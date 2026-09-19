@@ -1,0 +1,686 @@
+{
+  "id": "playground-feature-matrix.v1",
+  "schema": 1,
+  "contractNode": "PG0",
+  "law": "The workbench feature matrix is generated from the DX0 canonical exposure descriptors plus producer-registered capabilities. It replaces the manually curated compiler-demo tab list as the feature-coverage authority for the playground product; a literal hand-written feature list in workbench UI code is a coverage defect once PG2's generated explorer is the active authority.",
+  "vocabulary": {
+    "dxOperationId": "DX0 feature-exposure-contract.v1.json operation ids only; PG0 mints no parallel operation namespace. Each operationCoverage row must equal the joined DX0 row on hostExecutionClass, answerRail, browserExecutable and playground status, must carry the joined promotionBlocked state (absent means not blocked), and must carry the joined exposure.replayCase, the joined playground.blockedUntil route and replay case while blocked, and the joined playground.unlabelledAnalysisMerge pin (with its comparisonRailSelection) wherever DX0 records one; a row over a live unlabelled merge stays promotion-blocked and its routeObligation states the labelled-split/comparisonRail route, never a single TS-worker authority over the merge.",
+    "workbenchState": "DX0 playgroundStatus enum (exposed, partial, missing) joined verbatim from the DX0 row; PG0 never restates it independently.",
+    "familyState": [
+      "exposed",
+      "partial",
+      "missing",
+      "future"
+    ],
+    "familyStateSource": "exposed: every joined DX0 operation has workbenchState exposed; partial: at least one joined operation is exposed or partial, or a preserved PG0.1 surface ships while another part of the family is uncovered; missing: every joined operation has a shipping producer but no workbench route (the family renders as blocked/pending promotion, never as success); future: no shipping producer exists anywhere yet, so the family is a registered obligation with a named producing node and renders as the distinct future state, never as successful empty output.",
+    "hostExecutionClass": [
+      "Portable",
+      "NativeOnly",
+      "ExternalOwner"
+    ],
+    "answerRail": "DX0 rails-policy.v1.json rails (semantic, inspection, comparison, none); inspection-rail answers stay labelled and never substitute semantic-rail answers.",
+    "completenessState": [
+      "complete",
+      "complete-empty",
+      "partial",
+      "pending",
+      "unsupported",
+      "ambiguous",
+      "failed",
+      "cancelled",
+      "stale"
+    ],
+    "hostExecutionClassSource": "DX0 host-execution-class.v1.json; synonymous restatements describe but never define classes",
+    "completenessStateSource": "DX0 product-receipt-basis.v1.json completenessStates; complete-empty is a successful empty answer and every other non-complete state is distinct from it"
+  },
+  "preservedSurface": {
+    "charter": "PG0.1",
+    "obligation": "Multifile editing, Vue/Svelte outputs, preview, timings, version selection, themes and compiler options keep working on every workbench cutover; a cutover that removes one of these before its surviving route exists is a regression, not a migration.",
+    "evidence": [
+      "packages/playground/src/editor/FileSelector.vue",
+      "packages/playground/src/components/ProjectManager.vue",
+      "packages/playground/src/core/projectStorage.ts",
+      "packages/playground/src/output/CodeOutput.vue",
+      "packages/playground/src/output/Preview.vue",
+      "packages/playground/src/core/previewRuntime.ts",
+      "packages/playground/src/core/store.ts",
+      "packages/playground/src/core/compiler.ts",
+      "packages/playground/src/core/versions.ts",
+      "packages/playground/src/components/VersionSelect.vue",
+      "packages/playground/src/components/VueVersionSelect.vue",
+      "packages/playground/src/App.vue",
+      "packages/playground/e2e/multi-file.spec.ts",
+      "packages/playground/e2e/file-management.spec.ts",
+      "packages/playground/e2e/compilation.spec.ts",
+      "packages/playground/e2e/dark-mode.spec.ts",
+      "packages/playground/e2e/header-controls.spec.ts",
+      "packages/playground/e2e/vue-version.spec.ts",
+      "packages/playground/e2e/output-tabs.spec.ts"
+    ]
+  },
+  "displacedRoute": {
+    "description": "Two hand-written output navs are displaced at the cutover: the allTabs list in packages/playground/src/output/Output.vue (preview, files, analysis, lint, outline, cssMatch, map, diagnostics, templateAst, cssVarFlow, depGraph, plus the ssr insert), a manually curated compiler-demo feature list, and the sibling Output|Why? nav in packages/playground/src/App.vue whose always-rendered Why? control mounts AuditTree.vue. displacedRoute.tabs maps every live tab mode to its owning feature family and panel, and displacedRoute.appNav maps every live App.vue nav control, so no user-visible surface loses its surviving producer at the cutover.",
+    "cutoverOwner": "PG2",
+    "cutoverRule": "Characterize the existing user-visible surfaces first (displacedRoute.tabs binds each tab mode and displacedRoute.appNav binds each App.vue nav control to its owning family and panel), route each through its surviving producer (this matrix's featureFamilies rows), verify consumers, then remove the literal lists. The harness fails when an Output.vue tab mode or an App.vue nav control lacks a family-owned panel. Inert generated-matrix adapters may land before PG2 activates; after activation no two active feature-coverage authorities may coexist.",
+    "deletionPopulationThisNode": "empty: PG0 is contract-only and deletes nothing; the cutover executes in PG2 with this matrix as the generated obligation source.",
+    "tabs": [
+      {
+        "mode": "preview",
+        "panel": "packages/playground/src/output/Preview.vue",
+        "family": "workbench.family.runtime-ssr-hmr"
+      },
+      {
+        "mode": "files",
+        "panel": "packages/playground/src/output/VirtualFilesPanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "analysis",
+        "panel": "packages/playground/src/output/AnalysisPanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "lint",
+        "panel": "packages/playground/src/output/LintPanel.vue",
+        "family": "workbench.family.lint"
+      },
+      {
+        "mode": "outline",
+        "panel": "packages/playground/src/output/OutlinePanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "cssMatch",
+        "panel": "packages/playground/src/output/CssMatchPanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "map",
+        "panel": "packages/playground/src/output/SourceMapPanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "diagnostics",
+        "panel": "packages/playground/src/output/DiagnosticsPanel.vue",
+        "family": "workbench.family.semantics"
+      },
+      {
+        "mode": "templateAst",
+        "panel": "packages/playground/src/output/TemplateAstPanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "cssVarFlow",
+        "panel": "packages/playground/src/output/CssVarFlowPanel.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      },
+      {
+        "mode": "depGraph",
+        "panel": "packages/playground/src/output/DependencyGraphPanel.vue",
+        "family": "workbench.family.projects-configuration"
+      },
+      {
+        "mode": "ssr",
+        "panel": "packages/playground/src/output/CodeOutput.vue",
+        "family": "workbench.family.compiler-ir-mappings"
+      }
+    ],
+    "appNav": {
+      "description": "packages/playground/src/App.vue renders a sibling output nav above the workbench output surface. The Output control hosts the Output.vue tab strip, whose live modes are owned one-for-one by displacedRoute.tabs; the Why? control mounts AuditTree.vue, the provenance-chain view over the component-meta audit pipeline (ProvenanceChain from getComponentMetaWithAudit whyLoaded/whyInstantiated; provenanceChain is null until the playground wires the WASM session, so the control currently renders AuditTree.vue's enable-footprint empty state).",
+      "controls": [
+        {
+          "control": "Output",
+          "panel": "packages/playground/src/output/Output.vue",
+          "routesTo": "displacedRoute.tabs"
+        },
+        {
+          "control": "Why?",
+          "panel": "packages/playground/src/components/AuditTree.vue",
+          "family": "workbench.family.audit-provenance"
+        }
+      ]
+    }
+  },
+  "operationCoverage": [
+    {
+      "dxOperationId": "lsp.hover",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "editor client smoke suites (editors/nvim/tests/smoke_spec.lua; packages/vue-vscode e2e)",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker hover is a separate Portable producer (playground.hover), not this operation's exposure",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG7",
+      "routeObligation": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker hover is playground.hover, a separate Portable producer, never this row's exposure"
+    },
+    {
+      "dxOperationId": "playground.hover",
+      "hostExecutionClass": "Portable",
+      "answerRail": "semantic",
+      "browserExecutable": true,
+      "workbenchState": "partial",
+      "replayCase": "playground hover provider suites",
+      "blockedUntilRoute": "labelled split of provideHover: the TypeScript answer as the default, compiler-analysis hover as an explicitly labelled inspection supplement or a per-request comparison selection (rails-policy comparisonRail)",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a playground provider suite that fails on unlabelled concatenation",
+      "unlabelledAnalysisMerge": {
+        "defect": "provideHover concatenates tsBridge.getHover and hoverForWord(file.compiled.analysis) into one Monaco contents array with no labelling and no explicit comparison selection, so an implicit comparison is the default hover answer",
+        "comparisonRailSelection": "absent",
+        "evidence": [
+          "packages/playground/src/editor/lspProviders.ts"
+        ]
+      },
+      "promotionBlocked": true,
+      "routeOwner": "PG7",
+      "routeObligation": "labelled split of provideHover per the joined blockedUntil route: the pinned browser typescript worker answer as the default, compiler-analysis hover as an explicitly labelled inspection supplement or a per-request comparisonRail selection, engine identity disclosed; the live unlabelledAnalysisMerge keeps promotion blocked, and a single TS-worker adapter recorded as the whole authority over the merge is a coverage failure"
+    },
+    {
+      "dxOperationId": "playground.completion",
+      "hostExecutionClass": "Portable",
+      "answerRail": "semantic",
+      "browserExecutable": true,
+      "workbenchState": "partial",
+      "replayCase": "playground completion provider suites",
+      "blockedUntilRoute": "labelled split of provideCompletionItems: the TypeScript answer as the default, compiler-analysis and template completions as explicitly labelled inspection supplements or a per-request comparison selection (rails-policy comparisonRail)",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a playground provider suite that fails on unlabelled concatenation",
+      "unlabelledAnalysisMerge": {
+        "defect": "provideCompletionItems concatenates collectCompletions(file.compiled.analysis), template completions and tsBridge.getCompletions into one Monaco suggestions array with no labelling and no explicit comparison selection, so an implicit comparison is the default completion answer",
+        "comparisonRailSelection": "absent",
+        "evidence": [
+          "packages/playground/src/editor/lspProviders.ts"
+        ]
+      },
+      "promotionBlocked": true,
+      "routeOwner": "PG7",
+      "routeObligation": "labelled split of provideCompletionItems per the joined blockedUntil route: the pinned browser typescript worker answer as the default, compiler-analysis and template completions as explicitly labelled inspection supplements or a per-request comparisonRail selection, engine identity disclosed; the live unlabelledAnalysisMerge keeps promotion blocked, and a single TS-worker adapter recorded as the whole authority over the merge is a coverage failure"
+    },
+    {
+      "dxOperationId": "lsp.diagnostics",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "editor client diagnostic publications suites",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker diagnostics are a separate Portable producer (playground.diagnostics), not this operation's exposure",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG7",
+      "routeObligation": "explicitly selected local-native execution via the DX4/DX5 companion route; the pinned-worker diagnostics are playground.diagnostics, never this row's exposure"
+    },
+    {
+      "dxOperationId": "playground.diagnostics",
+      "hostExecutionClass": "Portable",
+      "answerRail": "semantic",
+      "browserExecutable": true,
+      "workbenchState": "partial",
+      "replayCase": "playground diagnostics suites",
+      "blockedUntilRoute": "labelled split of the Diagnostics tab: TypeScript diagnostics as their own labelled semantic channel or an explicitly selected comparison view, with compiler and lint items staying on their labelled inspection surfaces (playground.compile-carrier, playground.lint-file) and out of the default semantic badge",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a playground suite that fails when the Diagnostics tab or its badge merges compiler, lint and TypeScript diagnostics",
+      "unlabelledAnalysisMerge": {
+        "defect": "DiagnosticsPanel.vue concatenates file.compiled.compilerDiagnostics, file.compiled.lintDiagnostics and store.tsDiagnostics into one allDiagnostics list, and Output.vue sums the same three into one diagnosticCount badge, with no explicit comparison selection; per-source section headers label items inside the merged list but the channel and its badge remain one default mixed inspection+semantic diagnostics answer",
+        "comparisonRailSelection": "absent",
+        "evidence": [
+          "packages/playground/src/output/DiagnosticsPanel.vue",
+          "packages/playground/src/output/Output.vue"
+        ]
+      },
+      "promotionBlocked": true,
+      "routeOwner": "PG7",
+      "routeObligation": "labelled split of the Diagnostics tab per the joined blockedUntil route: TypeScript diagnostics as their own labelled semantic channel or an explicitly selected comparison view (rails-policy comparisonRail), with compiler and lint items staying on their labelled inspection surfaces and out of the default semantic badge, engine identity disclosed; the live unlabelledAnalysisMerge keeps promotion blocked, and a single TS-worker adapter recorded as the whole authority over the merge is a coverage failure"
+    },
+    {
+      "dxOperationId": "lsp.lint-diagnostics",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "editor client diagnostic publications suites",
+      "blockedUntilRoute": "registered browser adapter through the DX2 inspection facade; the browser analog is the separately labelled playground.lint-file Portable operation",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG8",
+      "routeObligation": "lint workbench route via the DX4/DX5 companion; per-file portable lint is playground.lint-file, never this row's exposure"
+    },
+    {
+      "dxOperationId": "lsp.component-usage-diagnostics",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "editor client diagnostic publications suites",
+      "blockedUntilRoute": "registered browser adapter through the DX2 inspection facade",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG8",
+      "routeObligation": "lint workbench route via the DX4/DX5 companion"
+    },
+    {
+      "dxOperationId": "editor.rename",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "none",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "nvim smoke rename case",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser TS-worker rename is a separate Portable producer (playground.rename), not this operation's exposure",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG7I",
+      "routeObligation": "language-operation inspector with edit-plan panel via the DX4/DX5 companion"
+    },
+    {
+      "dxOperationId": "playground.rename",
+      "hostExecutionClass": "Portable",
+      "answerRail": "none",
+      "browserExecutable": true,
+      "workbenchState": "exposed",
+      "replayCase": "playground rename provider suites",
+      "routeOwner": "PG7I",
+      "routeObligation": "language-operation inspector keeps the edit plan visible, source-linked and replayable"
+    },
+    {
+      "dxOperationId": "tsc.project-check.vue",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "verter-tsc project fixtures",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route or the DX8 terminal",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG3P",
+      "routeObligation": "project-model and configuration evidence explorer via the DX4/DX5 companion; project identity and configuration bind the receipt basis"
+    },
+    {
+      "dxOperationId": "tsc.project-check.svelte",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "semantic",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "verter-tsc project fixtures",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route or the DX8 terminal",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a DX6/DX6R-lineage replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG3P",
+      "routeObligation": "project-model and configuration evidence explorer via the DX4/DX5 companion; project identity and configuration bind the receipt basis"
+    },
+    {
+      "dxOperationId": "mcp.lint-project",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "mcp/README.md tool table scenarios",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route or the DX8 terminal",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG8",
+      "routeObligation": "project-wide lint workbench route via the DX4/DX5 companion"
+    },
+    {
+      "dxOperationId": "playground.lint-file",
+      "hostExecutionClass": "Portable",
+      "answerRail": "inspection",
+      "browserExecutable": true,
+      "workbenchState": "partial",
+      "replayCase": "playground unit suites over relint",
+      "routeOwner": "PG8",
+      "routeObligation": "lint workbench keeps the inspection-rail label and rule provenance on every result"
+    },
+    {
+      "dxOperationId": "lsp.component-meta",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "component-meta compat suites",
+      "blockedUntilRoute": "registered browser adapter through the DX2 inspection facade, or explicit local-native execution",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG3",
+      "routeObligation": "semantic and TypeInfo explorer via the DX4/DX5 companion; component-meta keeps component-meta ownership and hydration rules"
+    },
+    {
+      "dxOperationId": "inspection.flow-return",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "audit record inspection",
+      "blockedUntilRoute": "registered inspection projection through the DX3 evidence projections",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG4",
+      "routeObligation": "flow, query and proof explanation laboratory via the DX4/DX5 companion or the browser semantic host once BWH1 admits it"
+    },
+    {
+      "dxOperationId": "typeinfo.graph-operations",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "packages/typeinfo vitest suites",
+      "blockedUntilRoute": "registered inspection projection through the DX2 inspection facade or the DX3 evidence projections",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG3",
+      "routeObligation": "semantic and TypeInfo explorer; graph answers stay on the inspection rail with their own provenance"
+    },
+    {
+      "dxOperationId": "mcp.type-queries",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "mcp/README.md tool table scenarios",
+      "blockedUntilRoute": "registered inspection projection through the DX2 inspection facade or explicit local-native execution",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG4",
+      "routeObligation": "flow, query and proof explanation laboratory via the DX4/DX5 companion"
+    },
+    {
+      "dxOperationId": "lsp.binding-types",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "editor custom-method contract suites",
+      "blockedUntilRoute": "registered browser adapter through the DX2 inspection facade",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG3",
+      "routeObligation": "scopes and bindings view in the semantic and TypeInfo explorer via the DX4/DX5 companion"
+    },
+    {
+      "dxOperationId": "vscode.source-map",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "inspection",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "vscode e2e launch acceptance",
+      "blockedUntilRoute": "explicitly selected local-native execution via the DX4/DX5 companion route; the browser analog is the separately labelled playground.source-map-view Portable operation",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG5",
+      "routeObligation": "projection, source-map, AST and IR explorer via the DX4/DX5 companion"
+    },
+    {
+      "dxOperationId": "playground.source-map-view",
+      "hostExecutionClass": "Portable",
+      "answerRail": "inspection",
+      "browserExecutable": true,
+      "workbenchState": "exposed",
+      "replayCase": "playground source-map suites",
+      "routeOwner": "PG5",
+      "routeObligation": "projection explorer keeps generated-vs-authored coordinate labelling; generated coordinates are never passed off as authored"
+    },
+    {
+      "dxOperationId": "lsp.format-document",
+      "hostExecutionClass": "NativeOnly",
+      "answerRail": "none",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "LSP formatting fixtures",
+      "blockedUntilRoute": "registered browser adapter (formatter train owns the producer; DX0 registers only the gap)",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG8",
+      "routeObligation": "formatter workbench route via the DX4/DX5 companion; format logic stays with its existing producing owner"
+    },
+    {
+      "dxOperationId": "playground.compile-carrier",
+      "hostExecutionClass": "Portable",
+      "answerRail": "none",
+      "browserExecutable": true,
+      "workbenchState": "exposed",
+      "replayCase": "playground compile suites",
+      "routeOwner": "PG6",
+      "routeObligation": "compiler target and artifact workbench presents every artifact kind with its timings and options basis"
+    },
+    {
+      "dxOperationId": "tsc.engine-tsgo",
+      "hostExecutionClass": "ExternalOwner",
+      "answerRail": "semantic",
+      "browserExecutable": false,
+      "workbenchState": "missing",
+      "replayCase": "verter-tsc engine-resolution fixtures",
+      "blockedUntilRoute": "a shipped WASM/native-bridge build with its own producer-owned evidence, or explicit local-native execution",
+      "blockedUntilReplayCase": "DX1 exposure registration plus a replay case",
+      "promotionBlocked": true,
+      "routeOwner": "PG13",
+      "routeObligation": "isolated dual-version comparison binds the pinned engine identity on every result; ExternalOwner engines are provisioned and bound, never embedded or implied"
+    }
+  ],
+  "featureFamilies": [
+    {
+      "id": "workbench.family.semantics",
+      "family": "semantics",
+      "dxOperations": [
+        "lsp.hover",
+        "playground.hover",
+        "playground.completion",
+        "lsp.diagnostics",
+        "playground.diagnostics"
+      ],
+      "familyState": "partial",
+      "workbenchOwner": "PG7",
+      "preservationEvidence": [
+        "packages/playground/src/editor/tsWorker.ts",
+        "packages/playground/src/editor/lspProviders.ts",
+        "packages/playground/src/editor/tsService.ts",
+        "packages/playground/e2e/editor-lsp.spec.ts",
+        "packages/playground/src/output/DiagnosticsPanel.vue"
+      ]
+    },
+    {
+      "id": "workbench.family.typeinfo",
+      "family": "TypeInfo",
+      "dxOperations": [
+        "typeinfo.graph-operations"
+      ],
+      "familyState": "missing",
+      "workbenchOwner": "PG3",
+      "futureProducer": "PG3 semantic and TypeInfo explorer (companion route until the BWH1 browser semantic host is admitted); until the route exists the family renders as blocked promotion, never as success",
+      "preservationEvidence": [
+        "packages/typeinfo/package.json",
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto"
+      ]
+    },
+    {
+      "id": "workbench.family.scopes-bindings",
+      "family": "scopes/bindings",
+      "dxOperations": [
+        "lsp.binding-types"
+      ],
+      "familyState": "missing",
+      "workbenchOwner": "PG3",
+      "futureProducer": "PG3 semantic explorer scopes-and-bindings view (companion route); until the route exists the family renders as blocked promotion, never as success",
+      "preservationEvidence": [
+        "crates/verter_lsp/src/main.rs"
+      ]
+    },
+    {
+      "id": "workbench.family.flow-query-evidence",
+      "family": "flow/query evidence",
+      "dxOperations": [
+        "inspection.flow-return",
+        "mcp.type-queries"
+      ],
+      "familyState": "missing",
+      "workbenchOwner": "PG4",
+      "futureProducer": "PG4 flow, query and proof explanation laboratory (companion route); until the route exists the family renders as blocked promotion, never as success",
+      "preservationEvidence": [
+        "crates/verter_session/src/host_flow_return_audit.rs",
+        "crates/verter_mcp/src/server.rs",
+        "mcp/README.md"
+      ]
+    },
+    {
+      "id": "workbench.family.compiler-ir-mappings",
+      "family": "compiler/IR/mappings",
+      "dxOperations": [
+        "playground.compile-carrier",
+        "vscode.source-map",
+        "playground.source-map-view"
+      ],
+      "familyState": "partial",
+      "workbenchOwner": "PG5",
+      "coOwners": [
+        "PG6"
+      ],
+      "preservationEvidence": [
+        "packages/playground/src/output/CodeOutput.vue",
+        "packages/playground/src/output/SourceMapPanel.vue",
+        "packages/playground/src/output/TemplateAstPanel.vue",
+        "packages/playground/src/output/VirtualFilesPanel.vue",
+        "packages/playground/src/core/sourcemap.ts",
+        "packages/playground/e2e/output-tabs.spec.ts",
+        "packages/playground/src/output/AnalysisPanel.vue",
+        "packages/playground/src/output/OutlinePanel.vue",
+        "packages/playground/src/output/CssMatchPanel.vue",
+        "packages/playground/src/output/CssVarFlowPanel.vue"
+      ],
+      "analysisSurfaceClause": "AnalysisPanel.vue, OutlinePanel.vue, CssMatchPanel.vue and CssVarFlowPanel.vue are views over the compile carrier's WASM-host analysis snapshot (file.compiled.analysis via getAnalysis/getDocumentSymbols/matchCssSelectors in packages/playground/src/core/compiler.ts); DX0 registers no separate operation for them — they ride playground.compile-carrier — so they are preserved PG0.1 surfaces of this family and never evidence for the missing TypeInfo, scopes/bindings or flow/query families."
+    },
+    {
+      "id": "workbench.family.typechecking",
+      "family": "typechecking",
+      "dxOperations": [
+        "tsc.project-check.vue",
+        "tsc.project-check.svelte",
+        "tsc.engine-tsgo"
+      ],
+      "familyState": "missing",
+      "workbenchOwner": "PG3P",
+      "coOwners": [
+        "PG13"
+      ],
+      "futureProducer": "PG3P project-model and configuration evidence explorer with PG13 engine-version comparison (companion route); until the route exists the family renders as blocked promotion, never as success",
+      "preservationEvidence": [
+        "packages/playground/src/editor/inContextLs.ts",
+        "packages/playground/src/editor/wasmTsgoFailClosed.spec.ts"
+      ]
+    },
+    {
+      "id": "workbench.family.lint",
+      "family": "lint",
+      "dxOperations": [
+        "lsp.lint-diagnostics",
+        "lsp.component-usage-diagnostics",
+        "mcp.lint-project",
+        "playground.lint-file"
+      ],
+      "familyState": "partial",
+      "workbenchOwner": "PG8",
+      "preservationEvidence": [
+        "packages/playground/src/output/LintPanel.vue",
+        "packages/playground/e2e/analysis-tab.spec.ts"
+      ]
+    },
+    {
+      "id": "workbench.family.format-actions-refactors",
+      "family": "format/actions/refactors",
+      "dxOperations": [
+        "lsp.format-document",
+        "editor.rename",
+        "playground.rename"
+      ],
+      "familyState": "partial",
+      "workbenchOwner": "PG8",
+      "coOwners": [
+        "PG7I"
+      ],
+      "preservationEvidence": [
+        "packages/playground/src/editor/carrierMappers.ts"
+      ]
+    },
+    {
+      "id": "workbench.family.projects-configuration",
+      "family": "projects/configuration",
+      "dxOperations": [],
+      "familyState": "partial",
+      "workbenchOwner": "PG1",
+      "coOwners": [
+        "PG3P"
+      ],
+      "preservationEvidence": [
+        "packages/playground/src/components/ProjectManager.vue",
+        "packages/playground/src/core/projectStorage.ts",
+        "packages/playground/src/core/importMap.ts",
+        "packages/playground/e2e/import-map.spec.ts",
+        "packages/playground/e2e/url-state.spec.ts",
+        "packages/playground/src/output/DependencyGraphPanel.vue"
+      ],
+      "descriptorGap": "DX0 registers no projects/configuration operation descriptor yet; PG1 workspace and PG3P configuration evidence explorer register their operations through DX1 as they expose them"
+    },
+    {
+      "id": "workbench.family.metadata",
+      "family": "metadata",
+      "dxOperations": [
+        "lsp.component-meta"
+      ],
+      "familyState": "missing",
+      "workbenchOwner": "PG3",
+      "futureProducer": "PG3 semantic and TypeInfo explorer (companion route); component-meta stays with its existing producing owner and cache-owned hydration; until the route exists the family renders as blocked promotion, never as success",
+      "preservationEvidence": [
+        "packages/playground/src/output/ComponentMetaPanel.spec.ts"
+      ]
+    },
+    {
+      "id": "workbench.family.audit-provenance",
+      "family": "audit provenance",
+      "dxOperations": [],
+      "familyState": "partial",
+      "workbenchOwner": "PG3",
+      "preservationEvidence": [
+        "packages/playground/src/App.vue",
+        "packages/playground/src/components/AuditTree.vue"
+      ],
+      "descriptorGap": "DX0 registers no why/audit operation id; the App.vue Why? control (displacedRoute.appNav) mounts AuditTree.vue, the view over the component-meta provenance chain (ProvenanceChain from getComponentMetaWithAudit whyLoaded/whyInstantiated), and renders the enable-footprint empty state while the chain is unwired. The metadata family cannot hold it: DX0's lsp.component-meta gap evidence does not cite AuditTree.vue or App.vue, so this preserved live surface rides a descriptor-gap family; PG3's semantic and TypeInfo explorer registers the why/audit operation through DX1 as it exposes it"
+    },
+    {
+      "id": "workbench.family.runtime-ssr-hmr",
+      "family": "runtime/SSR/HMR",
+      "dxOperations": [],
+      "familyState": "partial",
+      "workbenchOwner": "PG9",
+      "coOwners": [
+        "PG10",
+        "PG11",
+        "PG11D"
+      ],
+      "preservationEvidence": [
+        "packages/playground/src/output/Preview.vue",
+        "packages/playground/src/output/PreviewUnsupported.vue",
+        "packages/playground/src/output/previewTransforms.ts",
+        "packages/playground/src/core/previewRuntime.ts",
+        "packages/playground/src/output/previewGate.spec.ts",
+        "packages/playground/e2e/vue-playground-compat.spec.ts"
+      ],
+      "descriptorGap": "DX0 registers no runtime/SSR/HMR operation descriptor yet; PG9 isolated preview, PG10 SSR inspection, PG11 bundler/HMR and PG11D DOM/style probes register their operations through DX1 as they expose them"
+    },
+    {
+      "id": "workbench.family.performance",
+      "family": "performance",
+      "dxOperations": [],
+      "familyState": "future",
+      "workbenchOwner": "PG14",
+      "futureProducer": "PG14 interactive performance and invalidation laboratory; AC-RESOURCE equal-work corpus and real-client cost accounting bind there, and no general performance claim follows from a compiler microbenchmark; the family renders as the distinct future state, never as successful empty output",
+      "preservationEvidence": [
+        "packages/playground/src/core/store.ts",
+        "packages/playground/src/core/compiler.ts"
+      ]
+    }
+  ],
+  "rules": [
+    "PG0-AC1: a supported feature promoted by its producer (DX0 playground.status exposed, or promotionBlocked lifted) without a matching executable workbench matrix row fails coverage; the matrix is the coverage authority, and pg0.test.mjs joins every DX0 operation id to exactly one operationCoverage row with equality on class, rail, browserExecutable, status and promotionBlocked, plus the joined replayCase, blockedUntil route/replay case and the unlabelledAnalysisMerge pin where DX0 records one.",
+    "PG0-AC2: a capability with no shipping producer is future: its family row carries familyState future with a named futureProducer, its results render as the distinct future/unsupported completeness state, and it is never presented as successful empty output (complete-empty).",
+    "PG0-AC3: every supported feature has a runnable route, a source-linked result or explanation, and a replay scenario; a route that cannot be replayed is not executable coverage.",
+    "A NativeOnly operation's workbench route is explicitly selected native execution through the DX4/DX5 companion (or the BWH1-admitted browser semantic host where its build proves the closure); an inactive card, a hidden substitution engine or an unlabelled Portable stand-in are each coverage failures, not partial coverage.",
+    "PG0-AC-EXPOSURE: every operation this train exposes supplies its DX1 registration, executable playground adapter and replay case; until the DX1 explorer exists the schema and case are registered in this matrix (each operationCoverage row carries its joined DX0 exposure.replayCase and, while blocked, the blockedUntil replay case) and product promotion stays blocked on executable exposure.",
+    "PG0.4: a newly registered framework or profile acquires these obligations automatically when its descriptors register; the workbench does not implement missing framework compilers and does not replace TypeScript.",
+    "Inspection-rail results stay labelled with their own provenance and never substitute semantic-rail answers; generated coordinates are never presented as authored coordinates.",
+    "Every matrix result binds the DX0 product-receipt-basis field set, and stale-basis results (old source, old project, old engine, old worker, wrong result handle) are rejected rather than published as current."
+  ]
+}
