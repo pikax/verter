@@ -16,6 +16,7 @@ use crate::VerterHost;
 
 /// A yield hook that cancels the adapter at its first yield point and
 /// records how often the scheduler was consulted afterwards.
+#[derive(Debug)]
 struct CancellingYield {
     fired: AtomicUsize,
 }
@@ -214,4 +215,179 @@ fn cancelled_drive_exposes_no_half_committed_snapshot() {
         handoff.observe("/coop/e.ts"),
         crate::input_handoff::HandoffObserve::File { .. }
     ));
+}
+
+/// A yield hook that continues on its first offer (before the first
+/// driven stage) and withdraws on its second (between stages).
+#[derive(Debug)]
+struct ContinueOnceYield {
+    offers: AtomicUsize,
+}
+
+impl ContinueOnceYield {
+    fn offers(&self) -> usize {
+        self.offers.load(Ordering::SeqCst)
+    }
+}
+
+impl CooperativeYield for ContinueOnceYield {
+    fn yield_to_runtime(&self) -> YieldDecision {
+        if self.offers.fetch_add(1, Ordering::SeqCst) == 0 {
+            YieldDecision::Continue
+        } else {
+            YieldDecision::Cancelled
+        }
+    }
+}
+
+/// The cooperative points sit INSIDE the pump a nonthreaded worker
+/// runs, not only in front of it. On a scheduler with no driver
+/// thread (the wasm/test inline execution model) the adapter drives
+/// one `Scheduler::drive_one` stage per iteration and offers the
+/// yield hook between stages: a hook that withdraws on its second
+/// offer stops the drive with the Source stage committed but Analysis
+/// not yet driven — the worker withdrew mid-request, and the pending
+/// handle is all a later drive call needs to resume it.
+#[test]
+fn yield_point_between_stages_stops_mid_pump() {
+    use verter_scheduler::scheduler::Scheduler;
+    use verter_scheduler::source_loader::MemorySourceLoader;
+
+    let scheduler = Scheduler::test_new_sync(
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+        Arc::new(MemorySourceLoader::new()),
+    );
+
+    let hook = Arc::new(ContinueOnceYield {
+        offers: AtomicUsize::new(0),
+    });
+    let adapter = CooperativeSchedulerAdapter::with_yield_hook(hook.clone());
+    let request = Request {
+        file_id: "/coop/f.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        // Inline source: the Source stage commits without depending
+        // on the default executor's reading behaviour.
+        source: Some(Arc::from("export const f = 6;\n")),
+        file_language: None,
+        request_context: None,
+    };
+    let CooperativeSubmit::Submitted(handle) = adapter.submit(&scheduler, request) else {
+        panic!("uncancelled adapter must submit");
+    };
+
+    let driven = adapter.drive(&scheduler, &handle);
+    assert!(
+        matches!(
+            &driven,
+            CooperativeDrive::Cancelled(stop) if stop.point == CooperativePoint::AtYield
+        ),
+        "the between-stages yield offer must withdraw the worker (got {driven:?})"
+    );
+    assert_eq!(
+        hook.offers(),
+        2,
+        "one offer before the first stage, one between stages"
+    );
+    assert!(
+        scheduler.try_get_source("/coop/f.ts").is_some(),
+        "the Source stage must have been driven before the withdrawal"
+    );
+    assert!(
+        scheduler.try_get_analysis("/coop/f.ts").is_none(),
+        "the withdrawal must stop the pump before the Analysis stage is driven"
+    );
+    drop(handle);
+}
+
+/// Cancellation observed between driven stages stops the pump with the
+/// typed between-stages stop: at least one stage ran, no result value
+/// is carried, and a re-drive of the same handle through a fresh,
+/// uncancellable adapter reaches the scheduler's own terminal state —
+/// withdrawal never rewrote the request's outcome.
+#[test]
+fn cancel_between_stages_stops_the_pump_and_a_re_drive_resumes() {
+    use verter_scheduler::scheduler::Scheduler;
+    use verter_scheduler::source_loader::MemorySourceLoader;
+
+    let scheduler = Scheduler::test_new_sync(
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+        Arc::new(MemorySourceLoader::new()),
+    );
+
+    // Withdraw after the Source stage by cancelling the adapter's
+    // token at the between-stages offer — the embedding runtime's
+    // out-of-band withdrawal shape.
+    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let hook = Arc::new(CancelTokenAtSecondOffer {
+        offers: AtomicUsize::new(0),
+        cancellation: cancellation.clone(),
+    });
+    let adapter = CooperativeSchedulerAdapter::with_yield_hook_and_cancellation(hook, cancellation);
+    let request = Request {
+        file_id: "/coop/g.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const g = 7;\n")),
+        file_language: None,
+        request_context: None,
+    };
+    let CooperativeSubmit::Submitted(handle) = adapter.submit(&scheduler, request) else {
+        panic!("uncancelled adapter must submit");
+    };
+
+    let stopped = adapter.drive(&scheduler, &handle);
+    assert!(
+        matches!(
+            &stopped,
+            CooperativeDrive::Cancelled(stop) if stop.point == CooperativePoint::BetweenStages
+        ),
+        "cancellation observed after a driven stage stops at the \
+         between-stages point (got {stopped:?})"
+    );
+    assert!(
+        scheduler.try_get_source("/coop/g.ts").is_some(),
+        "exactly the Source stage ran before the cancellation"
+    );
+    assert!(
+        scheduler.try_get_analysis("/coop/g.ts").is_none(),
+        "the cancelled pump drove no Analysis stage"
+    );
+
+    // The handle stays pending and carries no partial outcome: a
+    // later drive (here through a fresh uncancellable adapter, the
+    // shape an embedding runtime's resumed continuation takes) pumps
+    // the same request to the scheduler's own terminal state.
+    let resumed = CooperativeSchedulerAdapter::new();
+    match resumed.drive(&scheduler, &handle) {
+        CooperativeDrive::Driven(state) => assert!(
+            !matches!(
+                state,
+                CompletionState::Superseded | CompletionState::Shutdown
+            ),
+            "the resumed drive must reach a real terminal state (got {state:?})"
+        ),
+        CooperativeDrive::Cancelled(stop) => {
+            panic!("an uncancellable resumed drive must not stop (got {stop:?})")
+        }
+    }
+    drop(handle);
+}
+
+/// Always continues, but trips the shared cancellation token on its
+/// second offer, so the stop is observed at the between-stages point
+/// rather than at a yield withdrawal.
+#[derive(Debug)]
+struct CancelTokenAtSecondOffer {
+    offers: AtomicUsize,
+    cancellation: verter_scheduler::cancellation::CancellationToken,
+}
+
+impl CooperativeYield for CancelTokenAtSecondOffer {
+    fn yield_to_runtime(&self) -> YieldDecision {
+        if self.offers.fetch_add(1, Ordering::SeqCst) > 0 {
+            self.cancellation.cancel();
+        }
+        YieldDecision::Continue
+    }
 }

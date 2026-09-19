@@ -1,11 +1,10 @@
 //! Cooperative drive adapter for nonthreaded scheduler execution.
 //!
 //! The browser closure runs the scheduler inline: no driver thread, no
-//! worker pools — the calling thread pumps ready stages inside
-//! `Scheduler::wait_or_drive`. A nonthreaded worker therefore needs
-//! cooperative points where (a) an cancelled request stops admitting
-//! further stage work, and (b) control can be offered back to the
-//! embedding runtime between drives.
+//! worker pools — the calling thread pumps ready stages. A nonthreaded
+//! worker therefore needs cooperative points where (a) a cancelled
+//! request stops admitting further stage work, and (b) control can be
+//! offered back to the embedding runtime between driven stages.
 //!
 //! [`CooperativeSchedulerAdapter`] is that seam, and ONLY that seam. It
 //! owns no runtime, no queue, and no cache: it wraps the existing
@@ -41,9 +40,10 @@ pub enum YieldDecision {
 ///
 /// The embedding runtime installs the hook that returns control to it
 /// (a browser worker schedules its continuation; a native host has
-/// nothing to yield to). The default [`InlineYield`] continues
-/// immediately.
-pub trait CooperativeYield: Send + Sync {
+/// nothing to yield to). The hook is consulted at every cooperative
+/// point of a drive — before the first driven stage and between
+/// stages. The default [`InlineYield`] continues immediately.
+pub trait CooperativeYield: Send + Sync + std::fmt::Debug {
     /// Offer one yield point. Pure: no scheduler state is touched.
     fn yield_to_runtime(&self) -> YieldDecision;
 }
@@ -68,9 +68,15 @@ pub enum CooperativePoint {
     /// Stopped after submission, before the drive: the handle stays
     /// pending with the scheduler and is released by dropping it.
     BeforeDrive,
-    /// Stopped at a yield point: the scheduler was not consulted for
-    /// this drive call.
+    /// Stopped at a yield point (before the first stage or between
+    /// driven stages): the scheduler was not consulted for the next
+    /// stage of this drive call. The handle stays pending; a later
+    /// drive call resumes it.
     AtYield,
+    /// Stopped on cancellation observed after at least one stage of
+    /// this drive was pumped: no further stage is driven by this
+    /// adapter, and the pending handle is released by dropping it.
+    BetweenStages,
 }
 
 /// Typed refusal to continue a cooperative drive. Carries no result
@@ -148,11 +154,29 @@ impl CooperativeSchedulerAdapter {
     }
 
     /// Adapter with an embedding-runtime yield hook. The hook is
-    /// consulted once per drive call, before the scheduler is touched.
+    /// consulted at every cooperative point of a drive: before the
+    /// first driven stage and between stages.
     #[must_use]
     pub fn with_yield_hook(hook: Arc<dyn CooperativeYield>) -> Self {
         Self {
             cancellation: CancellationToken::new(),
+            yield_hook: hook,
+        }
+    }
+
+    /// Adapter with an embedding-runtime yield hook AND a token the
+    /// runtime owns separately from the adapter. An embedding runtime
+    /// that hands its worker to `drive` keeps a clone of `cancellation`
+    /// so it can withdraw the worker from outside (the browser
+    /// closure's one cancellation authority); a hook that observes the
+    /// same token reports stops between the stages it already drove.
+    #[must_use]
+    pub fn with_yield_hook_and_cancellation(
+        hook: Arc<dyn CooperativeYield>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            cancellation,
             yield_hook: hook,
         }
     }
@@ -182,11 +206,24 @@ impl CooperativeSchedulerAdapter {
         CooperativeSubmit::Submitted(scheduler.submit_request(request))
     }
 
-    /// Drive `handle` through the existing `Scheduler::wait_or_drive`
-    /// after two cooperative checks: cancellation, then one yield
-    /// point. When neither stops the drive, the scheduler's own
-    /// `CompletionState` is returned unchanged — query outcomes are
-    /// not rewritten by this adapter.
+    /// Drive `handle` to its terminal state through the existing
+    /// scheduler contracts, offering cooperative points before the
+    /// first stage and between every driven stage.
+    ///
+    /// When the calling thread is the pump (no driver thread: WASM,
+    /// sync schedulers), the adapter drives ONE ready stage per
+    /// iteration through [`Scheduler::drive_one`] and consults
+    /// cancellation plus the yield hook between stages, so a
+    /// nonthreaded worker can withdraw mid-request; a later drive
+    /// call resumes the same handle, so withdrawal never rewrites
+    /// the request's eventual outcome. When no stage is ready on
+    /// this thread (a native driver thread owns the pump), the
+    /// drive defers to [`Scheduler::wait_or_drive`] — parking on the
+    /// driver or returning the scheduler's own controlled-failure
+    /// state exactly as before. An uncancellable adapter with the
+    /// inline yield hook is therefore behaviourally identical to
+    /// driving the scheduler directly: query outcomes are never
+    /// rewritten by this adapter.
     pub fn drive<T: Clone>(
         &self,
         scheduler: &Arc<Scheduler>,
@@ -197,12 +234,29 @@ impl CooperativeSchedulerAdapter {
                 point: CooperativePoint::BeforeDrive,
             });
         }
-        if self.yield_hook.yield_to_runtime() == YieldDecision::Cancelled {
-            return CooperativeDrive::Cancelled(CooperativeStop {
-                point: CooperativePoint::AtYield,
-            });
+        loop {
+            if self.yield_hook.yield_to_runtime() == YieldDecision::Cancelled {
+                return CooperativeDrive::Cancelled(CooperativeStop {
+                    point: CooperativePoint::AtYield,
+                });
+            }
+            if let Some(state) = handle.try_get() {
+                return CooperativeDrive::Driven(state);
+            }
+            if self.cancellation.is_cancelled() {
+                return CooperativeDrive::Cancelled(CooperativeStop {
+                    point: CooperativePoint::BetweenStages,
+                });
+            }
+            if !scheduler.drive_one() {
+                // Nothing ready on this thread right now. The terminal
+                // decision — park on a native driver, the controlled
+                // dry-failure of the inline loop, or a state resolved
+                // since the last check — belongs to the scheduler's
+                // own wait contract, unchanged.
+                return CooperativeDrive::Driven(scheduler.wait_or_drive(handle));
+            }
         }
-        CooperativeDrive::Driven(scheduler.wait_or_drive(handle))
     }
 }
 

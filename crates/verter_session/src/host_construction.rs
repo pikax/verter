@@ -235,9 +235,13 @@ impl VerterHost {
     }
 
     /// The cooperative drive adapter threading cancellation and yield
-    /// points through the scheduler execution contract. Embedding
-    /// runtimes with a single-threaded worker cancel this adapter and
-    /// may install a yield hook; until then, driving through it is
+    /// points through the scheduler execution contract that the
+    /// `ensure_loaded` seam submits and pumps through. The hook is a
+    /// constructor-time choice: an embedding runtime with a
+    /// single-threaded worker installs its yield hook through
+    /// [`HostConfig::cooperative_yield`](crate::types::HostConfig::cooperative_yield)
+    /// and cancels through this accessor; a host constructed without
+    /// one drives with [`InlineYield`](crate::cooperative_scheduler::InlineYield),
     /// behaviourally identical to driving the scheduler directly.
     #[must_use]
     pub fn cooperative_drive(&self) -> &crate::cooperative_scheduler::CooperativeSchedulerAdapter {
@@ -571,6 +575,16 @@ impl VerterHost {
             #[cfg(any(test, feature = "test-support"))]
             HostWorkerPoolSource::Shared(worker_pools) => Arc::clone(&worker_pools.host_cpu_pool),
         };
+        // The cooperative drive adapter the load seam uses. Built from
+        // the constructor-time yield hook: `None` selects the inline
+        // hook, so a host constructed without an embedding-runtime
+        // hook drives behaviourally identically to the scheduler's own
+        // contracts.
+        let cooperative_drive = config
+            .cooperative_yield
+            .clone()
+            .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
+            .unwrap_or_default();
         let host = Self {
             instance_id,
             config,
@@ -592,7 +606,7 @@ impl VerterHost {
             metrics: HostMetrics::default(),
             scheduler,
             platform_services,
-            cooperative_drive: crate::cooperative_scheduler::CooperativeSchedulerAdapter::new(),
+            cooperative_drive,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             query_profile: parking_lot::Mutex::new(query_profile),

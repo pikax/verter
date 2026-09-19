@@ -4747,6 +4747,25 @@ pub(crate) mod foundations_guards {
         // wrap, so the line-based extractor records the bare prefix).
         "pub mod input_basis",
         "pub use input_basis::",
+        // crates/verter_wasm/src/input_snapshot.rs — the browser
+        // acquisition boundary commits asynchronously-acquired rows
+        // through the session handoff core (AcquiredFile /
+        // CommittedInputHandoff / HandoffObserve, imported via the
+        // module path; no crate-root re-export of this family exists).
+        "pub mod input_handoff",
+        // crates/verter_wasm/src/lib.rs (input_snapshot_receipt) — the
+        // wasm commitInputSnapshot export binds its receipt to the
+        // host's platform-services profile through
+        // VerterHost::platform_services(), so PortableHostServices and
+        // its route vocabulary are named outside this crate.
+        "pub mod platform_services",
+        // tests/cases/g_session/cooperative_drive_seam.rs — the host
+        // load-seam discriminators (cancelled drive refuses
+        // ensure_loaded admission; constructor-time yield hook
+        // installed through HostConfig::cooperative_yield) drive
+        // VerterHost::cooperative_drive and implement its
+        // CooperativeYield hook from the integration binary.
+        "pub mod cooperative_scheduler",
         // tests/cases/g_misc0/invalidation_coverage.rs, tests/cases/g_misc0/invalidation_perf.rs
         "pub mod invalidation_domain",
         // tests/cases/g_misc0/invalidation_perf.rs (ImportedRegistryDb /

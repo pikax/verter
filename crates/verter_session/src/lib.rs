@@ -469,22 +469,13 @@ pub use verter_protocol::types::PublicApiProjectionSubject;
 
 use std::sync::Arc;
 
-pub use cooperative_scheduler::{
-    CooperativeDrive, CooperativePoint, CooperativeSchedulerAdapter, CooperativeStop,
-    CooperativeSubmit, CooperativeYield, InlineYield, YieldDecision,
-};
 pub use id::resolve_external;
 pub use input_basis::{
     commit_workspace_canonical, retry_workspace_wave, CommitError, DirectoryEntry, InputBasis,
     LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError,
     RequestInputBinding, RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
-pub use input_handoff::{AcquiredFile, CommittedInputHandoff, HandoffObserve};
 pub(crate) use parsed_eval_program::ParsedEvalProgram;
-pub use platform_services::{
-    ExecutionHostKind, NativeServiceInBrowserClosure, PlatformServiceClass, PortableHostServices,
-    ServiceRoute,
-};
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;

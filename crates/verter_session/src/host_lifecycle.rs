@@ -978,30 +978,42 @@ impl VerterHost {
         }
 
         // Submit to scheduler — it loads via WorkspaceSourceLoader.
+        // Submission goes THROUGH the host's cooperative adapter: a
+        // cancelled drive refuses admission at its BeforeSubmit point,
+        // so a cancelled host admits no scheduler work at all (no
+        // inbox entry, no handle to strand) instead of admitting an
+        // Analysis request a later cancelled drive would abandon.
         // Thread the current-thread's `OpaqueRequestContext` (if any)
         // into the request so worker threads install it before running
         // stages — that way fan-out events from `workspace.read_file`
         // during `SourceStage` carry the outer request_id and the
         // session-side `SessionVfsSink` picks them up.
-        let handle = self
-            .scheduler
-            .submit_request(verter_scheduler::scheduler::Request {
+        let handle = match self.cooperative_drive.submit(
+            &self.scheduler,
+            verter_scheduler::scheduler::Request {
                 file_id: canonical_id.to_string(),
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
                 file_language: None,
                 request_context: verter_scheduler::request_context::current_context(),
-            });
+            },
+        ) {
+            crate::cooperative_scheduler::CooperativeSubmit::Submitted(handle) => handle,
+            crate::cooperative_scheduler::CooperativeSubmit::Refused(_) => return false,
+        };
 
         // Wait for the scheduler to reach Analysis. The drive runs
         // through the host's cooperative adapter so a single-threaded
         // embedding runtime can cancel or withdraw at the cooperative
-        // points; uncancellable (the default adapter state) it is
-        // `wait_or_drive` exactly — driving stages inline on WASM (no
-        // driver thread) and delegating to `handle.wait()` on native
-        // when the driver thread is installed. A cancelled drive is a
-        // not-loaded outcome: no partial result is integrated. Split
+        // points — before the first driven stage and between stages
+        // (one `drive_one` stage per iteration while this thread is
+        // the pump); uncancellable (the default adapter state) it is
+        // behaviourally `wait_or_drive` exactly — driving stages
+        // inline on WASM (no driver thread) and delegating to
+        // `handle.wait()` on native when the driver thread is
+        // installed. A cancelled or withdrawn drive is a not-loaded
+        // outcome: no partial result is integrated. Split
         // wait (scheduler drive) vs work (integrate_scheduler_snapshot)
         // so diagnosis can tell load-path contention from post-load
         // processing.
