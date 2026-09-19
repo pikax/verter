@@ -20,7 +20,10 @@ working example it does not have.
 - [Debugging](./debugging.md) — diagnostics and debugging workflows
 - [Compatibility](./compatibility.md) — supported versions, stability classes and migration
 
-The SDK documentation gate: once the producing nodes land executable
-examples, the docs build runs `node docs/scripts/reference-harness.mjs
---sdk-gate`. A topic that is still pending, or one whose sample is a static
-manifest without an executable extension, fails that gate.
+The SDK documentation gate is a release-lane command:
+`node docs/scripts/reference-harness.mjs --sdk-gate`. The standard docs
+build (`pnpm --filter docs check`) runs the harness without the flag while
+slots remain pending; the release lane turns the flag on once the producing
+nodes land executable examples. Under the gate a topic that is still pending,
+one whose sample is a static manifest without an executable extension, or one
+whose example lacks the entry kind its topic page requires, fails.

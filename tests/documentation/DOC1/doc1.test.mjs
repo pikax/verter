@@ -8,9 +8,12 @@ import { fileURLToPath } from "node:url";
 
 import {
   canonicalizeReceipt,
+  createBoundedText,
+  createTextDigester,
   loadWorkspacePackages,
   resolvePackageExport,
   resolveShippedCommand,
+  sha256Text,
   shippedBins,
   validate,
 } from "../../../docs/scripts/reference-harness.mjs";
@@ -296,4 +299,159 @@ test("edit fails and revert restores a complete receipt", async () => {
   assert.notEqual(edited.completenessState, "complete");
   const reverted = await clean();
   assert.deepEqual(reverted, before);
+});
+
+const typesExampleRel = "examples/reference/types-helpers/example.ts";
+const typesExample = readFileSync(join(repoRoot, typesExampleRel), "utf8");
+const planRel = "tests/documentation/DOC0/products/generated-reference-plan.v1.json";
+
+test("a compound command is rejected before the bin lookup", async () => {
+  const bins = shippedBins(loadWorkspacePackages(repoRoot));
+  assert.equal(resolveShippedCommand(bins, "verter-tsc").ok, true);
+  for (const command of [
+    "verter-tsc && cargo run -p verter_tsc",
+    "verter-tsc || cargo run -p verter_tsc",
+    "verter-tsc; cargo run -p verter_tsc",
+    "verter-tsc | cat",
+    "verter-tsc $(cargo run -p verter_tsc)",
+  ]) {
+    const resolved = resolveShippedCommand(bins, command);
+    assert.equal(resolved.ok, false, command);
+    assert.equal(resolved.code, "compound-command", command);
+  }
+  const mutated = structuredClone(manifest);
+  mutated.examples.find((row) => row.id === "shipped-cli").commands = [
+    "verter-tsc && cargo run -p verter_tsc",
+  ];
+  const receipt = await validate(
+    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const rejected = receipt.errors.find((item) => item.code === "unshipped-command");
+  assert.ok(rejected);
+  assert.equal(rejected.reason, "compound-command");
+});
+
+test("an example file outside the example home is rejected", async () => {
+  const mutated = structuredClone(manifest);
+  mutated.examples.find((row) => row.id === "types-helpers").files = ["../../package.json"];
+  const receipt = await validate(
+    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const outside = receipt.errors.find((item) => item.code === "example-outside-home");
+  assert.ok(outside);
+  assert.equal(outside.id, "types-helpers");
+  assert.equal(outside.file, "../../package.json");
+  assert.equal(
+    receipt.errors.some((item) => item.code === "missing-source"),
+    false,
+  );
+});
+
+test("an observed subpath of a declared package must resolve on its own", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [typesExampleRel]: `${typesExample}\nimport "@verter/types/not-exported";\n`,
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const leak = receipt.errors.find(
+    (item) => item.code === "unpublished-export" && item.specifier === "@verter/types/not-exported",
+  );
+  assert.ok(leak);
+  assert.equal(leak.reason, "missing-export");
+});
+
+test("an observed import of an undeclared non-peer package is unknown", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [typesExampleRel]: `${typesExample}\nimport pad from "left-pad";\n`,
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const unknown = receipt.errors.find(
+    (item) => item.code === "unpublished-export" && item.specifier === "left-pad",
+  );
+  assert.ok(unknown);
+  assert.equal(unknown.reason, "unknown-package");
+});
+
+test("manifest pins are validated against the running engine and the workspace", async () => {
+  const mutated = structuredClone(manifest);
+  mutated.pin = { ...mutated.pin, node: ">=999", typescript: "0.0.0-not-installed" };
+  const receipt = await validate(
+    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const node = receipt.errors.find(
+    (item) => item.code === "pin-mismatch" && item.package === "node",
+  );
+  assert.ok(node);
+  assert.equal(node.actual, process.version);
+  const ts = receipt.errors.find(
+    (item) => item.code === "pin-mismatch" && item.package === "typescript",
+  );
+  assert.ok(ts);
+  assert.equal(ts.pin, "0.0.0-not-installed");
+  assert.equal(typeof ts.actual, "string");
+  const cleanReceipt = await validate(opts());
+  assert.equal(
+    cleanReceipt.errors.some((item) => item.code === "pin-mismatch" || item.code === "pin-invalid"),
+    false,
+  );
+});
+
+test("a workspace export map edit changes the source digest", async () => {
+  const fresh = await clean();
+  const pkgRel = "packages/types/package.json";
+  const pkg = JSON.parse(readFileSync(join(repoRoot, pkgRel), "utf8"));
+  pkg.exports = { ...pkg.exports, "./extra": "./index.js" };
+  const edited = await validate(opts({ overlays: { [pkgRel]: JSON.stringify(pkg) } }));
+  assert.notEqual(edited.sourceRevisions.digest, fresh.sourceRevisions.digest);
+});
+
+test("a generated-reference plan edit changes the source digest", async () => {
+  const fresh = await clean();
+  const plan = JSON.parse(readFileSync(join(repoRoot, planRel), "utf8"));
+  const edited = await validate(
+    opts({ overlays: { [planRel]: JSON.stringify({ ...plan, note: "edited" }) } }),
+  );
+  assert.equal(edited.completenessState, "complete");
+  assert.notEqual(edited.sourceRevisions.digest, fresh.sourceRevisions.digest);
+});
+
+test("canonical receipts order capabilities by id and surface", () => {
+  const canonical = canonicalizeReceipt({
+    capabilities: [
+      { id: "b", surface: "x" },
+      { id: "a", surface: "y" },
+      { id: "a", surface: "x" },
+    ],
+  });
+  assert.deepEqual(
+    canonical.capabilities.map((row) => `${row.id}:${row.surface}`),
+    ["a:x", "a:y", "b:x"],
+  );
+});
+
+test("streamed child output hashes like the whole text and retains bounded stderr", () => {
+  const text = `line one\r\nline two\r\n${"x".repeat(200_000)}\r\n`;
+  const digester = createTextDigester();
+  digester.update(text.slice(0, 9));
+  digester.update(text.slice(9, 10));
+  for (let index = 10; index < text.length; index += 4096) {
+    digester.update(text.slice(index, index + 4096));
+  }
+  assert.equal(digester.digest(), sha256Text(text));
+  const bounded = createBoundedText(8);
+  bounded.update("abcde");
+  bounded.update("fghij");
+  bounded.update("klm");
+  assert.equal(bounded.value(), "abcdefgh");
+  assert.equal(bounded.truncated(), true);
 });

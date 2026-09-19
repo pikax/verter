@@ -32,6 +32,12 @@ const contracts = readFileSync(
   join(repoRoot, ...model.contractSources.dependencyContracts.split("/")),
   "utf8",
 );
+const contractCandidate = JSON.parse(
+  readFileSync(
+    join(repoRoot, "tests/architecture-health/ARH1/products/dependency-contracts.json"),
+    "utf8",
+  ),
+).candidate;
 
 function opts(extra = {}) {
   return { repoRoot, skipTypeinfoCheck: true, ...extra };
@@ -146,7 +152,7 @@ test("architecture contracts distinguish sync constructors from the native drive
     "the page resolves the original host/profile as unrecorded",
   );
   assert.ok(
-    architecturePage.includes("260be884014110ffd3b72850509e765c8752b011"),
+    architecturePage.includes(contractCandidate),
     "the page names the contract candidate SHA",
   );
   assert.ok(
