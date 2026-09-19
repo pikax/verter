@@ -141,9 +141,13 @@
       "evidence": ["extensions/jetbrains/README.md", "extensions/jetbrains/gradle.properties", "tests/jetbrains-product/JBT1/products/ide-support-range.v1.json"]
     },
     "packages/dx-harness/jetbrains": {
-      "state": "absent",
-      "note": "the dx-harness substrate exists without a jetbrains driver; JBT1H registers it",
-      "evidence": ["packages/dx-harness/package.json"]
+      "state": "harness-present",
+      "note": "JBT1H landed the real-IDE comparison harness and fixture driver (paired-run recorder, process-tree and UI application/paint capture, Platform-test-framework IDE driver). It captures versions and comparison rows; it does not evaluate superiority (JBT10/JBT11) or workflow parity (JBT9). No second semantic engine. Installed-product About-dialog pins stay pending-capture: the platform test IDE is not that capture route.",
+      "evidence": [
+        "packages/dx-harness/jetbrains/index.ts",
+        "packages/dx-harness/test/jetbrainsHarness.test.ts",
+        "extensions/jetbrains/src/test/kotlin/dev/verter/jetbrains/RealIdeCaptureTest.kt"
+      ]
     },
     "semanticEntry": {
       "state": "verter-lsp only",

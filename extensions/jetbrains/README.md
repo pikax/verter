@@ -13,7 +13,10 @@ plugin lifecycle and engine integration.
   version and the running platform build. This is the JBT1 load proof and the
   entire user-visible surface.
 - Real JVM tests: a booted-platform test asserting the action is registered
-  under `verter.Health`, plus descriptor-consistency tests.
+  under `verter.Health`, plus descriptor-consistency tests. JBT1H adds
+  `RealIdeCaptureTest` (test hook only): versions, EDT application/paint and
+  process-tree snapshot from the same pinned test IDE. The comparison recorder
+  lives in `packages/dx-harness/jetbrains`.
 - `verifyPlugin` runs the IntelliJ Plugin Verifier against the pinned WebStorm
   build (never `recommended()`, so verification never depends on whatever IDE
   builds are latest at run time), failing on every failure level.

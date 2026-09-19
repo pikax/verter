@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"]
+  },
+  "include": ["types/**/*.d.ts"]
+}

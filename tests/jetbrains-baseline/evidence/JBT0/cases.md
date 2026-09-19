@@ -17,7 +17,7 @@ JBT0.2 grounding: the twelve charter workflows are pinned as the matrix populati
 
 JBT0.3/JBT0.4 grounding: the predeclared metric set (client apply/paint, provider CPU/wall, outbound bytes, retained memory), the no-post-hoc-subset rule, labelled-unavailable metrics, the WSP equal-work corpus binding and the thin-LSP-plugin starting-point-only status are pinned; WSP1 owns instrumentation, JBT9 parity qualification, JBT10 comparative qualification, JBT11 the terminal conjunction.
 
-Live-repository facts the harness depends on: `extensions/jetbrains` and `packages/dx-harness/jetbrains` do not exist yet (recorded `absent`; landing one without updating the row is a failure), `verter-lsp` remains the sole semantic entry, DX0 is implemented in the ledger, and the `jetbrains_product`/`semantic_presentation` conflict domains are registered.
+Live-repository facts the harness depends on: `extensions/jetbrains` is `skeleton-inert` (JBT1) and `packages/dx-harness/jetbrains` is `harness-present` (JBT1H); landing either without updating the adapterState row is a failure. `verter-lsp` remains the sole semantic entry, DX0 is implemented in the ledger, and the `jetbrains_product`/`semantic_presentation` conflict domains are registered. Installed-product pin values stay `pending-capture` — the platform test IDE is not the About-dialog capture route.
 
 AC-BASIS is bound to JBT1H/JBT10 as downstream runtime-test owners; AC-RESOURCE is not applicable (no hot paths, no UI, 0 production LOC); AC-EXPOSURE registration is owned by DX1.
 
