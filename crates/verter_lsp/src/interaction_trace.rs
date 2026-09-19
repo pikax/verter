@@ -123,8 +123,9 @@ impl InteractionTraceLog {
         self.session_start.elapsed().as_secs_f64() * 1000.0
     }
 
-    /// Open a request span. Returns a no-op span when disabled.
-    pub fn begin(&self, method: &str, source_epoch: Option<u64>) -> TraceSpan<'_> {
+    /// Open a request span. `source_epoch` is evaluated only when tracing is
+    /// enabled; returns a no-op span when disabled.
+    pub fn begin(&self, method: &str, source_epoch: impl FnOnce() -> Option<u64>) -> TraceSpan<'_> {
         if !self.is_enabled() {
             return TraceSpan {
                 log: self,
@@ -132,6 +133,7 @@ impl InteractionTraceLog {
                 live: false,
             };
         }
+        let source_epoch = source_epoch();
         let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         let trace = InteractionTrace {
             request_epoch: epoch,
@@ -312,7 +314,7 @@ mod tests {
     fn disabled_records_nothing() {
         let log = InteractionTraceLog::new(8);
         {
-            let span = log.begin("textDocument/hover", Some(3));
+            let span = log.begin("textDocument/hover", || Some(3));
             span.mark(ProtocolStage::ProviderWork);
         }
         let snap = log.snapshot();
@@ -329,7 +331,7 @@ mod tests {
         let log = InteractionTraceLog::new(8);
         log.set_enabled(true);
         {
-            let span = log.begin("textDocument/hover", Some(11));
+            let span = log.begin("textDocument/hover", || Some(11));
             span.mark_with_bytes(ProtocolStage::Serialize, Some(128));
             span.mark(ProtocolStage::OutboundEnqueued);
             span.finish_ok();
@@ -466,7 +468,7 @@ mod tests {
         let log = InteractionTraceLog::new(8);
         log.set_enabled(true);
         {
-            let span = log.begin("textDocument/definition", None);
+            let span = log.begin("textDocument/definition", || None);
             span.mark(ProtocolStage::Admitted);
             let spin = Instant::now();
             while spin.elapsed() < Duration::from_millis(2) {
@@ -488,7 +490,7 @@ mod tests {
         let log = InteractionTraceLog::new(8);
         log.set_enabled(true);
         {
-            let span = log.begin("textDocument/hover", None);
+            let span = log.begin("textDocument/hover", || None);
             span.mark(ProtocolStage::ProviderWork);
             span.fail();
         }
@@ -506,7 +508,7 @@ mod tests {
         let log = InteractionTraceLog::new(8);
         log.set_enabled(true);
         {
-            let span = log.begin("textDocument/hover", None);
+            let span = log.begin("textDocument/hover", || None);
             span.mark(ProtocolStage::ProviderWork);
             drop(span);
         }
@@ -523,7 +525,7 @@ mod tests {
     fn in_flight_request_snapshots_as_pending() {
         let log = InteractionTraceLog::new(8);
         log.set_enabled(true);
-        let span = log.begin("textDocument/hover", None);
+        let span = log.begin("textDocument/hover", || None);
         assert_eq!(log.snapshot().traces[0].status, TraceStatus::Pending);
         span.finish_ok();
     }

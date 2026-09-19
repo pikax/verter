@@ -15,23 +15,21 @@ use tower_lsp_server::ls_types::*;
 use super::nav_features::{handle_completion, handle_hover};
 use super::nav_features_navigation::{handle_goto_definition, handle_references, handle_rename};
 use super::VerterLanguageServer;
-use crate::interaction_trace::ProtocolStage;
+use crate::interaction_trace::{ProtocolStage, TraceSpan};
 
 async fn with_protocol_trace<T>(
-    server: &VerterLanguageServer,
-    method: &'static str,
-    source_epoch: Option<u64>,
+    span: TraceSpan<'_>,
     fut: impl std::future::Future<Output = Result<T>>,
     byte_len: impl FnOnce(&T) -> u32,
 ) -> Result<T> {
-    let span = server.interaction_trace.begin(method, source_epoch);
     span.mark(ProtocolStage::Admitted);
     span.mark(ProtocolStage::ProviderWork);
     let result = fut.await;
     span.mark(ProtocolStage::Serialize);
     if let Ok(value) = result.as_ref() {
-        let n = u64::from(byte_len(value));
-        span.mark_with_bytes(ProtocolStage::OutboundEnqueued, Some(n));
+        // Byte sizing is trace-only work: run it just for live spans.
+        let n = span.request_epoch().map(|_| u64::from(byte_len(value)));
+        span.mark_with_bytes(ProtocolStage::OutboundEnqueued, n);
         span.finish_ok();
     } else {
         // A failed request keeps a terminal state distinct from complete.
@@ -60,11 +58,11 @@ pub(super) async fn handle_hover_with_audit(
         .clone();
     let position = params.text_document_position_params.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    let span = server.interaction_trace.begin("textDocument/hover", || {
+        server.documents.get(&uri).map(|doc| doc.version as u64)
+    });
     with_protocol_trace(
-        server,
-        "textDocument/hover",
-        source_epoch,
+        span,
         crate::audit_harness::run_with_audit(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Hover,
@@ -90,11 +88,13 @@ pub(super) async fn handle_completion_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    let span = server
+        .interaction_trace
+        .begin("textDocument/completion", || {
+            server.documents.get(&uri).map(|doc| doc.version as u64)
+        });
     with_protocol_trace(
-        server,
-        "textDocument/completion",
-        source_epoch,
+        span,
         crate::audit_harness::run_with_audit(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Completion,
@@ -139,11 +139,13 @@ pub(super) async fn handle_goto_definition_with_audit(
         .clone();
     let position = params.text_document_position_params.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    let span = server
+        .interaction_trace
+        .begin("textDocument/definition", || {
+            server.documents.get(&uri).map(|doc| doc.version as u64)
+        });
     with_protocol_trace(
-        server,
-        "textDocument/definition",
-        source_epoch,
+        span,
         crate::audit_harness::run_with_audit(
             &host,
             verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
@@ -184,11 +186,13 @@ pub(super) async fn handle_references_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    let span = server
+        .interaction_trace
+        .begin("textDocument/references", || {
+            server.documents.get(&uri).map(|doc| doc.version as u64)
+        });
     with_protocol_trace(
-        server,
-        "textDocument/references",
-        source_epoch,
+        span,
         crate::audit_harness::run_with_audit(
             &host,
             verter_audit::payloads::tags::LspMethodTag::References,
@@ -220,11 +224,11 @@ pub(super) async fn handle_rename_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
-    let source_epoch = server.documents.get(&uri).map(|doc| doc.version as u64);
+    let span = server.interaction_trace.begin("textDocument/rename", || {
+        server.documents.get(&uri).map(|doc| doc.version as u64)
+    });
     with_protocol_trace(
-        server,
-        "textDocument/rename",
-        source_epoch,
+        span,
         crate::audit_harness::run_with_audit(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Rename,
@@ -272,4 +276,110 @@ fn hover_response_size(hover: Option<&Hover>) -> u32 {
         HoverContents::Markup(m) => m.value.len(),
     };
     u32::try_from(total).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use verter_session::{HostConfig, VerterHost};
+
+    use crate::interaction_trace::TraceStatus;
+    use crate::{LspConfig, ProjectSyncMode};
+
+    fn make_server() -> (
+        tower_lsp_server::LspService<VerterLanguageServer>,
+        tower_lsp_server::ClientSocket,
+    ) {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: None,
+                    project_sync_mode: ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                    type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                    mcp_port: None,
+                    type_provider_reason: Some("trace deferral test".into()),
+                    type_provider_advisory: None,
+                    suppress_imported_carrier_prewarm: true,
+                },
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn disabled_trace_runs_handler_without_epoch_or_byte_callbacks() {
+        let (service, _socket) = make_server();
+        let server = service.inner();
+        assert!(!server.interaction_trace.is_enabled());
+
+        let epoch_called = Cell::new(false);
+        let byte_called = Cell::new(false);
+        let handler_ran = Cell::new(false);
+        let span = server.interaction_trace.begin("textDocument/hover", || {
+            epoch_called.set(true);
+            Some(3)
+        });
+        let result: Result<Option<u32>> = with_protocol_trace(
+            span,
+            async {
+                handler_ran.set(true);
+                Ok(None)
+            },
+            |_| {
+                byte_called.set(true);
+                0
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(
+            handler_ran.get(),
+            "the audited handler still runs with tracing disabled"
+        );
+        assert!(
+            !epoch_called.get(),
+            "source_epoch lookup must be deferred until tracing is enabled"
+        );
+        assert!(
+            !byte_called.get(),
+            "byte_len must only run while tracing is active"
+        );
+        assert!(server.interaction_trace.snapshot().traces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enabled_trace_evaluates_epoch_and_byte_callbacks() {
+        let (service, _socket) = make_server();
+        let server = service.inner();
+        server.interaction_trace.set_enabled(true);
+
+        let span = server
+            .interaction_trace
+            .begin("textDocument/hover", || Some(7));
+        let result: Result<Option<u32>> =
+            with_protocol_trace(span, async { Ok(Some(42u32)) }, |value| {
+                value.map_or(0, |v| v + 1)
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), Some(42));
+        let snap = server.interaction_trace.snapshot();
+        let trace = &snap.traces[0];
+        assert_eq!(trace.source_epoch, Some(7));
+        assert_eq!(trace.status, TraceStatus::Complete);
+        let enqueued = trace
+            .stamps
+            .iter()
+            .find(|stamp| stamp.stage == ProtocolStage::OutboundEnqueued)
+            .expect("outbound enqueued stamp");
+        assert_eq!(enqueued.byte_length, Some(43));
+    }
 }
