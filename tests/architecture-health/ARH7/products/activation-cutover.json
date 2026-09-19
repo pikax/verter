@@ -1,0 +1,116 @@
+{
+  "schema": "ARH7ActivationCutover",
+  "version": 1,
+  "contractNode": "ARH7",
+  "candidate": "6057a7004d9a6606372fafcebc098e683033151c",
+  "predecessorProducts": {
+    "characterization": "tests/architecture-health/ARH2/products/characterization.json"
+  },
+  "boundary": {
+    "path": "packages/vue-vscode/src/extension.ts",
+    "compositionRoot": ["activate", "deactivate"],
+    "displacedModuleBindings": [
+      "getClient",
+      "stopHeartbeat",
+      "activationContext",
+      "currentMcpEndpoint",
+      "retryMcpLifecycleSync"
+    ],
+    "allowedModuleBindings": ["hostContext"],
+    "displacedInFileTypes": ["StartAttemptScope"]
+  },
+  "cutover": [
+    {
+      "id": "ARH7-CUT-1",
+      "route": "module-level getClient/stopHeartbeat/activationContext/currentMcpEndpoint/retryMcpLifecycleSync locator",
+      "decision": "delete the extension-wide mutable locator; one ActivationSession owned by the composition root holds MCP handles and the activation lifetime",
+      "survivingOwner": {
+        "path": "packages/vue-vscode/src/activationSession.ts",
+        "typeName": "ActivationSession",
+        "export": "createActivationRoot"
+      },
+      "disposition": "deleted; activate()/deactivate() are the composition root over createActivationRoot",
+      "class": "lifetime-narrowing"
+    },
+    {
+      "id": "ARH7-CUT-2",
+      "route": "StartAttemptScope defined in extension.ts",
+      "decision": "move the start-attempt lifetime bag to its own module so activation and language-server start share one owner type",
+      "survivingOwner": {
+        "path": "packages/vue-vscode/src/startAttemptScope.ts",
+        "typeName": "StartAttemptScope",
+        "export": "StartAttemptScope"
+      },
+      "disposition": "moved; extension.ts imports the owner and no longer defines the class",
+      "class": "lifetime-narrowing"
+    },
+    {
+      "id": "ARH7-CUT-3",
+      "route": "context.subscriptions as activateExtension lifetime owner",
+      "decision": "activateExtension and host contributions register on ActivationSession.scope; VS Code context.subscriptions holds the session disposable only",
+      "survivingOwner": {
+        "path": "packages/vue-vscode/src/startAttemptScope.ts",
+        "typeName": "StartAttemptScope",
+        "method": "add"
+      },
+      "disposition": "deleted from activateExtension; the language-server start-attempt test path may still push an attempt onto context.subscriptions when no lifetime is passed",
+      "class": "lifetime-narrowing"
+    }
+  ],
+  "ac2": {
+    "defect": "Reload or repeated activation duplicates listeners, authorities, background work or processes",
+    "evidence": [
+      {
+        "file": "packages/vue-vscode/src/activationSession.spec.ts",
+        "test": "reload or repeated activation does not duplicate registrations",
+        "proves": "deactivate disposes the session; a later activate starts a new generation instead of stacking"
+      },
+      {
+        "file": "packages/vue-vscode/src/activationGate.ts",
+        "proves": "concurrent activate() callers still share one in-flight start"
+      },
+      {
+        "file": "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
+        "proves": "a failed language-server start attempt still disposes its own registrations, status bar items and timers"
+      }
+    ]
+  },
+  "ac3": {
+    "note": "ARH7 does not mutate a compiler state, query or map boundary. Language-server start-attempt cancellation and disposal are the touched lifetime concern; the rest stay with their existing owners.",
+    "concerns": [
+      {
+        "concern": "fresh-versus-incremental equivalence",
+        "applicable": false,
+        "rationale": "no incremental compile cache, query memo or generation supersession is touched; activation owns host registrations and process lifetime only"
+      },
+      {
+        "concern": "edit/revert",
+        "applicable": false,
+        "rationale": "no edit transaction or source-revision boundary is touched"
+      },
+      {
+        "concern": "cancellation",
+        "applicable": true,
+        "evidence": [
+          {
+            "file": "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
+            "test": "releases every subscription, status bar item and armed timer when a start attempt fails"
+          }
+        ],
+        "note": "a failed or disposed start attempt still cannot hand the workspace an ownerless server"
+      },
+      {
+        "concern": "stale/partial rejection",
+        "applicable": false,
+        "rationale": "no qualified-map, snapshot or partial-result envelope is touched"
+      },
+      {
+        "concern": "deterministic ordering under perturbed discovery or scheduling",
+        "applicable": false,
+        "rationale": "no discovery or scheduler ordering boundary is touched"
+      }
+    ]
+  },
+  "ac4Rationale": "No public example, VIM/DX capability or host/profile surface names the displaced module-level locator or the in-file StartAttemptScope class; examples/reference is consumed, not duplicated. vscode.extension remains NativeOnly. VSC0 lifecycle evidence for start-attempt-scope migrates to startAttemptScope.ts in the same change. DOC1 executable-example obligations are unchanged because no public example called the displaced bindings. Permissions are not applicable. Uncertainty is the live source join re-derived by this verifier.",
+  "ac5Rationale": "No new latency/work/allocation/RSS budget is created. The obsolete module-level locator and in-file StartAttemptScope are retired; required work is not removed — language-server start, MCP child lifetime, heartbeat watchdog, restart supervisor and TypeScript plugin forwarding remain. VSC1 still owns later activation/recovery runtime tests."
+}
