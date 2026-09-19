@@ -994,25 +994,32 @@ impl VerterHost {
                 request_context: verter_scheduler::request_context::current_context(),
             });
 
-        // Wait for the scheduler to reach Analysis. `wait_or_drive`
-        // drives stages inline on WASM (no driver thread); on native it
-        // delegates to `handle.wait()` when the driver thread is
-        // installed. Split wait (scheduler drive) vs work
-        // (integrate_scheduler_snapshot) so diagnosis can tell
-        // load-path contention from post-load processing.
+        // Wait for the scheduler to reach Analysis. The drive runs
+        // through the host's cooperative adapter so a single-threaded
+        // embedding runtime can cancel or withdraw at the cooperative
+        // points; uncancellable (the default adapter state) it is
+        // `wait_or_drive` exactly — driving stages inline on WASM (no
+        // driver thread) and delegating to `handle.wait()` on native
+        // when the driver thread is installed. A cancelled drive is a
+        // not-loaded outcome: no partial result is integrated. Split
+        // wait (scheduler drive) vs work (integrate_scheduler_snapshot)
+        // so diagnosis can tell load-path contention from post-load
+        // processing.
         let wait_start = Instant::now();
-        match self.scheduler.wait_or_drive(&handle) {
-            CompletionState::Ready(_) => {}
-            _ => {
-                self.provenance
-                    .ensure_loaded_wait_ns
-                    .fetch_add(wait_start.elapsed().as_nanos() as u64, Relaxed);
-                return false;
+        let driven = self.cooperative_drive.drive(&self.scheduler, &handle);
+        let ready = match driven {
+            crate::cooperative_scheduler::CooperativeDrive::Driven(CompletionState::Ready(_)) => {
+                true
             }
-        }
+            crate::cooperative_scheduler::CooperativeDrive::Driven(_) => false,
+            crate::cooperative_scheduler::CooperativeDrive::Cancelled(_) => false,
+        };
         self.provenance
             .ensure_loaded_wait_ns
             .fetch_add(wait_start.elapsed().as_nanos() as u64, Relaxed);
+        if !ready {
+            return false;
+        }
 
         let work_start = Instant::now();
         let loaded = self.integrate_scheduler_snapshot(canonical_id);

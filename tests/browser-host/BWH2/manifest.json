@@ -1,0 +1,63 @@
+{
+  "node": "BWH2",
+  "kind": "implementation",
+  "products": [
+    "PortableHostServices boundary: crates/verter_session/src/platform_services.rs (five service classes, per-target routes, browser-closure dependency guard, scheduling seam verification at host construction)",
+    "Committed input handoff: crates/verter_session/src/input_handoff.rs + crates/verter_wasm/src/input_snapshot.rs (commitInputSnapshot/observeInputSnapshot exports) + packages/browser-host/src/input-handoff.js + @verter/wasm Host methods",
+    "CooperativeSchedulerAdapter: crates/verter_session/src/cooperative_scheduler.rs, wired into the ensure_loaded drive seam (host_lifecycle.rs) and exposed via VerterHost::cooperative_drive()"
+  ],
+  "cases": [
+    {
+      "id": "BWH2-AC1",
+      "disposition": "reject",
+      "binding": "identical committed rows commit to identical InputBasisId natively (input_handoff_tests::identical_rows_commit_to_identical_basis_identities; input_snapshot::tests::identical_waves_share_one_basis_identity) and the same handoff core compiles into the wasm32 browser closure (cargo check -p verter_wasm --target wasm32-unknown-unknown); the live three-engine worker comparison of the same committed snapshot stays bound to the browser-host gate run and is recorded by BWH3 when the WASM semantic session exports activate the seam",
+      "twins": [
+        "clean evidence",
+        "identical rows diverging basis identity",
+        "browser closure failing wasm32 check"
+      ]
+    },
+    {
+      "id": "BWH2-AC2",
+      "disposition": "reject",
+      "binding": "a requested never-acquired key answers typed NeedInputs at every layer — HandoffObserve::NeedInputs (input_handoff_tests::unacquired_key_observes_as_typed_need_inputs), InputSnapshotObservationCore::NeedInputs (input_snapshot::tests::missing_and_unacquired_keys_answer_distinct_typed_statuses), status:\"needInputs\" on the WASM surface, and NeedInputsError on the browser client (browser-host-gate.test.mjs observeInputSnapshot test). The handoff type carries no workspace handle, loader, or callback, so no synchronous fetch path exists inside the boundary",
+      "twins": [
+        "clean evidence",
+        "unacquired key answered as absent",
+        "unacquired key answered as error"
+      ]
+    },
+    {
+      "id": "BWH2-AC3",
+      "disposition": "reject",
+      "binding": "CooperativeDrive::Cancelled carries no result value at the type level and the committed basis behind a cancelled drive stays fence-coherent (cooperative_scheduler_tests::cancelled_drive_exposes_no_half_committed_snapshot); cancel-before-submit admits nothing, cancel-before-drive and yield withdrawal never consult the scheduler, and the uncancellable adapter preserves wait_or_drive outcomes exactly (cooperative_scheduler_tests)",
+      "twins": [
+        "clean evidence",
+        "cancelled drive surfaced a Ready/partial value",
+        "torn committed basis after cancellation"
+      ]
+    },
+    {
+      "id": "BWH2-AC-OWNER",
+      "disposition": "accept",
+      "binding": "final owner expansion.browser-host. The boundary modules retire when their activation owners adopt them: BWH3 (WASM semantic session and lifetime exports) activates the committed-snapshot handoff and the cooperative drive on the worker surface; BWH4 owns the browser VFS adapter behind the io seam; BWH5 owns the worker protocol and optional threaded strategy behind the scheduling seam; BWH8 owns durable browser caches behind the persistence seam. Semantic algorithms, project resolution, TypeScript projection and edit transactions stay with their producing owners; the adapter introduces no second runtime or query cache"
+    },
+    {
+      "id": "BWH2-AC-BASIS",
+      "disposition": "accept",
+      "binding": "incremental retry extension of a committed handoff and a fresh commit of the same rows land on the identical InputBasisId (input_handoff_tests::incremental_extension_matches_fresh_commit_basis); committed positives and negatives are never re-demanded by the next acquisition wave (next_acquisition_wave_demands_only_unrecorded_keys)"
+    },
+    {
+      "id": "BWH2-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "no performance claim is made by this node. The adapter adds one atomic cancellation load and one no-op yield hook call per ensure_loaded drive; no hot-path or UI metric is claimed, and no benchmark was run. Equal-work corpus claims stay with WSP1/BWH11/VSW5"
+    },
+    {
+      "id": "BWH2-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "the operations introduced here (commitInputSnapshot / observeInputSnapshot) are host-boundary input operations, not DX0 semantic operations; no DX0 class changes and nothing is admitted Portable. Registration is recorded in tests/product-experience/DX0/products/exposure-ownership-map.json (BWH2 receiving amendment); product promotion stays blocked on executable exposure, which BWH3 supplies when the worker protocol activates"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "Native runtime correctness is proven by the focused cargo suites recorded in the work report; the browser runtime proof (real workers over the new exports) executes through scripts/browser-host-gate.mjs when the wasm artifact is built and engines are present, and its worker-side activation is assigned to BWH3/BWH5. packages/browser-host remains a client adapter, not a second semantic authority."
+}
