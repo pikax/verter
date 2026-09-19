@@ -658,7 +658,11 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
     );
     ws.inject_file(
         real_aug.to_string(),
-        Arc::from("declare global { interface PhantomAug { x: 1 } }\nexport {};\n"),
+        // Module augmenter, not `declare global`: a global block is a
+        // program-wide contributor and is always probed. This file exists
+        // so a rejected barrel's baked re-export can still materialise it
+        // if the BFS wrongly walks that edge.
+        Arc::from("declare module \"./unrelated\" { export const x: 1 }\nexport {};\n"),
     );
     // The phantom barrel file is NEVER present in the workspace.
     let host = StdArc::new(VerterHost::new(HostConfig::default(), ws));

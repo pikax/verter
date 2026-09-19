@@ -3826,6 +3826,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
         let host = self.ctx.host_for_fact_tracer_install();
+        host.ingest_program_ambient_roots();
         // Store-view / workspace-default basis: the warm-validate
         // `AugmentationTargetKey` is recomposed from the sealed store
         // view's `project_env_root` (workspace-default env + identity).

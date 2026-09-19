@@ -24,6 +24,14 @@ use crate::shared::default_shared;
 use crate::types::{HostConfig, HostMetrics};
 use crate::{host_executor, VerterHost};
 
+fn is_ambient_declaration_canonical(canonical: &str) -> bool {
+    canonical.starts_with("ambient:/")
+        || canonical.ends_with(".d.ts")
+        || canonical.ends_with(".d.tsx")
+        || canonical.ends_with(".d.cts")
+        || canonical.ends_with(".d.mts")
+}
+
 /// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
 ///
 /// - `force_overflow_observations`: test-injection for the cold relation
@@ -1047,9 +1055,6 @@ impl VerterHost {
         root.snapshot.owners_for_file(canonical).first().copied()
     }
 
-    /// Ingest injected program-root `.d.ts` / ambient-lib files that were
-    /// never upserted so their global contributions land at IndexedReady
-    /// publication, not on the lookup path.
     /// Configured `files` index for `canonical`, or `u32::MAX` when the
     /// path was discovered by include/globs (unordered inputs are then
     /// normalized by canonical spelling).
@@ -1074,15 +1079,59 @@ impl VerterHost {
         }
     }
 
+    /// IndexedReady for a declaration file whose source is a global/ambient
+    /// contributor (`declare global` / `declare module`, or an automatic
+    /// lib). Ordinary `.ts` / export-only `.d.ts` stay on the shallow
+    /// upsert path so cold/fence flights are not consumed at upsert.
+    pub(crate) fn ingest_ambient_contributor(&self, canonical: &str, source: &str) {
+        if !is_ambient_declaration_canonical(canonical) {
+            return;
+        }
+        if !canonical.starts_with("ambient:/")
+            && !crate::global_contributors::source_has_ambient_contribution(source)
+        {
+            return;
+        }
+        let _ = self.ensure_loaded(canonical);
+        let _ = self.ensure_indexed_ready_serve(canonical);
+    }
+
+    /// Drain overlay `.ts` ambient contributors recorded at upsert.
+    /// Contribution collection calls this so a never-imported `.ts`
+    /// augmenter is IndexedReady before the index scan, without a
+    /// whole-program `read_file` and without consuming cold flights at
+    /// upsert.
+    pub(crate) fn ingest_program_ambient_roots(&self) {
+        let pending = self
+            .project_type_store()
+            .indexed()
+            .global_contributor_index()
+            .take_pending_overlay_ambient();
+        for member in pending {
+            let _ = self.ensure_loaded(&member);
+            let _ = self.ensure_indexed_ready_serve(&member);
+        }
+    }
+
+    /// Ingest snapshot members that contribute globally and were never
+    /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
         for member in self.workspace().snapshot_canonicals() {
             if except == Some(member.as_str()) {
                 continue;
             }
-            if member.ends_with(".d.ts") || member.starts_with("ambient:/") {
+            if member.starts_with("ambient:/") {
                 let _ = self.ensure_loaded(&member);
                 let _ = self.ensure_indexed_ready_serve(&member);
+                continue;
             }
+            if !is_ambient_declaration_canonical(&member) {
+                continue;
+            }
+            let Some(source) = self.workspace().read_file(&member) else {
+                continue;
+            };
+            self.ingest_ambient_contributor(&member, source.as_ref());
         }
     }
 

@@ -162,3 +162,105 @@ fn injected_unimported_ambient_is_ingested_without_upserting_it() {
         "an injected unimported ambient .d.ts must enter the population without being upserted"
     );
 }
+
+#[test]
+fn upserted_unimported_ambient_is_ingested_on_standalone_host() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/aug.d.ts".to_owned()),
+            input_id: "/aug.d.ts".to_owned(),
+            source: Arc::from(
+                "declare module \"ext-pkg\" { export interface Cfg { mode: string } }\n",
+            ),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("augmenter upsert");
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/aug.d.ts")
+            .is_some(),
+        "upserted ambient declare-module .d.ts must be IndexedReady without a later demand"
+    );
+    let hit = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup_in_space(
+            &AugmentationTargetKind::ExternalSpecifier(
+                crate::file_artifact_store::InternedSpecifier::from("ext-pkg"),
+            ),
+            "Cfg",
+            None,
+            true,
+            verter_semantic::facts::SymbolSpace::Type,
+        );
+    assert!(
+        !hit.entries.is_empty(),
+        "upserted overlay-only ambient .d.ts must enter the population"
+    );
+}
+
+#[test]
+fn export_only_snapshot_dts_is_not_eagerly_indexed() {
+    let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file(
+        "/pkg/index.d.ts".to_owned(),
+        Arc::from("export interface Props { msg: string }\n"),
+    );
+    workspace.inject_file("/app.ts".to_owned(), Arc::from("export const n = 1;\n"));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/pkg/index.d.ts")
+            .is_none(),
+        "export-only snapshot .d.ts must stay cold until demanded"
+    );
+}
+
+#[test]
+fn unrelated_file_publish_sorts_no_contributor_entries() {
+    let store = FileArtifactStore::new();
+    publish(
+        &store,
+        "/promise.d.ts",
+        "export {};\ndeclare global { interface Promise<T> { thenable: T } }\n",
+    );
+    let index = store.global_contributor_index();
+    index.reset_publish_sorted_entry_count();
+    publish(&store, "/unrelated.ts", "export const x = 1;\n");
+    assert_eq!(
+        index.publish_sorted_entry_count(),
+        0,
+        "an unrelated file must not clone/sort existing contributor vectors"
+    );
+}
+
+#[test]
+fn source_has_ambient_contribution_matches_declare_module_and_global() {
+    use super::source_has_ambient_contribution;
+    assert!(source_has_ambient_contribution(
+        "declare module \"ext-pkg\" { export const x: number }\n"
+    ));
+    assert!(source_has_ambient_contribution(
+        "export {};\ndeclare global { interface Window { x: number } }\n"
+    ));
+    assert!(source_has_ambient_contribution(
+        "export declare module \"vite/client\" { interface ImportMeta { env: unknown } }\n"
+    ));
+    assert!(!source_has_ambient_contribution(
+        "export interface Props { msg: string }\n"
+    ));
+    assert!(!source_has_ambient_contribution(
+        "import type { P } from './dep';\nexport type Owner = P;\n"
+    ));
+    assert!(!source_has_ambient_contribution(
+        "// declare module \"nope\" { }\nexport const x = 1;\n"
+    ));
+}

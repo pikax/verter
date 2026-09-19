@@ -341,15 +341,40 @@ impl RecordKey {
     }
 }
 
+struct GroupedState {
+    by_symbol: FxHashMap<SymbolKey, Vec<ContributorEntry>>,
+    dirty: FxHashSet<SymbolKey>,
+}
+
+impl GroupedState {
+    fn new() -> Self {
+        Self {
+            by_symbol: FxHashMap::default(),
+            dirty: FxHashSet::default(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.by_symbol.clear();
+        self.dirty.clear();
+    }
+}
+
 /// Reverse index of per-file contribution records plus the published
 /// immutable snapshot. Mutation goes through [`Self::note_live`] /
 /// [`Self::note_gone`] then [`Self::publish`].
 pub struct GlobalContributorIndex {
     records: DashMap<RecordKey, Arc<FileContributionRecord>>,
-    grouped: parking_lot::Mutex<FxHashMap<SymbolKey, Vec<ContributorEntry>>>,
+    grouped: parking_lot::Mutex<GroupedState>,
     snapshot: parking_lot::RwLock<Arc<GlobalContributorPopulation>>,
     publish: parking_lot::Mutex<()>,
     revision: AtomicU64,
+    /// Overlay `.ts` files with file-level `declare module`/`declare global`
+    /// that have not yet been IndexedReady. Drained from contribution
+    /// collection, not from upsert, so fence flights stay cold.
+    pending_overlay_ambient: parking_lot::Mutex<FxHashSet<Arc<str>>>,
+    #[cfg(test)]
+    publish_sorted_entries: AtomicU64,
 }
 
 impl std::fmt::Debug for GlobalContributorIndex {
@@ -372,7 +397,7 @@ impl GlobalContributorIndex {
     pub fn new() -> Self {
         Self {
             records: DashMap::new(),
-            grouped: parking_lot::Mutex::new(FxHashMap::default()),
+            grouped: parking_lot::Mutex::new(GroupedState::new()),
             snapshot: parking_lot::RwLock::new(Arc::new(GlobalContributorPopulation {
                 program_snapshot: 0,
                 revision: 0,
@@ -380,6 +405,9 @@ impl GlobalContributorIndex {
             })),
             publish: parking_lot::Mutex::new(()),
             revision: AtomicU64::new(0),
+            pending_overlay_ambient: parking_lot::Mutex::new(FxHashSet::default()),
+            #[cfg(test)]
+            publish_sorted_entries: AtomicU64::new(0),
         }
     }
 
@@ -387,6 +415,19 @@ impl GlobalContributorIndex {
     #[must_use]
     pub fn snapshot(&self) -> Arc<GlobalContributorPopulation> {
         Arc::clone(&self.snapshot.read())
+    }
+
+    /// Entries cloned and sorted while building a published snapshot.
+    /// Zero on an unrelated file that contributes no global symbols.
+    #[cfg(test)]
+    #[must_use]
+    pub fn publish_sorted_entry_count(&self) -> u64 {
+        self.publish_sorted_entries.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn reset_publish_sorted_entry_count(&self) {
+        self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }
 
     /// Record (or replace) the contributions of a live artifact version.
@@ -417,8 +458,20 @@ impl GlobalContributorIndex {
         remove_record_from_grouped(&mut grouped, &previous);
     }
 
+    pub fn note_pending_overlay_ambient(&self, canonical: &str) {
+        self.pending_overlay_ambient
+            .lock()
+            .insert(Arc::from(canonical));
+    }
+
+    #[must_use]
+    pub fn take_pending_overlay_ambient(&self) -> Vec<Arc<str>> {
+        self.pending_overlay_ambient.lock().drain().collect()
+    }
+
     pub fn clear(&self) {
         self.records.clear();
+        self.pending_overlay_ambient.lock().clear();
         self.grouped.lock().clear();
         let _guard = self.publish.lock();
         *self.snapshot.write() = Arc::new(GlobalContributorPopulation {
@@ -427,6 +480,8 @@ impl GlobalContributorIndex {
             by_symbol: Arc::new(FxHashMap::default()),
         });
         self.revision.store(0, Ordering::Release);
+        #[cfg(test)]
+        self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }
 
     /// Pin `S`, clone the reverse index off to the side, publish only if
@@ -457,56 +512,70 @@ impl GlobalContributorIndex {
 
     fn publish_pinned(&self, pinned: u64, live_epoch: &impl Fn() -> u64) -> bool {
         let by_symbol = {
-            let grouped = self.grouped.lock();
-            grouped
-                .iter()
-                .map(|(k, v)| {
-                    let mut entries = v.clone();
-                    entries.sort_by(compare_contributors);
-                    (k.clone(), Arc::from(entries.into_boxed_slice()))
-                })
-                .collect::<FxHashMap<_, _>>()
+            let mut grouped = self.grouped.lock();
+            let prev = self.snapshot.read();
+            let next = if grouped.dirty.is_empty() {
+                Arc::clone(&prev.by_symbol)
+            } else {
+                let mut next = (*prev.by_symbol).clone();
+                for key in grouped.dirty.iter() {
+                    match grouped.by_symbol.get(key) {
+                        Some(entries) if !entries.is_empty() => {
+                            let mut sorted = entries.clone();
+                            sorted.sort_by(compare_contributors);
+                            #[cfg(test)]
+                            self.publish_sorted_entries
+                                .fetch_add(sorted.len() as u64, Ordering::Relaxed);
+                            next.insert(key.clone(), Arc::from(sorted.into_boxed_slice()));
+                        }
+                        _ => {
+                            next.remove(key);
+                        }
+                    }
+                }
+                Arc::new(next)
+            };
+            drop(prev);
+            if live_epoch() != pinned {
+                return false;
+            }
+            grouped.dirty.clear();
+            next
         };
-        if live_epoch() != pinned {
-            return false;
-        }
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
         *self.snapshot.write() = Arc::new(GlobalContributorPopulation {
             program_snapshot: pinned,
             revision,
-            by_symbol: Arc::new(by_symbol),
+            by_symbol,
         });
         true
     }
 }
 
-fn remove_record_from_grouped(
-    grouped: &mut FxHashMap<SymbolKey, Vec<ContributorEntry>>,
-    record: &FileContributionRecord,
-) {
+fn remove_record_from_grouped(grouped: &mut GroupedState, record: &FileContributionRecord) {
     for fact in record.facts.iter() {
         let Some(symbol_key) = SymbolKey::from_fact(fact) else {
             continue;
         };
-        let Some(entries) = grouped.get_mut(&symbol_key) else {
+        grouped.dirty.insert(symbol_key.clone());
+        let Some(entries) = grouped.by_symbol.get_mut(&symbol_key) else {
             continue;
         };
         entries.retain(|entry| entry.artifact_key != record.artifact_key);
         if entries.is_empty() {
-            grouped.remove(&symbol_key);
+            grouped.by_symbol.remove(&symbol_key);
         }
     }
 }
 
-fn add_record_to_grouped(
-    grouped: &mut FxHashMap<SymbolKey, Vec<ContributorEntry>>,
-    record: &FileContributionRecord,
-) {
+fn add_record_to_grouped(grouped: &mut GroupedState, record: &FileContributionRecord) {
     for fact in record.facts.iter() {
         let Some(symbol_key) = SymbolKey::from_fact(fact) else {
             continue;
         };
+        grouped.dirty.insert(symbol_key.clone());
         grouped
+            .by_symbol
             .entry(symbol_key)
             .or_default()
             .push(ContributorEntry {
@@ -639,6 +708,108 @@ pub fn classify_module_kind(indexed: &IndexedReady) -> FileModuleKind {
     } else {
         FileModuleKind::Script
     }
+}
+
+/// File-level `declare global` / `declare module` (quoted or ambient
+/// namespace). Nested inside another block, comments, and strings are
+/// not contributions. Used to ingest never-imported ambient declarers
+/// without IndexedReady-ing every `.d.ts`.
+#[must_use]
+pub(crate) fn source_has_ambient_contribution(source: &str) -> bool {
+    if !source.contains("declare") {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let mut in_line = false;
+    let mut in_block = false;
+    let mut string: Option<u8> = None;
+    let mut at_statement = true;
+    let mut brace_depth: u32 = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_line {
+            if b == b'\n' {
+                in_line = false;
+                if brace_depth == 0 {
+                    at_statement = true;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(closer) = string {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == closer {
+                string = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                in_line = true;
+                i += 2;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                in_block = true;
+                i += 2;
+            }
+            b'\'' | b'"' | b'`' => {
+                string = Some(b);
+                at_statement = false;
+                i += 1;
+            }
+            b'{' => {
+                brace_depth = brace_depth.saturating_add(1);
+                at_statement = true;
+                i += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                at_statement = brace_depth == 0;
+                i += 1;
+            }
+            b'\n' | b';' => {
+                if brace_depth == 0 {
+                    at_statement = true;
+                }
+                i += 1;
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"export") => {
+                i += b"export".len();
+            }
+            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"declare") => {
+                i += b"declare".len();
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if starts_with_ident(bytes, i, b"global") || starts_with_ident(bytes, i, b"module")
+                {
+                    return true;
+                }
+                at_statement = false;
+            }
+            _ => {
+                at_statement = false;
+                i += 1;
+            }
+        }
+    }
+    false
 }
 
 /// File-level `import`/`export` including `export {}`. Nested `export`
