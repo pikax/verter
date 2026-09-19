@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>BWH1 browser-host harness</title>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const engine = params.get("engine") || "unknown";
+  const worker = new Worker("./worker.js", { type: "module" });
+  window.__bwh1 = { pending: true, engine };
+  worker.onmessage = (event) => {
+    window.__bwh1 = { ...event.data, engine, pending: false };
+  };
+  worker.onerror = (event) => {
+    window.__bwh1 = {
+      ok: false,
+      pending: false,
+      engine,
+      error: event.message || "worker error",
+    };
+  };
+  const [tsSource, vueSource] = await Promise.all([
+    fetch("./fixtures/probe.ts").then((response) => response.text()),
+    fetch("./fixtures/probe.vue").then((response) => response.text()),
+  ]);
+  worker.postMessage({
+    wasmJsUrl: "/wasm/verter_wasm.js",
+    wasmUrl: "/wasm/verter_wasm_bg.wasm",
+    tsSource,
+    vueSource,
+  });
+</script>

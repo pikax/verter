@@ -1,0 +1,68 @@
+{
+  "id": "browser-host-feasibility-receipt.v1",
+  "schema": 1,
+  "contractNode": "BWH1",
+  "finalOwner": "expansion.browser-host:Shared browser language and semantic host",
+  "retirementObligation": "Delete throwaway feasibility glue (packages/browser-host probe/worker harness and this receipt's spike notes) when BWH3 adopts the proven seams. The gate runner remains the browser-host-domain profile entry until a later node replaces it.",
+  "authority": "verter_session VerterHost via crates/verter_wasm wasm_bindgen bindings. packages/browser-host calls that host; it does not implement types, project resolution, mapping or query.",
+  "fixture": {
+    "ts": "packages/browser-host/src/fixtures/probe.ts",
+    "vue": "packages/browser-host/src/fixtures/probe.vue",
+    "normalization": "symbol identity is {name, kind, isExported} sorted by name then kind using code-unit/byte order (JS <, Rust str::cmp), then compared with recursively key-sorted JSON so serde_json BTreeMap order matches JS insertion order; TypeInfo observation is JSON-canonicalized typeExpr from resolveSymbolWithAudit/project_node_to_type_expr_json_bytes. Spans are not identity keys (host listSymbols is SFC-absolute UTF-8; CSS matches are UTF-16)."
+  },
+  "operations": [
+    {
+      "id": "session",
+      "route": "VerterHost.upsert + compileRequest (runtimeClient with source maps + analysis)",
+      "admittedDx0": false,
+      "note": "compiler-substrate session already Portable as playground.compile-carrier; this row proves the same host runs in a dedicated worker"
+    },
+    {
+      "id": "typeinfo",
+      "route": "VerterHost.listSymbols + resolveSymbolWithAudit",
+      "admittedDx0": false,
+      "dx0Id": "typeinfo.graph-operations",
+      "note": "execution proof only; DX0 class stays NativeOnly until a producer-owned Portable port"
+    },
+    {
+      "id": "style",
+      "route": "VerterHost.matchCssSelectors",
+      "admittedDx0": false
+    },
+    {
+      "id": "mapping",
+      "route": "compileRequest runtimeClient.nodes[].sourceMap",
+      "admittedDx0": false
+    },
+    {
+      "id": "query",
+      "route": "VerterHost.resolveTypeWithAudit",
+      "admittedDx0": false
+    }
+  ],
+  "engines": ["chromium", "firefox", "webkit"],
+  "worker": {
+    "entry": "packages/browser-host/src/worker.js",
+    "nodeGlobals": "must be unavailable (BWH1-AC3)",
+    "isolation": "baseline-no-isolation (BWH0-AC2); SharedArrayBuffer is not required"
+  },
+  "metrics": {
+    "artifactBytes": "measured live by the gate from packages/wasm/wasm/verter_wasm_bg.wasm",
+    "startupMs": "worker start to first probe postMessage, per engine",
+    "retainedMemory": "performance.memory.usedJSHeapSize on Chromium; labelled unavailable on Firefox/WebKit",
+    "notClaimed": "no general performance claim; WSP equal-work binds to BWH11/VSW5"
+  },
+  "census": {
+    "command": "cargo tree --target wasm32-unknown-unknown -p verter_wasm -e normal --prefix none",
+    "owner": "BWH1 recurring proof of BWH0-AC1",
+    "forbidden": ["tokio", "rayon", "mio", "nix", "tempfile", "socket2"]
+  },
+  "gate": "scripts/browser-host-gate.mjs",
+  "receiptBasis": {
+    "sourceRevisions": "the probe fixture bytes registered into the in-memory virtual workspace",
+    "projectConfiguration": "in-worker playground-shaped profile: no tsconfig/filesystem project identity",
+    "engineIdentity": "none (Verter compiler/session WASM); TypeInfo is the session substrate, not typescript@6.0.3",
+    "hostIdentity": "browser worker plus WASM build selector",
+    "completenessState": "complete for the five representative operations when the gate passes; unsupported remains the DX0 NativeOnly rows this node does not admit"
+  }
+}

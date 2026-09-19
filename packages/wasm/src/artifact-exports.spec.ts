@@ -48,6 +48,9 @@ const REQUIRED_HOST_METHODS = [
   "getLintRuleMetadata",
   "getDocumentSymbols",
   "matchCssSelectors",
+  "listSymbols",
+  "resolveSymbolWithAudit",
+  "resolveTypeWithAudit",
 ] as const;
 
 describe("@verter/wasm artifact export surface", () => {

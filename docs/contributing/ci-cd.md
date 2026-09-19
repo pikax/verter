@@ -16,6 +16,7 @@ Runs on push to `main` and on pull requests. Uses [dorny/paths-filter](https://g
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`
 - **WASM changes** (`crates/verter_compiler/**`, `crates/verter_wasm/**`) -- `wasm-build`
+- **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build`: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
 - **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.

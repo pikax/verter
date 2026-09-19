@@ -123,6 +123,14 @@ type WasmHostGetCodeActionsFn = (canonicalOrAlias: string, offset: number) => Ho
 type WasmHostGetLintRuleMetadataFn = () => HostLintRuleMetadata[];
 type WasmHostGetDocumentSymbolsFn = (canonicalOrAlias: string) => HostDocumentSymbol[];
 type WasmHostMatchCssSelectorsFn = (canonicalOrAlias: string) => HostSelectorMatchResult[];
+type WasmHostListSymbolsFn = (canonicalId: string) => string;
+type WasmHostResolveSymbolWithAuditFn = (
+  canonicalId: string,
+  name: string,
+  typeArgsJson?: string | null,
+  mode?: string | null,
+) => unknown;
+type WasmHostResolveTypeWithAuditFn = (canonicalId: string, declName: string) => unknown;
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
@@ -138,6 +146,9 @@ interface WasmHostBinding {
   getLintRuleMetadata: WasmHostGetLintRuleMetadataFn;
   getDocumentSymbols: WasmHostGetDocumentSymbolsFn;
   matchCssSelectors: WasmHostMatchCssSelectorsFn;
+  listSymbols: WasmHostListSymbolsFn;
+  resolveSymbolWithAudit: WasmHostResolveSymbolWithAuditFn;
+  resolveTypeWithAudit: WasmHostResolveTypeWithAuditFn;
 }
 type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
 
@@ -304,6 +315,29 @@ export class Host {
   /** Matches CSS selectors against template elements (three-valued matrix). */
   matchCssSelectors(canonicalOrAlias: string): HostSelectorMatchResult[] {
     return this.inner.matchCssSelectors(canonicalOrAlias);
+  }
+
+  /** Top-level symbol inventory JSON (`FfiSymbolEntry[]`) for a registered file. */
+  listSymbols(canonicalId: string): unknown {
+    return JSON.parse(this.inner.listSymbols(canonicalId));
+  }
+
+  /**
+   * Resolve `name` in `canonicalId`'s scope. Returns `{ typeExpr, auditRecord, error }`
+   * from the existing session typeinfo substrate — not a second engine.
+   */
+  resolveSymbolWithAudit(
+    canonicalId: string,
+    name: string,
+    typeArgsJson?: string | null,
+    mode?: string | null,
+  ): unknown {
+    return this.inner.resolveSymbolWithAudit(canonicalId, name, typeArgsJson, mode);
+  }
+
+  /** Resolve `declName` in the ordinary module top-level and return the audit record. */
+  resolveTypeWithAudit(canonicalId: string, declName: string): unknown {
+    return this.inner.resolveTypeWithAudit(canonicalId, declName);
   }
 }
 
