@@ -1087,7 +1087,8 @@ export function expectedPublishingForRow(row) {
 /**
  * STS0-policy-lock structural contract for the live behavior path: every
  * profile row pins the declaration-visible binding names its publishing
- * surface must expose (empty only for the template-only surface), and the
+ * surface must expose (empty only for runes instance rows without public
+ * props and the template-only surface), and the
  * claimed publishing behavior must match the row's script context. The
  * behavioral proof itself runs through the owned CCA1I backend gate below —
  * this projector-free check only pins what the product claims.
@@ -1104,12 +1105,18 @@ export function assertProfileContract(policy) {
           `profile ${row?.id} carries no publishedSymbols pin for the live behavior path`,
         ),
       );
-    } else if (row.publishedSymbols.length === 0 && row.publishing === "module-exports-published") {
+    } else if (
+      row.publishedSymbols.length === 0 &&
+      (row.publishing === "module-exports-published" ||
+        (row.publishing === "declarations-published" &&
+          row.scriptContext === "instance" &&
+          row.semantics === "legacy"))
+    ) {
       errors.push(
         err(
           "STS0-policy-lock",
           "publication-missing",
-          `profile ${row?.id} claims module-exports-published but pins no exported symbols`,
+          `profile ${row?.id} claims ${row.publishing} but pins no declaration-visible symbols`,
         ),
       );
     }
@@ -1143,6 +1150,7 @@ export const STS0_PROFILE_GATE_TESTS = Object.freeze([
   "cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines",
   "cases::sts0_profile_gate::evidence_template_corruption_is_caught_on_both_claimed_engines",
   "cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines",
+  "cases::sts0_profile_gate::pinned_declaration_symbols_appear_in_the_host_declaration_carrier",
   "cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines",
 ]);
 
@@ -1173,20 +1181,55 @@ export function runSts0ProfileGate(repoRoot = REPO_ROOT) {
   return { status: result.status, error: result.error, stdout };
 }
 
+function isTimeoutSpawnError(error) {
+  const code = error?.code;
+  if (code === "ETIMEDOUT" || code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return true;
+  return /timed?\s*out/i.test(String(error?.message || ""));
+}
+
 export function assertProfileGateRun(run) {
   const errors = [];
   if (run.error) {
+    if (run.error.code === "ENOENT") {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "environment-unavailable",
+          `the owned-backend profile gate cannot run: cargo is not available (${run.error.message})`,
+        ),
+      );
+    } else if (isTimeoutSpawnError(run.error)) {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "environment-unavailable",
+          `the owned-backend profile gate timed out: ${run.error.message}`,
+        ),
+      );
+    } else {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "environment-unavailable",
+          `the owned-backend profile gate failed to spawn: ${run.error.message}`,
+        ),
+      );
+    }
+    return errors;
+  }
+  const summary = CARGO_SUMMARY_RE.exec(run.stdout || "");
+  if (run.status !== 0) {
+    const detail = summary
+      ? `status=${run.status} passed=${summary[2]} failed=${summary[3]}`
+      : `status=${run.status} (no cargo test summary)`;
     errors.push(
       err(
         "STS0-policy-lock",
-        "profile-gate-missing",
-        `the owned-backend profile gate failed to spawn: ${run.error.message}`,
+        "test-failure",
+        `the owned-backend profile gate cargo run failed (${detail})`,
       ),
     );
-    return errors;
-  }
-  const summary = CARGO_SUMMARY_RE.exec(run.stdout);
-  if (!summary || run.status !== 0 || summary[1] !== "ok" || Number(summary[2]) === 0) {
+  } else if (!summary || summary[1] !== "ok" || Number(summary[2]) === 0) {
     const detail = summary
       ? `status=${run.status} passed=${summary[2]} failed=${summary[3]}`
       : `status=${run.status} (no cargo test summary)`;
@@ -1199,8 +1242,8 @@ export function assertProfileGateRun(run) {
     );
   }
   for (const name of STS0_PROFILE_GATE_TESTS) {
-    const failed = run.stdout.includes(`${name} ... FAILED`);
-    const passed = run.stdout.includes(`${name} ... ok`);
+    const failed = (run.stdout || "").includes(`${name} ... FAILED`);
+    const passed = (run.stdout || "").includes(`${name} ... ok`);
     if (!passed || failed) {
       errors.push(
         err(
@@ -1225,6 +1268,162 @@ export function assertProfileGateRun(run) {
 export function assertProfileBehavior(policy, { repoRoot = REPO_ROOT } = {}) {
   const errors = [...assertProfileContract(policy)];
   errors.push(...assertProfileGateRun(runSts0ProfileGate(repoRoot)));
+  return errors;
+}
+
+function loadPlaygroundTypeScript(repoRoot = REPO_ROOT) {
+  const pkgDir = path.join(repoRoot, "packages", "playground", "node_modules", "typescript");
+  const require = createRequire(path.join(pkgDir, "package.json"));
+  return require(path.join(pkgDir, "lib", "typescript.js"));
+}
+
+function tsLiteralValue(ts, node) {
+  if (!node) return undefined;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isNumericLiteral(node)) return Number(node.text);
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
+  if (
+    ts.isPrefixUnaryExpression(node) &&
+    node.operator === ts.SyntaxKind.MinusToken &&
+    ts.isNumericLiteral(node.operand)
+  ) {
+    return -Number(node.operand.text);
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    return node.elements.map((element) => tsLiteralValue(ts, element));
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    const out = {};
+    for (const prop of node.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const name = ts.isIdentifier(prop.name)
+        ? prop.name.text
+        : ts.isStringLiteral(prop.name)
+          ? prop.name.text
+          : undefined;
+      if (!name) continue;
+      out[name] = tsLiteralValue(ts, prop.initializer);
+    }
+    return out;
+  }
+  if (ts.isAsExpression(node) || ts.isParenthesizedExpression(node)) {
+    return tsLiteralValue(ts, node.expression);
+  }
+  if (typeof ts.isSatisfiesExpression === "function" && ts.isSatisfiesExpression(node)) {
+    return tsLiteralValue(ts, node.expression);
+  }
+  return undefined;
+}
+
+/**
+ * Read contract.ts exported const literals through the probe TypeScript
+ * project. contract.ts re-exports Svelte probe modules, so it must not be
+ * imported as a Node runtime module.
+ */
+export function readContractConstantsFromProbeProject({ repoRoot = REPO_ROOT } = {}) {
+  const ts = loadPlaygroundTypeScript(repoRoot);
+  const probesDir = path.join(STS0_DIR, "probes");
+  const tsconfigAbs = path.join(probesDir, "tsconfig.json");
+  const raw = ts.readConfigFile(tsconfigAbs, ts.sys.readFile);
+  if (raw.error) {
+    throw new Error(ts.flattenDiagnosticMessageText(raw.error.messageText, "\n"));
+  }
+  const parsed = ts.parseJsonConfigFileContent(
+    raw.config,
+    ts.sys,
+    probesDir,
+    undefined,
+    tsconfigAbs,
+  );
+  const contractAbs = path.join(STS0_DIR, "contract.ts");
+  const options = { ...parsed.options, noEmit: true, noResolve: true };
+  const host = ts.createCompilerHost(options, true);
+  const program = ts.createProgram({
+    rootNames: [contractAbs],
+    options,
+    host,
+  });
+  const sourceFile = program.getSourceFile(contractAbs);
+  if (!sourceFile) return null;
+  const exported = {};
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isVariableStatement(stmt)) continue;
+    const isExport = stmt.modifiers?.some((mod) => mod.kind === ts.SyntaxKind.ExportKeyword);
+    if (!isExport) continue;
+    for (const decl of stmt.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+      exported[decl.name.text] = tsLiteralValue(ts, decl.initializer);
+    }
+  }
+  return exported;
+}
+
+export function assertContractConstantsJoin(policy, { repoRoot = REPO_ROOT } = {}) {
+  const errors = [];
+  let exported;
+  try {
+    exported = readContractConstantsFromProbeProject({ repoRoot });
+  } catch (error) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "contract-join-missing",
+        `contract.ts could not be read through the probe TypeScript project: ${error.message}`,
+      ),
+    );
+    return errors;
+  }
+  if (!exported) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "contract-join-missing",
+        "contract.ts was not present in the probe TypeScript project",
+      ),
+    );
+    return errors;
+  }
+  if (JSON.stringify(exported.acceptedProducts) !== JSON.stringify(policy?.acceptedProducts)) {
+    errors.push(
+      err(
+        "STS0-svelte-abi",
+        "contract-join-missing",
+        "contract.ts acceptedProducts drifted from policy.acceptedProducts",
+      ),
+    );
+  }
+  const shape = policy?.componentShape || {};
+  const selected = exported.selectedProfile || {};
+  for (const field of ["publicShape", "vueConstructorRequired", "instanceTypeRequirement"]) {
+    if (selected[field] !== shape[field]) {
+      errors.push(
+        err(
+          "STS0-svelte-abi",
+          "contract-join-missing",
+          `contract.ts selectedProfile.${field} drifted from policy.componentShape`,
+        ),
+      );
+    }
+  }
+  if (JSON.stringify(exported.dialectFileKinds) !== JSON.stringify([...SVELTE_FILE_KINDS])) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "contract-join-missing",
+        "contract.ts dialectFileKinds drifted from SVELTE_FILE_KINDS",
+      ),
+    );
+  }
+  if (JSON.stringify(exported.semanticsModes) !== JSON.stringify([...SEMANTICS_MODES])) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "contract-join-missing",
+        "contract.ts semanticsModes drifted from SEMANTICS_MODES",
+      ),
+    );
+  }
   return errors;
 }
 
@@ -2092,6 +2291,45 @@ export function evaluateRejectTwins() {
       ),
     );
   }
+  const emptyLegacy = cloneJson(policy);
+  const emptyLegacyRow = emptyLegacy.profiles.find((row) => row.id === "svelte-ts-instance-legacy");
+  if (emptyLegacyRow) emptyLegacyRow.publishedSymbols = [];
+  if (!assertProfileContract(emptyLegacy).some((error) => error.code === "publication-missing")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "a legacy instance profile pinning no declaration-visible symbols was not rejected",
+      ),
+    );
+  }
+  const mismatchedEvidence = cloneJson(policy);
+  const mismatchedRow = mismatchedEvidence.profiles.find(
+    (row) => row.id === "svelte-ts-instance-runes",
+  );
+  if (mismatchedRow) {
+    mismatchedRow.evidencePath = "tests/sfc-projection/STS0/probes/profiles/module-context.svelte";
+  }
+  if (!assertPolicyLock(mismatchedEvidence).some((error) => error.code === "evidence-mismatch")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "a profile whose evidence script context does not match the row was not rejected",
+      ),
+    );
+  }
+  const driftedSelection = cloneJson(policy);
+  driftedSelection.semanticsSelection.row.option = "not-an-official-option";
+  if (!assertPolicyLock(driftedSelection).some((error) => error.code === "options-join-missing")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "a runes selection outside the official options population was not rejected",
+      ),
+    );
+  }
 
   // STS0-svelte-inventory clean pass, then the dirty twins.
   const cleanInventory = assertSvelteInventory(inventory);
@@ -2419,9 +2657,13 @@ export function evaluateSts0(input = {}) {
   const policy = loadSts0Product("svelte-projection-policy.json");
   const inventory = loadSts0Product("svelte-current-feature-inventory.json");
   errors.push(...assertModeClassification(inventory, { compile: input.compile ?? undefined }));
-  // Live profile behavior executes through the owned CCA1I backend gate
-  // (both claimed engines); the in-process ts-js projector path is retired.
-  errors.push(...assertProfileBehavior(policy, { repoRoot: input.repoRoot ?? REPO_ROOT }));
+  // skipLive is the harness product-only path (skipProbes). The live cargo
+  // gate remains mandatory when skipLive is unset (charter §14).
+  errors.push(
+    ...(input.skipLive
+      ? assertProfileContract(policy)
+      : assertProfileBehavior(policy, { repoRoot: input.repoRoot ?? REPO_ROOT })),
+  );
   const positiveAbs = path.join(STS0_DIR, "probes", "positive.ts");
   const positiveSource = fs.readFileSync(positiveAbs, "utf8");
   errors.push(...assertSvelteShapeSource(positiveSource));

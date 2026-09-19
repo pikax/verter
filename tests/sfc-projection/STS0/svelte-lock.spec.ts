@@ -32,20 +32,22 @@ import {
   REQUIRED_POLICY_PROFILE_IDS,
   REQUIRED_SVELTE_FEATURES,
   SVELTE_BENCHMARKS_ADAPTER,
+  assertContractConstantsJoin,
   assertModeClassification,
   assertProfileContract,
+  assertProfileGateRun,
   assertRuneProbeMatchesPinnedProjection,
   assertEngineFrameworkPins,
   assertInstanceShapePin,
   assertPolicyLock,
   assertPredecessorJoins,
-  assertProfileBehavior,
   assertSvelteAbi,
   assertSvelteInventory,
   assertSvelteShapeSource,
   cloneJson,
   evaluateRejectTwins,
   evaluateSts0,
+  STS0_PROFILE_GATE_TESTS,
   loadEngineMatrix,
   loadRootPackageJson,
   loadSts0Product,
@@ -351,14 +353,71 @@ test("STS0-policy-lock: publishing claims match the profile's script context and
     assertProfileContract(missingSymbols).some((error) => error.code === "publication-missing"),
     "a profile dropping its publishedSymbols pin was not rejected",
   );
+  const emptyLegacy = cloneJson(POLICY());
+  const emptyLegacyRow = emptyLegacy.profiles.find((row) => row.id === "svelte-ts-instance-legacy");
+  assert.ok(emptyLegacyRow, "legacy instance profile row must exist");
+  emptyLegacyRow.publishedSymbols = [];
+  assert.ok(
+    assertProfileContract(emptyLegacy).some((error) => error.code === "publication-missing"),
+    "a legacy instance profile pinning no declaration-visible symbols was not rejected",
+  );
 });
 
-test("STS0-policy-lock: claimed checking and publishing behavior executes through the owned backend gate", () => {
-  // Live behavior executes the verter_session gate: every profile fixture is
-  // projected through the owned SvelteProjectionBackend and checked on BOTH
-  // claimed engines with corruption and publication twins (charter §14).
-  const errors = assertProfileBehavior(POLICY());
+test("STS0-policy-lock: skipLive is product-only and still joins contract constants", () => {
+  const errors = evaluateSts0({ skipLive: true }).errors;
   assert.equal(errors.length, 0, JSON.stringify(errors, null, 2));
+  assert.equal(
+    assertContractConstantsJoin(POLICY()).length,
+    0,
+    JSON.stringify(assertContractConstantsJoin(POLICY()), null, 2),
+  );
+});
+
+test("STS0-policy-lock: profile-gate spawn and cargo outcomes are classified separately", () => {
+  const missingCargo = assertProfileGateRun({
+    status: null,
+    error: { code: "ENOENT", message: "spawn cargo ENOENT" },
+    stdout: "",
+  });
+  assert.ok(
+    missingCargo.some((error) => error.code === "environment-unavailable"),
+    JSON.stringify(missingCargo),
+  );
+  assert.ok(
+    missingCargo.every((error) => error.code !== "profile-gate-missing"),
+    "missing cargo must not be reported as profile-gate-missing",
+  );
+  const timedOut = assertProfileGateRun({
+    status: null,
+    error: { code: "ETIMEDOUT", message: "spawnSync cargo ETIMEDOUT" },
+    stdout: "",
+  });
+  assert.ok(
+    timedOut.some((error) => error.code === "environment-unavailable"),
+    JSON.stringify(timedOut),
+  );
+  assert.ok(
+    timedOut.some((error) => /timed out/i.test(error.message)),
+    JSON.stringify(timedOut),
+  );
+  const failedName = STS0_PROFILE_GATE_TESTS[0];
+  const failedRun = assertProfileGateRun({
+    status: 101,
+    error: null,
+    stdout: `running 4 tests\n${failedName} ... FAILED\ntest result: FAILED. 3 passed; 1 failed`,
+  });
+  assert.ok(
+    failedRun.some((error) => error.code === "test-failure"),
+    JSON.stringify(failedRun),
+  );
+  assert.ok(
+    failedRun.every((error) => error.code !== "profile-gate-missing"),
+    "a nonzero cargo run must not be reported as profile-gate-missing",
+  );
+  assert.ok(
+    failedRun.some((error) => error.code === "profile-gate-failed"),
+    JSON.stringify(failedRun),
+  );
 });
 
 test("STS0-svelte-inventory: runes versus legacy semantics is carried per row", () => {

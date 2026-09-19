@@ -785,6 +785,36 @@ fn sidecars_for(row: &ProfileRow) -> Vec<(&'static str, String)> {
     extras
 }
 
+/// Host-declaration pin: engine-free. Empty `publishedSymbols` never
+/// reaches `names_symbol`, so legacy instance rows must pin the
+/// declaration-visible prop names the carrier actually emits.
+#[test]
+fn pinned_declaration_symbols_appear_in_the_host_declaration_carrier() {
+    for row in load_profile_rows() {
+        if row.publishing != "declarations-published" {
+            continue;
+        }
+        let evidence = evidence_text(&row);
+        let declaration = host_declaration(&evidence);
+        for symbol in &row.published_symbols {
+            assert!(
+                names_symbol(&declaration, symbol),
+                "the declaration carrier for profile {} must publish {symbol}:\n{declaration}",
+                row.id
+            );
+        }
+        if let Some(symbol) = row.published_symbols.first().cloned() {
+            let renamed = evidence.replace(symbol.as_str(), &format!("{symbol}__sts0_removed"));
+            let renamed_declaration = host_declaration(&renamed);
+            assert!(
+                !names_symbol(&renamed_declaration, &symbol),
+                "renaming published binding {symbol} must remove it from the declaration of profile {}:\n{renamed_declaration}",
+                row.id
+            );
+        }
+    }
+}
+
 #[test]
 fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
     let engines = claimed_engines();

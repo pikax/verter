@@ -1873,7 +1873,7 @@ export async function verifyNode(options) {
   }
 
   if (nodeId === "STS0") {
-    const sts0 = await evaluateSts0Node({ repoRoot, resolvedEngines });
+    const sts0 = await evaluateSts0Node({ repoRoot, skipProbes: options.skipProbes });
     errors.push(...sts0.errors);
   }
 
@@ -2001,16 +2001,14 @@ async function evaluateStp9Node({ repoRoot }) {
   return { errors: stp9.errors };
 }
 
-async function evaluateSts0Node({ repoRoot }) {
+async function evaluateSts0Node({ repoRoot, skipProbes }) {
   const protocolHref = pathToFileURL(
     repoPath(repoRoot, "tests/sfc-projection/STS0/protocol.mjs"),
   ).href;
   const protocol = await import(protocolHref);
-  // STS0's live profile behavior runs through the owned CCA1I backend gate
-  // in verter_session on BOTH claimed engines (ts-js 6.0.3 and ts-native
-  // 7.0.2); the protocol executes it, so no single JS engine is selected
-  // for the profile path here.
-  const sts0 = await protocol.evaluateSts0({ repoRoot });
+  // skipProbes is product-only (assertProfileContract). The live cargo
+  // gate stays mandatory on the default evaluateSts0 path (charter §14).
+  const sts0 = await protocol.evaluateSts0({ repoRoot, skipLive: !!skipProbes });
   return { errors: sts0.errors };
 }
 

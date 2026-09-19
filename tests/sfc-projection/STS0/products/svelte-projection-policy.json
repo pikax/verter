@@ -34,7 +34,9 @@
       "checking": "engine-checked",
       "publishing": "declarations-published",
       "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy.svelte",
-      "publishedSymbols": []
+      "publishedSymbols": [
+        "title"
+      ]
     },
     {
       "id": "svelte-js-instance-runes-unchecked",
@@ -69,7 +71,9 @@
       "publishing": "declarations-published",
       "checkJs": true,
       "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-checked.svelte",
-      "publishedSymbols": []
+      "publishedSymbols": [
+        "title"
+      ]
     },
     {
       "id": "svelte-js-instance-legacy-unchecked",
@@ -80,7 +84,9 @@
       "checking": "js-unchecked",
       "publishing": "declarations-published",
       "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-unchecked.svelte",
-      "publishedSymbols": []
+      "publishedSymbols": [
+        "name"
+      ]
     },
     {
       "id": "svelte-ts-module-context",
