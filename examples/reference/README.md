@@ -5,6 +5,8 @@ These examples are the published user-facing example home. The docs build
 reference harness: every import must resolve to a shipped package export,
 and every command must be a bin of a public package.
 
-The example index is [`manifest.json`](./manifest.json). Contributor
+The example index is [`manifest.json`](./manifest.json). The
+[SDK and official-extension guide structure](./sdk/README.md) declares the
+six guide topics and their executable example slots. Contributor
 sandboxes (`examples/`, `packages/example`) are not this home and are not
 treated as executed user evidence.

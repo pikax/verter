@@ -1,0 +1,40 @@
+{
+  "id": "sdk-docs-model.v1",
+  "harness": "docs-reference-harness",
+  "owner": "DOC7",
+  "interface": "docs/scripts/reference-harness.mjs (sdkGuides manifest section, receipt.sdkGuides, sdkGate option)",
+  "commands": {
+    "check": "pnpm --filter docs check",
+    "direct": "node docs/scripts/reference-harness.mjs",
+    "sdkGate": "node docs/scripts/reference-harness.mjs --sdk-gate",
+    "tests": "node --test tests/documentation/DOC7/doc7.test.mjs"
+  },
+  "home": "examples/reference",
+  "guideIndex": "examples/reference/sdk/README.md",
+  "topics": [
+    { "id": "contribution", "page": "examples/reference/sdk/contribution.md" },
+    { "id": "isolation", "page": "examples/reference/sdk/isolation.md" },
+    { "id": "permissions", "page": "examples/reference/sdk/permissions.md" },
+    { "id": "packaging", "page": "examples/reference/sdk/packaging.md" },
+    { "id": "debugging", "page": "examples/reference/sdk/debugging.md" },
+    { "id": "compatibility", "page": "examples/reference/sdk/compatibility.md" }
+  ],
+  "gate": {
+    "id": "sdk-docs-gate",
+    "commandFlag": "--sdk-gate",
+    "enforced": false,
+    "enforcedWhen": "the release lane turns the gate on when the first producing node (XSDK9) supplies executable SDK examples; until then every slot stays pending and the standard docs check runs without the gate",
+    "rule": "every topic must be supplied by a manifest example whose files include a file with an executable source extension (.ts/.mts/.cts/.js/.mjs/.cjs) and whose entry is a shipped-bin command or a public import; a static sample manifest without an executable extension, a pending topic, or an unbound slot fails the gate"
+  },
+  "hostProfile": {
+    "host": "node",
+    "profile": "docs-domain",
+    "executionClasses": ["static-proof", "NativeOnly", "ExternalOwner"]
+  },
+  "proofClass": "static-proof",
+  "runtimeClaim": "none",
+  "uncertaintyNotes": "The SDK guide model requires actual SDK examples when the producing nodes land; today all six slots are pending and no page claims a working SDK example. Executable here means an executable source file plus a shipped-bin command or public import, validated statically; runtime execution of examples stays with the later executable-journey and SDK tooling nodes.",
+  "permissions": "the harness reads the repository and spawns the existing typeinfo freshness command; the sdk gate adds no new process, network or write permission",
+  "migrationNotes": "additive to the DOC1 harness and the examples/reference manifest. Editors' shipped pages under docs/editor remain the official-extension truth; topic pages link them and never restate a capability matrix. XSDK9 migrates slots from pending to supplied by binding example ids in manifest.json sdkGuides and turning on --sdk-gate in the release lane.",
+  "resourceRationale": "synchronous static validation over a small authored tree; no new latency, allocation or RSS budget is bound to the ratified performance methodology"
+}
