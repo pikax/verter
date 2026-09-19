@@ -883,3 +883,25 @@ fn projection_plan_refuses_unbound_parse_artifact() {
         VueProjectionBackend.projection_plan(WITH_USE, &other_profile, "file:///plan.vue");
     assert_ne!(matched.snapshot, profiled.snapshot);
 }
+
+#[test]
+fn projection_emission_is_dormant_from_ide_route() {
+    let allocator = oxc_allocator::Allocator::default();
+    let transform = verter_compiler::code_transform::CodeTransform::new("café\r\n", &allocator);
+    let emission = VueProjectionBackend
+        .projection_emission(&transform, Vec::new())
+        .expect("identity emission");
+    emission
+        .roundtrip_verbatim("café\r\n")
+        .expect("verbatim unicode+CRLF");
+    let ide = VueProjectionBackend
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &registered_artifact("file:///grant-mint.vue", SIMPLE),
+            &ide_only_request("Simple.vue", false),
+            &VueProjectionInputs::default(),
+        )
+        .expect("existing IDE route stays on the companion path");
+    assert!(!ide.ide.code.is_empty());
+}

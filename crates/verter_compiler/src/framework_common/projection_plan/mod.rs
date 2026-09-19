@@ -29,6 +29,9 @@ use crate::template::oxc::types::{
 };
 use crate::types::{NodeId, NodeProp, NodeTag};
 
+pub mod origin;
+pub use origin::ObservationRole;
+
 const USE_DOMAIN: &str = "verter.compiler.projection_plan.component_use_id.v1";
 const ORIGIN_DOMAIN: &str = "verter.compiler.projection_plan.binding_origin_id.v1";
 const SCOPE_DOMAIN: &str = "verter.compiler.projection_plan.lexical_scope_id.v1";
@@ -223,15 +226,6 @@ pub struct ExpressionOccurrence {
     pub end: u32,
     /// Lexical environment the expression was admitted in.
     pub lexical_env: LexicalScopeId,
-}
-
-/// Observation channels a use participates in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObservationRole {
-    Hover,
-    Definition,
-    References,
-    Edits,
 }
 
 /// A named slot provided by one component use.

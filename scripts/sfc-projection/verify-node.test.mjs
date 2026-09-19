@@ -14,6 +14,7 @@ import {
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
+  STP10_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
   assertExactType,
@@ -867,6 +868,60 @@ test("STP9 --require-all does not demand STP1 cases", async () => {
   assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
   assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
   for (const id of STP9_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
+  }
+});
+
+test("STP10 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP10/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP10_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP10 verify: emission correspondence on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP10",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP10_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP10_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.engines.length, 2, JSON.stringify(result.engines));
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    assert.ok(
+      run.negativeDiagnostics.some((diag) => diag.code === 2345),
+      JSON.stringify(run.negativeDiagnostics),
+    );
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.equal(run.instanceType, "Comp<unknown, unknown>", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+    assert.ok(run.references >= 1, JSON.stringify(run));
+    assert.ok(run.edits >= 1);
+  }
+  assert.equal(result.incremental, "fresh");
+});
+
+test("STP10 --require-all does not demand STP1 cases", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP10",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
+  for (const id of STP10_MANDATORY_CASES) {
     assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
   }
 });

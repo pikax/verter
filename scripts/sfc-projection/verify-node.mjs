@@ -38,6 +38,7 @@ import {
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
+  STP10_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
 export {
@@ -50,6 +51,7 @@ export {
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
+  STP10_MANDATORY_CASES,
 };
 
 export function canonicalMandatoryCases(nodeId) {
@@ -1722,6 +1724,11 @@ export async function verifyNode(options) {
     errors.push(...stp9.errors);
   }
 
+  if (nodeId === "STP10") {
+    const stp10 = await evaluateStp10Node({ repoRoot });
+    errors.push(...stp10.errors);
+  }
+
   return summarize({
     options,
     errors,
@@ -1844,6 +1851,15 @@ async function evaluateStp9Node({ repoRoot }) {
   const protocol = await import(protocolHref);
   const stp9 = await protocol.evaluateStp9({ repoRoot });
   return { errors: stp9.errors };
+}
+
+async function evaluateStp10Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP10/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp10 = await protocol.evaluateStp10({ repoRoot });
+  return { errors: stp10.errors };
 }
 
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
@@ -2019,10 +2035,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
