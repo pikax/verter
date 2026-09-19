@@ -1,5 +1,5 @@
 error[E0599]: no method named `compile_bundle` found for struct `VueCarrierCompiler` in the current scope
- --> tests/cases/compile-fail/vue_carrier_compiler_has_no_production_compile_bundle.rs:8:24
+ --> tests/cases/compile-fail/vue_carrier_compiler_has_no_production_compile_bundle.rs:7:24
   |
-8 |     VueCarrierCompiler.compile_bundle();
+7 |     VueCarrierCompiler.compile_bundle();
   |                        ^^^^^^^^^^^^^^ method not found in `VueCarrierCompiler`
