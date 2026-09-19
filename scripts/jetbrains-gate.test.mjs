@@ -585,6 +585,15 @@ test("the install rehearsal unpacks real layouts and rejects corrupt or unsafe a
     writeFileSync(path.join(dir, "hostile.zip"), hostile);
     const hostileOutcome = extractDistribution(path.join(dir, "hostile.zip"), installDir);
     assert.equal(hostileOutcome.ok, false, "a `..` zip entry must be rejected, not extracted");
+
+    const winHostile = makeZipBuffer([{ name: "..\\..\\evil.txt", data: Buffer.from("nope") }]);
+    writeFileSync(path.join(dir, "win-hostile.zip"), winHostile);
+    const winHostileOutcome = extractDistribution(path.join(dir, "win-hostile.zip"), installDir);
+    assert.equal(
+      winHostileOutcome.ok,
+      false,
+      "a backslash `..` zip entry must be rejected, not extracted",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

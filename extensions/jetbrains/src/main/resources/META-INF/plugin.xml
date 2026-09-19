@@ -1,6 +1,7 @@
 <idea-plugin>
     <id>com.verter.jetbrains</id>
     <name>Verter</name>
+    <version>0.1.0-jbt1</version>
     <vendor>Verter</vendor>
     <description><![CDATA[
         Verter for JetBrains IDEs — build skeleton (JBT1).

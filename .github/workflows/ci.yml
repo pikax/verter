@@ -1964,10 +1964,14 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      # This lane never installs the JS workspace. setup-node@v5 otherwise
+      # auto-caches from package.json#packageManager and fails looking up
+      # `pnpm` (the rust-test-build job documents the same gotcha).
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          package-manager-cache: false
       - name: Run the jetbrains-product gate (JVM tests, verifier, packaging)
         run: node scripts/jetbrains-gate.mjs
 

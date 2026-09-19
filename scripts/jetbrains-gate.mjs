@@ -319,10 +319,17 @@ export function extractDistribution(zipPath, installDir) {
     rmSync(installDir, { recursive: true, force: true });
     let files = 0;
     for (const entry of entries) {
-      // Zip entry names use "/" separators; reject absolute paths and `..`
-      // segments so a hostile archive cannot escape the rehearsal directory.
-      const parts = entry.name.split("/").filter((part) => part !== "");
-      if (entry.name.startsWith("/") || parts.includes("..")) {
+      // Zip entries are supposed to use "/". Backslash is still a separator
+      // on win32 `path.join`, so reject `..` segments, `\`, and drive-letter
+      // prefixes so a `..\..\evil` name cannot escape the rehearsal directory.
+      const parts = entry.name.split(/[/\\]/).filter((part) => part !== "");
+      if (
+        entry.name.startsWith("/") ||
+        entry.name.startsWith("\\") ||
+        entry.name.includes("\\") ||
+        /^[A-Za-z]:[\\/]/.test(entry.name) ||
+        parts.includes("..")
+      ) {
         return { ok: false, reason: `install rehearsal: unsafe zip entry name '${entry.name}'` };
       }
       if (entry.name.endsWith("/")) {

@@ -21,9 +21,13 @@ class VerterHealthActionTest : BasePlatformTestCase() {
     fun `test health message reports plugin version and platform build`() {
         val message = VerterHealthAction.healthMessage()
         val pluginVersion = VerterHealthAction.installedPluginVersion()
+        assertNotNull(
+            "installed plugin version must come from the patched descriptor (was: $message)",
+            pluginVersion,
+        )
         assertTrue(
             "health message must carry the installed plugin version (was: $message)",
-            pluginVersion == null || message.contains(pluginVersion),
+            message.contains(pluginVersion!!),
         )
         assertTrue(
             "health message must carry the running platform build (was: $message)",

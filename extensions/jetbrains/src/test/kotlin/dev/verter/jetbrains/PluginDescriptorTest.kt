@@ -22,6 +22,10 @@ class PluginDescriptorTest {
             Regex("""<id>\s*${Regex.escape(VerterHealthAction.PLUGIN_ID.idString)}\s*</id>""").containsMatchIn(descriptor),
         )
         assertTrue(
+            "plugin.xml must declare a version the health action can report",
+            Regex("""<version>\s*[^<]+?\s*</version>""").containsMatchIn(descriptor),
+        )
+        assertTrue(
             "plugin.xml must register the health action id",
             Regex("""<action[^>]*id="${Regex.escape(VerterHealthAction.ACTION_ID)}"""").containsMatchIn(descriptor),
         )
