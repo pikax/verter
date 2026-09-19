@@ -359,8 +359,8 @@ carrier parse routes through the immutable frontend catalog
 row, Svelte through `svelte/carrier_frontend.rs`) — a single dispatch
 path, no `is_vue` branch, no dual Vue direct-parse path. A carrier row
 whose adapter has no registered catalog frontend is the typed
-unsupported-language state. `VueCarrierCompiler` delegates call-for-call
-to `parse_sfc` + `compile_from_parsed` with ZERO edits to any Vue
+unsupported-language state. `VueCarrierCompiler::parse` delegates
+call-for-call to `parse_sfc` with ZERO edits to any Vue
 parser/codegen module, so Vue compile output stays byte-identical
 pre/post the rehousing (pinned by
 `rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile`
