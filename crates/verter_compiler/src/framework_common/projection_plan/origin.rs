@@ -457,6 +457,11 @@ impl ProjectionEmission {
 /// `content_offset` are [`ProjectedClass::Synthesized`]; the suffix is
 /// [`ProjectedClass::Rewritten`]. An offset equal to the text length
 /// produces only Synthesized regions.
+///
+/// Offset basis: [`EmitOp::PreserveOriginal`] returns absolute generated
+/// offsets from the completed [`MappingProduct`]. Every other variant
+/// returns spans local to the emitted text (or the moved slice), starting
+/// at `0`. Callers must not mix the two spaces.
 #[must_use]
 pub fn projected_class_for_emit_op(
     op: &EmitOp<'_>,
@@ -756,8 +761,13 @@ fn preserved_classes_from_mapping(
                 start: region.generated.start + local,
                 end: region.generated.start + local + len,
             }
-        } else {
+        } else if overlap_start == region_carrier.start && overlap_end == region_carrier.end {
+            // Rewritten is region-to-region. A partial carrier overlap has no
+            // exact generated image; returning the whole generated span would
+            // claim bytes past the requested overlap.
             region.generated
+        } else {
+            continue;
         };
         out.push((generated, region.class));
     }
@@ -1514,6 +1524,46 @@ mod tests {
         assert_eq!(
             projected_class_for_emit_op(&preserve_a, &control),
             vec![(MappingSpan { start: 0, end: 1 }, ProjectedClass::Identity)]
+        );
+    }
+
+    #[test]
+    fn preserve_original_omits_partial_rewritten_carrier() {
+        let allocator = Allocator::default();
+        let mut rewritten = CodeTransform::new("abcdef", &allocator);
+        rewritten.overwrite(0, 6, "XY");
+        let mapping = MappingProduct::of(&rewritten);
+        let region = mapping
+            .projected()
+            .iter()
+            .find(|region| region.class == ProjectedClass::Rewritten)
+            .expect("mapped overwrite is rewritten");
+        assert_eq!(region.generated, MappingSpan { start: 0, end: 2 });
+        assert_eq!(
+            region.carrier,
+            Some(MappingSpan { start: 0, end: 6 }),
+            "generated and carrier lengths differ"
+        );
+        let preserve_partial = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(3),
+            },
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_partial, &rewritten),
+            vec![],
+            "partial rewritten overlap must not return the whole generated span"
+        );
+        let preserve_full = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(6),
+            },
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_full, &rewritten),
+            vec![(MappingSpan { start: 0, end: 2 }, ProjectedClass::Rewritten)]
         );
     }
 
