@@ -1,0 +1,67 @@
+{
+  "node": "DOC5",
+  "kind": "implementation",
+  "products": [
+    "docs/scripts/reference-harness.mjs recipes validation, recipesGate option, journeys validation and journey executor with --run-journeys (sole owning interface extended)",
+    "examples/reference/guides recipe home (eight charter topics plus index)",
+    "examples/reference/manifest.json recipes and journeys sections (slot model and executable journey programs)",
+    "web-product-guides-model.v1 machine product",
+    "committed NodeOnly fixture example home executed by the journey executor tests (tests/documentation/DOC5/fixtures/example-home)"
+  ],
+  "cases": [
+    {
+      "id": "DOC5-AC1",
+      "disposition": "reject",
+      "twins": [
+        "the eight charter recipe topics are declared pending with a named producing node",
+        "a real native journey is declared over the shipped cli example and stays not-run by default",
+        "clean tree passes and reports the recipe model truthfully",
+        "the required recipe topic set is enforced in both directions",
+        "an explicitly empty journeys model is rejected while an absent section stays legal"
+      ]
+    },
+    {
+      "id": "DOC5-AC2",
+      "disposition": "reject",
+      "twins": [
+        "a supplied recipe bound to a static sample manifest without an executable extension fails",
+        "a supplied recipe whose example declares no capability link fails",
+        "the recipes documentation gate rejects pending topics",
+        "the recipes documentation gate passes once every topic is supplied executably with a capability link"
+      ]
+    },
+    {
+      "id": "DOC5-AC3",
+      "disposition": "reject",
+      "twins": [
+        "perturbed discovery order yields an identical canonical receipt",
+        "recipe pages and journeys participate in the source digest for incremental equality",
+        "edit fails and revert restores a complete receipt",
+        "a missing recipe page is a partial result",
+        "a recipe page the index does not list fails",
+        "journey structural validation rejects unknown examples, unshipped commands and outside entries",
+        "a duplicate journey id fails",
+        "an executed step that misses its expected exit code fails the journey lane",
+        "a step that exceeds its bounded runtime times out and fails",
+        "aborting during a step cancels the journey lane and kills the child"
+      ]
+    },
+    {
+      "id": "DOC5-AC4",
+      "disposition": "accept",
+      "twins": [
+        "node journeys execute for real and record runtime observation",
+        "the recipe home and product record the delivery contract"
+      ]
+    },
+    {
+      "id": "DOC5-AC5",
+      "disposition": "accept",
+      "twins": [
+        "the recipe home and product record the delivery contract"
+      ]
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "Implementation node: web-product guide recipe templates plus the executable-journey model, delivered through the DOC1 harness. Structural validation is static-proof; the journey executor produces runtime observation only under --run-journeys on lanes whose pinned artifacts exist (NodeOnly fixture execution proves the executor for real). All eight recipe slots stay pending until CSS0, WBC0, DBG0, TST0, RTI0, AX0, WPF0 and SEC0 land real feature examples; no page claims a working example it does not have. No second capability matrix: capability links cite surface ids from the DOC0 generated-reference plan pin."
+}

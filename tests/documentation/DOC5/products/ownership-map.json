@@ -1,0 +1,39 @@
+{
+  "contractNode": "DOC5",
+  "finalOwner": "expansion.documentation:Documentation system, information architecture and executable examples; feature owners author feature truth",
+  "predecessors": ["DOC1", "WDX0"],
+  "receivingAmendments": [
+    { "receiver": "CSS0", "product": "CSS semantic authority and support", "note": "supplies the css recipe slot with an executable example citing a css capability surface; turns the recipes gate on when its slots land" },
+    { "receiver": "WBC0", "product": "Compatibility target and data authority", "note": "supplies the compatibility recipe slot" },
+    { "receiver": "DBG0", "product": "Debugging, mapping and backend authority", "note": "supplies the debug recipe slot" },
+    { "receiver": "TST0", "product": "Test-product and runner integration", "note": "supplies the tests recipe slot" },
+    { "receiver": "RTI0", "product": "Runtime observation and source correlation", "note": "supplies the runtime recipe slot and NodeOnly journeys exercising it" },
+    { "receiver": "AX0", "product": "Accessibility algorithm and evidence", "note": "supplies the accessibility recipe slot" },
+    { "receiver": "WPF0", "product": "Application-performance measurement", "note": "supplies the performance recipe slot" },
+    { "receiver": "SEC0", "product": "Security threat model and analysis authority", "note": "supplies the security recipe slot" },
+    { "receiver": "DOC9", "product": "Documentation navigation, accessibility and maintenance qualification", "note": "site nav for the recipe home stays with DOC9; the example-home index owns in-home navigation only" }
+  ],
+  "outcomes": [
+    { "id": "web-product-guide-recipes", "currentOwner": "DOC5", "finalOwner": "DOC5", "receivingAcceptance": "DOC5-AC1" },
+    { "id": "recipes-documentation-gate", "currentOwner": "DOC5", "finalOwner": "producing feature nodes", "receivingAcceptance": "DOC5-AC2" },
+    { "id": "executable-journeys", "currentOwner": "DOC5", "finalOwner": "DOC5", "receivingAcceptance": "DOC5-AC4" }
+  ],
+  "consumers": [
+    { "id": "docs-reference-harness", "path": "docs/scripts/reference-harness.mjs", "disposition": "extended", "owner": "DOC1" },
+    { "id": "guides-recipe-home", "path": "examples/reference/guides", "disposition": "created", "owner": "DOC5" },
+    { "id": "example-manifest-recipes-journeys", "path": "examples/reference/manifest.json", "disposition": "extended", "owner": "DOC5" },
+    { "id": "docs-package-check", "path": "docs/package.json", "disposition": "consumed", "owner": "DOC1" },
+    { "id": "executable-examples-plan", "path": "tests/documentation/DOC0/products/executable-examples-plan.v1.json", "disposition": "amended", "owner": "DOC0" },
+    { "id": "capability-catalog-pin", "path": "tests/documentation/DOC0/products/generated-reference-plan.v1.json", "disposition": "consumed", "owner": "DOC0" }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "deletionRationale": "genuinely additive boundary: no web-product recipe structure, recipes manifest section, recipes gate or executable-journey model existed before this node; the DOC1 plan's deferral of runtime example execution to DOC5 executable journeys is discharged here, so no deferral note survives to delete elsewhere; shipped guide pages under docs/ remain their owners' truth and are linked, not duplicated",
+  "acRationales": {
+    "ac1": { "applicable": true, "evidence": "the DOC1 harness stays the sole owning interface; the recipes and journeys manifest sections, receipt.recipes, receipt.journeys, the recipesGate and runJourneys options are validated only through validate(); pnpm --filter docs check invokes it unchanged; the eight topics are declared pending with named producing nodes and the home requires at least one declared journey" },
+    "ac2": { "applicable": true, "evidence": "a supplied slot bound to a static JSON-only sample fails with recipes-static-example; a supplied example without a capability surface fails with recipes-without-capability-link; the --recipes-gate lane rejects any pending topic with recipes-gate-unsatisfied" },
+    "ac3": { "applicable": true, "evidence": "recipe pages and the manifest join the source digest, so fresh versus incremental digest equality, edit/revert and perturbed-discovery canonical equality are proven; journey execution is deterministic (sorted journeys, declared step order, stdout digests), bounded per step, cancellable with child teardown, and structural violations (unknown example, unshipped or outside command, class mismatch, duplicate id) are rejected; a missing recipe page is a partial result" },
+    "ac4": { "applicable": true, "evidence": "examples/reference/guides is the DOC1-tested public recipe home; every page records its pending status truthfully and links shipped authority pages; the journey executor produces runtime observation (exit codes, stdout digests, engine and host identity) under --run-journeys and records not-run journeys as not-run; pins, host/profile, permissions, uncertainty and migration notes live in web-product-guides-model.v1.json" },
+    "ac5": { "applicable": true, "evidence": "no latency/work/allocation/RSS budget is bound to the ratified performance methodology; journey execution is opt-in, sequential and bounded at 60000 ms per step; the deletion population is empty with the rationale above; no required check is dropped" }
+  }
+}

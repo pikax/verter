@@ -8,6 +8,7 @@ import {
   MANDATORY_CASES,
   NODE_MANDATORY_CASES,
   STP3_MANDATORY_CASES,
+  STP4_MANDATORY_CASES,
   STP5_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
@@ -17,6 +18,7 @@ import {
   assertNonZeroSelection,
   assertStp2Products,
   assertStp3Products,
+  assertStp4Products,
   cloneJson,
   loadNodeManifest,
   loadObligation,
@@ -534,6 +536,80 @@ test("STP3 --require-all does not demand STP1 cases", async () => {
   assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
   assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
   for (const id of STP3_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
+  }
+});
+
+test("STP4 node manifest is schema-valid and lists every mandatory case", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP4/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  const ids = node.manifest.cases.map((row) => row.id).sort();
+  assert.deepEqual(ids, [...NODE_MANDATORY_CASES.STP4].sort());
+  assert.deepEqual([...STP4_MANDATORY_CASES].sort(), [...NODE_MANDATORY_CASES.STP4].sort());
+});
+
+test("STP4 products name every mandatory case, dialect, and topology decision", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP4/manifest.json");
+  const errors = assertStp4Products(REPO_ROOT, node.manifest);
+  assert.equal(errors.length, 0, JSON.stringify(errors));
+});
+
+test("STP4-supplemental-import dirty twin is the public SFC module", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP4/manifest.json");
+  const row = node.manifest.cases.find((entry) => entry.id === "STP4-supplemental-import");
+  assert.equal(row.disposition, "reject");
+  assert.equal(row.expectedCode, 2306);
+  assert.match(row.dirtyTwin, /accept-public-import\.ts$/);
+  const dirty = fs.readFileSync(repoPath(REPO_ROOT, row.dirtyTwin), "utf8");
+  assert.match(dirty, /from "\.\/components\/JsUnchecked\.vue"/);
+  assert.doesNotMatch(dirty, /vue\.__template/);
+});
+
+test("STP4-illegal-vue dirty twin is generated TypeScript, not Vue legality", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP4/manifest.json");
+  const row = node.manifest.cases.find((entry) => entry.id === "STP4-illegal-vue");
+  assert.equal(row.disposition, "reject");
+  assert.equal(row.expectedCode, 2307);
+  assert.match(row.dirtyTwin, /illegal-setup-src\.generated\.ts$/);
+  const dirty = fs.readFileSync(repoPath(REPO_ROOT, row.dirtyTwin), "utf8");
+  assert.match(dirty, /export default Comp/);
+  assert.doesNotMatch(dirty, /IllegalSetupSrc\.vue/);
+});
+
+test("STP4 verify: all mandatory cases run on each admitted engine", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP4",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...NODE_MANDATORY_CASES.STP4].sort(), [...result.mandatoryCases].sort());
+  for (const id of NODE_MANDATORY_CASES.STP4) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.engines.length, 2, JSON.stringify(result.engines));
+  assert.equal(result.harnessRuns.length, 2);
+  assert.equal(result.incremental, "fresh");
+  for (const run of result.harnessRuns) {
+    for (const count of Object.values(run.checkCounts)) {
+      assert.equal(count, 1, JSON.stringify(run.checkCounts));
+    }
+  }
+});
+
+test("STP4 --require-all does not demand STP1 cases", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP4",
+    engine: "all",
+    requireAll: true,
+    skipProbes: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.ok(!selectedCaseIds(result).includes("STP1-harness"));
+  for (const id of STP4_MANDATORY_CASES) {
     assert.ok(selectedCaseIds(result).includes(id), `missing ${id}`);
   }
 });

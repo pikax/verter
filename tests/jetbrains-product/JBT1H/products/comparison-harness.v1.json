@@ -1,0 +1,57 @@
+{
+  "id": "comparison-harness.v1",
+  "schema": 1,
+  "node": "JBT1H",
+  "finalOwner": "expansion.jetbrains-product:JetBrains differentiated web-development product",
+  "retirementObligation": "the comparison harness is the durable measurement surface consumed by JBT9 and JBT10; it is not deleted when JBT2 owns the plugin lifecycle (that retirement applies to the JBT1 loading skeleton only)",
+  "products": [
+    {
+      "id": "real-ide-comparison-harness",
+      "path": "packages/dx-harness/jetbrains",
+      "driver": "IntelliJ Platform test-framework against the pinned WebStorm 2026.2.3 SDK (extensions/jetbrains RealIdeCaptureTest); robot APIs may be added without replacing this host class",
+      "hostKind": "real-jetbrains-ide",
+      "rejectedHosts": ["mock-lsp", "raw-lsp", "screenshot", "protocol-smoke"]
+    },
+    {
+      "id": "paired-run-recorder",
+      "path": "packages/dx-harness/jetbrains/paired-run.ts",
+      "order": "deterministic from a recorded seed; swapped seed inverts official/verter",
+      "sessionStates": ["cold", "warm"],
+      "outlierPolicy": "label and retain; never drop",
+      "failedRunPolicy": "retain raw failed captures on the pair record"
+    },
+    {
+      "id": "process-tree-and-ui-paint",
+      "path": "packages/dx-harness/jetbrains/process-tree.ts",
+      "uiPaint": "EDT application/paint on the real test IDE, distinct from RPC duration",
+      "processTree": "whole tree including the TypeScript provider; excluding the provider invalidates the retained-memory row",
+      "unavailableMetrics": "label-with-reason; guessed zeros forbidden"
+    }
+  ],
+  "fixtureDriver": {
+    "corpus": "packages/dx-harness/fixtures/hermetic",
+    "equalWork": "tests/workspace-responsiveness/WSP0/products/interactive-slo-catalog.v1.json",
+    "requiredFeaturesEnabled": true,
+    "diagnosticsEnabled": true,
+    "workflows": "tests/jetbrains-baseline/JBT0/products/required-workflow-matrix.v1.json",
+    "verterSkeletonWorkflowState": "unsupported (no semantic features until JBT2)",
+    "officialPlatformOnlyState": "pending (bundled Vue/JS plugins are not on the platform-only test IDE)"
+  },
+  "versionCapture": {
+    "ideProduct": "ApplicationInfo from the pinned test IDE",
+    "ideBuild": "ApplicationInfo.build",
+    "pluginVersion": "installed plugin.xml version",
+    "engine": "unknown on the JBT1 skeleton with reason; never a guessed pin",
+    "installedProductPins": "remain pending-capture on jetbrains-baseline-manifest.v1; the platform test IDE is not the installed About-dialog capture route"
+  },
+  "receiptBasis": {
+    "reuses": "ProductReceiptBasis v1 (DX0)",
+    "freshVsIncremental": "same sourceRevisions, projectConfiguration, engineIdentity and hostIdentity; mismatched basis is not comparable"
+  },
+  "evidence": [
+    "packages/dx-harness/jetbrains/index.ts",
+    "packages/dx-harness/test/jetbrainsHarness.test.ts",
+    "extensions/jetbrains/src/test/kotlin/dev/verter/jetbrains/RealIdeCaptureTest.kt",
+    "tests/jetbrains-baseline/JBT0/products/jetbrains-baseline-manifest.v1.json"
+  ]
+}
