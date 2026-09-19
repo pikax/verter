@@ -193,6 +193,120 @@ describe("WSP1.2 live cancellation control", () => {
 });
 
 describe("buildReplayFromWire", () => {
+  it("derives the terminal state from request terminal evidence, never from the absence of errors", () => {
+    expect(buildReplayFromWire([]).completenessState).toBe("complete-empty");
+
+    const requestOnly: ProtocolWireEvent[] = [
+      {
+        requestEpoch: 1,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 1,
+        encodeCompletedMs: 1,
+        queuedMs: 1,
+        decodedMs: 1,
+        completedMs: null,
+        kind: "request",
+      },
+    ];
+    const pending = buildReplayFromWire(requestOnly);
+    expect(pending.traces[0]!.status).toBe("pending");
+    expect(pending.completenessState).toBe("pending");
+
+    const halfAnswered: ProtocolWireEvent[] = [
+      {
+        requestEpoch: 1,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 1,
+        encodeCompletedMs: 1,
+        queuedMs: 1,
+        decodedMs: 1,
+        completedMs: null,
+        kind: "request",
+      },
+      {
+        requestEpoch: 1,
+        method: "(response)",
+        direction: "server_to_client",
+        byteLength: 60,
+        encodeStartedMs: 51,
+        encodeCompletedMs: 51,
+        queuedMs: 51,
+        decodedMs: 51,
+        completedMs: 51,
+        kind: "response",
+      },
+      {
+        requestEpoch: 2,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 2,
+        encodeCompletedMs: 2,
+        queuedMs: 2,
+        decodedMs: 2,
+        completedMs: null,
+        kind: "request",
+      },
+    ];
+    expect(buildReplayFromWire(halfAnswered).completenessState).toBe("partial");
+
+    const answered: ProtocolWireEvent[] = [
+      {
+        requestEpoch: 1,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 1,
+        encodeCompletedMs: 1,
+        queuedMs: 1,
+        decodedMs: 1,
+        completedMs: null,
+        kind: "request",
+      },
+      {
+        requestEpoch: 1,
+        method: "(response)",
+        direction: "server_to_client",
+        byteLength: 60,
+        encodeStartedMs: 51,
+        encodeCompletedMs: 51,
+        queuedMs: 51,
+        decodedMs: 51,
+        completedMs: 51,
+        kind: "response",
+      },
+      {
+        requestEpoch: 2,
+        method: "echo/method",
+        direction: "client_to_server",
+        byteLength: 40,
+        encodeStartedMs: 2,
+        encodeCompletedMs: 2,
+        queuedMs: 2,
+        decodedMs: 2,
+        completedMs: null,
+        kind: "request",
+      },
+      {
+        requestEpoch: 2,
+        method: "(response)",
+        direction: "server_to_client",
+        byteLength: 60,
+        encodeStartedMs: 52,
+        encodeCompletedMs: 52,
+        queuedMs: 52,
+        decodedMs: 52,
+        completedMs: 52,
+        kind: "response",
+      },
+    ];
+    expect(buildReplayFromWire(answered).completenessState).toBe("complete");
+  });
+
   it("counts duplicate diagnostic notifications", () => {
     const wire: ProtocolWireEvent[] = [
       {

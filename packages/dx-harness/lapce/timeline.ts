@@ -69,16 +69,23 @@ function stageGap(latest: Map<UiStage, number>, from: UiStage, to: UiStage): Met
   return gapMetric(a, b);
 }
 
+/**
+ * The widest gap between consecutive PRESENT stages in canonical order. A
+ * stage that was never observed does not hide the interval around it: the two
+ * present neighbours are measured against each other and the earlier one is
+ * named as the stage the loop stalled after.
+ */
 function worstEventLoopGap(latest: Map<UiStage, number>): {
   readonly gapMs: Metric;
   readonly stalledAfter: UiStage | null;
 } {
   let worst: { gap: number; stalledAfter: UiStage } | null = null;
-  for (let i = 0; i < UI_STAGE_ORDER.length - 1; i += 1) {
-    const gap = stageGap(latest, UI_STAGE_ORDER[i], UI_STAGE_ORDER[i + 1]);
+  const present = UI_STAGE_ORDER.filter((stage) => latest.has(stage));
+  for (let i = 0; i < present.length - 1; i += 1) {
+    const gap = stageGap(latest, present[i]!, present[i + 1]!);
     if (gap === null || gap.status !== "measured") continue;
     if (worst === null || gap.value > worst.gap) {
-      worst = { gap: gap.value, stalledAfter: UI_STAGE_ORDER[i] };
+      worst = { gap: gap.value, stalledAfter: present[i]! };
     }
   }
   if (worst === null) {

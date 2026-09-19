@@ -54,4 +54,20 @@ test("WSP1-AC-RESOURCE does not guess zeros for unavailable metrics", () => {
   );
   const rec = load("issue93-reproduction.v1.json");
   assert.equal(rec.reproduction.protocolHarness.cannotCertify, "Lapce issue 93");
+  // The record names the harness surfaces it has, not measurements it lacks:
+  // no RSS, paint, latency or byte figure may appear as a number anywhere in
+  // it, because none was captured (a zero would be a guessed value).
+  const numericLeaves = [];
+  const walk = (value, trail) => {
+    if (value !== null && typeof value === "object") {
+      for (const [key, child] of Object.entries(value)) walk(child, [...trail, key]);
+    } else if (typeof value === "number") {
+      numericLeaves.push(trail.join("."));
+    }
+  };
+  walk(rec.reproduction, []);
+  assert.deepEqual(numericLeaves, []);
+  assert.equal(rec.reproduction.state, "unreproduced");
+  assert.equal(rec.reproduction.notAFix, true);
+  assert.doesNotMatch(JSON.stringify(rec.reproduction), /"(rss|paint|latency)[A-Za-z]*":\s*\d/i);
 });
