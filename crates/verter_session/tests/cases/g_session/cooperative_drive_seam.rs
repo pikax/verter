@@ -54,6 +54,25 @@ impl CooperativeYield for WithdrawingYield {
     }
 }
 
+/// A yield hook that meets the test at its first offer — on the native
+/// load path that is the drive's one pre-park cooperative point, reached
+/// after the request was admitted and before the wait is handed to the
+/// scheduler — and continues.
+#[derive(Debug)]
+struct RendezvousYield {
+    checkpoint: std::sync::Barrier,
+    offered: AtomicBool,
+}
+
+impl CooperativeYield for RendezvousYield {
+    fn yield_to_runtime(&self) -> YieldDecision {
+        if !self.offered.swap(true, Ordering::SeqCst) {
+            self.checkpoint.wait();
+        }
+        YieldDecision::Continue
+    }
+}
+
 fn submitted_requests(host: &VerterHost) -> u64 {
     host.scheduler()
         .counters()
@@ -190,12 +209,18 @@ fn withdrawn_drive_returns_not_loaded_without_integration() {
 /// once the driver is released.
 #[test]
 fn native_ensure_loaded_parks_on_the_driver_instead_of_inline_pumping() {
-    use std::time::Duration;
     use verter_scheduler::scheduler::Request;
     use verter_scheduler::stage::{Priority, TargetStage};
 
+    let hook = Arc::new(RendezvousYield {
+        checkpoint: std::sync::Barrier::new(2),
+        offered: AtomicBool::new(false),
+    });
     let host = host_with_workspace_file(
-        HostConfig::default(),
+        HostConfig {
+            cooperative_yield: Some(Arc::clone(&hook) as Arc<dyn CooperativeYield>),
+            ..HostConfig::default()
+        },
         "/coop/seam/e.ts",
         "export const e = 4;\n",
     );
@@ -228,18 +253,16 @@ fn native_ensure_loaded_parks_on_the_driver_instead_of_inline_pumping() {
             );
         })
     };
-    // Wait until the load thread has admitted its request: only then does
-    // "still not completed" say anything about who pumps the stages. A
-    // fixed sleep could expire before the thread even reached
-    // `ensure_loaded`.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while scheduler.counters().submit_count.load(Ordering::SeqCst) == submits_before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the load thread must submit its request while the driver is parked"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Meet the load thread at the native pre-park cooperative point: it
+    // has admitted its request and is about to hand the wait to the
+    // scheduler. Only from here does "still not completed" say anything
+    // about who pumps the stages; a fixed sleep or a submission count
+    // could be observed before the thread reached the drive.
+    hook.checkpoint.wait();
+    assert!(
+        scheduler.counters().submit_count.load(Ordering::SeqCst) > submits_before,
+        "the load thread admitted its request before the pre-park point"
+    );
     assert!(
         !completed.load(Ordering::SeqCst),
         "with the driver parked and the load's stages ready but \
@@ -361,8 +384,14 @@ fn scheduler_snapshots_without_integration_never_answer_the_loaded_fast_path() {
         "committed snapshots without host integration must go through the \
          submit/drive/integrate seam, not answer loaded from the fast path"
     );
-    assert!(
-        host.provenance_snapshot().ensure_loaded_work_ns > 0,
-        "ensure_loaded may answer true only after the integrate step ran"
+    // Integration is proven by stable state, not by elapsed time: the
+    // integrated snapshot now satisfies the loaded fast path, so a second
+    // call admits no further request.
+    let submits_after_integration = submitted_requests(&host);
+    assert!(host.ensure_loaded("/coop/seam/g.ts"));
+    assert_eq!(
+        submitted_requests(&host),
+        submits_after_integration,
+        "the integrated snapshot must answer the loaded fast path"
     );
 }
