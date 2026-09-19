@@ -46,7 +46,7 @@
       "pins": [
         {
           "behavior": "submission dedup merges identity and upgrades priority; readiness order is the priority lane order; an older generation is dropped as stale",
-          "command": "cargo nextest -p verter_scheduler dag_tests",
+          "command": "cargo nextest run -p verter_scheduler dag_tests",
           "filter": "dag_tests",
           "witnesses": [
             {
@@ -65,7 +65,7 @@
         },
         {
           "behavior": "the driver owns admission and ordering policy: a ready node enters its priority-class lane, and a pre-dispatch dedup that adds a dependency removes the ready token from the lane",
-          "command": "cargo nextest -p verter_scheduler dag_lanes_tests",
+          "command": "cargo nextest run -p verter_scheduler dag_lanes_tests",
           "filter": "dag_lanes_tests",
           "witnesses": [
             {
@@ -80,7 +80,7 @@
         },
         {
           "behavior": "cancellation latches are one-shot and idempotent across clones",
-          "command": "cargo nextest -p verter_scheduler cancellation_token",
+          "command": "cargo nextest run -p verter_scheduler cancellation_token",
           "filter": "cancellation_token",
           "witnesses": [
             {
@@ -111,7 +111,7 @@
       "pins": [
         {
           "behavior": "symbolic flow-return calls resolve complete; this-calls fail closed; an empty cycle stays return-only",
-          "command": "cargo nextest -p verter_session flow_return_tests",
+          "command": "cargo nextest run -p verter_session flow_return_tests",
           "filter": "flow_return_tests",
           "witnesses": [
             {
@@ -130,7 +130,7 @@
         },
         {
           "behavior": "flow products are selected and scoped: script-setup functions serve under the instance owner only, Svelte script functions under the instance owner, not the module owner",
-          "command": "cargo nextest -p verter_session flow_return_coverage_tests",
+          "command": "cargo nextest run -p verter_session flow_return_coverage_tests",
           "filter": "flow_return_coverage_tests",
           "witnesses": [
             {
@@ -161,7 +161,7 @@
       "pins": [
         {
           "behavior": "build/admission cycle-gates recursion: productive tree recursion continues, generic mutual recursion stops",
-          "command": "cargo nextest -p verter_session cycle_gate_tests",
+          "command": "cargo nextest run -p verter_session cycle_gate_tests",
           "filter": "cycle_gate_tests",
           "witnesses": [
             {
@@ -176,7 +176,7 @@
         },
         {
           "behavior": "the store assembles through dispatch transactions: a staged session is deposit-inactive and commits exactly once; abandonment respects the commit boundary",
-          "command": "cargo nextest -p verter_session dispatch_txn_tests",
+          "command": "cargo nextest run -p verter_session dispatch_txn_tests",
           "filter": "dispatch_txn_tests",
           "witnesses": [
             {
@@ -207,7 +207,7 @@
       "pins": [
         {
           "behavior": "the memo table interns stable identities: interning returns unique stable ids, dedups structural values across contexts, and resolve-decl memo keys discriminate the top-level owner",
-          "command": "cargo nextest -p verter_session semantic_query_memo::tests",
+          "command": "cargo nextest run -p verter_session semantic_query_memo::tests",
           "filter": "semantic_query_memo::tests",
           "witnesses": [
             {
@@ -226,7 +226,7 @@
         },
         {
           "behavior": "query keys bind deterministically: equal-prefix literals order by exact key and primitive tags are fixed independent of intern order",
-          "command": "cargo nextest -p verter_session stable_key_tests",
+          "command": "cargo nextest run -p verter_session stable_key_tests",
           "filter": "stable_key_tests",
           "witnesses": [
             {
@@ -257,7 +257,7 @@
       "pins": [
         {
           "behavior": "slice content lowers without rescans: nested descriptors defer mutable capture annotation content and occurrence classification never rescans hoisted alias groups",
-          "command": "cargo nextest -p verter_session flow_slice_content_tests",
+          "command": "cargo nextest run -p verter_session flow_slice_content_tests",
           "filter": "flow_slice_content_tests",
           "witnesses": [
             {
@@ -272,7 +272,7 @@
         },
         {
           "behavior": "slice publication admission gates on the budget: the flow product budget boundary is exact and never warm",
-          "command": "cargo nextest -p verter_session flow_return_frame_seal_tests",
+          "command": "cargo nextest run -p verter_session flow_return_frame_seal_tests",
           "filter": "flow_return_frame_seal_tests",
           "witnesses": [
             {
@@ -296,7 +296,7 @@
       "pins": [
         {
           "behavior": "the three bookkeeping fields' current behavior: a tombstone rejects pre-remove source submission, reset seeds generation floors for cleared nodes, deferred blockers are replaced, not appended",
-          "command": "cargo nextest -p verter_scheduler scheduler::tests",
+          "command": "cargo nextest run -p verter_scheduler scheduler::tests",
           "filter": "scheduler::tests",
           "witnesses": [
             {
@@ -326,7 +326,7 @@
       "pins": [
         {
           "behavior": "the hooks' current behavior through the seams they expose: atomic batch admission is not partially observable by the pump, and a single-worker-pool wait_or_drive executes a cpu dependency inline",
-          "command": "cargo nextest -p verter_scheduler scheduler::tests",
+          "command": "cargo nextest run -p verter_scheduler scheduler::tests",
           "filter": "scheduler::tests",
           "witnesses": [
             {
@@ -347,12 +347,103 @@
       "narrowingOwner": { "id": "ARH3", "kind": "node" },
       "surface": {
         "kind": "bulk",
-        "derivedLive": "the verifier joins the ARH1 minimalPublicSurface bulk row and its exact cross-crate importer population; only the ten retained envelope types and seven assoc items stay pub"
+        "derivedLive": "the verifier joins the ARH1 minimalPublicSurface bulk row: retainedTypes, retainedAssocItems, and consumersAffected must equal the ARH1 populations exactly",
+        "retainedTypes": [
+          "HashValue",
+          "SemanticNodeId",
+          "ScopeId",
+          "ResolveDeclKey",
+          "SemanticQueryKey",
+          "ResultCompleteness",
+          "PartialReason",
+          "PartialReasonSet",
+          "ProjectionMode",
+          "OriginEdgeKind"
+        ],
+        "retainedAssocItems": [
+          "PartialReasonSet::PROPAGATED",
+          "PartialReasonSet::SEMANTIC_QUERY_FAULT",
+          "PartialReasonSet::empty",
+          "PartialReasonSet::is_empty",
+          "PartialReasonSet::iter",
+          "ResultCompleteness::partial",
+          "ScopeId::file"
+        ],
+        "consumersAffected": [
+          "crates/verter_session/benches/projection_safety_bench.rs",
+          "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_session/tests/allocation_cases/flow_products.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
+          "crates/verter_session/tests/cases/compile-fail/composite_struct_literal_forge.rs",
+          "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
+          "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
+          "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
+          "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
+          "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
+          "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
+          "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
+          "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
+          "crates/verter_session/tests/cases/flow_product_lattice.rs",
+          "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+          "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
+          "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_mapped_source_declref_enum.rs",
+          "crates/verter_session/tests/cases/g_block/block_6i_round7_selected_key_callable_realization.rs",
+          "crates/verter_session/tests/cases/g_block/r6_query_identity_keys_content_free.rs",
+          "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs",
+          "crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2_spec_table_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b5_class_ns_enum_overload_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b6_apparent_template_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b7_flow_contextual_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b8_relate_upgrade_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs",
+          "crates/verter_session/tests/cases/g_block/u6_call_resolve_guards.rs",
+          "crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs",
+          "crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs",
+          "crates/verter_session/tests/cases/g_misc0/capture_token_smoke.rs",
+          "crates/verter_session/tests/cases/g_misc0/declaration_merge_guards.rs",
+          "crates/verter_session/tests/cases/g_misc0/dep_signature_to_fact_signature.rs",
+          "crates/verter_session/tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs",
+          "crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs",
+          "crates/verter_session/tests/cases/g_misc1/memo_traced_parse_fact_survives_warm_hit.rs",
+          "crates/verter_session/tests/cases/g_misc1/merged_symbol_identity.rs",
+          "crates/verter_session/tests/cases/g_misc1/path_precision_navigate_then_terminal.rs",
+          "crates/verter_session/tests/cases/g_misc1/pe4_evaluate_deferred_memo.rs",
+          "crates/verter_session/tests/cases/g_misc2/generic_instantiation_identity_and_bounded_work.rs",
+          "crates/verter_session/tests/cases/g_misc2/mapped_remap_dead_key_value_forcing.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_evaluate_depth_budget.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_mapped_type_k_independent_hoist.rs",
+          "crates/verter_session/tests/cases/g_misc2/pe4_substitute_hash_cons.rs",
+          "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
+          "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
+          "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+          "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_long_chain_stack_safe.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_no_unrelated_imports.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_pathological_recursion.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
+          "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
+          "crates/verter_session/tests/cases/relation_nominal_authority.rs",
+          "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs"
+        ]
       },
       "pins": [
         {
           "behavior": "the envelope surface's identity behavior the narrowing must preserve: intern identity discriminates the top-level owner",
-          "command": "cargo nextest -p verter_session semantic_query_memo::tests",
+          "command": "cargo nextest run -p verter_session semantic_query_memo::tests",
           "filter": "semantic_query_memo::tests",
           "witnesses": [
             {

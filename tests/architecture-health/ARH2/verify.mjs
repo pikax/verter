@@ -11,10 +11,11 @@
  * population is exactly the ARH1 hotspot contracts, which is exactly the
  * ARH0 god-module candidate population; every ARH1 authority responsibility
  * is carried by exactly one characterization row. Every behavioral pin is a
- * real cargo nextest lane: the command is canonical, the crate is a live
- * workspace member, the filter selects the recorded witnesses under nextest
- * substring semantics over the module-path fragment, and every witness is a
- * real #[test] function in a real file. Every cutover route a successor
+ * real cargo nextest lane: the command is canonical (`cargo nextest run`),
+ * the crate is a live workspace member, the filter selects the recorded
+ * witnesses under nextest substring semantics over the compiled module path
+ * (`mod` / `#[path]`, never a filesystem `src::` fragment), and every
+ * witness is a real #[test] function in a real file. Every cutover route a successor
  * narrows (ARH1 register rows owned by ARH3/ARH4, plus the ARH2-executed
  * deletion) is characterized exactly once, with the narrowed surface
  * derived live (the scheduler pub bookkeeping fields, the pub fn test_*
@@ -24,9 +25,10 @@
  * key, its ARH1 cutover row and the same-change ARH0 product refresh, and
  * the deleted path is absent from the tree and from every product. The
  * complexity product separates the four charter measurement dimensions
- * exactly once each, binds every wall-clock dimension to a real locked
- * performance-gates.toml cell and the pinned lanes to the characterization
- * commands, commits only deterministically re-derivable structural counts
+ * exactly once each, binds production behavior and test cost to the pinned
+ * nextest lanes, clean/warm build time to cargo --timings recipes with both
+ * cache states, and application latency to a host/session gate cell,
+ * commits only deterministically re-derivable structural counts
  * (re-derived here on every run), and ratifies the god-module threshold
  * basis ARH0-DEBT-5 requires before ARH12 may extend the existing guard.
  * No wall-clock, RSS or speedup number may be committed in any dimension.
@@ -43,6 +45,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadProducts as loadArh0Products, validate as validateArh0 } from "../ARH0/verify.mjs";
 import { loadProducts as loadArh1Products, validate as validateArh1 } from "../ARH1/verify.mjs";
+import { readGatesToml } from "../../../scripts/validate-performance-gates.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -58,6 +61,13 @@ const DIMENSION_IDS = Object.freeze([
   "test-cost",
   "application-latency",
 ]);
+const DIMENSION_MECHANISM_KIND = Object.freeze({
+  "production-behavior": "cargo-nextest",
+  "clean-warm-build-time": "cargo-build",
+  "test-cost": "cargo-nextest",
+  "application-latency": "gate-cell",
+});
+const CARGO_BUILD_CACHE_STATES = Object.freeze(["clean", "warm"]);
 // Charter AC3 concerns, verbatim; each must carry existing named evidence.
 const AC3_CONCERNS = Object.freeze([
   "fresh-versus-incremental equivalence",
@@ -145,16 +155,112 @@ function workspaceCrates() {
   return crates;
 }
 
+function posixRel(rel) {
+  return rel.split(path.sep).join("/");
+}
+
+function posixDir(rel) {
+  const i = rel.lastIndexOf("/");
+  return i === -1 ? "" : rel.slice(0, i);
+}
+
+function posixJoin(dir, child) {
+  if (!dir) return child.replace(/\\/g, "/");
+  return `${dir}/${child.replace(/\\/g, "/")}`;
+}
+
+function sameSet(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return [...new Set(a)].sort().join("\n") === [...new Set(b)].sort().join("\n");
+}
+
+function stripComments(text) {
+  return text.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
 /**
- * The nextest module-path fragment of a witness file: the path under its
- * crate directory with `.rs` stripped and separators as `::`, which is how
- * nextest builds test ids, so a substring filter selects the witness iff it
- * is a substring of this fragment joined with the test name.
+ * `mod` declarations of a Rust file, including `#[path]` retargets and
+ * inline `mod name { ... }` blocks. Used to reconstruct the compiled
+ * nextest module path; a filesystem path under `src/` is not a module.
  */
-function testPathFragment(file) {
-  const rel = file.split(path.sep).join("/");
-  const underCrate = rel.replace(/^crates\/[^/]+\//, "");
-  return underCrate.replace(/\.rs$/, "").replace(/\//g, "::");
+function parseModDecls(text) {
+  const stripped = stripComments(text);
+  const decls = [];
+  const re =
+    /((?:#\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*([;{])/g;
+  let match;
+  while ((match = re.exec(stripped))) {
+    const attrs = match[1] || "";
+    const pathAttr = attrs.match(/#\[path\s*=\s*"([^"]+)"\]/);
+    decls.push({
+      name: match[2],
+      inline: match[3] === "{",
+      pathAttr: pathAttr ? pathAttr[1] : null,
+    });
+  }
+  return decls;
+}
+
+function resolveModFile(parentFile, decl) {
+  const dir = posixDir(parentFile);
+  if (decl.pathAttr) return posixJoin(dir, decl.pathAttr);
+  const base = parentFile.slice(parentFile.lastIndexOf("/") + 1);
+  const candidates =
+    base === "lib.rs" || base === "main.rs" || base === "mod.rs"
+      ? [posixJoin(dir, `${decl.name}.rs`), posixJoin(dir, `${decl.name}/mod.rs`)]
+      : [
+          posixJoin(dir, `${base.replace(/\.rs$/, "")}/${decl.name}.rs`),
+          posixJoin(dir, `${base.replace(/\.rs$/, "")}/${decl.name}/mod.rs`),
+        ];
+  return candidates.find((candidate) => existsRel(candidate)) || null;
+}
+
+const MODULE_INDEX_CACHE = new Map();
+
+function indexCrateModules(crate) {
+  const cached = MODULE_INDEX_CACHE.get(crate);
+  if (cached) return cached;
+  const map = new Map();
+  const seen = new Set();
+  const walk = (file, modulePath) => {
+    const key = `${file}|${modulePath}`;
+    if (seen.has(key) || !existsRel(file)) return;
+    seen.add(key);
+    const paths = map.get(file) || [];
+    paths.push(modulePath);
+    map.set(file, paths);
+    for (const decl of parseModDecls(readRel(file))) {
+      const childPath = modulePath ? `${modulePath}::${decl.name}` : decl.name;
+      if (decl.inline) {
+        paths.push(childPath);
+        continue;
+      }
+      const childFile = resolveModFile(file, decl);
+      if (childFile) walk(childFile, childPath);
+    }
+  };
+  const crateRel = `crates/${crate}`;
+  for (const root of [
+    `${crateRel}/src/lib.rs`,
+    `${crateRel}/src/main.rs`,
+    `${crateRel}/tests/main.rs`,
+  ]) {
+    walk(root, "");
+  }
+  MODULE_INDEX_CACHE.set(crate, map);
+  return map;
+}
+
+/**
+ * Compiled nextest module paths for a witness file, derived from the crate's
+ * `mod` / `#[path]` tree. Filesystem `src::…` fragments are not IDs.
+ */
+function compiledModulePaths(crate, file) {
+  const rel = posixRel(file);
+  const index = indexCrateModules(crate);
+  const paths = index.get(rel);
+  if (!paths || paths.length === 0) return [];
+  return [...new Set(paths.filter((p) => p.length > 0))];
 }
 
 /**
@@ -191,7 +297,7 @@ function checkWitness(witness, errors, caseId) {
 }
 
 function checkPin(pin, crate, errors, caseId) {
-  const expected = `cargo nextest -p ${crate} ${pin.filter}`;
+  const expected = `cargo nextest run -p ${crate} ${pin.filter}`;
   if (pin.command !== expected) {
     errors.push({
       caseId,
@@ -209,17 +315,21 @@ function checkPin(pin, crate, errors, caseId) {
   }
   for (const witness of pin.witnesses) {
     if (!checkWitness(witness, errors, caseId)) continue;
-    // The file path alone cannot see inner `mod tests` blocks (the sibling
-    // test convention), so a filter selects the witness when it is a
-    // substring of the module-path fragment joined with the test name
-    // directly or through the trailing tests module.
-    const fragment = testPathFragment(witness.file);
-    const ids = [`${fragment}::${witness.test}`, `${fragment}::tests::${witness.test}`];
+    const modules = compiledModulePaths(crate, witness.file);
+    if (modules.length === 0) {
+      errors.push({
+        caseId,
+        code: "pin-filter-selects-nothing",
+        detail: `${witness.file} is not a compiled module of ${crate}; filesystem paths are not nextest ids`,
+      });
+      continue;
+    }
+    const ids = modules.map((mod) => `${mod}::${witness.test}`);
     if (!ids.some((id) => id.includes(pin.filter))) {
       errors.push({
         caseId,
         code: "pin-filter-selects-nothing",
-        detail: `filter ${pin.filter} is not a substring of the nextest id ${ids[0]}`,
+        detail: `filter ${pin.filter} is not a substring of the compiled nextest id ${ids[0]}`,
       });
     }
   }
@@ -586,6 +696,43 @@ function validateCharacterization(products, predecessors, errors) {
       });
     }
   }
+  const bulkRoute = (characterization.routes || []).find((r) => r.cutoverRow === "ARH1-CUT-4");
+  if (bulkRoute) {
+    const queryRel = "crates/verter_session/src/semantic_query.rs";
+    const contract = arh1["dependency-contracts"].hotspots.find((h) => h.path === queryRel);
+    const declared = contract?.minimalPublicSurface || {};
+    const bulkRow = (declared.narrow || []).find((r) => r.kind === "bulk");
+    const surface = bulkRoute.surface || {};
+    if (surface.kind !== "bulk") {
+      errors.push({
+        caseId,
+        code: "route-surface-drift",
+        detail: "ARH1-CUT-4 surface kind is not the ARH1 bulk narrowing",
+      });
+    }
+    if (!sameSet(surface.retainedTypes, declared.retainedTypes || [])) {
+      errors.push({
+        caseId,
+        code: "route-surface-drift",
+        detail: "ARH1-CUT-4 retainedTypes are not exactly the ARH1 retained envelope types",
+      });
+    }
+    if (!sameSet(surface.retainedAssocItems, declared.retainedAssocItems || [])) {
+      errors.push({
+        caseId,
+        code: "route-surface-drift",
+        detail: "ARH1-CUT-4 retainedAssocItems are not exactly the ARH1 retained assoc items",
+      });
+    }
+    if (!sameSet(surface.consumersAffected, bulkRow?.consumersAffected || [])) {
+      errors.push({
+        caseId,
+        code: "route-surface-drift",
+        detail:
+          "ARH1-CUT-4 consumersAffected are not exactly the ARH1 bulk-row consumer population",
+      });
+    }
+  }
 
   // AC3: every charter concern carries existing named evidence.
   const concerns = new Map((characterization.ac3?.concerns || []).map((c) => [c.concern, c]));
@@ -667,31 +814,102 @@ function validateSeparation(products, predecessors, errors) {
         });
       }
     }
+    const requiredKind = DIMENSION_MECHANISM_KIND[dimension.id];
+    if (requiredKind && dimension.mechanismKind !== requiredKind) {
+      errors.push({
+        caseId,
+        code: "dimension-mechanism-kind-mismatch",
+        detail: `${dimension.id} must use mechanismKind ${requiredKind}, not ${JSON.stringify(dimension.mechanismKind)}`,
+      });
+    }
     const mechanisms = dimension.mechanisms;
-    if (dimension.mechanismKind === "gate-cell" && Array.isArray(mechanisms)) {
-      for (const cell of mechanisms) {
-        if (!gateIds.has(cell)) {
+    if (!Array.isArray(mechanisms) || mechanisms.length === 0) {
+      errors.push({
+        caseId,
+        code: "mechanism-binding-missing",
+        detail: `${dimension.id} has no nonempty measurement mechanism binding`,
+      });
+      continue;
+    }
+    if (dimension.mechanismKind === "gate-cell") {
+      let cellsById = new Map();
+      try {
+        cellsById = new Map(readGatesToml(gatesText).cells.map((cell) => [cell.id, cell]));
+      } catch {
+        cellsById = new Map();
+      }
+      for (const cellId of mechanisms) {
+        if (typeof cellId !== "string" || !gateIds.has(cellId)) {
           errors.push({
             caseId,
             code: "gate-cell-unknown",
-            detail: `${cell} is not a locked cell of performance-gates.toml`,
+            detail: `${cellId} is not a locked cell of performance-gates.toml`,
           });
+          continue;
         }
+        if (dimension.id === "application-latency") {
+          const cell = cellsById.get(cellId);
+          const owner = String(cell?.owner || "");
+          const hay = `${cell?.operation || ""} ${cell?.execution_profile || ""} ${cell?.result_contract || ""}`;
+          if ((owner !== "verter_session" && owner !== "verter_scheduler") || !/host/i.test(hay)) {
+            errors.push({
+              caseId,
+              code: "gate-cell-wrong-operation",
+              detail: `${cellId} does not measure the characterized host/session path`,
+            });
+          }
+        }
+      }
+    }
+    if (dimension.mechanismKind === "cargo-build") {
+      const states = new Set();
+      for (const recipe of mechanisms) {
+        if (
+          !recipe ||
+          typeof recipe !== "object" ||
+          typeof recipe.command !== "string" ||
+          !recipe.command.startsWith("cargo build") ||
+          !recipe.command.includes("--timings")
+        ) {
+          errors.push({
+            caseId,
+            code: "cargo-build-recipe-malformed",
+            detail: `${dimension.id} recipes must be cargo build --timings commands with a cacheState`,
+          });
+          continue;
+        }
+        if (!CARGO_BUILD_CACHE_STATES.includes(recipe.cacheState)) {
+          errors.push({
+            caseId,
+            code: "cargo-build-cache-state-unknown",
+            detail: `${dimension.id} recipe cacheState ${JSON.stringify(recipe.cacheState)} is not clean or warm`,
+          });
+          continue;
+        }
+        states.add(recipe.cacheState);
+      }
+      if (!states.has("clean") || !states.has("warm")) {
+        errors.push({
+          caseId,
+          code: "dimension-cache-state-incomplete",
+          detail: `${dimension.id} must bind both clean and warm repository-build cache states`,
+        });
       }
     }
   }
 
-  // The behavior dimension's lanes are exactly the characterization pins.
-  const behavior = dimensions.find((d) => d.id === "production-behavior");
-  if (behavior && Array.isArray(behavior.mechanisms)) {
-    const pinned = collectPinCommands(characterization);
-    const declared = new Set(behavior.mechanisms);
+  const pinned = collectPinCommands(characterization);
+  const joinPinnedLanes = (dimension, unboundCode, inventedCode) => {
+    if (!dimension || !Array.isArray(dimension.mechanisms) || dimension.mechanisms.length === 0) {
+      return;
+    }
+    const declared = new Set(dimension.mechanisms);
     for (const command of pinned) {
       if (!declared.has(command)) {
         errors.push({
           caseId,
-          code: "behavior-lane-unbound",
-          detail: `pinned lane ${command} is not recorded in the test-cost/behavior dimension`,
+          code: unboundCode,
+          detail: `pinned lane ${command} is not recorded in ${dimension.id}`,
         });
       }
     }
@@ -699,23 +917,30 @@ function validateSeparation(products, predecessors, errors) {
       if (!pinned.has(command)) {
         errors.push({
           caseId,
-          code: "behavior-lane-invented",
-          detail: `${command} is recorded as a lane but no pin carries it`,
+          code: inventedCode,
+          detail: `${command} is recorded as a ${dimension.id} lane but no pin carries it`,
         });
       }
     }
-  }
+  };
+  joinPinnedLanes(
+    dimensions.find((d) => d.id === "production-behavior"),
+    "behavior-lane-unbound",
+    "behavior-lane-invented",
+  );
+  joinPinnedLanes(
+    dimensions.find((d) => d.id === "test-cost"),
+    "test-cost-lane-unbound",
+    "test-cost-lane-invented",
+  );
 
   // The runner class is the locked one; a different class is a recalibration.
   const runnerClass = gatesText.match(/^\[runner\][\s\S]*?^class = "([^"]+)"/m)?.[1];
-  if (
-    measurements.numberPolicy?.runnerClass &&
-    !measurements.numberPolicy.runnerClass.startsWith(runnerClass)
-  ) {
+  if (measurements.numberPolicy?.runnerClass !== runnerClass) {
     errors.push({
       caseId,
       code: "runner-class-unbound",
-      detail: `numberPolicy.runnerClass does not bind the locked [runner] class ${runnerClass}`,
+      detail: `numberPolicy.runnerClass must equal the locked [runner] class ${runnerClass}`,
     });
   }
 

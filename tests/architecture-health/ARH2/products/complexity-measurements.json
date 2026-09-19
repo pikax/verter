@@ -48,50 +48,73 @@
       "id": "production-behavior",
       "mechanismKind": "cargo-nextest",
       "mechanisms": [
-        "cargo nextest -p verter_scheduler dag_tests",
-        "cargo nextest -p verter_scheduler dag_lanes_tests",
-        "cargo nextest -p verter_scheduler cancellation_token",
-        "cargo nextest -p verter_scheduler scheduler::tests",
-        "cargo nextest -p verter_session flow_return_tests",
-        "cargo nextest -p verter_session flow_return_coverage_tests",
-        "cargo nextest -p verter_session flow_return_frame_seal_tests",
-        "cargo nextest -p verter_session cycle_gate_tests",
-        "cargo nextest -p verter_session dispatch_txn_tests",
-        "cargo nextest -p verter_session semantic_query_memo::tests",
-        "cargo nextest -p verter_session stable_key_tests",
-        "cargo nextest -p verter_session flow_slice_content_tests"
+        "cargo nextest run -p verter_scheduler dag_tests",
+        "cargo nextest run -p verter_scheduler dag_lanes_tests",
+        "cargo nextest run -p verter_scheduler cancellation_token",
+        "cargo nextest run -p verter_scheduler scheduler::tests",
+        "cargo nextest run -p verter_session flow_return_tests",
+        "cargo nextest run -p verter_session flow_return_coverage_tests",
+        "cargo nextest run -p verter_session flow_return_frame_seal_tests",
+        "cargo nextest run -p verter_session cycle_gate_tests",
+        "cargo nextest run -p verter_session dispatch_txn_tests",
+        "cargo nextest run -p verter_session semantic_query_memo::tests",
+        "cargo nextest run -p verter_session stable_key_tests",
+        "cargo nextest run -p verter_session flow_slice_content_tests"
       ],
       "measures": "whether the characterized boundaries still behave as pinned (pass/fail per lane); this list is exactly the characterization product's pinned commands, joined by the verifier in both directions",
       "separates": "behavior only: a lane's outcome is never reported as a timing, a size or a cost, and a failing lane cannot be exchanged for a cheaper one"
     },
     {
       "id": "clean-warm-build-time",
-      "mechanismKind": "gate-cell",
-      "mechanisms": ["A6_META_COMPILE_40_COLD_RUST"],
-      "measures": "cold project-batch semantic build time and work (wall_ns, peak_rss_bytes) with the cold/warm seam carried by the session.semantic_cold_build.calls counter and its warm-hit counterpart",
-      "separates": "the semantic project build is measured on its own cold cache state; test execution and editor/application latency never enter this dimension"
+      "mechanismKind": "cargo-build",
+      "mechanisms": [
+        {
+          "command": "cargo build -p verter_scheduler -p verter_session --timings",
+          "cacheState": "clean"
+        },
+        {
+          "command": "cargo build -p verter_scheduler -p verter_session --timings",
+          "cacheState": "warm"
+        }
+      ],
+      "measures": "repository compilation of the characterized crates (verter_scheduler, verter_session) under cargo --timings telemetry already used by the gate runner: a clean target versus a warm target; receipts are not committed",
+      "separates": "clean and warm repository-build time are measured on distinct cache states of the same cargo build recipe; test execution and host/session application latency never enter this dimension"
     },
     {
       "id": "test-cost",
-      "mechanismKind": "gate-cell",
-      "mechanisms": ["BF2_VUE_ORACLE_MANIFEST_GENERATE", "BF2_SVELTE_ORACLE_MANIFEST_GENERATE"],
-      "measures": "the cost of the test corpus machinery itself (oracle manifest generation wall/RSS) plus the per-lane runtime of the pinned nextest lanes, taken per run",
+      "mechanismKind": "cargo-nextest",
+      "mechanisms": [
+        "cargo nextest run -p verter_scheduler dag_tests",
+        "cargo nextest run -p verter_scheduler dag_lanes_tests",
+        "cargo nextest run -p verter_scheduler cancellation_token",
+        "cargo nextest run -p verter_scheduler scheduler::tests",
+        "cargo nextest run -p verter_session flow_return_tests",
+        "cargo nextest run -p verter_session flow_return_coverage_tests",
+        "cargo nextest run -p verter_session flow_return_frame_seal_tests",
+        "cargo nextest run -p verter_session cycle_gate_tests",
+        "cargo nextest run -p verter_session dispatch_txn_tests",
+        "cargo nextest run -p verter_session semantic_query_memo::tests",
+        "cargo nextest run -p verter_session stable_key_tests",
+        "cargo nextest run -p verter_session flow_slice_content_tests"
+      ],
+      "measures": "per-lane runtime cost of the twelve pinned characterization nextest lanes (the same commands as production-behavior; this dimension accounts wall/RSS, never pass/fail)",
       "separates": "test cost is never reported as application latency or build time: the pinned behavior lanes may be run cheaply for pass/fail while their cost is accounted only here"
     },
     {
       "id": "application-latency",
       "mechanismKind": "gate-cell",
-      "mechanisms": ["B6_COMPILER_ROUTE_OVERHEAD"],
-      "measures": "end-to-end route latency (direct, prepared-first, prepared-repeat, batch wall_ns) of the compiled product surface the hotspots serve",
-      "separates": "latency is measured by the locked route cells on the bound runner class only; it is never derived from test-lane or build timings"
+      "mechanisms": ["A6_META_COMPILE_40_COLD_RUST"],
+      "measures": "end-to-end host/session latency of the characterized product surface: A6_META_COMPILE_40_COLD_RUST is the locked host-backed VerterHost batch (component meta then compile) on the bound runner class",
+      "separates": "latency is measured by the locked host/session cell on the bound runner class only; it is never derived from test-lane timings, cargo build timings, or a standalone compiler process that bypasses the host"
     }
   ],
   "numberPolicy": {
     "committedNumbers": "deterministic structural counts only (populations, fileLoc, the over-threshold file count): every committed number is re-derived live by the verifier on each run",
     "wallClock": "no wall-clock, RSS or speedup number is committed in any ARH2 product; measured numbers exist only in receipts produced under the ratified methodology (performance-gates.toml) on its bound runner class",
-    "runnerClass": "apple-silicon-laptop-8core-24gib (performance-gates.toml [runner]; a different runner class is a recalibration under that file's rules, not a local adjustment)"
+    "runnerClass": "apple-silicon-laptop-8core-24gib",
+    "runnerClassNote": "locked [runner] class in performance-gates.toml; a different runner class is a recalibration under that file's rules, not a local adjustment"
   },
   "ac3Rationale": "see the characterization product's ac3 block: ARH2 mutates no production state/query/map boundary, so fresh/incremental, edit/revert, cancellation, stale/partial and ordering are bound as existing named evidence rather than new invariants",
   "ac4Rationale": "the measurement entry points are the recorded commands and gate cells; documenting them in contributor documentation is DOC2's obligation",
-  "ac5Rationale": "every dimension is bound to the existing ratified performance methodology before any measurement; no gate is weakened and no lower-LOC win is claimed (the only LOC change this node makes is a deletion with no consumer)"
+  "ac5Rationale": "every dimension is bound to an existing ratified measurement mechanism before any measurement (pinned nextest lanes, cargo --timings, locked host/session gate cell); no gate is weakened and no lower-LOC win is claimed (the only LOC change this node makes is a deletion with no consumer)"
 }

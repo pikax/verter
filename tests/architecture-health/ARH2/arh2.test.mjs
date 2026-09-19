@@ -193,12 +193,60 @@ test("ARH2-characterization dirty twin: a filter that selects nothing is rejecte
   const dirty = cloneProducts();
   const h = hotspot(dirty, "crates/verter_session/src/semantic_query.rs");
   h.pins[0].filter = "unrelated_module";
-  h.pins[0].command = `cargo nextest -p verter_session ${h.pins[0].filter}`;
+  h.pins[0].command = `cargo nextest run -p verter_session ${h.pins[0].filter}`;
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some(
       (e) => e.caseId === "ARH2-characterization" && e.code === "pin-filter-selects-nothing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+const retargetLane = (products, from, to) => {
+  for (const id of ["production-behavior", "test-cost"]) {
+    const lanes = products["complexity-measurements"].dimensions.find(
+      (d) => d.id === id,
+    ).mechanisms;
+    const idx = lanes.indexOf(from);
+    if (idx !== -1) lanes[idx] = to;
+  }
+};
+
+test("ARH2-characterization dirty twin: filesystem src:: filter selecting no compiled module is rejected (AC2)", () => {
+  const dirty = cloneProducts();
+  const pin = hotspot(dirty, "crates/verter_scheduler/src/scheduler.rs").pins.find(
+    (p) => p.filter === "dag_tests",
+  );
+  const previous = pin.command;
+  pin.filter = "src::dag_tests";
+  pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
+  retargetLane(dirty, previous, pin.command);
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "pin-filter-selects-nothing" &&
+        e.detail.includes("src::dag_tests"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: nextest command omitting run is rejected", () => {
+  const dirty = cloneProducts();
+  const pin = hotspot(dirty, "crates/verter_scheduler/src/scheduler.rs").pins[0];
+  const previous = pin.command;
+  pin.command = `cargo nextest -p verter_scheduler ${pin.filter}`;
+  retargetLane(dirty, previous, pin.command);
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "pin-command-not-canonical",
     ),
     JSON.stringify(result.errors),
   );
@@ -276,6 +324,55 @@ test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer 
   );
 });
 
+test("ARH2-characterization dirty twin: CUT-4 retained-type drift is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-4");
+  route.surface.retainedTypes = route.surface.retainedTypes.filter((t) => t !== "HashValue");
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "route-surface-drift" &&
+        e.detail.includes("retainedTypes"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: CUT-4 consumer-population drift is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-4");
+  route.surface.consumersAffected = route.surface.consumersAffected.slice(1);
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "route-surface-drift" &&
+        e.detail.includes("consumersAffected"),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: CUT-4 invented surface is rejected (AC1)", () => {
+  const dirty = cloneProducts();
+  const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-4");
+  route.surface = { kind: "invented", derivedLive: "false" };
+  route.pins[0].behavior = "unrelated";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "route-surface-drift",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH2-characterization dirty twin: missing AC3 concern is rejected (AC3)", () => {
   const dirty = cloneProducts();
   const concerns = dirty["characterization"].ac3.concerns;
@@ -343,6 +440,101 @@ test("ARH2-separation dirty twin: invented gate cell is rejected (AC5)", () => {
   );
 });
 
+test("ARH2-separation dirty twin: missing mechanisms are rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  for (const dim of dirty["complexity-measurements"].dimensions) delete dim.mechanisms;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "mechanism-binding-missing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: empty mechanisms are rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  for (const dim of dirty["complexity-measurements"].dimensions) dim.mechanisms = [];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "mechanism-binding-missing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: suffix-forged runner class is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  dirty["complexity-measurements"].numberPolicy.runnerClass =
+    "apple-silicon-laptop-8core-24gib-forged";
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "runner-class-unbound"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: absent runner class is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  delete dirty["complexity-measurements"].numberPolicy.runnerClass;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.caseId === "ARH2-separation" && e.code === "runner-class-unbound"),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: clean/warm missing a cache state is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  const dim = dirty["complexity-measurements"].dimensions.find(
+    (d) => d.id === "clean-warm-build-time",
+  );
+  dim.mechanisms = dim.mechanisms.filter((recipe) => recipe.cacheState === "clean");
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "dimension-cache-state-incomplete",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: application-latency cell that bypasses the host is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  dirty["complexity-measurements"].dimensions.find(
+    (d) => d.id === "application-latency",
+  ).mechanisms = ["B6_COMPILER_ROUTE_OVERHEAD"];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "gate-cell-wrong-operation",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-separation dirty twin: test-cost bound to unrelated gate cells is rejected (AC5)", () => {
+  const dirty = cloneProducts();
+  const dim = dirty["complexity-measurements"].dimensions.find((d) => d.id === "test-cost");
+  dim.mechanismKind = "gate-cell";
+  dim.mechanisms = ["BF2_VUE_ORACLE_MANIFEST_GENERATE", "BF2_SVELTE_ORACLE_MANIFEST_GENERATE"];
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-separation" && e.code === "dimension-mechanism-kind-mismatch",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH2-separation dirty twin: committed wall-clock number is rejected (AC5)", () => {
   const dirty = cloneProducts();
   const dims = dirty["complexity-measurements"].dimensions;
@@ -362,7 +554,7 @@ test("ARH2-separation dirty twin: lane recorded in the dimension but pinned nowh
   const dims = dirty["complexity-measurements"].dimensions;
   dims
     .find((d) => d.id === "production-behavior")
-    .mechanisms.push("cargo nextest -p verter_scheduler phantom_lane");
+    .mechanisms.push("cargo nextest run -p verter_scheduler phantom_lane");
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
@@ -377,7 +569,7 @@ test("ARH2-separation dirty twin: pinned lane missing from the dimension is reje
   const dirty = cloneProducts();
   const dims = dirty["complexity-measurements"].dimensions;
   const lanes = dims.find((d) => d.id === "production-behavior").mechanisms;
-  lanes.splice(lanes.indexOf("cargo nextest -p verter_session stable_key_tests"), 1);
+  lanes.splice(lanes.indexOf("cargo nextest run -p verter_session stable_key_tests"), 1);
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
