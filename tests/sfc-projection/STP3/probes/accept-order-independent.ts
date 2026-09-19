@@ -6,7 +6,7 @@ export const permA = new Comp({
   project: (row) => row.name,
 });
 export const permB = new Comp({
-  project: (row: { id: number; name: string }) => row.name,
+  project: (row) => row.name,
   rows: [{ id: 1, name: "a" }],
 });
 export const permSame: typeof permA.value = permB.value;

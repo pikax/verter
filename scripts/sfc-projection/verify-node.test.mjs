@@ -474,6 +474,17 @@ test("STP3-wrong-channel dirty twin is the broad any constructor", () => {
   assert.match(row.dirtyTwin, /reject-wrong-channel-any\.ts$/);
 });
 
+test("STP3-order-independent dirty twin permutes unannotated whole-signature", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP3/manifest.json");
+  const row = node.manifest.cases.find((entry) => entry.id === "STP3-order-independent");
+  assert.equal(row.disposition, "reject");
+  assert.equal(row.expectedCode, 18046);
+  assert.match(row.dirtyTwin, /accept-order-independent\.ts$/);
+  const dirty = fs.readFileSync(repoPath(REPO_ROOT, row.dirtyTwin), "utf8");
+  assert.match(dirty, /new Comp\(\{\s*project:\s*\(row\)\s*=>\s*row\.name,\s*rows:/s);
+  assert.doesNotMatch(dirty, /project:\s*\(row:/);
+});
+
 test("STP3-ordered-merge dirty twin is last-write-wins, not accumulation", () => {
   const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP3/manifest.json");
   const row = node.manifest.cases.find((entry) => entry.id === "STP3-ordered-merge");
