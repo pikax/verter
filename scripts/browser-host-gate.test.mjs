@@ -568,9 +568,21 @@ test("runProbes requires the query audit record before the worker can report suc
     resolveTypeWithAudit: () => query,
   });
   const sources = { tsSource: "export type ProbeAlias = string;", vueSource: "<template/>" };
-  const probed = runProbes(hostWith({ decl: "ProbeAlias", hasRecord: true }), sources);
-  assert.deepEqual(probed.operations.query, [{ decl: "ProbeAlias", hasRecord: true }]);
-  for (const query of [null, { decl: "ProbeAlias", hasRecord: false }, { error: "boom" }, "[]"]) {
+  // The stored record arrives as the JSON string the WASM boundary emits for
+  // an `ActiveStored` capture; the probe derives `hasRecord` from that state.
+  const stored = JSON.stringify({ kind: "ResolveDecl", capture_state: "ActiveStored" });
+  const probed = runProbes(hostWith(stored), sources);
+  assert.deepEqual(probed.operations.query, [
+    { decl: "ProbeAlias", kind: "ResolveDecl", hasRecord: true },
+  ]);
+  for (const query of [
+    null,
+    JSON.stringify({ kind: "ResolveDecl", capture_state: "FilteredNoop" }),
+    { kind: "ResolveDecl", capture_state: "AuditDisabled" },
+    { decl: "ProbeAlias", hasRecord: true },
+    { error: "boom" },
+    "[]",
+  ]) {
     assert.throws(() => runProbes(hostWith(query), sources), /query audit record is absent/);
   }
 });
