@@ -133,6 +133,21 @@ export async function driveLapceSession(
   for (const step of options.script) assertSingleUse(seenEpochs, step);
 
   const dumpDir = mkdtempSync(path.join(tmpdir(), "verter-wsp1l-dump-"));
+  try {
+    return await driveLapceSessionInto(options, dumpDir, readyTimeoutMs, stepTimeoutMs);
+  } finally {
+    // Launch, drive and post-drive validation failures all pass through here:
+    // the temporary dump directory never outlives the session.
+    rmSync(dumpDir, { recursive: true, force: true });
+  }
+}
+
+async function driveLapceSessionInto(
+  options: DrivenLapceSessionOptions,
+  dumpDir: string,
+  readyTimeoutMs: number,
+  stepTimeoutMs: number,
+): Promise<DrivenLapceSession> {
   const dumpPath = path.join(dumpDir, "interaction-trace.jsonl");
   const sessionId = `${nowUnixMs()}-${randomUUID().slice(0, 8)}`;
 
@@ -269,10 +284,19 @@ export async function driveLapceSession(
     }
   } finally {
     killTree();
-    await new Promise<void>((resolve) => {
-      child.once("exit", () => resolve());
-      setTimeout(resolve, 5_000).unref();
-    });
+    if (!exited) {
+      // The exit listener is only useful while the child is still running: a
+      // child that already exited would never fire it and the timer alone
+      // would hold teardown for its full duration.
+      await new Promise<void>((resolve) => {
+        child.once("exit", () => resolve());
+        setTimeout(resolve, 5_000).unref();
+      });
+    }
+    // server.close() keeps established connections alive; the drive socket is
+    // torn down explicitly so the listener can actually close.
+    connBox.current?.destroy();
+    connBox.current = null;
     server.close();
   }
 
@@ -305,7 +329,6 @@ export async function driveLapceSession(
   } catch {
     dumpLines = [];
   }
-  rmSync(dumpDir, { recursive: true, force: true });
 
   return {
     sessionId,
@@ -497,7 +520,10 @@ export function buildDrivenCaptureArtifact(input: {
   readonly correlated: CorrelatedCapture;
   readonly recordedAs: string;
   readonly lapceClientSource: string;
+  /** Local path of the instrumentation patch, read for its digest only. */
   readonly patchPath: string;
+  /** Repository-relative path recorded as the patch provenance. */
+  readonly patchRecordedAs: string;
   readonly automationPath: AutomationPath;
 }): DrivenCaptureArtifact {
   const { launchStamps, uiStamps } = collectStampMessages(input.session.capturedLines);
@@ -528,7 +554,7 @@ export function buildDrivenCaptureArtifact(input: {
     lapceClient: {
       version: input.session.lapceClientVersion,
       source: input.lapceClientSource,
-      patch: input.patchPath.replaceAll("\\", "/"),
+      patch: input.patchRecordedAs,
       patchSha256,
     },
     automationPath: input.automationPath,
@@ -573,6 +599,12 @@ export interface RecordedLapceCapture {
  * stale artifact (content digest), on stamps that do not match the sealed
  * provenance digest, or on a capture that lacks the launch/UI observations a
  * real-client claim requires.
+ *
+ * The two digests are corruption and drift detection, not authentication:
+ * `contentSha256` is recomputed from the artifact body it sits in, so a
+ * deliberate edit that recomputes the field passes, and `captureSha256` binds
+ * a run's observed stamps to the artifact's own stamp lines. What the committed
+ * capture proves is pinned outside the artifact by the tests that load it.
  */
 export function loadRecordedLapceCapture(artifactPath: string): RecordedLapceCapture {
   const artifact = JSON.parse(readFileSync(artifactPath, "utf8")) as DrivenCaptureArtifact;
@@ -682,7 +714,15 @@ export class DrivenLapceHost implements LapceHost {
   ): Promise<DrivenLapceHost> {
     const session = await driveLapceSession(options);
     const { launchStamps, uiStamps } = collectStampMessages(session.capturedLines);
-    const first = (launchStamps[0] ?? uiStamps[0])!;
+    const first = launchStamps[0] ?? uiStamps[0];
+    if (first === undefined) {
+      // The acks carried stamps but the captured lines hold none: the child's
+      // streams closed before the stamp lines arrived. That is a capture hole,
+      // reported as such rather than as a failed property access.
+      throw new Error(
+        "the driven session's captured lines hold no launch/ui stamp; the capture has a hole and cannot anchor a clock",
+      );
+    }
     const anchor: StampClockAnchor = {
       stampUnixMs: first.atUnixMs,
       timelineMs: first.atUnixMs,

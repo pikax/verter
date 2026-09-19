@@ -31,7 +31,7 @@
       "currentOwner": "WSP1L",
       "finalOwner": "expansion.workspace-responsiveness",
       "surface": "packages/dx-harness/lapce/manifest.ts + tests/workspace-responsiveness/WSP1L/products/version-manifest.v1.json",
-      "state": "lapce-client unrecorded (no reference machine yet); volt/server/provider pinned"
+      "state": "lapce-client pinned to the recorded 0.4.6+Nightly.126d356 instrumented build; volt/server/provider pinned"
     },
     {
       "id": "VoltLaunchStampHook",
@@ -45,7 +45,7 @@
       "currentOwner": "WSP1L",
       "finalOwner": "expansion.workspace-responsiveness",
       "surface": "tests/workspace-responsiveness/WSP1L/products/gui-instrumentation-availability.v1.json",
-      "state": "unavailable-on-reference-machine"
+      "state": "captured (one local driven session; reference-machine capture still unavailable)"
     }
   ],
   "receivingAmendments": [
