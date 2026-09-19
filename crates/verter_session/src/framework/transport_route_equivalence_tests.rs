@@ -1449,6 +1449,10 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
          observation, never fetches to fill a gap; not a framework \
          product route",
     ),
+    (
+        "releaseInputSnapshot",
+        "browser input-acquisition bridge: releases a committed snapshot          the host no longer observes; not a framework product route",
+    ),
     ("remove", "lifecycle"),
     ("resolve", "id resolution"),
     (
