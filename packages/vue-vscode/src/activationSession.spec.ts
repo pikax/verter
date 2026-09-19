@@ -108,4 +108,116 @@ describe("createActivationRoot", () => {
     expect(root.getRuntime()).toBeUndefined();
     expect(root.getSession()).toBeUndefined();
   });
+
+  it("a stale activation's rejection cannot dispose or replace the live session", async () => {
+    const disposed: string[] = [];
+    let rejectA: ((error: Error) => void) | undefined;
+    let generation = 0;
+    const root = createActivationRoot(
+      (session) =>
+        new Promise<string>((resolve, reject) => {
+          generation += 1;
+          const id = `gen-${generation}`;
+          session.scope.add({ dispose: () => disposed.push(id) });
+          if (generation === 1) {
+            rejectA = reject;
+          } else {
+            resolve(id);
+          }
+        }),
+    );
+
+    // Park activation A, deactivate, then let activation B complete.
+    root.ensureSession();
+    const staleRun = root.run();
+    root.deactivate();
+    expect(disposed).toEqual(["gen-1"]);
+
+    root.ensureSession();
+    await expect(root.run()).resolves.toBe("gen-2");
+    const liveSession = root.getSession();
+    expect(liveSession?.isDisposed).toBe(false);
+    expect(root.getRuntime()).toBe("gen-2");
+
+    // A settles last, as a rejection. The replacement must survive it.
+    rejectA?.(new Error("stale activation failure"));
+    await expect(staleRun).rejects.toThrow("stale activation failure");
+    expect(root.getSession()).toBe(liveSession);
+    expect(root.getSession()?.isDisposed).toBe(false);
+    expect(root.getRuntime()).toBe("gen-2");
+    expect(disposed).toEqual(["gen-1"]);
+
+    // Single-start: a later caller still joins the live activation rather
+    // than starting a third one over it.
+    await expect(root.run()).resolves.toBe("gen-2");
+    expect(generation).toBe(2);
+  });
+
+  it("a stale activation's success cannot republish its runtime", async () => {
+    let resolveA: ((value: string) => void) | undefined;
+    let generation = 0;
+    const root = createActivationRoot(
+      (session) =>
+        new Promise<string>((resolve) => {
+          generation += 1;
+          session.scope.add({ dispose: () => {} });
+          if (generation === 1) {
+            resolveA = resolve;
+          } else {
+            resolve(`gen-${generation}`);
+          }
+        }),
+    );
+
+    root.ensureSession();
+    const staleRun = root.run();
+    root.deactivate();
+
+    root.ensureSession();
+    await expect(root.run()).resolves.toBe("gen-2");
+    expect(root.getRuntime()).toBe("gen-2");
+
+    resolveA?.("gen-1");
+    await expect(staleRun).resolves.toBe("gen-1");
+    // The stale generation resolved, but only the live session's runtime is
+    // published by the root.
+    expect(root.getRuntime()).toBe("gen-2");
+    expect(root.getSession()?.isDisposed).toBe(false);
+  });
+
+  it("a stale activation settles harmlessly when no replacement exists", async () => {
+    const parked: Array<{
+      resolve: (value: string) => void;
+      reject: (error: Error) => void;
+    }> = [];
+    let generation = 0;
+    const root = createActivationRoot(
+      (session) =>
+        new Promise<string>((resolve, reject) => {
+          generation += 1;
+          session.scope.add({ dispose: () => {} });
+          parked.push({ resolve, reject });
+        }),
+    );
+
+    // A rejects after deactivation with no replacement: the root is empty,
+    // so the cleanup must not reach for a session that no longer exists.
+    root.ensureSession();
+    const rejectedRun = root.run();
+    root.deactivate();
+    parked[0].reject(new Error("stale activation failure"));
+    await expect(rejectedRun).rejects.toThrow("stale activation failure");
+    expect(root.getRuntime()).toBeUndefined();
+    expect(root.getSession()).toBeUndefined();
+
+    // A late success is equally inert: nothing is republished into the
+    // deactivated root.
+    root.ensureSession();
+    const staleRun = root.run();
+    root.deactivate();
+    parked[1].resolve(`gen-${generation}`);
+    await expect(staleRun).resolves.toBe(`gen-${generation}`);
+    expect(root.getRuntime()).toBeUndefined();
+    expect(root.getSession()).toBeUndefined();
+  });
 });

@@ -62,16 +62,26 @@ export function createActivationRoot<TRuntime>(
   let session: ActivationSession | undefined;
   let runtime: TRuntime | undefined;
   const gate = createActivationGate(async () => {
-    if (!session) {
+    // Bind this run to the session it started with. After `await start(...)`
+    // the outer `session` may already belong to a replacement activation
+    // (deactivate + re-activate), so a superseded completion must neither
+    // publish into the root nor dispose the replacement.
+    const activation = session;
+    if (!activation) {
       throw new Error("Verter activation session was not initialized");
     }
     try {
-      runtime = await start(session);
-      return runtime;
+      const started = await start(activation);
+      if (session === activation && !activation.isDisposed) {
+        runtime = started;
+      }
+      return started;
     } catch (error) {
-      session.dispose();
-      session = undefined;
-      runtime = undefined;
+      if (session === activation) {
+        session.dispose();
+        session = undefined;
+        runtime = undefined;
+      }
       throw error;
     }
   });
