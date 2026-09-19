@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { builtinModules } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -98,13 +98,50 @@ function isNodeBuiltinImport(spec) {
   if (spec.startsWith("node:")) return true;
   return NODE_BUILTINS.has(spec) || NODE_BUILTINS.has(spec.split("/")[0]);
 }
-// Static import/export-from, side-effect import, require(...) and dynamic
-// import(...) all carry a module specifier the bundler resolves.
-const IMPORT_SPEC_RE =
-  /(?:import|export)\s+(?!type\b)[^;'"]*?from\s*["']([^"']+)["']|import\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)|import\(\s*["']([^"']+)["']\s*\)/g;
-function moduleSpecifiers(src) {
+// The extension package's own TypeScript parses its sources: specifiers are
+// read from the syntax tree, so a comment inside import(...) does not hide a
+// specifier and import-shaped text inside comments or strings is not one.
+const ts = createRequire(path.join(PKG_DIR, "package.json"))("typescript");
+const isSpecifierLiteral = (node) =>
+  ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
+
+/**
+ * Module specifiers a bundler resolves for `src`: static import and
+ * export-from declarations (type-only ones are erased and skipped),
+ * `import x = require(...)`, `require(...)` and dynamic `import(...)` with
+ * a literal argument.
+ */
+function moduleSpecifiers(src, fileName = "module.ts") {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const specs = [];
-  for (const m of src.matchAll(IMPORT_SPEC_RE)) specs.push(m[1] ?? m[2] ?? m[3] ?? m[4]);
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node)) {
+      if (!node.importClause?.isTypeOnly && isSpecifierLiteral(node.moduleSpecifier)) {
+        specs.push(node.moduleSpecifier.text);
+      }
+    } else if (ts.isExportDeclaration(node)) {
+      if (!node.isTypeOnly && node.moduleSpecifier && isSpecifierLiteral(node.moduleSpecifier)) {
+        specs.push(node.moduleSpecifier.text);
+      }
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      const ref = node.moduleReference;
+      if (
+        !node.isTypeOnly &&
+        ts.isExternalModuleReference(ref) &&
+        isSpecifierLiteral(ref.expression)
+      ) {
+        specs.push(ref.expression.text);
+      }
+    } else if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const dynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+      const requireCall = ts.isIdentifier(callee) && callee.text === "require";
+      const arg = node.arguments[0];
+      if ((dynamicImport || requireCall) && arg && isSpecifierLiteral(arg)) specs.push(arg.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
   return specs;
 }
 
@@ -137,7 +174,7 @@ function entryGraphImportsNode(entryRel) {
     } catch {
       throw new Error(`browser entry source not readable: ${rel}`);
     }
-    for (const spec of moduleSpecifiers(src)) {
+    for (const spec of moduleSpecifiers(src, rel)) {
       if (isNodeBuiltinImport(spec) || spec === "vscode-languageclient/node") return true;
       if (spec.startsWith(".")) {
         const joined = path.posix
@@ -457,6 +494,29 @@ test("VSW0-AC1 twin: dynamic-import-of-a-node-builtin is a Node import specifier
     ["node:fs"],
   );
   assert.ok(isNodeBuiltinImport("node:fs"));
+});
+
+test("VSW0-AC1 twin: comment-inside-dynamic-import still yields the specifier", () => {
+  assert.deepEqual(
+    moduleSpecifiers(`const m = await import(/* lazily */ "node:fs" /* builtin */);`),
+    ["node:fs"],
+  );
+  assert.deepEqual(moduleSpecifiers(`const r = require(// desktop only\n  "node:path");`), [
+    "node:path",
+  ]);
+});
+
+test("VSW0-AC1 twin: import-shaped text in comments and strings is not a specifier", () => {
+  const src = [
+    `// import "node:fs";`,
+    `/* const x = require("node:child_process"); */`,
+    `const doc = 'import { a } from "node:os";';`,
+    `const tpl = \`import("node:net")\`;`,
+    `import type { T } from "node:tls";`,
+    `export type { U } from "node:dns";`,
+    `import { real } from "./activationGate";`,
+  ].join("\n");
+  assert.deepEqual(moduleSpecifiers(src), ["./activationGate"]);
 });
 
 test("VSW0-AC1 twin: an unprefixed builtin outside any hand-kept shortlist (process) is a Node import", () => {
