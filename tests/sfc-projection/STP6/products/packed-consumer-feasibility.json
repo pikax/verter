@@ -1,0 +1,78 @@
+{
+  "schema": "PackedConsumerFeasibility",
+  "version": 1,
+  "product": "PackedConsumerFeasibility",
+  "node": "STP6",
+  "kind": "proof",
+  "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+  "constructorSpelling": "declare class Comp { constructor(props?: { msg: string }) }",
+  "package": {
+    "name": "@stp6/lib",
+    "layout": "tests/sfc-projection/STP6/packed",
+    "producerWorkspaceResolution": false,
+    "packSimulatesNpmFilesField": true
+  },
+  "consumptionModes": [
+    { "id": "direct-import", "spelling": "import Comp from \"@stp6/lib\"", "case": "STP6-package-instance" },
+    { "id": "alias", "spelling": "import { Comp as Alias } from \"@stp6/lib\"", "case": "STP6-package-instance" },
+    { "id": "barrel", "spelling": "export { default, Comp } from \"./concrete\"", "case": "STP6-package-instance" },
+    { "id": "namespace", "spelling": "import * as Lib from \"@stp6/lib\"", "case": "STP6-package-instance" },
+    { "id": "project-references", "spelling": "references: packed/tsconfig.json composite", "case": "STP6-package-instance" },
+    { "id": "package-exports", "spelling": "exports[.] / ./concrete / ./generic", "case": "STP6-resolution" }
+  ],
+  "resolutionModes": [
+    { "id": "bundler", "module": "ESNext", "moduleResolution": "bundler", "case": "STP6-resolution" },
+    { "id": "node16", "module": "Node16", "moduleResolution": "Node16", "case": "STP6-resolution" },
+    { "id": "nodenext", "module": "NodeNext", "moduleResolution": "NodeNext", "case": "STP6-resolution" }
+  ],
+  "subpaths": [".", "./concrete", "./generic"],
+  "cases": [
+    {
+      "id": "STP6-package-instance",
+      "disposition": "accept",
+      "observables": ["InstanceType<typeof Comp>", "reset(): void", "$props.msg: string", "subpath", "alias", "namespace"]
+    },
+    {
+      "id": "STP6-package-generics",
+      "disposition": "accept",
+      "observables": ["source-packed-assignable", "callback", "slot", "model", "ref"]
+    },
+    {
+      "id": "STP6-hidden-metadata",
+      "disposition": "reject",
+      "reason": "precision-requires-unpublished-producer-metadata",
+      "observables": ["TS2307-unpublished-sidecar", "public-exports-suffice"]
+    },
+    {
+      "id": "STP6-closure",
+      "disposition": "reject",
+      "reason": "private-virtual-path-or-inaccessible-captured-type",
+      "observables": ["TS2307-virtual-path", "closed-public-dts"]
+    },
+    {
+      "id": "STP6-decl-map",
+      "disposition": "accept",
+      "observables": ["sources: src/Concrete.vue", "sources-exist-in-pack"]
+    },
+    {
+      "id": "STP6-resolution",
+      "disposition": "accept",
+      "observables": ["bundler", "node16", "nodenext", "package-subpaths"]
+    }
+  ],
+  "forbidden": [
+    "producer-workspace-resolution",
+    "unpublished-checker-metadata",
+    "fabricated-runtime-checker-property",
+    "callable-sfc-default-export",
+    "per-fixture-compiler-options"
+  ],
+  "productionOwner": "STP16",
+  "abiOwner": "STP8",
+  "fullTypingOwner": "STP59",
+  "ac3UntouchedOwners": ["B4R0", "LSO0", "CCA1J", "TCM0R"],
+  "ac3Rationale": "Proof fixtures and harness observations only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1J projection route, and TCM0R observation identity.",
+  "ac4UntouchedOwners": ["CCA1J", "CCA1H"],
+  "ac4Rationale": "STP6 does not change production projection hot paths. Bounded parse/check/emit stays with the existing ProjectionBackend route. Pack/install is harness-owned and discarded after the probe.",
+  "timingClaim": "none"
+}
