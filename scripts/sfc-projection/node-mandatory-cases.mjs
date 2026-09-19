@@ -69,6 +69,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP8-abi-contamination",
     "STP8-inference-contract",
   ]),
+  STP9: Object.freeze([
+    "STP9-ids",
+    "STP9-shadow",
+    "STP9-type-free",
+    "STP9-complete-cache",
+    "STP9-determinism",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -85,4 +92,5 @@ export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
 export const STP6_MANDATORY_CASES = NODE_MANDATORY_CASES.STP6;
 export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
 export const STP8_MANDATORY_CASES = NODE_MANDATORY_CASES.STP8;
+export const STP9_MANDATORY_CASES = NODE_MANDATORY_CASES.STP9;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

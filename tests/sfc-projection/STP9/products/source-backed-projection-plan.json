@@ -1,0 +1,81 @@
+{
+  "schema": "SourceBackedProjectionPlan",
+  "version": 1,
+  "product": "ProjectionPlan",
+  "node": "STP9",
+  "kind": "implementation",
+  "products": [
+    "ProjectionPlan",
+    "BindingOriginId",
+    "ComponentUseId",
+    "GenericBinderRef",
+    "OrderedAttributeOp",
+    "BranchEdge"
+  ],
+  "owner": "compiler.sfc-ts-projection:plan",
+  "implementationHome": "crates/verter_compiler/src/framework_common/projection_plan/mod.rs",
+  "backendSurface": "VueProjectionBackend::projection_plan (dormant vs project_ide; STP58 owns activation)",
+  "codeTransformSurface": "ProjectionPlan::syntax_obligations",
+  "predecessors": {
+    "STP8": {
+      "consumes": ["AcceptedVueConstructorABI", "AcceptedTopologyMatrix"],
+      "genericBinders": ["T", "U"],
+      "abiSpelling": "Comp<T = unknown, U = unknown>"
+    },
+    "CCA1J": {
+      "consumes": "existing IDE projection route and source/identity contract",
+      "duplicateImplementation": false
+    }
+  },
+  "identities": {
+    "ComponentUseId": {
+      "inputs": ["SourceUnitId lineage", "lexical scope", "component expression", "ancestor path", "operation signature", "occurrence among matching uses"],
+      "notInputs": ["byte offsets", "content hashes alone", "generated companion text"]
+    },
+    "BindingOriginId": {
+      "inputs": ["SourceUnitId lineage", "lexical scope", "binder kind", "spelling"],
+      "distinctNestedSameSpelling": true,
+      "distinctSiblingSameSpelling": true
+    },
+    "BranchEdge": {
+      "inputs": ["expression identity", "outcome", "lexical environment", "preceding excluded conditions"],
+      "forbidden": ["concatenated condition strings", "native flow graph"]
+    },
+    "OrderedAttributeOp": {
+      "kinds": ["v-bind", "v-on", "static", "bound", "model"]
+    },
+    "GenericBinderRef": {
+      "family": "STP8 two-binder Comp<T, U>",
+      "members": ["T", "U"]
+    }
+  },
+  "planConstruction": {
+    "typeInfo": false,
+    "assignability": false,
+    "storesGeneratedText": false,
+    "referencesAdmittedExpressions": true
+  },
+  "completeCache": {
+    "incompleteCannotWarm": true,
+    "malformedCachedAsComplete": false,
+    "unknownSyntaxCachedAsComplete": false,
+    "cancelledCannotWarm": true,
+    "configurationMissingCannotWarm": true
+  },
+  "stateSafety": {
+    "incrementalEqualsFresh": true,
+    "logicalUseDistinctFromRevisionObservation": true,
+    "publicationOwner": "existing provider/LSO snapshot authority"
+  },
+  "svelteRoute": "preserved; STS0/STS15 own Svelte activation",
+  "deletionPopulationThisNode": [],
+  "ac2Observability": {
+    "diagnostics": "TypeScript diagnostics through existing ProjectionBackend/CodeTransform",
+    "types": "TypeScript type answers; InstanceType<typeof Comp> preserved",
+    "sourceTargets": "SourceUnitId lineage; no invented locations",
+    "hoverDefinitionReferencesEdits": "harness probes plus ComponentUse observation roles"
+  },
+  "ac3Rationale": "CompletePlanCache refuses incomplete/unknown-syntax/cancelled observations. Fresh and incremental observations match for the same snapshot. Publication stays with provider/LSO.",
+  "ac4Rationale": "Plan construction walks the admitted parse and the existing template OXC pass once. No second generated-text parse, no helper expansion, no TypeInfo.",
+  "runtimeActivationAuthorized": false
+}
