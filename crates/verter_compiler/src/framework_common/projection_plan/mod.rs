@@ -20,7 +20,7 @@ use verter_identity::identity::{InputBasisId, ParseKey, SourceUnitId, SyntaxProf
 
 use crate::assembly::source_unit::{carrier_revision, carrier_source_id};
 use crate::ast::types::{AstNodeKind, ElementNode, ElementNodeConditionKind, InterpolationNode};
-use crate::ide::get_directive_name;
+use crate::ide::{event_to_jsx_name, get_directive_name};
 use crate::parser::types::ParsedSfc;
 use crate::template::oxc::parse_template_expressions;
 use crate::template::oxc::types::{
@@ -171,6 +171,8 @@ pub struct OrderedAttributeOp {
     pub name: String,
     /// Admitted value expression, when present.
     pub expression: Option<AdmittedExpressionId>,
+    /// Admitted dynamic argument expression (`:[key]`), when present.
+    pub argument: Option<AdmittedExpressionId>,
     /// Whether this bound/value-bearing channel participates in inference.
     pub inference_participation: bool,
 }
@@ -489,7 +491,7 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
         oxc_span::SourceType::tsx(),
         false,
     );
-    let root_scope = mint_scope(None, "template-root", &[], "", "", 0);
+    let root_scope = mint_scope(None, "template-root", &[], "", "", "", 0);
     let mut builder = PlanBuilder {
         source: input.source,
         ast,
@@ -511,7 +513,7 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
         .as_ref()
         .map(|c| c.children.as_slice())
         .unwrap_or(&[]);
-    builder.walk_nodes(root_children, &root_scope, &[], &[]);
+    builder.walk_nodes(root_children, &root_scope, &[]);
     builder.finish(snapshot, input_basis, template_unit)
 }
 
@@ -571,6 +573,7 @@ fn mint_scope(
     binders: &[String],
     spelling: &str,
     host: &str,
+    path: &str,
     occurrence: u32,
 ) -> LexicalScopeId {
     let mut encoder = CanonicalEncoder::new(SCOPE_DOMAIN);
@@ -578,10 +581,11 @@ fn mint_scope(
     encoder.field_str(2, kind);
     encoder.field_str(3, spelling);
     encoder.field_str(4, host);
-    encoder.field_u32(5, occurrence);
-    encoder.field_u32(6, binders.len() as u32);
+    encoder.field_str(5, path);
+    encoder.field_u32(6, occurrence);
+    encoder.field_u32(7, binders.len() as u32);
     for (i, name) in binders.iter().enumerate() {
-        encoder.field_str(7 + i as u16, name);
+        encoder.field_str(8 + i as u16, name);
     }
     LexicalScopeId(Canonical::from_encoder(&encoder))
 }
@@ -591,6 +595,8 @@ fn mint_expression(
     env: &LexicalScopeId,
     kind: ExpressionKind,
     spelling: &str,
+    path: &str,
+    role: &str,
     occurrence: u32,
 ) -> AdmittedExpressionId {
     let mut encoder = CanonicalEncoder::new(EXPR_DOMAIN);
@@ -598,7 +604,9 @@ fn mint_expression(
     encoder.field_bytes(2, env.digest().as_bytes());
     encoder.field_str(3, kind.tag());
     encoder.field_str(4, spelling);
-    encoder.field_u32(5, occurrence);
+    encoder.field_str(5, path);
+    encoder.field_str(6, role);
+    encoder.field_u32(7, occurrence);
     AdmittedExpressionId(Canonical::from_encoder(&encoder))
 }
 
@@ -697,8 +705,8 @@ struct PlanBuilder<'a> {
     obligations: Vec<SyntaxObligation>,
     reasons: Vec<Incompleteness>,
     use_counts: FxHashMap<(CanonicalDigest, String, String, String), u32>,
-    expr_counts: FxHashMap<(CanonicalDigest, &'static str, String), u32>,
-    scope_counts: FxHashMap<(CanonicalDigest, String, String, String, String), u32>,
+    expr_counts: FxHashMap<(CanonicalDigest, &'static str, String, String, String), u32>,
+    scope_counts: FxHashMap<(CanonicalDigest, String, String, String, String, String), u32>,
 }
 
 impl<'a> PlanBuilder<'a> {
@@ -728,13 +736,7 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    fn walk_nodes(
-        &mut self,
-        ids: &[NodeId],
-        env: &LexicalScopeId,
-        parent_locals: &[String],
-        ancestors: &[String],
-    ) {
+    fn walk_nodes(&mut self, ids: &[NodeId], env: &LexicalScopeId, ancestors: &[String]) {
         let mut chain: Option<OpenBranch> = None;
         for &id in ids {
             match &self.ast.nodes[id.0].kind {
@@ -746,10 +748,10 @@ impl<'a> PlanBuilder<'a> {
                 }
                 AstNodeKind::Interpolation(interp) => {
                     chain = None;
-                    self.admit_interpolation(id, interp, env);
+                    self.admit_interpolation(id, interp, env, ancestors);
                 }
                 AstNodeKind::Element(el) => {
-                    self.walk_element(id, el, env, parent_locals, ancestors, &mut chain);
+                    self.walk_element(id, el, env, ancestors, &mut chain);
                 }
             }
         }
@@ -760,7 +762,6 @@ impl<'a> PlanBuilder<'a> {
         id: NodeId,
         el: &ElementNode,
         env: &LexicalScopeId,
-        parent_locals: &[String],
         ancestors: &[String],
         chain: &mut Option<OpenBranch>,
     ) {
@@ -770,25 +771,22 @@ impl<'a> PlanBuilder<'a> {
         };
         let host = open_tag_name(&el.tag_open, self.source);
 
-        let mut child_env = env.clone();
-        let mut child_locals: Vec<String> = parent_locals.to_vec();
-        if let Some(v_for) = el.v_for.as_ref() {
-            let (scope, locals) = self.push_vfor_scope(v_for, oxc_el, env, host);
-            child_env = scope;
-            child_locals.extend(locals);
-        }
+        // Vue evaluates same-element v-if before v-for; the condition lives in
+        // the parent environment. Loop aliases are not visible to it.
+        self.record_condition(el, oxc_el, env, ancestors, host, chain);
 
-        self.record_condition(el, oxc_el, &child_env, chain);
+        let mut child_env = env.clone();
+        if let Some(v_for) = el.v_for.as_ref() {
+            child_env = self.push_vfor_scope(v_for, oxc_el, env, host, ancestors);
+        }
 
         let component_env = child_env.clone();
         if let Some(v_slot) = el.v_slot.as_ref() {
-            let (scope, locals) = self.push_slot_scope(v_slot, &child_env, oxc_el, host);
-            child_env = scope;
-            child_locals.extend(locals);
+            child_env = self.push_slot_scope(v_slot, &child_env, oxc_el, host, ancestors);
         }
 
         if el.tag_type.is_component() || is_dynamic_component(el, self.source) {
-            self.record_component_use(el, oxc_el, &component_env, ancestors);
+            self.record_component_use(el, oxc_el, &component_env, ancestors, host);
         } else {
             self.scan_unadmitted_props(el, oxc_el);
         }
@@ -800,7 +798,7 @@ impl<'a> PlanBuilder<'a> {
             .unwrap_or(&[]);
         let mut child_ancestors = ancestors.to_vec();
         child_ancestors.push(host.to_string());
-        self.walk_nodes(children, &child_env, &child_locals, &child_ancestors);
+        self.walk_nodes(children, &child_env, &child_ancestors);
     }
 
     fn record_condition(
@@ -808,6 +806,8 @@ impl<'a> PlanBuilder<'a> {
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
+        ancestors: &[String],
+        host: &str,
         chain: &mut Option<OpenBranch>,
     ) {
         let Some(condition) = el.v_condition.as_ref() else {
@@ -835,6 +835,9 @@ impl<'a> PlanBuilder<'a> {
                     spelling.trim(),
                     start,
                     end,
+                    ancestors,
+                    host,
+                    "branch",
                 );
                 let excluded = match condition.kind {
                     ElementNodeConditionKind::If => {
@@ -898,24 +901,25 @@ impl<'a> PlanBuilder<'a> {
         oxc_el: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
         host: &str,
-    ) -> (LexicalScopeId, Vec<String>) {
+        ancestors: &[String],
+    ) -> LexicalScopeId {
         let Some(value) = prop_value(self.source, v_for) else {
             self.reasons.push(Incompleteness::UnadmittedExpression {
                 kind: ExpressionKind::VForSource,
             });
-            return (env.clone(), Vec::new());
+            return env.clone();
         };
         let Some(parsed) = oxc_el.and_then(|el| el.v_for.as_ref()) else {
             self.reasons.push(Incompleteness::UnadmittedExpression {
                 kind: ExpressionKind::VForSource,
             });
-            return (env.clone(), Vec::new());
+            return env.clone();
         };
         if !parsed.parsed.result.is_ok() {
             self.reasons.push(Incompleteness::UnadmittedExpression {
                 kind: ExpressionKind::VForSource,
             });
-            return (env.clone(), Vec::new());
+            return env.clone();
         }
         let start = v_for.value_start.unwrap_or(v_for.start);
         let end = v_for.value_end.unwrap_or(v_for.name_end);
@@ -926,27 +930,52 @@ impl<'a> PlanBuilder<'a> {
             .map(|span| self.source[span.start as usize..span.end as usize].to_string())
             .filter(|n| !n.is_empty())
             .collect();
-        let source_spelling = parsed
+        let (source_spelling, src_start, src_end) = parsed
             .parsed
             .result
             .right
             .as_ref()
             .map(|_| {
-                let off = parsed.parsed.result.right_offset as usize;
-                let slice = &self.source[start as usize..end as usize];
-                slice.get(off..).unwrap_or(value).trim().to_string()
+                let right_start = parsed.parsed.result.right_offset;
+                let right_end = end;
+                if (right_start as usize) < (right_end as usize)
+                    && (right_end as usize) <= self.source.len()
+                {
+                    (
+                        self.source[right_start as usize..right_end as usize]
+                            .trim()
+                            .to_string(),
+                        right_start,
+                        right_end,
+                    )
+                } else {
+                    (value.trim().to_string(), start, end)
+                }
             })
-            .unwrap_or_else(|| value.trim().to_string());
+            .unwrap_or_else(|| (value.trim().to_string(), start, end));
         let _ = self.admit_expr(
             env,
             ExpressionKind::VForSource,
             &source_spelling,
-            start,
-            end,
+            src_start,
+            src_end,
+            ancestors,
+            host,
+            "v-for",
         );
         let spelling = value.trim();
-        let occurrence = self.next_scope_occurrence(env, "v-for", &names, spelling, host);
-        let scope = mint_scope(Some(env), "v-for", &names, spelling, host, occurrence);
+        let occurrence =
+            self.next_scope_occurrence(env, "v-for", &names, spelling, host, ancestors);
+        let path = ancestors.join("/");
+        let scope = mint_scope(
+            Some(env),
+            "v-for",
+            &names,
+            spelling,
+            host,
+            &path,
+            occurrence,
+        );
         for name in &names {
             let id = mint_origin(&self.template_unit, &scope, BinderKind::VForAlias, name);
             self.origins.push(BindingOrigin {
@@ -956,7 +985,7 @@ impl<'a> PlanBuilder<'a> {
                 lexical_env: scope.clone(),
             });
         }
-        (scope, names)
+        scope
     }
 
     fn push_slot_scope(
@@ -965,9 +994,34 @@ impl<'a> PlanBuilder<'a> {
         env: &LexicalScopeId,
         oxc_el: Option<&OxcParsedElement<'a>>,
         host: &str,
-    ) -> (LexicalScopeId, Vec<String>) {
+        ancestors: &[String],
+    ) -> LexicalScopeId {
         let val = prop_value(self.source, v_slot);
         let parsed = oxc_el.and_then(|el| el.v_slot.as_ref());
+        if v_slot.is_dynamic == Some(true) {
+            match parsed.and_then(|slot| slot.dynamic_name.as_ref()) {
+                Some(name) if !oxc_unadmitted(Some(name)) => {
+                    if let Some((spelling, start, end)) = dynamic_arg_inner(self.source, v_slot) {
+                        let _ = self.admit_expr(
+                            env,
+                            ExpressionKind::AttributeValue,
+                            spelling,
+                            start,
+                            end,
+                            ancestors,
+                            host,
+                            "slot-name",
+                        );
+                    }
+                }
+                _ => {
+                    self.reasons.push(Incompleteness::UnadmittedExpression {
+                        kind: ExpressionKind::AttributeValue,
+                    });
+                    return env.clone();
+                }
+            }
+        }
         if let Some(val) = val {
             if !val.trim().is_empty() {
                 match parsed {
@@ -976,18 +1030,37 @@ impl<'a> PlanBuilder<'a> {
                         self.reasons.push(Incompleteness::UnadmittedExpression {
                             kind: ExpressionKind::SlotParams,
                         });
-                        return (env.clone(), Vec::new());
+                        return env.clone();
                     }
                 }
                 let start = v_slot.value_start.unwrap_or(v_slot.start);
                 let end = v_slot.value_end.unwrap_or(v_slot.name_end);
-                let _ = self.admit_expr(env, ExpressionKind::SlotParams, val.trim(), start, end);
+                let _ = self.admit_expr(
+                    env,
+                    ExpressionKind::SlotParams,
+                    val.trim(),
+                    start,
+                    end,
+                    ancestors,
+                    host,
+                    "slot-params",
+                );
             }
         }
         let names = slot_local_names(self.source, parsed);
         let spelling = val.map(str::trim).unwrap_or("");
-        let occurrence = self.next_scope_occurrence(env, "v-slot", &names, spelling, host);
-        let scope = mint_scope(Some(env), "v-slot", &names, spelling, host, occurrence);
+        let occurrence =
+            self.next_scope_occurrence(env, "v-slot", &names, spelling, host, ancestors);
+        let path = ancestors.join("/");
+        let scope = mint_scope(
+            Some(env),
+            "v-slot",
+            &names,
+            spelling,
+            host,
+            &path,
+            occurrence,
+        );
         for name in &names {
             let id = mint_origin(&self.template_unit, &scope, BinderKind::SlotProp, name);
             self.origins.push(BindingOrigin {
@@ -997,7 +1070,7 @@ impl<'a> PlanBuilder<'a> {
                 lexical_env: scope.clone(),
             });
         }
-        (scope, names)
+        scope
     }
 
     fn next_scope_occurrence(
@@ -1007,6 +1080,7 @@ impl<'a> PlanBuilder<'a> {
         binders: &[String],
         spelling: &str,
         host: &str,
+        ancestors: &[String],
     ) -> u32 {
         let key = (
             env.digest(),
@@ -1014,6 +1088,7 @@ impl<'a> PlanBuilder<'a> {
             binders.join("\0"),
             spelling.to_string(),
             host.to_string(),
+            ancestors.join("/"),
         );
         let slot = self.scope_counts.entry(key).or_insert(0);
         let n = *slot;
@@ -1027,18 +1102,22 @@ impl<'a> PlanBuilder<'a> {
         oxc_el: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
         ancestors: &[String],
+        host: &str,
     ) {
-        let (kind, spelling) = self.component_expression(el, oxc_el);
-        let tag_start = el.tag_open.start;
-        let tag_end = el.tag_open.name_end;
-        let expr = self.admit_expr(env, kind, &spelling, tag_start, tag_end);
-        let operations = self.collect_ops(el, oxc_el, env);
-        let ops_sig = operations
-            .iter()
-            .map(|op| format!("{:?}:{}", op.kind, op.name))
-            .collect::<Vec<_>>()
-            .join(",");
+        let (kind, spelling, expr_start, expr_end) = self.component_expression(el, oxc_el);
+        let operations = self.collect_ops(el, oxc_el, env, ancestors, host);
+        let ops_sig = op_signature(&operations, &self.expressions);
         let path_key = ancestors.join("/");
+        let expr = self.admit_expr(
+            env,
+            kind,
+            &spelling,
+            expr_start,
+            expr_end,
+            ancestors,
+            host,
+            &format!("{}:{ops_sig}", kind.tag()),
+        );
         let occurrence = {
             let slot = self
                 .use_counts
@@ -1070,6 +1149,13 @@ impl<'a> PlanBuilder<'a> {
                 kind: ObligationKind::AttributeOp,
                 expression: op.expression.clone(),
             });
+            if let Some(argument) = op.argument.as_ref() {
+                self.obligations.push(SyntaxObligation {
+                    use_id: Some(use_id.clone()),
+                    kind: ObligationKind::AttributeOp,
+                    expression: Some(argument.clone()),
+                });
+            }
         }
         for _slot in &provided_slots {
             self.obligations.push(SyntaxObligation {
@@ -1099,7 +1185,8 @@ impl<'a> PlanBuilder<'a> {
         &mut self,
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
-    ) -> (ExpressionKind, String) {
+    ) -> (ExpressionKind, String, u32, u32) {
+        let (tag_start, tag_end, tag_name) = open_tag_name_span(&el.tag_open, self.source);
         if is_dynamic_component(el, self.source) {
             if let Some((index, is_prop)) = el
                 .props
@@ -1107,15 +1194,39 @@ impl<'a> PlanBuilder<'a> {
                 .enumerate()
                 .find(|(_, p)| is_is_attr(p, self.source))
             {
-                if let Some(val) = prop_value(self.source, is_prop) {
-                    let parsed = oxc_el.and_then(|parsed| parsed.prop(index));
-                    if oxc_unadmitted(parsed.and_then(|p| p.exp.as_ref())) || val.trim().is_empty()
-                    {
-                        self.reasons.push(Incompleteness::UnadmittedExpression {
-                            kind: ExpressionKind::ComponentIs,
-                        });
+                if is_prop.is_directive {
+                    if let Some(val) = prop_value(self.source, is_prop) {
+                        let parsed = oxc_el.and_then(|parsed| parsed.prop(index));
+                        if oxc_unadmitted(parsed.and_then(|p| p.exp.as_ref()))
+                            || val.trim().is_empty()
+                        {
+                            self.reasons.push(Incompleteness::UnadmittedExpression {
+                                kind: ExpressionKind::ComponentIs,
+                            });
+                        }
+                        let start = is_prop.value_start.unwrap_or(is_prop.start);
+                        let end = is_prop.value_end.unwrap_or(is_prop.name_end);
+                        return (
+                            ExpressionKind::ComponentIs,
+                            val.trim().to_string(),
+                            start,
+                            end,
+                        );
                     }
-                    return (ExpressionKind::ComponentIs, val.trim().to_string());
+                    if let Some(arg) = arg_name(is_prop, self.source) {
+                        let start = is_prop.arg_start.unwrap_or(is_prop.start);
+                        let end = is_prop.arg_end.unwrap_or(is_prop.name_end);
+                        return (ExpressionKind::ComponentIs, kebab_to_camel(arg), start, end);
+                    }
+                } else if let Some(val) = prop_value(self.source, is_prop) {
+                    let start = is_prop.value_start.unwrap_or(is_prop.start);
+                    let end = is_prop.value_end.unwrap_or(is_prop.name_end);
+                    return (
+                        ExpressionKind::ComponentTag,
+                        val.trim().to_string(),
+                        start,
+                        end,
+                    );
                 }
             }
             self.reasons.push(Incompleteness::UnadmittedExpression {
@@ -1123,12 +1234,16 @@ impl<'a> PlanBuilder<'a> {
             });
             return (
                 ExpressionKind::ComponentIs,
-                open_tag_name(&el.tag_open, self.source).to_string(),
+                tag_name.to_string(),
+                tag_start,
+                tag_end,
             );
         }
         (
             ExpressionKind::ComponentTag,
-            open_tag_name(&el.tag_open, self.source).to_string(),
+            tag_name.to_string(),
+            tag_start,
+            tag_end,
         )
     }
 
@@ -1153,6 +1268,8 @@ impl<'a> PlanBuilder<'a> {
         el: &ElementNode,
         oxc_el: Option<&OxcParsedElement<'a>>,
         env: &LexicalScopeId,
+        ancestors: &[String],
+        host: &str,
     ) -> Vec<OrderedAttributeOp> {
         let mut ops = Vec::new();
         for (index, prop) in el.props.iter().enumerate() {
@@ -1167,8 +1284,24 @@ impl<'a> PlanBuilder<'a> {
                     kind: ExpressionKind::AttributeValue,
                 });
             }
-            let expression = match prop_value(self.source, prop) {
-                Some(val) if !exp_unadmitted && !arg_unadmitted => {
+            let argument = if !arg_unadmitted {
+                dynamic_arg_inner(self.source, prop).map(|(spelling, start, end)| {
+                    self.admit_expr(
+                        env,
+                        ExpressionKind::AttributeValue,
+                        spelling,
+                        start,
+                        end,
+                        ancestors,
+                        host,
+                        &format!("arg:{name}"),
+                    )
+                })
+            } else {
+                None
+            };
+            let expression = if !exp_unadmitted && !arg_unadmitted {
+                if let Some(val) = prop_value(self.source, prop) {
                     let start = prop.value_start.unwrap_or(prop.start);
                     let end = prop.value_end.unwrap_or(prop.name_end);
                     Some(self.admit_expr(
@@ -1177,16 +1310,35 @@ impl<'a> PlanBuilder<'a> {
                         val.trim(),
                         start,
                         end,
+                        ancestors,
+                        host,
+                        &format!("value:{name}"),
                     ))
+                } else {
+                    shorthand_value(prop, self.source, kind).map(|(spelling, start, end)| {
+                        self.admit_expr(
+                            env,
+                            ExpressionKind::AttributeValue,
+                            &spelling,
+                            start,
+                            end,
+                            ancestors,
+                            host,
+                            &format!("value:{name}"),
+                        )
+                    })
                 }
-                _ => None,
+            } else {
+                None
             };
+            let participates = op_participates(kind, expression.is_some());
             ops.push(OrderedAttributeOp {
                 index: index as u32,
                 kind,
                 name,
                 expression,
-                inference_participation: op_participates(kind),
+                argument,
+                inference_participation: participates,
             });
         }
         ops
@@ -1197,6 +1349,7 @@ impl<'a> PlanBuilder<'a> {
         id: NodeId,
         interp: &InterpolationNode,
         env: &LexicalScopeId,
+        ancestors: &[String],
     ) {
         if interp.inner_start >= interp.inner_end {
             return;
@@ -1221,9 +1374,13 @@ impl<'a> PlanBuilder<'a> {
             spelling,
             interp.inner_start,
             interp.inner_end,
+            ancestors,
+            "",
+            "interpolation",
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn admit_expr(
         &mut self,
         env: &LexicalScopeId,
@@ -1231,17 +1388,35 @@ impl<'a> PlanBuilder<'a> {
         spelling: &str,
         start: u32,
         end: u32,
+        ancestors: &[String],
+        host: &str,
+        role: &str,
     ) -> AdmittedExpressionId {
+        let path = expr_path(ancestors, host);
         let occurrence = {
             let slot = self
                 .expr_counts
-                .entry((env.digest(), kind.tag(), spelling.to_string()))
+                .entry((
+                    env.digest(),
+                    kind.tag(),
+                    spelling.to_string(),
+                    path.clone(),
+                    role.to_string(),
+                ))
                 .or_insert(0);
             let n = *slot;
             *slot += 1;
             n
         };
-        let id = mint_expression(&self.template_unit, env, kind, spelling, occurrence);
+        let id = mint_expression(
+            &self.template_unit,
+            env,
+            kind,
+            spelling,
+            &path,
+            role,
+            occurrence,
+        );
         self.expressions.push(ExpressionOccurrence {
             id: id.clone(),
             kind,
@@ -1269,7 +1444,7 @@ fn is_dynamic_component(el: &ElementNode, source: &str) -> bool {
 
 fn is_is_attr(prop: &NodeProp, source: &str) -> bool {
     if !prop.is_directive {
-        return false;
+        return source.get(prop.start as usize..prop.name_end as usize) == Some("is");
     }
     if get_directive_name(prop, source) != "bind" {
         return false;
@@ -1280,7 +1455,7 @@ fn is_is_attr(prop: &NodeProp, source: &str) -> bool {
     }
 }
 
-fn open_tag_name<'a>(tag: &NodeTag, source: &'a str) -> &'a str {
+fn open_tag_name_span<'a>(tag: &NodeTag, source: &'a str) -> (u32, u32, &'a str) {
     let bytes = source.as_bytes();
     let mut i = tag.start as usize + 1;
     let end = tag.name_end as usize;
@@ -1288,9 +1463,13 @@ fn open_tag_name<'a>(tag: &NodeTag, source: &'a str) -> &'a str {
         i += 1;
     }
     if i > end {
-        return "";
+        return (tag.name_end, tag.name_end, "");
     }
-    &source[i..end]
+    (i as u32, tag.name_end, &source[i..end])
+}
+
+fn open_tag_name<'a>(tag: &NodeTag, source: &'a str) -> &'a str {
+    open_tag_name_span(tag, source).2
 }
 
 fn prop_value<'a>(source: &'a str, prop: &NodeProp) -> Option<&'a str> {
@@ -1312,7 +1491,7 @@ fn classify_op(prop: &NodeProp, source: &str) -> Option<(AttributeOpKind, String
         "if" | "else-if" | "else" | "for" | "slot" | "once" => None,
         "on" => Some((
             AttributeOpKind::VOn,
-            event_handler_key(arg_name(prop, source).unwrap_or("on")),
+            event_to_jsx_name(arg_name(prop, source).unwrap_or("on")),
         )),
         "model" => Some((
             AttributeOpKind::Model,
@@ -1332,24 +1511,100 @@ fn classify_op(prop: &NodeProp, source: &str) -> Option<(AttributeOpKind, String
     }
 }
 
-fn event_handler_key(arg: &str) -> String {
-    if arg.len() >= 3 && arg.starts_with("on") {
-        let rest = &arg[2..];
-        if rest.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-            return arg.to_string();
-        }
+fn op_participates(kind: AttributeOpKind, has_value: bool) -> bool {
+    match kind {
+        AttributeOpKind::Static => has_value,
+        _ => true,
     }
-    let mut out = String::from("on");
-    let mut chars = arg.chars();
-    if let Some(c) = chars.next() {
-        out.push(c.to_ascii_uppercase());
-        out.extend(chars);
+}
+
+fn kebab_to_camel(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut upper = false;
+    for c in input.chars() {
+        if c == '-' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
     }
     out
 }
 
-fn op_participates(kind: AttributeOpKind) -> bool {
-    !matches!(kind, AttributeOpKind::Static)
+fn dynamic_arg_inner<'a>(source: &'a str, prop: &NodeProp) -> Option<(&'a str, u32, u32)> {
+    if prop.is_dynamic != Some(true) {
+        return None;
+    }
+    let start = prop.arg_start?;
+    let end = prop.arg_end?;
+    if start >= end || (end as usize) > source.len() {
+        return None;
+    }
+    let raw = &source[start as usize..end as usize];
+    let (inner_start, inner_end) = if raw.starts_with('[') && raw.ends_with(']') && raw.len() >= 2 {
+        (start + 1, end - 1)
+    } else {
+        (start, end)
+    };
+    if inner_start >= inner_end {
+        return None;
+    }
+    Some((
+        source[inner_start as usize..inner_end as usize].trim(),
+        inner_start,
+        inner_end,
+    ))
+}
+
+fn shorthand_value(
+    prop: &NodeProp,
+    source: &str,
+    kind: AttributeOpKind,
+) -> Option<(String, u32, u32)> {
+    if !matches!(kind, AttributeOpKind::Bound | AttributeOpKind::Model) {
+        return None;
+    }
+    if prop.is_dynamic == Some(true) {
+        return None;
+    }
+    let arg = arg_name(prop, source)?;
+    let start = prop.arg_start?;
+    let end = prop.arg_end?;
+    Some((kebab_to_camel(arg), start, end))
+}
+
+fn expr_path(ancestors: &[String], host: &str) -> String {
+    if host.is_empty() {
+        ancestors.join("/")
+    } else if ancestors.is_empty() {
+        host.to_string()
+    } else {
+        format!("{}/{host}", ancestors.join("/"))
+    }
+}
+
+fn op_signature(ops: &[OrderedAttributeOp], expressions: &[ExpressionOccurrence]) -> String {
+    ops.iter()
+        .map(|op| {
+            let value = op
+                .expression
+                .as_ref()
+                .and_then(|id| expressions.iter().find(|e| e.id == *id))
+                .map(|e| e.spelling.as_str())
+                .unwrap_or("");
+            let argument = op
+                .argument
+                .as_ref()
+                .and_then(|id| expressions.iter().find(|e| e.id == *id))
+                .map(|e| e.spelling.as_str())
+                .unwrap_or("");
+            format!("{:?}:{}:{value}:{argument}", op.kind, op.name)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn arg_name<'a>(prop: &NodeProp, source: &'a str) -> Option<&'a str> {
@@ -1394,6 +1649,9 @@ fn collect_provided_slots(
         slots.push(provided_slot(
             arg_name(v_slot, source).unwrap_or("default").to_string(),
         ));
+        // Component-level slot content belongs to that slot; it is not also
+        // implicit default content.
+        return slots;
     }
     let Some(content) = el.content.as_ref() else {
         return slots;
@@ -1597,6 +1855,137 @@ mod tests {
                 "plan construction must not call {needle}"
             );
         }
+        for path in crate_paths(production) {
+            assert!(
+                crate_path_allowed(&path),
+                "plan construction must not reach {path}"
+            );
+        }
+        let input = PlanInput {
+            canonical_id: "file:///ids.vue",
+            source: IDS_BASE,
+            parsed: &crate::compile::parse_sfc(IDS_BASE, None, None),
+            parse_key: None,
+            syntax_profile: None,
+        };
+        let _ = build_projection_plan(input);
+        let number = concat!(
+            "<script setup lang=\"ts\">\n",
+            "const x: number = 1;\n",
+            "</script>\n",
+            "<template>\n",
+            "  <Foo :bar=\"x\" />\n",
+            "</template>\n",
+        );
+        let string = concat!(
+            "<script setup lang=\"ts\">\n",
+            "const x: string = 'a';\n",
+            "</script>\n",
+            "<template>\n",
+            "  <Foo :bar=\"x\" />\n",
+            "</template>\n",
+        );
+        let from_number = plan_from_source("file:///typed.vue", number);
+        let from_string = plan_from_source("file:///typed.vue", string);
+        assert!(from_number.is_complete());
+        assert!(from_string.is_complete());
+        assert_eq!(from_number.uses.len(), from_string.uses.len());
+        assert_eq!(
+            from_number.uses[0]
+                .operations
+                .iter()
+                .map(|op| (op.kind, op.name.as_str(), op.inference_participation))
+                .collect::<Vec<_>>(),
+            from_string.uses[0]
+                .operations
+                .iter()
+                .map(|op| (op.kind, op.name.as_str(), op.inference_participation))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            from_number
+                .expressions()
+                .iter()
+                .map(|e| (e.kind, e.spelling.as_str()))
+                .collect::<Vec<_>>(),
+            from_string
+                .expressions()
+                .iter()
+                .map(|e| (e.kind, e.spelling.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    const TYPE_FREE_CRATE_ALLOWLIST: &[&str] = &[
+        "crate::assembly::source_unit",
+        "crate::ast::types",
+        "crate::ide::event_to_jsx_name",
+        "crate::ide::get_directive_name",
+        "crate::parser::types",
+        "crate::template::oxc",
+        "crate::types",
+        "crate::compile::parse_sfc",
+    ];
+
+    fn crate_path_allowed(path: &str) -> bool {
+        TYPE_FREE_CRATE_ALLOWLIST
+            .iter()
+            .any(|allow| path == *allow || path.starts_with(&format!("{allow}::")))
+    }
+
+    fn ident_len(src: &str) -> usize {
+        let mut chars = src.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return 0,
+        }
+        let mut n = 1;
+        for c in chars {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+
+    fn crate_paths(src: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut rest = src;
+        while let Some(at) = rest.find("crate::") {
+            let from = &rest[at..];
+            let mut end = "crate::".len();
+            loop {
+                let ident = ident_len(&from[end..]);
+                if ident == 0 {
+                    break;
+                }
+                end += ident;
+                if from[end..].starts_with("::") {
+                    end += 2;
+                    continue;
+                }
+                break;
+            }
+            let path = from[..end].strip_suffix("::").unwrap_or(&from[..end]);
+            if from[path.len()..].starts_with("::{") {
+                if let Some(close) = from[path.len() + 3..].find('}') {
+                    let inner = &from[path.len() + 3..path.len() + 3 + close];
+                    for item in inner.split(',') {
+                        let name = item.split(" as ").next().unwrap_or(item).trim();
+                        if ident_len(name) == name.len() && !name.is_empty() {
+                            paths.push(format!("{path}::{name}"));
+                        }
+                    }
+                    rest = &from[path.len() + 3 + close..];
+                    continue;
+                }
+            }
+            paths.push(path.to_string());
+            rest = &from[path.len()..];
+        }
+        paths
     }
 
     #[test]
@@ -1810,6 +2199,22 @@ mod tests {
         assert_ne!(&same_tag_plan.uses[0].id, original);
         assert_eq!(original, &subtree_plan.uses[1].id);
         assert_ne!(&subtree_plan.uses[0].id, original);
+        let value_expr = |plan: &ProjectionPlan, use_idx: usize| {
+            let op = plan.uses[use_idx]
+                .operations
+                .iter()
+                .find(|op| op.name == "value")
+                .expect("value");
+            op.expression.clone().expect("value expr")
+        };
+        let base_value = value_expr(&base_plan, 0);
+        assert_eq!(base_value, value_expr(&same_tag_plan, 1));
+        assert_eq!(base_value, value_expr(&subtree_plan, 1));
+        assert_eq!(
+            base_plan.expression(&base_value).unwrap().spelling,
+            same_tag_plan.expression(&base_value).unwrap().spelling
+        );
+        assert_eq!(base_plan.expression(&base_value).unwrap().spelling, "x");
     }
 
     #[test]
@@ -1836,17 +2241,32 @@ mod tests {
     }
 
     #[test]
-    fn vif_on_vfor_evaluates_in_loop_scope() {
-        let src = sfc("  <li v-for=\"item in items\" v-if=\"item.ok\">{{ item }}</li>\n");
-        let plan = plan_from_source("file:///loop-if.vue", &src);
-        assert!(plan.is_complete(), "{:?}", plan.completeness);
-        let origin = plan
+    fn vif_on_vfor_evaluates_in_parent_scope() {
+        let same = sfc("  <li v-for=\"item in items\" v-if=\"show\">{{ item }}</li>\n");
+        let nested = sfc(
+            "  <template v-for=\"item in items\"><li v-if=\"item.ok\">{{ item }}</li></template>\n",
+        );
+        let same_plan = plan_from_source("file:///loop-if.vue", &same);
+        let nested_plan = plan_from_source("file:///loop-if-nested.vue", &nested);
+        assert!(same_plan.is_complete(), "{:?}", same_plan.completeness);
+        assert!(nested_plan.is_complete(), "{:?}", nested_plan.completeness);
+        let same_origin = same_plan
             .origins
             .iter()
             .find(|o| o.name == "item")
             .expect("item origin");
-        assert_eq!(plan.branches.len(), 1);
-        assert_eq!(plan.branches[0].lexical_env, origin.lexical_env);
+        assert_eq!(same_plan.branches.len(), 1);
+        assert_ne!(same_plan.branches[0].lexical_env, same_origin.lexical_env);
+        let nested_origin = nested_plan
+            .origins
+            .iter()
+            .find(|o| o.name == "item")
+            .expect("nested item");
+        assert_eq!(nested_plan.branches.len(), 1);
+        assert_eq!(
+            nested_plan.branches[0].lexical_env,
+            nested_origin.lexical_env
+        );
     }
 
     #[test]
@@ -1880,7 +2300,7 @@ mod tests {
     fn malformed_required_expressions_are_incomplete() {
         cache_refuses(&sfc("  {{ foo. }}\n"));
         cache_refuses(&sfc("  {{ foo( }}\n"));
-        cache_refuses(&sfc("  <component :is />\n"));
+        cache_refuses(&sfc("  <component />\n"));
         cache_refuses(&sfc("  <div :title=\"foo(\" />\n"));
         cache_refuses(&sfc("  <Foo :[foo(]=\"bar\" />\n"));
         cache_refuses(&sfc("  <Foo :title=\"foo(\" />\n"));
@@ -1963,6 +2383,14 @@ mod tests {
         assert!(foo.provided_slots.iter().any(|s| s.name == "default"));
         assert!(!foo.provided_slots.iter().any(|s| s.name == "named"));
         assert!(bar.provided_slots.iter().any(|s| s.name == "named"));
+        let component_level = sfc("  <Foo #named>hi</Foo>\n");
+        let named_plan = plan_from_source("file:///slots.vue", &component_level);
+        let names: Vec<&str> = named_plan.uses[0]
+            .provided_slots
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["named"]);
     }
 
     #[test]
@@ -2006,6 +2434,23 @@ mod tests {
             .find(|op| op.name == "onChange")
             .expect("bound onChange");
         assert!(bound.inference_participation);
+        let static_src = sfc("  <List modelValue=\"hello\" />\n");
+        let static_plan = plan_from_source("file:///infer.vue", &static_src);
+        let static_op = static_plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.kind == AttributeOpKind::Static && op.name == "modelValue")
+            .expect("static modelValue");
+        assert!(static_op.inference_participation);
+        assert!(static_op.expression.is_some());
+        let bound_lit = sfc("  <List :modelValue=\"'hello'\" />\n");
+        let bound_plan = plan_from_source("file:///infer.vue", &bound_lit);
+        let bound_op = bound_plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.name == "modelValue")
+            .expect("bound modelValue");
+        assert!(bound_op.inference_participation);
     }
 
     #[test]
@@ -2035,11 +2480,246 @@ mod tests {
             !production.contains("parse_vfor_with_bindings_sliced"),
             "loop walk must consume the retained v-for product"
         );
-        let plan = plan_from_source(
-            "file:///vfor.vue",
-            &sfc("  <div v-for=\"item in items\" :key=\"item\">{{ item }}</div>\n"),
+        assert!(
+            !production.contains("parent_locals"),
+            "plan walk must not thread a write-only parent_locals accumulation"
         );
+        let src = sfc("  <div v-for=\"item in items\" :key=\"item\">{{ item }}</div>\n");
+        let plan = plan_from_source("file:///vfor.vue", &src);
         assert!(plan.is_complete(), "{:?}", plan.completeness);
         assert_eq!(plan.origins.len(), 1);
+        let source = plan
+            .expressions()
+            .iter()
+            .find(|e| e.kind == ExpressionKind::VForSource)
+            .expect("v-for source");
+        assert_eq!(source.spelling, "items");
+        assert_eq!(&src[source.start as usize..source.end as usize], "items");
+    }
+
+    #[test]
+    fn same_parent_same_signature_insertion_preserves_surviving_use() {
+        let base = sfc("  <section><Foo :value=\"foo\" /></section>\n");
+        let inserted = sfc("  <section><Foo :value=\"is\" /><Foo :value=\"foo\" /></section>\n");
+        let unrelated =
+            sfc("  <section><Foo :value=\"unrelated\" /><Foo :value=\"foo\" /></section>\n");
+        let base_plan = plan_from_source("file:///same-sig.vue", &base);
+        let inserted_plan = plan_from_source("file:///same-sig.vue", &inserted);
+        let unrelated_plan = plan_from_source("file:///same-sig.vue", &unrelated);
+        assert!(base_plan.is_complete(), "{:?}", base_plan.completeness);
+        assert!(inserted_plan.is_complete());
+        assert!(unrelated_plan.is_complete());
+        let original = &base_plan.uses[0].id;
+        assert_eq!(original, &inserted_plan.uses[1].id);
+        assert_ne!(&inserted_plan.uses[0].id, original);
+        assert_eq!(original, &unrelated_plan.uses[1].id);
+        assert_ne!(&unrelated_plan.uses[0].id, original);
+    }
+
+    #[test]
+    fn component_occurrence_slices_match_spelling() {
+        let static_src = sfc("  <Comp />\n");
+        let dynamic_src = sfc("  <component :is=\"Chosen\" />\n");
+        let static_plan = plan_from_source("file:///span.vue", &static_src);
+        let dynamic_plan = plan_from_source("file:///span.vue", &dynamic_src);
+        assert!(static_plan.is_complete(), "{:?}", static_plan.completeness);
+        assert!(
+            dynamic_plan.is_complete(),
+            "{:?}",
+            dynamic_plan.completeness
+        );
+        let static_occ = static_plan
+            .expression(&static_plan.uses[0].component_expression)
+            .expect("static occ");
+        assert_eq!(static_occ.spelling, "Comp");
+        assert_eq!(
+            &static_src[static_occ.start as usize..static_occ.end as usize],
+            "Comp"
+        );
+        let dynamic_occ = dynamic_plan
+            .expression(&dynamic_plan.uses[0].component_expression)
+            .expect("dynamic occ");
+        assert_eq!(dynamic_occ.spelling, "Chosen");
+        assert_eq!(
+            &dynamic_src[dynamic_occ.start as usize..dynamic_occ.end as usize],
+            "Chosen"
+        );
+        assert_eq!(dynamic_occ.kind, ExpressionKind::ComponentIs);
+    }
+
+    #[test]
+    fn shorthand_vbind_retains_same_name_expression() {
+        let short = sfc("  <Foo :value />\n");
+        let explicit = sfc("  <Foo :value=\"value\" />\n");
+        let short_plan = plan_from_source("file:///short.vue", &short);
+        let explicit_plan = plan_from_source("file:///short.vue", &explicit);
+        assert!(short_plan.is_complete(), "{:?}", short_plan.completeness);
+        assert!(explicit_plan.is_complete());
+        let short_op = short_plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.name == "value")
+            .expect("short value");
+        let id = short_op.expression.as_ref().expect("shorthand expr");
+        let occ = short_plan.expression(id).expect("locator");
+        assert_eq!(occ.spelling, "value");
+        assert_eq!(&short[occ.start as usize..occ.end as usize], "value");
+        let explicit_op = explicit_plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.name == "value")
+            .expect("explicit value");
+        assert_eq!(
+            explicit_plan
+                .expression(explicit_op.expression.as_ref().expect("explicit expr"))
+                .unwrap()
+                .spelling,
+            "value"
+        );
+        let dyn_is = sfc("  <component :is />\n");
+        let dyn_plan = plan_from_source("file:///short-is.vue", &dyn_is);
+        assert!(dyn_plan.is_complete(), "{:?}", dyn_plan.completeness);
+        let is_occ = dyn_plan
+            .expression(&dyn_plan.uses[0].component_expression)
+            .expect("is occ");
+        assert_eq!(is_occ.spelling, "is");
+        assert_eq!(&dyn_is[is_occ.start as usize..is_occ.end as usize], "is");
+    }
+
+    #[test]
+    fn dynamic_attribute_argument_is_admitted() {
+        let src = sfc("  <Foo :[key]=\"value\" />\n");
+        let plan = plan_from_source("file:///dyn-arg.vue", &src);
+        assert!(plan.is_complete(), "{:?}", plan.completeness);
+        let op = plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.name.contains("key"))
+            .expect("dynamic op");
+        let arg = op.argument.as_ref().expect("argument identity");
+        let occ = plan.expression(arg).expect("arg locator");
+        assert_eq!(occ.spelling, "key");
+        assert_eq!(&src[occ.start as usize..occ.end as usize], "key");
+        let value = op.expression.as_ref().expect("value identity");
+        assert_eq!(plan.expression(value).unwrap().spelling, "value");
+    }
+
+    #[test]
+    fn event_handler_keys_keep_authored_on_prefix_distinct() {
+        let src = sfc("  <Foo @change=\"a\" @onChange=\"b\" :onChange=\"c\" />\n");
+        let plan = plan_from_source("file:///events.vue", &src);
+        assert!(plan.is_complete(), "{:?}", plan.completeness);
+        let names: Vec<&str> = plan.uses[0]
+            .operations
+            .iter()
+            .map(|op| op.name.as_str())
+            .collect();
+        assert!(names.contains(&"onChange"), "{names:?}");
+        assert!(names.contains(&"onOnChange"), "{names:?}");
+        let von_on_change = plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.kind == AttributeOpKind::VOn && op.name == "onOnChange");
+        assert!(von_on_change.is_some(), "{names:?}");
+        let bound = plan.uses[0]
+            .operations
+            .iter()
+            .find(|op| op.kind == AttributeOpKind::Bound && op.name == "onChange");
+        assert!(bound.is_some(), "{names:?}");
+    }
+
+    #[test]
+    fn static_is_is_complete_without_identifier_kind() {
+        let static_src = sfc("  <component is=\"Foo\" />\n");
+        let bound_src = sfc("  <component :is=\"Foo\" />\n");
+        let static_plan = plan_from_source("file:///is.vue", &static_src);
+        let bound_plan = plan_from_source("file:///is.vue", &bound_src);
+        assert!(static_plan.is_complete(), "{:?}", static_plan.completeness);
+        assert!(bound_plan.is_complete(), "{:?}", bound_plan.completeness);
+        let static_occ = static_plan
+            .expression(&static_plan.uses[0].component_expression)
+            .expect("static is");
+        assert_eq!(static_occ.kind, ExpressionKind::ComponentTag);
+        assert_eq!(static_occ.spelling, "Foo");
+        assert_eq!(
+            &static_src[static_occ.start as usize..static_occ.end as usize],
+            "Foo"
+        );
+        let bound_occ = bound_plan
+            .expression(&bound_plan.uses[0].component_expression)
+            .expect("bound is");
+        assert_eq!(bound_occ.kind, ExpressionKind::ComponentIs);
+        assert_eq!(bound_occ.spelling, "Foo");
+    }
+
+    #[test]
+    fn malformed_dynamic_slot_names_cannot_warm_complete_cache() {
+        cache_refuses(&sfc("  <Foo><template #[foo(]>hi</template></Foo>\n"));
+        cache_refuses(&sfc("  <Foo v-slot:[foo(]=\"{}\">hi</Foo>\n"));
+        let valid = sfc("  <Foo><template #[name]>hi</template></Foo>\n");
+        let plan = plan_from_source("file:///dyn-slot.vue", &valid);
+        assert!(plan.is_complete(), "{:?}", plan.completeness);
+        let name = plan
+            .expressions()
+            .iter()
+            .find(|e| e.spelling == "name")
+            .expect("dynamic slot name");
+        assert_eq!(&valid[name.start as usize..name.end as usize], "name");
+    }
+
+    #[test]
+    fn unrelated_loop_subtree_does_not_shift_scope_or_use() {
+        let base = sfc("  <section><div v-for=\"item in items\"><Foo /></div></section>\n");
+        let inserted = sfc(concat!(
+            "  <aside><div v-for=\"item in items\"><Bar /></div></aside>\n",
+            "  <section><div v-for=\"item in items\"><Foo /></div></section>\n",
+        ));
+        let base_plan = plan_from_source("file:///scope-insert.vue", &base);
+        let inserted_plan = plan_from_source("file:///scope-insert.vue", &inserted);
+        assert!(base_plan.is_complete(), "{:?}", base_plan.completeness);
+        assert!(inserted_plan.is_complete());
+        let base_origin = base_plan
+            .origins
+            .iter()
+            .find(|o| o.name == "item")
+            .expect("base item");
+        let surviving = inserted_plan
+            .origins
+            .iter()
+            .find(|o| {
+                o.name == "item"
+                    && inserted_plan.uses.iter().any(|u| {
+                        u.lexical_env == o.lexical_env && {
+                            inserted_plan
+                                .expression(&u.component_expression)
+                                .is_some_and(|e| e.spelling == "Foo")
+                        }
+                    })
+            })
+            .expect("surviving item");
+        assert_eq!(base_origin.id, surviving.id);
+        let base_foo = &base_plan.uses[0].id;
+        let inserted_foo = inserted_plan
+            .uses
+            .iter()
+            .find(|u| {
+                inserted_plan
+                    .expression(&u.component_expression)
+                    .is_some_and(|e| e.spelling == "Foo")
+            })
+            .expect("Foo")
+            .id
+            .clone();
+        assert_eq!(base_foo, &inserted_foo);
+    }
+
+    #[test]
+    fn type_free_crate_path_allowlist_rejects_helper_escape() {
+        let dirty = "fn forbidden() { crate::ide::template::choose_answer(); }\n";
+        assert!(crate_paths(dirty)
+            .iter()
+            .any(|path| !crate_path_allowed(path)));
+        assert!(crate_path_allowed("crate::ide::get_directive_name"));
+        assert!(!crate_path_allowed("crate::ide::template::choose_answer"));
     }
 }

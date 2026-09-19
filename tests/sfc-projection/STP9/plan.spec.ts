@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   ACCEPTED_PRODUCTS,
   DIRTY_CACHE,
+  DIRTY_TYPEINFO_HELPER,
   STP9_MANDATORY_CASES,
   assertCompleteCachePolicy,
   assertRustCases,
   assertTypeFree,
+  cratePathAllowed,
+  cratePaths,
   cloneJson,
   evaluateRejectTwins,
   evaluateStp9,
@@ -32,6 +35,14 @@ test("STP9-type-free: plan construction does not call TypeInfo or assignability"
     assertTypeFree(dirty).some((error) => error.caseId === "STP9-type-free"),
     JSON.stringify(assertTypeFree(dirty)),
   );
+  const helper = `${productionPlanSource()}\nfn forbidden() { ${DIRTY_TYPEINFO_HELPER}(); }\n`;
+  assert.ok(
+    assertTypeFree(helper).some((error) => error.caseId === "STP9-type-free"),
+    JSON.stringify(assertTypeFree(helper)),
+  );
+  assert.equal(cratePathAllowed("crate::ide::get_directive_name"), true);
+  assert.equal(cratePathAllowed("crate::ide::template::choose_answer"), false);
+  assert.ok(cratePaths(helper).includes(DIRTY_TYPEINFO_HELPER));
 });
 
 test("STP9-complete-cache: malformed syntax cannot warm a complete plan cache", () => {
