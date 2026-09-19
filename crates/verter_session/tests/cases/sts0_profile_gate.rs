@@ -1046,9 +1046,13 @@ fn any_default_export_declaration(declaration: &str) -> Option<String> {
     // generic `{ … }` spelling nest, so a plain find would cut early).
     let mut depth = 0usize;
     let mut end = None;
+    let mut prev = '\0';
     for (offset, ch) in declaration[head_at..].char_indices() {
         match ch {
             '<' | '{' | '(' | '[' => depth += 1,
+            // `=>` carries a `>` that closes no `<`; counting it desyncs
+            // the depth and terminates the type inside a generic argument.
+            '>' if prev == '=' => {}
             '>' | '}' | ')' | ']' => depth = depth.saturating_sub(1),
             ';' if depth == 0 => {
                 end = Some(head_at + offset);
@@ -1056,6 +1060,7 @@ fn any_default_export_declaration(declaration: &str) -> Option<String> {
             }
             _ => {}
         }
+        prev = ch;
     }
     let end = end?;
     Some(format!(
@@ -1063,6 +1068,25 @@ fn any_default_export_declaration(declaration: &str) -> Option<String> {
         &declaration[..end],
         &declaration[end + 1..]
     ))
+}
+
+#[test]
+fn any_default_export_declaration_does_not_cut_inside_arrow_types() {
+    let declaration = concat!(
+        "declare const C: import(\"svelte\").Component<",
+        "{ a: (x: number) => void; b: (y: number) => void; c: string }",
+        ">;\nexport default C;\n",
+    );
+    let corrupted = any_default_export_declaration(declaration)
+        .expect("the Component<{…}> declaration must splice");
+    assert!(
+        corrupted.contains("c: string }>& any;"),
+        "=> must not decrement depth or the splice lands inside the object type:\n{corrupted}"
+    );
+    assert!(
+        !corrupted.contains("void& any"),
+        "the any splice must not land on an arrow return:\n{corrupted}"
+    );
 }
 
 // --- STS0-svelte-pin: the executed native launcher is the pinned one ------

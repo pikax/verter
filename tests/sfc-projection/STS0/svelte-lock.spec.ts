@@ -281,11 +281,8 @@ test("STS0-svelte-inventory: selected membership derives from the population aut
 });
 
 test("STS0-svelte-inventory: mode-shared features stay both and legacy-only stays legacy", () => {
-  assert.equal(
-    assertModeClassification(INVENTORY()).length,
-    0,
-    JSON.stringify(assertModeClassification(INVENTORY()), null, 2),
-  );
+  const modeErrors = assertModeClassification(INVENTORY());
+  assert.equal(modeErrors.length, 0, JSON.stringify(modeErrors, null, 2));
   const sharedAsLegacy = cloneJson(INVENTORY());
   const storeRow = sharedAsLegacy.rows.find((row) => row.id === "legacy-store-auto-subscription");
   assert.ok(storeRow, "store row must exist");
@@ -623,8 +620,10 @@ test("STS0-svelte-abi: clean rune probe matches the pinned $derived expression s
 });
 
 test("STS0 products validate and every reject twin is rejected", () => {
-  assert.equal(validateSts0Products().length, 0, JSON.stringify(validateSts0Products(), null, 2));
-  assert.equal(evaluateRejectTwins().length, 0, JSON.stringify(evaluateRejectTwins(), null, 2));
+  const productErrors = validateSts0Products();
+  assert.equal(productErrors.length, 0, JSON.stringify(productErrors, null, 2));
+  const twinErrors = evaluateRejectTwins();
+  assert.equal(twinErrors.length, 0, JSON.stringify(twinErrors, null, 2));
   const sts0 = evaluateSts0();
   assert.equal(sts0.errors.length, 0, JSON.stringify(sts0.errors, null, 2));
 });

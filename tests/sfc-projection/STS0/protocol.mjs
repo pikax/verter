@@ -2702,7 +2702,12 @@ export function evaluateSts0(input = {}) {
   errors.push(...validateSts0Products());
   const policy = loadSts0Product("svelte-projection-policy.json");
   const inventory = loadSts0Product("svelte-current-feature-inventory.json");
-  errors.push(...assertModeClassification(inventory, { compile: input.compile ?? undefined }));
+  errors.push(
+    ...assertModeClassification(inventory, {
+      repoRoot: input.repoRoot ?? REPO_ROOT,
+      compile: input.compile ?? undefined,
+    }),
+  );
   // skipLive is the harness product-only path (skipProbes). The live cargo
   // gate remains mandatory when skipLive is unset (charter §14).
   errors.push(
