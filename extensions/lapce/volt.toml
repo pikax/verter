@@ -1,5 +1,5 @@
 name = "verter-volt"
-version = "0.1.0"
+version = "0.0.2"
 author = "pikax"
 display-name = "Verter (Vue / Svelte)"
 description = "Vue & Svelte language support powered by the Verter LSP"
