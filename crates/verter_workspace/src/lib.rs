@@ -149,7 +149,9 @@ pub use config::{
     normalize_path_buf, parse_tsconfig_json, raw_paths_json, resolve_tsconfig_extends,
     strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
-pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
+pub use engine::{
+    known_canonicals_calls, reset_known_canonicals_calls, SVELTE_RUNE_AMBIENT_PARSER_FLAG,
+};
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use fact_cache::{

@@ -3906,7 +3906,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
         );
 
-        if augmenter_set.entries.is_empty() {
+        let allow_automatic_libs = !host.semantic_compiler_options_for("").no_lib;
+        let population_hit = artifact_store.global_contributor_index().snapshot().lookup(
+            &target,
+            decl_name,
+            overlay_discriminator,
+            allow_automatic_libs,
+        );
+        let has_file_scope = population_hit.entries.iter().any(|entry| {
+            matches!(
+                entry.origin,
+                crate::global_contributors::ContributorOrigin::FileScopeInterface
+                    | crate::global_contributors::ContributorOrigin::FileScopeNamespace
+            )
+        });
+        if augmenter_set.entries.is_empty() && !has_file_scope {
             return None;
         }
 
@@ -4169,6 +4183,101 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
+        for entry in population_hit.entries.iter() {
+            if !matches!(
+                entry.origin,
+                crate::global_contributors::ContributorOrigin::FileScopeInterface
+            ) {
+                continue;
+            }
+            let canonical = entry.artifact_key.canonical.as_ref();
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(canonical)
+                .map(|serve| serve.indexed)
+            else {
+                source_env_unobservable = true;
+                continue;
+            };
+            let Some((art, refreshed_key)) = artifact_store
+                .augmenter_artifacts_self_healing(&entry.artifact_key, indexed.whole_hash)
+            else {
+                source_env_unobservable = true;
+                continue;
+            };
+            let effective_artifact_key = refreshed_key
+                .clone()
+                .unwrap_or_else(|| entry.artifact_key.clone());
+            let Some(bundle) = self.ctx.prepared_decl_bundle(canonical) else {
+                source_env_unobservable = true;
+                continue;
+            };
+            let prepared = match bundle.prepared_type_decls.get_in(entry.owner, decl_name) {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => continue,
+                Err(_) => {
+                    source_env_unobservable = true;
+                    continue;
+                }
+            };
+            let aug_scope = NodeScopeId::File {
+                canonical_id: Arc::clone(&entry.artifact_key.canonical),
+                owner: entry.owner,
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            };
+            let aug_scope_payload = Some(
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                    entry.owner,
+                ),
+            );
+            let aug_shadowing =
+                crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                    aug_scope_payload.as_ref(),
+                );
+            let aug_env: FxHashMap<String, SemanticNodeId> = prepared
+                .type_parameters
+                .iter()
+                .zip(type_arguments.iter())
+                .map(|(param, argument)| (param.name.clone(), *argument))
+                .collect();
+            let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+            let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::clone(&entry.artifact_key.canonical),
+                        owner: entry.owner,
+                        symbol: Arc::from(decl_name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                    },
+                    path: Arc::from(
+                        Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
+                            .into_boxed_slice(),
+                    ),
+                },
+            );
+            let node = self.lower_located_body_with_provenance(
+                locator,
+                prepared.kind,
+                &prepared.type_parameters,
+                &prepared.name_resolution,
+                &aug_env,
+                &aug_scope,
+                aug_scope_payload.as_ref(),
+                &aug_shadowing,
+                &mut aug_subs,
+                context.into_structural_provenance(),
+            );
+            contributor_nodes.push(node);
+            contributor_roots.push(AugmentationContributorRoot {
+                canonical: Arc::clone(&entry.artifact_key.canonical),
+                whole_hash: indexed.whole_hash,
+                artifact_key: effective_artifact_key,
+            });
+            let _ = art;
+        }
+
         if contributor_nodes.is_empty() {
             // DISTINGUISH the two empty outcomes (they are NOT the same):
             //   - `source_env_unobservable == true`: augmenters targeted this
@@ -4287,23 +4396,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .import_target(name)
             .map(|t| t.source_specifier.clone())?;
 
-        // Program-completeness discovery for ambient external modules. Unlike a
-        // relative `declare module "./base"` augmenter (discovered via the
-        // base's reverse-dependency set), an ambient `declare module "<bare>"`
-        // DECLARER may be a program-root `.d.ts` that NOTHING imports (the
-        // canonical `vite/client` shape — referenced through tsconfig `types`/
-        // `include`, not the import graph). It is reachable only via program
-        // membership, so ensure every known program member is indexed BEFORE
-        // the `ExternalSpecifier` index scan — the augmentation index only sees
-        // loaded artifacts (R29). Loads are idempotent / content-hash cached;
-        // this mirrors the relative stitch's "index the candidate set, then scan
-        // once" shape, widened to program membership because an ambient module
-        // has no base-file anchor.
-        let host = self.ctx.host_for_fact_tracer_install();
-        for canonical in host.workspace().known_canonicals() {
-            let _ = self.ctx.ensure_indexed_ready_serve(&canonical);
-        }
-
+        // Contributor discovery for ambient external modules is the
+        // ingestion-time global contributor population: a program-root
+        // `.d.ts` that nothing imports is recorded when its `IndexedReady`
+        // publishes, so lookup does not scan program membership.
         let target =
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
         let AugmentationContributions {
@@ -10857,15 +10953,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name: &str,
         type_arguments: &[SemanticNodeId],
     ) -> Option<Vec<SemanticNodeId>> {
-        // Program-completeness discovery, as for an ambient external module: a
-        // `declare global` augmenter is typically a program-root `.d.ts` that
-        // nothing imports, and the augmentation index only sees loaded
-        // artifacts, so every known program member is indexed before the scan.
-        // Loads are idempotent and content-hash cached.
-        let host = self.ctx.host_for_fact_tracer_install();
-        for canonical in host.workspace().known_canonicals() {
-            let _ = self.ctx.ensure_indexed_ready_serve(&canonical);
-        }
+        // Contributor discovery for `declare global` is the ingestion-time
+        // population: a program-root `.d.ts` that nothing imports is
+        // recorded when its artifact publishes, so lookup does not scan
+        // program membership.
         let Some(AugmentationContributions {
             contributor_nodes,
             contributor_roots: _,

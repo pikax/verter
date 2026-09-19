@@ -1942,3 +1942,46 @@ fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result(
          got {surface:?}"
     );
 }
+
+#[test]
+fn unrelated_file_does_not_move_global_contributor_fingerprint() {
+    use crate::file_artifact_store::AugmentationTargetKind;
+
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/promise.d.ts",
+        "export {};\ndeclare global { interface Promise<T> { thenable: T } }\n",
+    );
+    let _ = host.ensure_indexed_ready("/promise.d.ts");
+    let before = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "Promise",
+            None,
+            true,
+        )
+        .fingerprint;
+    upsert_ts(host.as_ref(), "/unrelated.ts", "export const x = 1;\n");
+    let _ = host.ensure_indexed_ready("/unrelated.ts");
+    let after = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "Promise",
+            None,
+            true,
+        )
+        .fingerprint;
+    assert_eq!(
+        before, after,
+        "an unrelated file must not invalidate an augmented primitive's contributor fingerprint"
+    );
+}
