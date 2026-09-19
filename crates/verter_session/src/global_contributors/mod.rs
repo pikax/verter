@@ -376,13 +376,23 @@ pub struct GlobalContributorIndex {
     grouped: parking_lot::Mutex<GroupedState>,
     snapshot: parking_lot::RwLock<Arc<GlobalContributorPopulation>>,
     publish: parking_lot::Mutex<()>,
+    /// Serializes `note_live` / `note_gone` / `clear` so a concurrent
+    /// `clear` cannot drop `records` while a live note still writes
+    /// `grouped`.
+    mutate: parking_lot::Mutex<()>,
     revision: AtomicU64,
     /// Overlay `.ts` files with file-level `declare module`/`declare global`
-    /// that have not yet been IndexedReady. Drained from contribution
-    /// collection, not from upsert, so fence flights stay cold.
+    /// or file-scope script globals that have not yet been IndexedReady.
+    /// Drained from contribution collection, not from upsert, so fence
+    /// flights stay cold.
     pending_overlay_ambient: parking_lot::Mutex<FxHashSet<Arc<str>>>,
+    /// Fingerprint of the last snapshot-canonical set walked for ambient
+    /// / script-global ingest. Equal fingerprints skip the walk.
+    ingested_snapshot_fp: AtomicU64,
     #[cfg(test)]
     publish_sorted_entries: AtomicU64,
+    #[cfg(test)]
+    snapshot_scan_visits: AtomicU64,
 }
 
 impl std::fmt::Debug for GlobalContributorIndex {
@@ -412,10 +422,14 @@ impl GlobalContributorIndex {
                 by_symbol: Arc::new(FxHashMap::default()),
             })),
             publish: parking_lot::Mutex::new(()),
+            mutate: parking_lot::Mutex::new(()),
             revision: AtomicU64::new(0),
             pending_overlay_ambient: parking_lot::Mutex::new(FxHashSet::default()),
+            ingested_snapshot_fp: AtomicU64::new(0),
             #[cfg(test)]
             publish_sorted_entries: AtomicU64::new(0),
+            #[cfg(test)]
+            snapshot_scan_visits: AtomicU64::new(0),
         }
     }
 
@@ -438,10 +452,46 @@ impl GlobalContributorIndex {
         self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub fn snapshot_scan_visit_count(&self) -> u64 {
+        self.snapshot_scan_visits.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn reset_snapshot_scan_visit_count(&self) {
+        self.snapshot_scan_visits.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn note_snapshot_scan_visit(&self) {
+        self.snapshot_scan_visits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub(crate) fn ingested_snapshot_fingerprint(&self) -> u64 {
+        self.ingested_snapshot_fp.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_ingested_snapshot_fingerprint(&self, fingerprint: u64) {
+        self.ingested_snapshot_fp
+            .store(fingerprint, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn record_canonicals(&self) -> FxHashSet<Arc<str>> {
+        self.records
+            .iter()
+            .map(|entry| Arc::clone(&entry.key().canonical))
+            .collect()
+    }
+
     /// Record (or replace) the contributions of a live artifact version.
     /// Same-canonical overlay/base slots replace in place so retained
     /// old versions are not program membership.
     pub fn note_live(&self, key: FileArtifactKey, payload: &FileArtifacts) {
+        let _mutate = self.mutate.lock();
         let record = Arc::new(collect_file_contributions(&key, payload));
         let rec_key = RecordKey::from_artifact(&key);
         let previous = self.records.insert(rec_key, Arc::clone(&record));
@@ -454,6 +504,7 @@ impl GlobalContributorIndex {
 
     /// Drop a retired artifact from the unpublished record set.
     pub fn note_gone(&self, key: &FileArtifactKey) {
+        let _mutate = self.mutate.lock();
         let rec_key = RecordKey::from_artifact(key);
         let Some((_, previous)) = self.records.remove(&rec_key) else {
             return;
@@ -478,16 +529,18 @@ impl GlobalContributorIndex {
     }
 
     pub fn clear(&self) {
+        let _mutate = self.mutate.lock();
+        let _guard = self.publish.lock();
         self.records.clear();
         self.pending_overlay_ambient.lock().clear();
         self.grouped.lock().clear();
-        let _guard = self.publish.lock();
         *self.snapshot.write() = Arc::new(GlobalContributorPopulation {
             program_snapshot: 0,
             revision: 0,
             by_symbol: Arc::new(FxHashMap::default()),
         });
         self.revision.store(0, Ordering::Release);
+        self.ingested_snapshot_fp.store(0, Ordering::Release);
         #[cfg(test)]
         self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }
@@ -501,24 +554,35 @@ impl GlobalContributorIndex {
         if pinned != expected_epoch {
             return;
         }
-        self.publish_pinned(pinned, &live_epoch);
+        self.publish_pinned(pinned, &live_epoch, true);
     }
 
     /// Publish the current record set. Pin the live epoch, clone grouped
     /// state, and retry if membership moved during the clone so a racing
-    /// edit is not lost inside a claimed-current snapshot.
+    /// edit is not lost inside a claimed-current snapshot. Augmentation-index
+    /// mutations advance the epoch without publishing contributors; if
+    /// every pin attempt loses, still publish under the latest epoch so
+    /// the dirty set cannot stay unpublished until another contributor
+    /// mutation.
     pub fn publish_now(&self, live_epoch: impl Fn() -> u64) {
         let _guard = self.publish.lock();
         // bounded-loop: membership epoch retry
         for _ in 0..8 {
             let pinned = live_epoch();
-            if self.publish_pinned(pinned, &live_epoch) {
+            if self.publish_pinned(pinned, &live_epoch, true) {
                 return;
             }
         }
+        let pinned = live_epoch();
+        let _ = self.publish_pinned(pinned, &live_epoch, false);
     }
 
-    fn publish_pinned(&self, pinned: u64, live_epoch: &impl Fn() -> u64) -> bool {
+    fn publish_pinned(
+        &self,
+        pinned: u64,
+        live_epoch: &impl Fn() -> u64,
+        require_pin: bool,
+    ) -> bool {
         let by_symbol = {
             let mut grouped = self.grouped.lock();
             let prev = self.snapshot.read();
@@ -544,7 +608,7 @@ impl GlobalContributorIndex {
                 Arc::new(next)
             };
             drop(prev);
-            if live_epoch() != pinned {
+            if require_pin && live_epoch() != pinned {
                 return false;
             }
             grouped.dirty.clear();
@@ -832,6 +896,172 @@ fn source_has_file_module_syntax(source: &str) -> bool {
     let mut in_regex = false;
     let mut regex_class = false;
     let mut at_statement = true;
+    let mut can_regex = true;
+    let mut brace_depth: u32 = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_line {
+            if b == b'\n' {
+                in_line = false;
+                if brace_depth == 0 {
+                    at_statement = true;
+                }
+                can_regex = true;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_regex {
+            if b == b'\n' && !regex_class {
+                in_regex = false;
+                if brace_depth == 0 {
+                    at_statement = true;
+                }
+                can_regex = true;
+                i += 1;
+                continue;
+            }
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'[' {
+                regex_class = true;
+            } else if b == b']' {
+                regex_class = false;
+            } else if b == b'/' && !regex_class {
+                in_regex = false;
+                can_regex = false;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(closer) = string {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == closer {
+                string = None;
+                can_regex = false;
+                at_statement = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                in_line = true;
+                i += 2;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                in_block = true;
+                i += 2;
+            }
+            b'/' if can_regex => {
+                in_regex = true;
+                regex_class = false;
+                at_statement = false;
+                can_regex = false;
+                i += 1;
+            }
+            b'/' => {
+                at_statement = false;
+                can_regex = true;
+                i += 1;
+            }
+            b'\'' | b'"' | b'`' => {
+                string = Some(b);
+                at_statement = false;
+                can_regex = false;
+                i += 1;
+            }
+            b'{' | b'(' | b'[' => {
+                if b == b'{' {
+                    brace_depth = brace_depth.saturating_add(1);
+                    at_statement = true;
+                } else {
+                    at_statement = false;
+                }
+                can_regex = true;
+                i += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                at_statement = brace_depth == 0;
+                can_regex = true;
+                i += 1;
+            }
+            b')' | b']' => {
+                at_statement = false;
+                can_regex = false;
+                i += 1;
+            }
+            b'\n' | b';' => {
+                if brace_depth == 0 {
+                    at_statement = true;
+                }
+                can_regex = true;
+                i += 1;
+            }
+            b',' | b':' | b'=' | b'!' | b'?' | b'&' | b'|' | b'+' | b'-' | b'*' | b'%' | b'<'
+            | b'>' | b'^' | b'~' => {
+                at_statement = false;
+                can_regex = true;
+                i += 1;
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"export") => {
+                return true;
+            }
+            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"import") => {
+                let mut j = i + b"import".len();
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && (bytes[j] == b'(' || bytes[j] == b'.') {
+                    at_statement = false;
+                    can_regex = false;
+                    i += 1;
+                    continue;
+                }
+                return true;
+            }
+            _ => {
+                at_statement = false;
+                can_regex = false;
+                i += 1;
+            }
+        }
+    }
+    false
+}
+
+/// File-level `interface` / `namespace` in a script (no import/export).
+/// Nested declarations and module files are not file-scope globals.
+#[must_use]
+pub(crate) fn source_has_file_scope_global_contribution(source: &str) -> bool {
+    if source_has_file_module_syntax(source) {
+        return false;
+    }
+    if !source.contains("interface") && !source.contains("namespace") {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let mut in_line = false;
+    let mut in_block = false;
+    let mut string: Option<u8> = None;
+    let mut at_statement = true;
     let mut brace_depth: u32 = 0;
     while i < bytes.len() {
         let b = bytes[i];
@@ -850,21 +1080,6 @@ fn source_has_file_module_syntax(source: &str) -> bool {
                 in_block = false;
                 i += 2;
                 continue;
-            }
-            i += 1;
-            continue;
-        }
-        if in_regex {
-            if b == b'\\' && i + 1 < bytes.len() {
-                i += 2;
-                continue;
-            }
-            if b == b'[' {
-                regex_class = true;
-            } else if b == b']' {
-                regex_class = false;
-            } else if b == b'/' && !regex_class {
-                in_regex = false;
             }
             i += 1;
             continue;
@@ -889,12 +1104,6 @@ fn source_has_file_module_syntax(source: &str) -> bool {
                 in_block = true;
                 i += 2;
             }
-            b'/' => {
-                in_regex = true;
-                regex_class = false;
-                at_statement = false;
-                i += 1;
-            }
             b'\'' | b'"' | b'`' => {
                 string = Some(b);
                 at_statement = false;
@@ -917,19 +1126,35 @@ fn source_has_file_module_syntax(source: &str) -> bool {
                 i += 1;
             }
             b if b.is_ascii_whitespace() => i += 1,
-            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"export") => {
-                return true;
-            }
-            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"import") => {
-                let mut j = i + b"import".len();
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && (bytes[j] == b'(' || bytes[j] == b'.') {
-                    at_statement = false;
+            _ if at_statement && brace_depth == 0 && starts_with_ident(bytes, i, b"declare") => {
+                i += b"declare".len();
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                     i += 1;
-                    continue;
                 }
+                if starts_with_ident(bytes, i, b"namespace")
+                    || starts_with_ident(bytes, i, b"interface")
+                {
+                    return true;
+                }
+                if starts_with_ident(bytes, i, b"module") {
+                    let mut j = i + b"module".len();
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                        at_statement = false;
+                        i = j;
+                        continue;
+                    }
+                    return true;
+                }
+                at_statement = false;
+            }
+            _ if at_statement
+                && brace_depth == 0
+                && (starts_with_ident(bytes, i, b"interface")
+                    || starts_with_ident(bytes, i, b"namespace")) =>
+            {
                 return true;
             }
             _ => {

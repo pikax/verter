@@ -1,9 +1,12 @@
 //! Coherence of global contributor snapshots under concurrent publication.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::ContributorOrigin;
-use crate::file_artifact_store::{AugmentationTargetKind, FileArtifactStore};
+use super::{ContributorOrigin, GlobalContributorIndex};
+use crate::file_artifact_store::{
+    AugmentationTargetKind, FileArtifactKey, FileArtifactStore, FileArtifacts, BASE_PARSE_ENV_HASH,
+};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::ShallowFileState;
 
@@ -207,4 +210,74 @@ fn publication_pins_epoch_before_reading_membership() {
         before,
         "a publication must abandon when the live epoch moved after the pin"
     );
+}
+
+fn note_live_window(index: &GlobalContributorIndex) {
+    let source = "export {};\ndeclare global { interface Window { x: 1 } }\n";
+    let state = ShallowFileState::service_backed_for_test_at("/g.d.ts", source);
+    let src: Arc<str> = Arc::from(source);
+    let indexed =
+        IndexedReady::new_for_test_with_state(state.whole_hash, state, Arc::clone(&src), src);
+    let key = FileArtifactKey::for_indexed(Arc::from("/g.d.ts"), &indexed, BASE_PARSE_ENV_HASH);
+    let payload = FileArtifacts::with_indexed(Arc::new(indexed));
+    index.note_live(key, &payload);
+}
+
+#[test]
+fn publish_now_exhaustion_still_publishes_dirty_contributors() {
+    let index = GlobalContributorIndex::new();
+    note_live_window(&index);
+    let ticks = AtomicU64::new(0);
+    index.publish_now(|| ticks.fetch_add(1, Ordering::Relaxed) + 1);
+    let hit = index.snapshot().lookup(
+        &AugmentationTargetKind::GlobalAugmentation,
+        "Window",
+        None,
+        true,
+    );
+    assert!(
+        !hit.entries.is_empty(),
+        "retry exhaustion must still publish the dirty contributor set"
+    );
+}
+
+#[test]
+fn clear_cannot_publish_a_contributor_missing_from_records() {
+    let store = Arc::new(FileArtifactStore::new());
+    std::thread::scope(|scope| {
+        for t in 0..4 {
+            let store = Arc::clone(&store);
+            scope.spawn(move || {
+                for i in 0..24 {
+                    let canonical = format!("/g{t}_{i}.d.ts");
+                    publish(
+                        &store,
+                        &canonical,
+                        "export {};\ndeclare global { interface Window { x: 1 } }\n",
+                    );
+                }
+            });
+        }
+        let store = Arc::clone(&store);
+        scope.spawn(move || {
+            for _ in 0..48 {
+                store.global_contributor_index().clear();
+            }
+        });
+    });
+    let index = store.global_contributor_index();
+    let records = index.record_canonicals();
+    let published = index.snapshot().lookup(
+        &AugmentationTargetKind::GlobalAugmentation,
+        "Window",
+        None,
+        true,
+    );
+    for entry in published.entries.iter() {
+        assert!(
+            records.contains(&entry.artifact_key.canonical),
+            "published contributor {} must still exist in records",
+            entry.artifact_key.canonical
+        );
+    }
 }

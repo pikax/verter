@@ -42,6 +42,31 @@ fn lookup_path_source_has_no_known_canonicals_scan() {
         !nominal.contains("known_canonicals()"),
         "runtime_nominal_call_signatures must not scan known_canonicals"
     );
+    assert!(
+        nominal.contains("current_request_canonical"),
+        "runtime_nominal_call_signatures must use the request's compiler options"
+    );
+    assert!(
+        !nominal.contains("snapshot_canonicals()"),
+        "runtime_nominal_call_signatures must not pick the first workspace file"
+    );
+    assert!(
+        !nominal.contains("overlay_canonicals()"),
+        "runtime_nominal_call_signatures must not pick the first overlay file"
+    );
+    let collect = build
+        .split("fn collect_augmentation_contributions(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    fn ").next())
+        .expect("collect_augmentation_contributions body");
+    assert!(
+        collect.contains("enum OrderedOrigin"),
+        "augmenter and file-scope contributors must be ordered together before lowering"
+    );
+    assert!(
+        !collect.contains("let mut augmenter_order"),
+        "augmenter-only pre-sort must not run before file-scope lowering"
+    );
 }
 
 #[test]
@@ -263,4 +288,107 @@ fn source_has_ambient_contribution_matches_declare_module_and_global() {
     assert!(!source_has_ambient_contribution(
         "// declare module \"nope\" { }\nexport const x = 1;\n"
     ));
+}
+
+#[test]
+fn ordinary_script_file_scope_globals_index_before_population_lookup() {
+    use super::source_has_file_scope_global_contribution;
+    assert!(source_has_file_scope_global_contribution(
+        "interface Window { x: number }\n"
+    ));
+    assert!(source_has_file_scope_global_contribution(
+        "namespace N { export const v = 1; }\n"
+    ));
+    assert!(!source_has_file_scope_global_contribution(
+        "export {};\ninterface Window { x: number }\n"
+    ));
+    assert!(!source_has_file_scope_global_contribution(
+        "export const n = 1;\n"
+    ));
+
+    let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file(
+        "/globals.ts".to_owned(),
+        Arc::from("interface Window { x: number }\n"),
+    );
+    workspace.inject_file("/plain.ts".to_owned(), Arc::from("export const n = 1;\n"));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/globals.ts")
+            .is_none(),
+        "ordinary script globals must stay cold until population lookup"
+    );
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/plain.ts")
+            .is_none(),
+        "unrelated ordinary scripts must not be indexed"
+    );
+    host.ingest_program_ambient_roots();
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/globals.ts")
+            .is_some(),
+        "file-scope script globals must be IndexedReady before population lookup"
+    );
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/plain.ts")
+            .is_none(),
+        "unrelated ordinary scripts must stay cold after population lookup"
+    );
+    let hit = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "Window",
+            None,
+            true,
+        );
+    assert!(
+        !hit.entries.is_empty(),
+        "never-upserted ordinary script interface must enter the population"
+    );
+}
+
+#[test]
+fn upsert_does_not_rescan_snapshot_when_membership_is_unchanged() {
+    let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file(
+        "/ambient-test.d.ts".to_owned(),
+        Arc::from("declare module \"ambient-test\" { export const x: number }\n"),
+    );
+    workspace.inject_file("/app.ts".to_owned(), Arc::from("export const n = 1;\n"));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    let index = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index();
+    index.reset_snapshot_scan_visit_count();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/app.ts".to_owned()),
+            input_id: "/app.ts".to_owned(),
+            source: Arc::from("export const n = 2;\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert");
+    assert_eq!(
+        index.snapshot_scan_visit_count(),
+        0,
+        "an ordinary edit must not re-walk snapshot members"
+    );
 }

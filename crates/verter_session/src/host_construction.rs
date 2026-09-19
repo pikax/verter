@@ -32,6 +32,23 @@ fn is_ambient_declaration_canonical(canonical: &str) -> bool {
         || canonical.ends_with(".d.mts")
 }
 
+pub(crate) fn is_ordinary_typescript_canonical(canonical: &str) -> bool {
+    if is_ambient_declaration_canonical(canonical) {
+        return false;
+    }
+    canonical.ends_with(".ts") || canonical.ends_with(".tsx")
+}
+
+fn snapshot_membership_fingerprint(members: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    members.len().hash(&mut hasher);
+    for member in members {
+        member.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
 ///
 /// - `force_overflow_observations`: test-injection for the cold relation
@@ -1155,12 +1172,13 @@ impl VerterHost {
         let _ = self.ensure_indexed_ready_serve(canonical);
     }
 
-    /// Drain overlay `.ts` ambient contributors recorded at upsert.
-    /// Contribution collection calls this so a never-imported `.ts`
-    /// augmenter is IndexedReady before the index scan, without a
-    /// whole-program `read_file` and without consuming cold flights at
-    /// upsert.
+    /// Drain overlay `.ts` ambient / file-scope script contributors
+    /// recorded at construction or upsert. Contribution collection calls
+    /// this so a never-imported contributor is IndexedReady before the
+    /// index scan, without a whole-program `read_file` on every edit and
+    /// without consuming cold flights at upsert.
     pub(crate) fn ingest_program_ambient_roots(&self) {
+        self.ingest_injected_ambient_roots(None);
         let pending = self
             .project_type_store()
             .indexed()
@@ -1173,25 +1191,50 @@ impl VerterHost {
     }
 
     /// Ingest snapshot members that contribute globally and were never
-    /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`.
+    /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`
+    /// or unrelated ordinary scripts. Re-runs only when snapshot
+    /// membership changes.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
-        for member in self.workspace().snapshot_canonicals() {
+        let members = self.workspace().snapshot_canonicals();
+        let fingerprint = snapshot_membership_fingerprint(&members);
+        let index = self
+            .project_type_store()
+            .indexed()
+            .global_contributor_index();
+        if index.ingested_snapshot_fingerprint() == fingerprint {
+            return;
+        }
+        for member in &members {
             if except == Some(member.as_str()) {
                 continue;
             }
+            #[cfg(test)]
+            index.note_snapshot_scan_visit();
             if member.starts_with("ambient:/") {
-                let _ = self.ensure_loaded(&member);
-                let _ = self.ensure_indexed_ready_serve(&member);
+                let _ = self.ensure_loaded(member);
+                let _ = self.ensure_indexed_ready_serve(member);
                 continue;
             }
-            if !is_ambient_declaration_canonical(&member) {
+            if is_ambient_declaration_canonical(member) {
+                let Some(source) = self.workspace().read_file(member) else {
+                    continue;
+                };
+                self.ingest_ambient_contributor(member, source.as_ref());
                 continue;
             }
-            let Some(source) = self.workspace().read_file(&member) else {
+            if !is_ordinary_typescript_canonical(member) {
+                continue;
+            }
+            let Some(source) = self.workspace().read_file(member) else {
                 continue;
             };
-            self.ingest_ambient_contributor(&member, source.as_ref());
+            if crate::global_contributors::source_has_file_scope_global_contribution(
+                source.as_ref(),
+            ) {
+                index.note_pending_overlay_ambient(member);
+            }
         }
+        index.set_ingested_snapshot_fingerprint(fingerprint);
     }
 
     /// Host-owned scratch cache for the typeinfo

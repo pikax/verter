@@ -230,6 +230,19 @@ fn trailing_export_empty_makes_a_module() {
 }
 
 #[test]
+fn division_slash_does_not_hide_trailing_export_empty() {
+    assert_eq!(classify("foo / bar; export {};\n"), FileModuleKind::Module);
+    assert_eq!(
+        classify("const x = /export/;\ninterface W { x: 1 }\n"),
+        FileModuleKind::Script
+    );
+    assert_eq!(
+        classify("const x = /foo/; export {};\n"),
+        FileModuleKind::Module
+    );
+}
+
+#[test]
 fn same_canonical_replacement_keeps_one_live_version() {
     let store = FileArtifactStore::new();
     publish(

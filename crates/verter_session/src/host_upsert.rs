@@ -1042,13 +1042,19 @@ impl VerterHost {
             );
         }
         self.ingest_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
-        if crate::global_contributors::source_has_ambient_contribution(req.source.as_ref())
-            && !canonical_id.ends_with(".d.ts")
-            && !canonical_id.ends_with(".d.tsx")
-            && !canonical_id.ends_with(".d.cts")
-            && !canonical_id.ends_with(".d.mts")
-            && !canonical_id.starts_with("ambient:/")
-        {
+        let pending_overlay =
+            (crate::global_contributors::source_has_ambient_contribution(req.source.as_ref())
+                && !canonical_id.ends_with(".d.ts")
+                && !canonical_id.ends_with(".d.tsx")
+                && !canonical_id.ends_with(".d.cts")
+                && !canonical_id.ends_with(".d.mts")
+                && !canonical_id.starts_with("ambient:/"))
+                || (crate::host_construction::is_ordinary_typescript_canonical(
+                    canonical_id.as_ref(),
+                ) && crate::global_contributors::source_has_file_scope_global_contribution(
+                    req.source.as_ref(),
+                ));
+        if pending_overlay {
             self.project_type_store()
                 .indexed()
                 .global_contributor_index()
