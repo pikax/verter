@@ -1,0 +1,22 @@
+{
+  "schema": "ExecutionContextBoundaryContract",
+  "version": 1,
+  "product": "ExecutionContextBoundaryContract",
+  "node": "STP7",
+  "executionContexts": ["server", "client"],
+  "sameProgram": {
+    "separateSupplementalFiles": "not-ambient-isolation",
+    "separateSupplementalFilesIsolateAmbient": false,
+    "separateCompilerOptions": false,
+    "sharedAmbientGlobals": true,
+    "rejectCase": "STP7-realm"
+  },
+  "holes": {
+    "twoWayMapping": true,
+    "literalHolesRetainAuthoredExpression": true,
+    "acceptCase": "STP7-holes"
+  },
+  "newFrontends": false,
+  "forbiddenFrontends": ["astro", "mdx", "lit"],
+  "abiOwner": "STP8"
+}

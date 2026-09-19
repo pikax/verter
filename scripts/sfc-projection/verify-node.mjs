@@ -67,6 +67,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP5-raw-cli",
     "STP5-capability",
   ]),
+  STP7: Object.freeze([
+    "STP7-svelte-shape",
+    "STP7-holes",
+    "STP7-realm",
+    "STP7-reuse",
+    "STP7-scope-claim",
+  ]),
 });
 
 export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
@@ -78,6 +85,7 @@ export function canonicalMandatoryCases(nodeId) {
 export const STP3_MANDATORY_CASES = NODE_MANDATORY_CASES.STP3;
 export const STP4_MANDATORY_CASES = NODE_MANDATORY_CASES.STP4;
 export const STP5_MANDATORY_CASES = NODE_MANDATORY_CASES.STP5;
+export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
 
 function usesCaseFileRunner(nodeId) {
   return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4";
@@ -1345,20 +1353,27 @@ function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } 
   return errors;
 }
 
-function evaluateHarnessRun(run, probes, engineId, { maxChecksPerFile = 1 } = {}) {
+function evaluateHarnessRun(
+  run,
+  probes,
+  engineId,
+  { maxChecksPerFile = 1, requireInstanceType = true } = {},
+) {
   const errors = [];
   errors.push(...assertCleanTwin(run.positive.diags, { fileLabel: `${engineId} clean twin` }));
   const instance = run.positive.observations.types.Instance;
-  if (!instance) {
-    errors.push(err("STP1-types", "vacuous-type", `${engineId} missing Instance type`));
-  } else {
-    errors.push(
-      ...assertExactType({
-        actual: instance.printed,
-        expected: probes.expectedInstanceType,
-        flags: instance.flags,
-      }),
-    );
+  if (requireInstanceType) {
+    if (!instance) {
+      errors.push(err("STP1-types", "vacuous-type", `${engineId} missing Instance type`));
+    } else {
+      errors.push(
+        ...assertExactType({
+          actual: instance.printed,
+          expected: probes.expectedInstanceType,
+          flags: instance.flags,
+        }),
+      );
+    }
   }
   const hover = run.positive.observations.hover;
   if (!hover) {
@@ -1554,7 +1569,12 @@ export async function verifyNode(options) {
       if (caseFiles) {
         errors.push(...evaluateStp2Run(run, probes, cases, engine.id, { maxChecksPerFile }));
       } else {
-        errors.push(...evaluateHarnessRun(run, probes, engine.id, { maxChecksPerFile }));
+        errors.push(
+          ...evaluateHarnessRun(run, probes, engine.id, {
+            maxChecksPerFile,
+            requireInstanceType: nodeId !== "STP7",
+          }),
+        );
       }
     }
     if (harnessRuns.length === 0) {
@@ -1584,6 +1604,16 @@ export async function verifyNode(options) {
     });
     errors.push(...stp5.errors);
     capabilityRows = stp5.capabilityRows;
+  }
+
+  if (nodeId === "STP7") {
+    const stp7 = await evaluateStp7Node({
+      repoRoot,
+      resolvedEngines,
+      skipProbes: options.skipProbes,
+      runnable,
+    });
+    errors.push(...stp7.errors);
   }
 
   return summarize({
@@ -1651,6 +1681,37 @@ function observationFromRun(run) {
     references: (run?.positive?.observations?.references || 0) > 0,
     edits: (run?.positive?.observations?.edits || []).length > 0,
   };
+}
+
+async function evaluateStp7Node({ repoRoot, resolvedEngines, skipProbes, runnable }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP7/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const errors = [];
+  if (skipProbes) {
+    const stp7 = await protocol.evaluateStp7();
+    errors.push(...stp7.errors);
+    return { errors };
+  }
+  if (!runnable) {
+    errors.push(err("STP7-svelte-shape", "missing-probes", "STP7 omitted runnable probes"));
+    return { errors };
+  }
+  if (resolvedEngines.length === 0) {
+    errors.push(
+      err("STP7-svelte-shape", "missing-probes", "STP7 selected zero engines for boundary proof"),
+    );
+    return { errors };
+  }
+  const jsEngine = resolvedEngines.find((engine) => engine.kind === "javascript");
+  let ts = null;
+  if (jsEngine) {
+    ts = loadJsTypeScript(jsEngine, repoRoot);
+  }
+  const stp7 = await protocol.evaluateStp7({ ts });
+  errors.push(...stp7.errors);
+  return { errors };
 }
 
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
@@ -1738,6 +1799,8 @@ function summarize({
     "tests/sfc-projection/STP4/probes/reject-supplemental-import.ts",
     "tests/sfc-projection/STP4/probes/accept-external-owner.ts",
     "tests/sfc-projection/STP4/probes/reject-illegal-vue.ts",
+    "tests/sfc-projection/STP7/probes/positive.ts",
+    "tests/sfc-projection/STP7/probes/negative.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -1786,17 +1849,20 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP7 svelte boundary)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP7 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
 executable under the same engine label, omitted probes, non-exact type matches,
 missing references, and duplicate file checks. STP5 additionally rejects Alias
 rename codecs, query-snapshot reuse, Verter-as-stock-CLI claims, duplicate
-guards, version-label capability, and dormant-product complete claims.
+guards, version-label capability, and dormant-product complete claims. STP7
+rejects Vue-constructor shims on Svelte Component, Vue-only shared records,
+one-way hole maps, same-program ambient-isolation claims, and full Astro/MDX/Lit
+support advertisements.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

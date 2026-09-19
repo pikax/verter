@@ -1,0 +1,86 @@
+{
+  "schema": "SecondFrameworkBoundaryEvidence",
+  "version": 1,
+  "product": "SecondFrameworkBoundaryEvidence",
+  "node": "STP7",
+  "kind": "proof",
+  "adapter": {
+    "id": "svelte",
+    "epoch": "svelte",
+    "backend": "SvelteProjectionBackend",
+    "publicShape": "import(\"svelte\").Component",
+    "vueConstructorShim": false,
+    "owner": "CCA1I"
+  },
+  "sharedOrigins": {
+    "vueConstructor": false,
+    "vueRef": false,
+    "vueDirective": false,
+    "vueEmit": false,
+    "sourceAuthority": "verter_language::registered_source_authority",
+    "adapterIdsDistinct": true
+  },
+  "fixtures": {
+    "genericComponent": "Widget",
+    "eachScope": "eachScope",
+    "snippet": "greetSnippet"
+  },
+  "cases": [
+    {
+      "id": "STP7-svelte-shape",
+      "disposition": "accept",
+      "observables": ["svelte-5-component", "generic", "each-scope", "snippet"]
+    },
+    {
+      "id": "STP7-holes",
+      "disposition": "accept",
+      "observables": ["authored-expression", "literal-holes", "two-way-map"]
+    },
+    {
+      "id": "STP7-realm",
+      "disposition": "reject",
+      "reason": "separate-supplemental-files-are-not-ambient-isolation",
+      "observables": ["same-program", "shared-ambient"]
+    },
+    {
+      "id": "STP7-reuse",
+      "disposition": "reject",
+      "reason": "vue-only-semantics-must-not-be-required-by-svelte",
+      "observables": ["no-vue-constructor", "no-vue-ref", "no-vue-directive", "no-vue-emit"]
+    },
+    {
+      "id": "STP7-scope-claim",
+      "disposition": "reject",
+      "reason": "receiving-obligation-is-not-full-product-certification",
+      "observables": ["ASTP", "MDXP", "LITP", "SvelteKit"]
+    }
+  ],
+  "receivingObligations": [
+    {
+      "id": "ASTP",
+      "role": "reusable-substrate",
+      "certifiedProduct": false
+    },
+    {
+      "id": "MDXP",
+      "role": "reusable-substrate",
+      "certifiedProduct": false
+    },
+    {
+      "id": "LITP",
+      "role": "reusable-substrate",
+      "certifiedProduct": false
+    },
+    {
+      "id": "SvelteKit",
+      "role": "reusable-substrate",
+      "certifiedProduct": false,
+      "terminal": "STS15"
+    }
+  ],
+  "fullFrameworkSupportClaim": false,
+  "productionOwner": "STS15",
+  "abiOwner": "STP8",
+  "ac3Rationale": "STP7 owns harness proof state only. Incremental=fresh and stale/cancelled publication for production projection remain with B4R0 lineage, LSO snapshot publication, CCA1I Svelte projection route, and TCM0R observation identity.",
+  "ac4Rationale": "STP7 does not change production projection hot paths. Bounded parse/check/emit stays with the existing Svelte ProjectionBackend route. This proof does not add a parallel framework resolver, checker, CSS or mapping authority."
+}
