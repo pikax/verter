@@ -22,6 +22,9 @@ use crate::framework_common::catalog::{ProjectionCap, TypedCapabilityRegistratio
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
 };
+use crate::framework_common::projection_plan::{
+    build_projection_plan, incomplete_missing_parse, PlanInput, ProjectionPlan,
+};
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
@@ -86,6 +89,27 @@ impl VueProjectionBackend {
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
         VueCarrierCompiler.carrier_language_id()
+    }
+
+    /// Source-backed projection plan (STP9). Dormant relative to
+    /// [`Self::project_ide`]: STP58 owns Vue atomic activation. Qualification
+    /// harnesses call this path directly. CodeTransform may consume only
+    /// [`ProjectionPlan::syntax_obligations`].
+    #[must_use]
+    pub fn projection_plan(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> ProjectionPlan {
+        match VueCarrierCompiler.parsed_sfc(artifact) {
+            Some(parsed) => build_projection_plan(PlanInput {
+                canonical_id,
+                source,
+                parsed,
+            }),
+            None => incomplete_missing_parse(canonical_id, source),
+        }
     }
 }
 
