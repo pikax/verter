@@ -22,6 +22,10 @@ use crate::framework_common::catalog::{ProjectionCap, TypedCapabilityRegistratio
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
 };
+use crate::framework_common::projection_plan::{
+    build_projection_plan, incomplete_missing_parse, incomplete_parse_snapshot_mismatch, PlanInput,
+    ProjectionPlan,
+};
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
@@ -86,6 +90,39 @@ impl VueProjectionBackend {
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
         VueCarrierCompiler.carrier_language_id()
+    }
+
+    /// Source-backed projection plan. Dormant relative to [`Self::project_ide`]:
+    /// Vue atomic activation owns the live-route switch. Qualification
+    /// harnesses call this path directly. CodeTransform may consume only
+    /// [`ProjectionPlan::syntax_obligations`].
+    #[must_use]
+    pub fn projection_plan(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> ProjectionPlan {
+        match VueCarrierCompiler.parsed_sfc(artifact) {
+            Some(parsed) => {
+                let exact_source = artifact
+                    .inventory()
+                    .source_spaces()
+                    .first()
+                    .is_some_and(|space| space.bytes().as_ref() == source);
+                if !exact_source {
+                    return incomplete_parse_snapshot_mismatch(canonical_id, source);
+                }
+                build_projection_plan(PlanInput {
+                    canonical_id,
+                    source,
+                    parsed,
+                    parse_key: Some(artifact.parse_key()),
+                    syntax_profile: Some(artifact.syntax_profile()),
+                })
+            }
+            None => incomplete_missing_parse(canonical_id, source),
+        }
     }
 }
 
