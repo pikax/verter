@@ -197,7 +197,12 @@ test("the sdk documentation gate passes once every topic is supplied executably"
         [manifestRel]: mutatedManifest((m) => {
           m.examples.push(
             { id: "sdk-authoring", files: ["sdk/authoring/run.ts"], commands: ["verter-tsc"] },
-            { id: "sdk-isolation", files: ["sdk/isolation/run.ts"], commands: ["verter-lsp"] },
+            {
+              id: "sdk-isolation",
+              files: ["sdk/isolation/run.ts"],
+              imports: ["@verter/component-meta"],
+              commands: ["verter-lsp"],
+            },
             { id: "sdk-permissions", files: ["sdk/permissions/run.ts"], commands: ["verter-mcp"] },
             {
               id: "sdk-contribution",
@@ -364,4 +369,112 @@ test("the sdk guide home and product record the delivery contract", () => {
   assert.ok(product.uncertaintyNotes.length > 0);
   assert.ok(product.migrationNotes.length > 0);
   assert.ok(product.permissions.length > 0);
+});
+
+test("a duplicate sdk guide topic id fails", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [manifestRel]: mutatedManifest((m) => {
+          m.sdkGuides.topics.push(structuredClone(m.sdkGuides.topics[0]));
+        }),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const dup = receipt.errors.find((item) => item.code === "sdk-duplicate-topic");
+  assert.ok(dup);
+  assert.equal(dup.id, manifest.sdkGuides.topics[0].id);
+});
+
+test("a broken link in the sdk guide index fails and is recorded", async () => {
+  const index = readFileSync(join(repoRoot, indexRel), "utf8");
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [indexRel]: `${index}\n[missing](./no-such-index-target.md)\n`,
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const broken = receipt.errors.find(
+    (item) => item.code === "broken-link" && item.href === "./no-such-index-target.md",
+  );
+  assert.ok(broken);
+  assert.equal(broken.id, "index");
+  const link = receipt.links.find(
+    (row) => row.from === indexRel && row.href === "./no-such-index-target.md",
+  );
+  assert.ok(link);
+  assert.equal(link.ok, false);
+});
+
+test("a supplied slot whose only imports are node builtins has no entry", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [manifestRel]: mutatedManifest((m) => {
+          m.examples.push({
+            id: "sdk-builtin-only",
+            files: ["sdk/builtin-only/run.ts"],
+            imports: ["node:fs"],
+          });
+          const isolation = m.sdkGuides.topics.find((topic) => topic.id === "isolation");
+          isolation.status = "supplied";
+          isolation.exampleId = "sdk-builtin-only";
+          delete isolation.producingNode;
+        }),
+        "examples/reference/sdk/builtin-only/run.ts":
+          'import { readFileSync } from "node:fs";\nexport const read = readFileSync;\n',
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const miss = receipt.errors.find((item) => item.code === "sdk-example-without-entry");
+  assert.ok(miss);
+  assert.equal(miss.id, "isolation");
+});
+
+test("a supplied slot whose page requires a shipped bin rejects an imports-only example", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [manifestRel]: mutatedManifest((m) => {
+          m.examples.push({
+            id: "sdk-imports-only",
+            files: ["sdk/imports-only/run.ts"],
+            imports: ["@verter/types"],
+          });
+          const packaging = m.sdkGuides.topics.find((topic) => topic.id === "packaging");
+          packaging.status = "supplied";
+          packaging.exampleId = "sdk-imports-only";
+          delete packaging.producingNode;
+        }),
+        "examples/reference/sdk/imports-only/run.ts":
+          'import { createProject } from "@verter/types";\nexport const project = createProject;\n',
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  const kind = receipt.errors.find((item) => item.code === "sdk-example-entry-kind");
+  assert.ok(kind);
+  assert.equal(kind.id, "packaging");
+  assert.equal(kind.required, "command");
+  assert.deepEqual(kind.supplied, ["import"]);
+});
+
+test("an sdk page edit changes the source digest", async () => {
+  const fresh = canonicalizeReceipt(await validate(opts()));
+  const page = readFileSync(join(repoRoot, packagingRel), "utf8");
+  const edited = canonicalizeReceipt(
+    await validate(
+      opts({
+        overlays: {
+          [packagingRel]: `${page}\nA harmless trailing sentence.\n`,
+        },
+      }),
+    ),
+  );
+  assert.equal(edited.completenessState, "complete");
+  assert.notEqual(edited.sourceRevisions.digest, fresh.sourceRevisions.digest);
 });
