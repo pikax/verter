@@ -1609,6 +1609,18 @@ async function startVueLanguageServer(
   writeTimingMarker("client_start_begin", Date.now());
   await client.start();
   writeTimingMarker("client_start_end", Date.now());
+  if (attempt.isDisposed) {
+    // Deactivation landed during the initial start: the composition root
+    // disposed this attempt before the runtime was published, so nothing
+    // else will ever stop this client. Shut it down here instead of arming
+    // a watchdog nobody will disarm over a process no owner holds.
+    await client.stop();
+    return {
+      getClient,
+      stopHeartbeatTimer,
+      restart: restartLS,
+    };
+  }
   // Only a server that is actually up gets a freeze watchdog.
   armHeartbeatWatchdog();
 

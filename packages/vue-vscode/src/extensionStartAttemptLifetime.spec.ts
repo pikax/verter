@@ -524,4 +524,36 @@ describe("disposal during an in-flight recovery", () => {
     expect(mocks.state.startCalls).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("shuts down an initial server whose start completed after disposal", async () => {
+    const context = makeContext();
+
+    // The FIRST start parks, so deactivation lands while the initial
+    // language-server start is still pending: the runtime was never
+    // published, so deactivate() had no client to stop and disposal of the
+    // attempt is all the ownership this start ever had.
+    mocks.state.holdStart = true;
+    const activating = activateVueLanguageServer(context, log);
+    for (let i = 0; i < 10_000 && !mocks.state.releaseStart; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.releaseStart).toBeDefined();
+    expect(mocks.state.startCalls).toBe(1);
+    expect(mocks.state.stopCalls).toBe(0);
+
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The process finishes coming up — for an owner that no longer exists.
+    mocks.state.releaseStart?.();
+    await activating;
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    // The orphan is shut down exactly once, and no watchdog is armed over it.
+    expect(mocks.state.stopCalls).toBe(1);
+    expect(mocks.state.startCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
