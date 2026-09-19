@@ -67,6 +67,16 @@
       "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-checked.svelte"
     },
     {
+      "id": "svelte-js-instance-legacy-unchecked",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "js",
+      "semantics": "legacy",
+      "checking": "js-unchecked",
+      "publishing": "declarations-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-unchecked.svelte"
+    },
+    {
       "id": "svelte-ts-module-context",
       "fileKind": ".svelte",
       "scriptContext": "module",

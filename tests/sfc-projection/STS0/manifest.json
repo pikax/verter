@@ -32,10 +32,13 @@
       "twins": [
         "every-supported-profile-dialect-has-explicit-checking-and-publishing",
         "supported-profile-row-deletion",
+        "unchecked-legacy-js-instance-row-deletion",
         "evidence-file-kind-dialect-context",
         "runes-selection-joined-to-official-options",
         "refused-options-fail-closed",
-        "authority-backed-refusal-deletion"
+        "authority-backed-refusal-deletion",
+        "live-profile-type-corruption-must-fail",
+        "live-publication-corruption-must-fail"
       ]
     },
     {
@@ -48,7 +51,14 @@
         "fixture-removed",
         "empty-imported-populations",
         "official-recorded-rows-mismatch",
-        "unowned-selected-population-member"
+        "unowned-selected-population-member",
+        "harness-mapping-deleted-fixture-retained",
+        "selected-members-shrunk-to-one-supplied-row",
+        "benchmark-smoke-case-member-dropped",
+        "benchmark-population-citing-only-the-adapter",
+        "shipped-directive-row-dropped",
+        "mode-shared-feature-misclassified",
+        "legacy-only-feature-marked-mode-shared"
       ]
     },
     {
@@ -79,5 +89,5 @@
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STS0 --engine all --require-all --json",
   "test": "node --test tests/sfc-projection/STS0/svelte-lock.spec.ts",
   "runtimeCorrectness": true,
-  "notes": "Ratification lock for the Svelte projection profile. The positive probe exercises the framework-specific function-shaped Svelte Component plus runes and module/instance participation through the legal .svelte.ts module surface, on both admitted engines; the .svelte.ts rune declarations match the CCA1I prelude and pinned svelte/types $derived<T>(expression: T): T, and probes/negative.ts is the callback-form dirty twin (TS2322). probes.expectedInstanceType names the function-shaped component interface declared in probes/positive.ts (pinned by the STS0 protocol), and the Vue-constructor-shaped harness Instance check intentionally does not apply, as recorded for STP7. probes/vue-constructor-twin.ts is the scanned STS0-svelte-abi dirty twin and is never part of a compiled program. No production emit, runtime activation, or new public helper shape is authorized by this node."
+  "notes": "Ratification lock for the Svelte projection profile. The positive probe exercises the framework-specific function-shaped Svelte Component plus runes and module/instance participation through the legal .svelte.ts module surface, on both admitted engines; the .svelte.ts rune declarations match the CCA1I prelude and pinned svelte/types $derived<T>(expression: T): T, and probes/negative.ts is the callback-form dirty twin (TS2322). probes.expectedInstanceType names the function-shaped component interface declared in probes/positive.ts (pinned by the STS0 protocol), and the Vue-constructor-shaped harness Instance check intentionally does not apply, as recorded for STP7. probes/vue-constructor-twin.ts is the scanned STS0-svelte-abi dirty twin and is never part of a compiled program. runtimeCorrectness is backed by the live path: every policy profile's evidence fixture is projected and run through the pinned engine's real check and declaration-emit path (engine-checked rows must flag a corrupted projected type, js-unchecked rows must not, and a renamed published binding must lose its declaration), and mode semantics are pinned by the mode-paired svelte compiler controls under probes/modes/. No production emit, runtime activation, or new public helper shape is authorized by this node."
 }

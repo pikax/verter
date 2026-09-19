@@ -1729,7 +1729,7 @@ export async function verifyNode(options) {
   }
 
   if (nodeId === "STS0") {
-    const sts0 = await evaluateSts0Node({ repoRoot });
+    const sts0 = await evaluateSts0Node({ repoRoot, resolvedEngines });
     errors.push(...sts0.errors);
   }
 
@@ -1857,12 +1857,17 @@ async function evaluateStp9Node({ repoRoot }) {
   return { errors: stp9.errors };
 }
 
-async function evaluateSts0Node({ repoRoot }) {
+async function evaluateSts0Node({ repoRoot, resolvedEngines }) {
   const protocolHref = pathToFileURL(
     repoPath(repoRoot, "tests/sfc-projection/STS0/protocol.mjs"),
   ).href;
   const protocol = await import(protocolHref);
-  const sts0 = await protocol.evaluateSts0();
+  // STS0's live profile behavior runs through the pinned ts-js engine; pass
+  // the harness-resolved javascript engine when it is available (the
+  // protocol falls back to the same STP1 pin it resolves itself).
+  const jsPin = resolvedEngines?.find((engine) => engine.kind === "javascript");
+  const ts = jsPin ? loadJsTypeScript(jsPin, repoRoot) : null;
+  const sts0 = await protocol.evaluateSts0(ts ? { ts } : {});
   return { errors: sts0.errors };
 }
 

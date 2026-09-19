@@ -41,8 +41,9 @@
     },
     {
       "id": "svelte-benchmarks",
-      "path": "crates/verter_validation_probe/src/corpus/svelte_benchmarks.rs",
-      "role": "external-svelte-benchmarks-corpus-adapter"
+      "path": "crates/verter_validation_probe/manifest/svelte.toml",
+      "role": "pinned-svelte-benchmarks-case-inventory; deterministic smoke slice selected; adapter at crates/verter_validation_probe/src/corpus/svelte_benchmarks.rs",
+      "recordedRows": 70
     }
   ],
   "selectedMembers": [
@@ -104,6 +105,126 @@
       "id": "svelte-benchmarks-adapter",
       "population": "svelte-benchmarks",
       "path": "crates/verter_validation_probe/src/corpus/svelte_benchmarks.rs",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00000",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00000.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00010",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00010.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00001",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00001.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00011",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00011.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00002",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00002.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00012",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00012.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00003",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00003.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00013",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00013.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00004",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00004.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00014",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00014.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00005",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00005.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00015",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00015.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00006",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00006.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00016",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00016.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00007",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00007.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00017",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00017.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00008",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00008.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00018",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00018.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00009",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00009.svelte",
+      "owner": "component-function-shape"
+    },
+    {
+      "id": "svelte-benchmarks-Comp00019",
+      "population": "svelte-benchmarks",
+      "caseId": "svelte/fixtures/20/Comp00019.svelte",
       "owner": "component-function-shape"
     }
   ],
@@ -191,7 +312,7 @@
     {
       "id": "template-snippet",
       "family": "template",
-      "semantics": "runes",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
       "surface": "verter-parser"
@@ -247,7 +368,7 @@
     {
       "id": "events-attribute-handlers",
       "family": "events",
-      "semantics": "runes",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte",
       "surface": "fixture"
@@ -279,7 +400,7 @@
     {
       "id": "legacy-store-auto-subscription",
       "family": "legacy",
-      "semantics": "legacy",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "crates/verter_compiler/src/svelte/ide/store_scan.rs",
       "surface": "verter-classifier"
@@ -287,7 +408,23 @@
     {
       "id": "legacy-transitions-actions-animate",
       "family": "legacy",
-      "semantics": "legacy",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "class-directive",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "style-directive",
+      "family": "template",
+      "semantics": "both",
       "requiredCurrent": true,
       "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
       "surface": "verter-projector"
@@ -325,5 +462,5 @@
       "surface": "conformance-fixture"
     }
   ],
-  "notes": "Runes versus supported legacy semantics is carried per row; a rune mislabeled as legacy (or vice versa) fails STS0-svelte-inventory. Official, css, and harness population recordedRows are joined to the live imported members; selectedMembers join imported fixtures and official suites to mandatory owning rows."
+  "notes": "Historical feature families (the legacy- id prefix) are naming only; legal-mode support is carried per row by semantics, pinned by the mode-paired compiler controls under probes/modes/. Store auto-subscription, transitions/actions/animate, snippets, event attributes and the class/style directives are mode-shared (semantics both); export let stays legacy-only (legacy_export_invalid in runes mode). A rune mislabeled as legacy fails STS0-svelte-inventory. Official, css, harness and benchmark population recordedRows are joined to the live imported members; selectedMembers join imported fixtures, official suites and the pinned benchmark smoke inventory to mandatory owning rows."
 }
