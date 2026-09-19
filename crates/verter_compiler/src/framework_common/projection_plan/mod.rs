@@ -575,6 +575,7 @@ fn mint_snapshot(
     PlanSnapshotId(Canonical::from_encoder(&encoder))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mint_scope(
     parent: Option<&LexicalScopeId>,
     kind: &str,
@@ -600,6 +601,7 @@ fn mint_scope(
     LexicalScopeId(Canonical::from_encoder(&encoder))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mint_expression(
     unit: &SourceUnitId,
     env: &LexicalScopeId,
@@ -622,6 +624,7 @@ fn mint_expression(
     AdmittedExpressionId(Canonical::from_encoder(&encoder))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mint_use(
     unit: &SourceUnitId,
     env: &LexicalScopeId,
@@ -707,6 +710,36 @@ struct OpenBranch {
     seen: Vec<AdmittedExpressionId>,
 }
 
+#[derive(Hash, Eq, PartialEq)]
+struct UseCountKey {
+    env: CanonicalDigest,
+    spelling: String,
+    path: String,
+    ops_sig: String,
+    slots_sig: String,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct ExprCountKey {
+    env: CanonicalDigest,
+    kind: &'static str,
+    spelling: String,
+    path: String,
+    role: String,
+    owner: Option<CanonicalDigest>,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct ScopeCountKey {
+    env: CanonicalDigest,
+    kind: String,
+    binders: String,
+    spelling: String,
+    host: String,
+    path: String,
+    content_sig: String,
+}
+
 struct PlanBuilder<'a> {
     source: &'a str,
     ast: &'a crate::ast::types::TemplateAst,
@@ -718,30 +751,9 @@ struct PlanBuilder<'a> {
     expressions: Vec<ExpressionOccurrence>,
     obligations: Vec<SyntaxObligation>,
     reasons: Vec<Incompleteness>,
-    use_counts: FxHashMap<(CanonicalDigest, String, String, String, String), u32>,
-    expr_counts: FxHashMap<
-        (
-            CanonicalDigest,
-            &'static str,
-            String,
-            String,
-            String,
-            Option<CanonicalDigest>,
-        ),
-        u32,
-    >,
-    scope_counts: FxHashMap<
-        (
-            CanonicalDigest,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-        ),
-        u32,
-    >,
+    use_counts: FxHashMap<UseCountKey, u32>,
+    expr_counts: FxHashMap<ExprCountKey, u32>,
+    scope_counts: FxHashMap<ScopeCountKey, u32>,
 }
 
 impl<'a> PlanBuilder<'a> {
@@ -1123,6 +1135,7 @@ impl<'a> PlanBuilder<'a> {
         scope
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn next_scope_occurrence(
         &mut self,
         env: &LexicalScopeId,
@@ -1133,15 +1146,15 @@ impl<'a> PlanBuilder<'a> {
         ancestors: &[String],
         content_sig: &str,
     ) -> u32 {
-        let key = (
-            env.digest(),
-            kind.to_string(),
-            binders.join("\0"),
-            spelling.to_string(),
-            host.to_string(),
-            ancestors.join("/"),
-            content_sig.to_string(),
-        );
+        let key = ScopeCountKey {
+            env: env.digest(),
+            kind: kind.to_string(),
+            binders: binders.join("\0"),
+            spelling: spelling.to_string(),
+            host: host.to_string(),
+            path: ancestors.join("/"),
+            content_sig: content_sig.to_string(),
+        };
         let slot = self.scope_counts.entry(key).or_insert(0);
         let n = *slot;
         *slot += 1;
@@ -1169,13 +1182,13 @@ impl<'a> PlanBuilder<'a> {
         let occurrence = {
             let slot = self
                 .use_counts
-                .entry((
-                    env.digest(),
-                    spelling.clone(),
-                    path_key,
-                    ops_sig.clone(),
-                    slots_sig.clone(),
-                ))
+                .entry(UseCountKey {
+                    env: env.digest(),
+                    spelling: spelling.clone(),
+                    path: path_key,
+                    ops_sig: ops_sig.clone(),
+                    slots_sig: slots_sig.clone(),
+                })
                 .or_insert(0);
             let n = *slot;
             *slot += 1;
@@ -1566,14 +1579,14 @@ impl<'a> PlanBuilder<'a> {
         let occurrence = {
             let slot = self
                 .expr_counts
-                .entry((
-                    env.digest(),
-                    kind.tag(),
-                    spelling.to_string(),
-                    path.clone(),
-                    role.to_string(),
-                    owner.map(ComponentUseId::digest),
-                ))
+                .entry(ExprCountKey {
+                    env: env.digest(),
+                    kind: kind.tag(),
+                    spelling: spelling.to_string(),
+                    path: path.clone(),
+                    role: role.to_string(),
+                    owner: owner.map(ComponentUseId::digest),
+                })
                 .or_insert(0);
             let n = *slot;
             *slot += 1;
