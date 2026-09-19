@@ -12,6 +12,7 @@ import {
   DIRTY_SURFACE,
   DIRTY_TOY_ENGINES,
   DIRTY_UNCITED_ROW,
+  PREDECESSOR_PRODUCTS,
   assertAbiContamination,
   assertCompleteEvidence,
   assertEvidencePins,
@@ -147,6 +148,60 @@ test("STP8-complete-evidence: the frozen topology joins its predecessor policy p
   assert.ok(
     assertPredecessorJoins(driftedSpanKinds).some((error) => error.code === "predecessor-drift"),
     JSON.stringify(assertPredecessorJoins(driftedSpanKinds)),
+  );
+
+  // Predecessor-side drift: the STP8-authored subset (products + joins) stays
+  // untouched, so only the deep-equal joins can fail these twins.
+  const predecessorFile = (node, schema) =>
+    PREDECESSOR_PRODUCTS[node].find((product) => product.schema === schema).file;
+  const readJsonOverriding = (overrides) => (rel) =>
+    Object.hasOwn(overrides, rel)
+      ? overrides[rel]
+      : JSON.parse(fs.readFileSync(path.resolve(REPO_ROOT, rel), "utf8"));
+
+  const driftedLiftPolicy = JSON.parse(
+    fs.readFileSync(
+      path.resolve(REPO_ROOT, predecessorFile("STP6", "PublicDependencyClosurePolicy")),
+      "utf8",
+    ),
+  );
+  driftedLiftPolicy.liftIntoPublishedDeclarations = [
+    ...driftedLiftPolicy.liftIntoPublishedDeclarations,
+    "late-added-lift-row",
+  ];
+  assert.ok(
+    assertPredecessorJoins(topology, {
+      readJson: readJsonOverriding({
+        [predecessorFile("STP6", "PublicDependencyClosurePolicy")]: driftedLiftPolicy,
+      }),
+    }).some(
+      (error) =>
+        error.caseId === "STP8-complete-evidence" &&
+        error.code === "predecessor-drift" &&
+        error.message.includes("liftIntoPublishedDeclarations"),
+    ),
+    "an appended STP6 lift row must fail STP8-complete-evidence as predecessor drift",
+  );
+
+  const driftedCheckJs = JSON.parse(
+    fs.readFileSync(
+      path.resolve(REPO_ROOT, predecessorFile("STP4", "ProjectionTopologyDecisionInputs")),
+      "utf8",
+    ),
+  );
+  driftedCheckJs.checkJs.off = "rewritten-off-semantics";
+  assert.ok(
+    assertPredecessorJoins(topology, {
+      readJson: readJsonOverriding({
+        [predecessorFile("STP4", "ProjectionTopologyDecisionInputs")]: driftedCheckJs,
+      }),
+    }).some(
+      (error) =>
+        error.caseId === "STP8-complete-evidence" &&
+        error.code === "predecessor-drift" &&
+        error.message.includes("checkJs"),
+    ),
+    "a rewritten STP4 checkJs.off must fail STP8-complete-evidence as predecessor drift",
   );
 });
 

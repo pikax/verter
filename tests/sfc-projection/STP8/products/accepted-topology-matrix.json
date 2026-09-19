@@ -7,8 +7,18 @@
   "frozen": true,
   "dialects": [
     { "id": "ts", "moduleShape": "authored-ts", "case": "STP4-external-owner" },
-    { "id": "tsx", "moduleShape": "preserve-as-jsx", "angleAssertions": "no-jsx-rewrite", "case": "STP4-tsx-authored" },
-    { "id": "js", "moduleShape": "checkJs-per-file", "policy": "@ts-check/@ts-nocheck", "case": "STP4-js-checked" },
+    {
+      "id": "tsx",
+      "moduleShape": "preserve-as-jsx",
+      "angleAssertions": "no-jsx-rewrite",
+      "case": "STP4-tsx-authored"
+    },
+    {
+      "id": "js",
+      "moduleShape": "checkJs-per-file",
+      "policy": "@ts-check/@ts-nocheck",
+      "case": "STP4-js-checked"
+    },
     { "id": "jsx", "moduleShape": "jsx-dialect", "case": "STP4-tsx-authored" }
   ],
   "supplementalFiles": {
@@ -18,8 +28,17 @@
     "specifier": "*.vue.__template",
     "hostAdmission": "host-admitted-virtual-unit",
     "canonicalImportIdentity": "sfc-public-module",
+    "hostAdmittedVirtualUnit": true,
+    "compilerNamedSpecifier": "JsUnchecked.vue.__template",
     "rejectCase": "STP4-supplemental-import"
   },
+  "checkJs": {
+    "off": "script-diagnostics-suppressed-template-still-checked",
+    "on": "script-and-template-checked-with-source-anchors",
+    "projectAllowJs": true,
+    "perFilePolicy": "@ts-check/@ts-nocheck"
+  },
+  "normalScriptPlusSetup": "separate-modules",
   "externalScripts": {
     "ownership": "source-identity",
     "checkedOncePerIdentity": true,
@@ -35,6 +54,33 @@
   "publicDependencyClosure": {
     "policy": "STP6 PublicDependencyClosurePolicy",
     "resolutionModes": ["bundler", "node16", "nodenext"],
+    "liftIntoPublishedDeclarations": [
+      "local-alias-capturing-generic-binders",
+      "imported-conditional-or-mapped-types",
+      "typeof-value-dependencies",
+      "exposed-functions",
+      "declaration-maps-to-shipped-authored-source"
+    ],
+    "retainWithoutSecondBodyCheck": [
+      "private-classes-not-part-of-public-surface",
+      "unique-symbols-not-exported"
+    ],
+    "forbidInPublishedDeclarations": [
+      "private-virtual-path",
+      "inaccessible-captured-type",
+      "compiler-named-supplemental",
+      "unpublished-checker-metadata"
+    ],
+    "typeOnlyCheckingContract": {
+      "required": false,
+      "ifRequiredMust": [
+        "emit-from-same-source-contract",
+        "ship-in-actual-declarations",
+        "survive-reexport",
+        "no-fabricated-runtime-property"
+      ],
+      "cannotExcuse": ["lost-vue-public-precision", "non-constructor-default-export"]
+    },
     "hiddenMetadataInExports": false,
     "hiddenMetadataInFiles": false,
     "declarationMapsToShippedAuthoredSource": true

@@ -685,6 +685,15 @@ export function assertPredecessorJoins(
         drift("supplementalFiles.sharedLexicalScope vs ProjectionTopologyDecisionInputs"),
       );
     }
+    for (const field of [
+      "canonicalImportIdentity",
+      "hostAdmittedVirtualUnit",
+      "compilerNamedSpecifier",
+    ]) {
+      if (topology?.supplementalFiles?.[field] !== stp4.supplementalFiles?.[field]) {
+        errors.push(drift(`supplementalFiles.${field} vs ProjectionTopologyDecisionInputs`));
+      }
+    }
     for (const field of ["ownership", "checkedOncePerIdentity", "importersDoNotDuplicateBody"]) {
       if (topology?.externalScripts?.[field] !== stp4.externalScripts?.[field]) {
         errors.push(drift(`externalScripts.${field} vs ProjectionTopologyDecisionInputs`));
@@ -693,10 +702,29 @@ export function assertPredecessorJoins(
     if (topology?.vueLegality?.scriptSetupSrc !== stp4.vueLegality?.scriptSetupSrc) {
       errors.push(drift("vueLegality.scriptSetupSrc vs ProjectionTopologyDecisionInputs"));
     }
+    if (!deepEqual(topology?.checkJs, stp4.checkJs)) {
+      errors.push(drift("checkJs vs ProjectionTopologyDecisionInputs"));
+    }
+    if (topology?.normalScriptPlusSetup !== stp4.normalScriptPlusSetup) {
+      errors.push(drift("normalScriptPlusSetup vs ProjectionTopologyDecisionInputs"));
+    }
     const tsx = (topology?.dialects || []).find((row) => row.id === "tsx");
     if (tsx?.moduleShape !== stp4.jsxRewrite?.tsx) {
       errors.push(
         drift("dialects[tsx].moduleShape vs ProjectionTopologyDecisionInputs.jsxRewrite.tsx"),
+      );
+    }
+    if (tsx?.angleAssertions !== stp4.jsxRewrite?.tsAngleAssertion) {
+      errors.push(
+        drift(
+          "dialects[tsx].angleAssertions vs ProjectionTopologyDecisionInputs.jsxRewrite.tsAngleAssertion",
+        ),
+      );
+    }
+    const js = (topology?.dialects || []).find((row) => row.id === "js");
+    if (js?.policy !== stp4.checkJs?.perFilePolicy) {
+      errors.push(
+        drift("dialects[js].policy vs ProjectionTopologyDecisionInputs.checkJs.perFilePolicy"),
       );
     }
   }
@@ -743,6 +771,16 @@ export function assertPredecessorJoins(
           "publicDependencyClosure.resolutionModes vs PackedConsumerFeasibility.resolutionModes",
         ),
       );
+    }
+    for (const field of [
+      "liftIntoPublishedDeclarations",
+      "retainWithoutSecondBodyCheck",
+      "forbidInPublishedDeclarations",
+      "typeOnlyCheckingContract",
+    ]) {
+      if (!deepEqual(topology?.publicDependencyClosure?.[field], stp6[field])) {
+        errors.push(drift(`publicDependencyClosure.${field} vs PublicDependencyClosurePolicy`));
+      }
     }
     if (
       topology?.publicDependencyClosure?.hiddenMetadataInExports !== stp6.hiddenMetadata?.inExports
@@ -1235,6 +1273,17 @@ export function evaluateRejectTwins() {
         "STP8-complete-evidence",
         "missed-row",
         "a topology field diverging from its predecessor product was not rejected",
+      ),
+    );
+  }
+  const driftedCheckJs = cloneJson(topology);
+  driftedCheckJs.checkJs.off = "rewritten-off-semantics";
+  if (assertPredecessorJoins(driftedCheckJs).length === 0) {
+    errors.push(
+      err(
+        "STP8-complete-evidence",
+        "missed-row",
+        "a checkJs policy body diverging from ProjectionTopologyDecisionInputs was not rejected",
       ),
     );
   }
