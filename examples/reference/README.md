@@ -7,6 +7,10 @@ and every command must be a bin of a public package.
 
 The example index is [`manifest.json`](./manifest.json). The
 [SDK and official-extension guide structure](./sdk/README.md) declares the
-six guide topics and their executable example slots. Contributor
-sandboxes (`examples/`, `packages/example`) are not this home and are not
-treated as executed user evidence.
+six guide topics and their executable example slots. The
+[web-product guide recipes](./guides/README.md) declare the eight recipe
+topics (CSS, compatibility, debug, tests, runtime, accessibility,
+performance, security) with executable example slots and capability
+links, plus the executable journeys recorded in the manifest.
+Contributor sandboxes (`examples/`, `packages/example`) are not this home
+and are not treated as executed user evidence.

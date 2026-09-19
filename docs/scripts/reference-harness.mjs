@@ -29,6 +29,18 @@ const REQUIRED_SDK_GUIDE_TOPICS = [
   "packaging",
   "permissions",
 ];
+const REQUIRED_RECIPE_TOPICS = [
+  "accessibility",
+  "compatibility",
+  "css",
+  "debug",
+  "performance",
+  "runtime",
+  "security",
+  "tests",
+];
+const JOURNEY_EXECUTION_CLASSES = ["NodeOnly", "NativeOnly"];
+const JOURNEY_STEP_TIMEOUT_MS = 60_000;
 const EXECUTABLE_SOURCE_EXTENSIONS = new Set([".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"]);
 
 export const HARNESS_ID = "docs-reference-harness";
@@ -150,11 +162,11 @@ export function shippedBins(packages) {
       const name = pkg.name.includes("/")
         ? pkg.name.slice(pkg.name.lastIndexOf("/") + 1)
         : pkg.name;
-      bins.set(name, { package: pkg.name, path: pkg.bin, version: pkg.version });
+      bins.set(name, { package: pkg.name, dir: pkg.dir, path: pkg.bin, version: pkg.version });
       continue;
     }
     for (const [name, binPath] of Object.entries(pkg.bin).sort(([a], [b]) => a.localeCompare(b))) {
-      bins.set(name, { package: pkg.name, path: binPath, version: pkg.version });
+      bins.set(name, { package: pkg.name, dir: pkg.dir, path: binPath, version: pkg.version });
     }
   }
   return bins;
@@ -292,6 +304,49 @@ async function runTypeinfoCheck(repoRoot, signal) {
   });
 }
 
+function runJourneyProcess(repoRoot, args, timeoutMs, signal) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, args, {
+      cwd: repoRoot,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    const onAbort = () => {
+      child.kill();
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("close", (code, killedBy) => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolvePromise({
+        exitCode: timedOut ? null : code ?? 1,
+        signal: killedBy ?? null,
+        timedOut,
+        stdoutDigest: sha256Text(stdout),
+        stderr,
+      });
+    });
+  });
+}
+
 export async function validate(options = {}) {
   const repoRoot = resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
   const examplesRoot = resolve(options.examplesRoot ?? join(repoRoot, "examples", "reference"));
@@ -313,6 +368,8 @@ export async function validate(options = {}) {
     hostIdentity: { platform: process.platform, arch: process.arch },
     examples: [],
     sdkGuides: null,
+    recipes: null,
+    journeys: [],
     generatedReference: null,
     links: [],
     capabilities: [],
@@ -383,6 +440,7 @@ export async function validate(options = {}) {
       fail(err("duplicate-example", "duplicate example id", { id: example.id }));
     byId.set(example.id, example);
   }
+  const exampleFacts = new Map();
 
   const discovered = options.discoveryOrder ? [...options.discoveryOrder] : [...byId.keys()];
   for (const id of byId.keys()) {
@@ -503,6 +561,7 @@ export async function validate(options = {}) {
       }
     }
     const uniqueCommands = [...new Set(declaredCommands)];
+    exampleFacts.set(id, { files, commands: uniqueCommands });
     for (const command of uniqueCommands) {
       const resolved = resolveShippedCommand(bins, command);
       if (!resolved.ok) {
@@ -754,6 +813,488 @@ export async function validate(options = {}) {
     receipt.sdkGuides = sdk;
   }
 
+  const recipeModel = manifest.recipes ?? null;
+  if (recipeModel != null || options.recipesGate === true) {
+    if (signal?.aborted) {
+      receipt.completenessState = "cancelled";
+      receipt.errors = [...errors, err("cancelled", "validation aborted before recipe check")];
+      receipt.sourceRevisions.digest = sourceDigest(digestEntries);
+      return receipt;
+    }
+    const recipes = { gateEnforced: options.recipesGate === true, index: null, topics: [] };
+    const declaredTopics = Array.isArray(recipeModel?.topics) ? recipeModel.topics : [];
+    const declaredRecipeIds = new Set(
+      declaredTopics.map((topic) => topic?.id).filter((id) => typeof id === "string"),
+    );
+    const missingRecipeTopics = REQUIRED_RECIPE_TOPICS.filter((id) => !declaredRecipeIds.has(id));
+    if (missingRecipeTopics.length > 0) {
+      fail(
+        err("recipes-model-incomplete", "recipe model is missing required charter topics", {
+          missing: missingRecipeTopics,
+        }),
+      );
+    }
+    for (const id of declaredRecipeIds) {
+      if (!REQUIRED_RECIPE_TOPICS.includes(id)) {
+        fail(
+          err("recipes-model-unknown-topic", "recipe topic is not part of the charter model", {
+            id,
+          }),
+        );
+      }
+    }
+
+    let listedRecipePages = new Set();
+    const recipeIndexRelPath = recipeModel?.index;
+    if (typeof recipeIndexRelPath !== "string" || !recipeIndexRelPath.endsWith(".md")) {
+      fail(err("recipes-index-missing", "recipe model declares no markdown index page"));
+    } else {
+      recipes.index = recipeIndexRelPath;
+      const recipeIndexAbs = join(examplesRoot, recipeIndexRelPath);
+      if (!exists(recipeIndexAbs)) {
+        fail(
+          err("recipes-page-missing", "recipe index page is missing", {
+            id: "index",
+            page: recipeIndexRelPath,
+          }),
+        );
+      } else {
+        const bytes = read(recipeIndexAbs);
+        digestEntries.push({ path: posixRel(repoRoot, recipeIndexAbs), bytes });
+        listedRecipePages = new Set(
+          extractMarkdownHrefs(bytes)
+            .filter((href) => !/^[a-z]+:/i.test(href) && !href.startsWith("#"))
+            .map((href) =>
+              posixRel(
+                examplesRoot,
+                resolve(dirname(recipeIndexAbs), href.split("#")[0]),
+              ),
+            ),
+        );
+      }
+    }
+
+    const orderedRecipeTopics = [...declaredTopics].sort((a, b) =>
+      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+    );
+    for (const topic of orderedRecipeTopics) {
+      const id = typeof topic?.id === "string" ? topic.id : null;
+      if (!id) continue;
+      const pageRelPath = typeof topic.page === "string" ? topic.page : null;
+      let topicOk = true;
+      if (pageRelPath == null || !pageRelPath.endsWith(".md")) {
+        fail(
+          err("recipes-page-missing", "recipe topic declares no markdown page", { id, page: null }),
+        );
+        topicOk = false;
+      } else {
+        const pageAbs = join(examplesRoot, pageRelPath);
+        if (!exists(pageAbs)) {
+          fail(
+            err("recipes-page-missing", "recipe topic page is missing", { id, page: pageRelPath }),
+          );
+          topicOk = false;
+        } else {
+          if (!listedRecipePages.has(pageRelPath)) {
+            fail(
+              err("recipes-page-unlisted", "recipe topic page is not listed by the index", {
+                id,
+                page: pageRelPath,
+              }),
+            );
+            topicOk = false;
+          }
+          const bytes = read(pageAbs);
+          digestEntries.push({ path: posixRel(repoRoot, pageAbs), bytes });
+          for (const href of extractMarkdownHrefs(bytes)) {
+            if (/^[a-z]+:/i.test(href) || href.startsWith("#")) continue;
+            const target = resolve(dirname(pageAbs), href.split("#")[0]);
+            receipt.links.push({ from: posixRel(repoRoot, pageAbs), href, ok: exists(target) });
+            if (!exists(target)) {
+              fail(
+                err("broken-link", "recipe page link does not resolve", {
+                  id,
+                  file: pageRelPath,
+                  href,
+                }),
+              );
+              topicOk = false;
+            }
+          }
+        }
+      }
+      const status = topic.status;
+      if (status !== "pending" && status !== "supplied") {
+        fail(
+          err("recipes-slot-status-invalid", "recipe slot status must be pending or supplied", {
+            id,
+            status: status ?? null,
+          }),
+        );
+        topicOk = false;
+      }
+      if (status === "pending") {
+        if (typeof topic.producingNode !== "string" || topic.producingNode.length === 0) {
+          fail(err("recipes-slot-unowned", "pending recipe slot names no producing node", { id }));
+          topicOk = false;
+        }
+        if (topic.exampleId != null) {
+          fail(
+            err("recipes-pending-slot-bound", "pending recipe slot must not present an example", {
+              id,
+              exampleId: topic.exampleId,
+            }),
+          );
+          topicOk = false;
+        }
+      } else if (status === "supplied") {
+        const example = topic.exampleId != null ? byId.get(topic.exampleId) : undefined;
+        if (example == null) {
+          fail(
+            err("recipes-slot-unbound", "supplied recipe slot binds no manifest example", {
+              id,
+              exampleId: topic.exampleId ?? null,
+            }),
+          );
+          topicOk = false;
+        } else {
+          const facts = exampleFacts.get(topic.exampleId);
+          const files = facts?.files ?? [];
+          const executable = files.some((file) =>
+            EXECUTABLE_SOURCE_EXTENSIONS.has(extname(file)),
+          );
+          if (!executable) {
+            fail(
+              err(
+                "recipes-static-example",
+                "supplied recipe example has no file with an executable extension",
+                { id, exampleId: topic.exampleId },
+              ),
+            );
+            topicOk = false;
+          }
+          const hasEntry =
+            (facts?.commands ?? []).length > 0 || (example.imports ?? []).length > 0;
+          if (!hasEntry) {
+            fail(
+              err(
+                "recipes-example-without-entry",
+                "supplied recipe example declares no shipped command or public import",
+                { id, exampleId: topic.exampleId },
+              ),
+            );
+            topicOk = false;
+          }
+          if ((example.surfaces ?? []).length === 0) {
+            fail(
+              err(
+                "recipes-without-capability-link",
+                "supplied recipe example cites no capability surface",
+                { id, exampleId: topic.exampleId },
+              ),
+            );
+            topicOk = false;
+          }
+        }
+      }
+      if (options.recipesGate === true && status !== "supplied") {
+        fail(
+          err("recipes-gate-unsatisfied", "the recipes gate requires every topic supplied", {
+            id,
+            status: status ?? null,
+          }),
+        );
+        topicOk = false;
+      }
+      recipes.topics.push({
+        id,
+        page: pageRelPath,
+        status: status ?? null,
+        producingNode: topic.producingNode ?? null,
+        exampleId: topic.exampleId ?? null,
+        ok: topicOk,
+      });
+    }
+    if (options.recipesGate === true && recipeModel == null) {
+      fail(
+        err("recipes-model-incomplete", "the recipes gate requires a declared recipe model", {
+          missing: REQUIRED_RECIPE_TOPICS,
+        }),
+      );
+    }
+    receipt.links.sort((a, b) => `${a.from}:${a.href}`.localeCompare(`${b.from}:${b.href}`));
+    receipt.recipes = recipes;
+  }
+
+  const declaredJourneys = manifest.journeys;
+  if (declaredJourneys != null && (!Array.isArray(declaredJourneys) || declaredJourneys.length === 0)) {
+    fail(err("journeys-empty", "the example home declares an empty journeys model"));
+  }
+  const journeyRows = [];
+  const journeyIds = new Set();
+  const structuralJourneyError = (id) => errors.some((item) => item.journey === id);
+  for (const journey of Array.isArray(declaredJourneys) ? declaredJourneys : []) {
+    const id = typeof journey?.id === "string" && journey.id.length > 0 ? journey.id : null;
+    if (!id) {
+      fail(err("journey-missing-id", "journey declares no id"));
+      continue;
+    }
+    let journeyOk = true;
+    if (journeyIds.has(id)) {
+      fail(err("duplicate-journey", "duplicate journey id", { journey: id }));
+      journeyOk = false;
+    }
+    journeyIds.add(id);
+    if (typeof journey.description !== "string" || journey.description.length === 0) {
+      fail(err("journey-description-missing", "journey declares no description", { journey: id }));
+      journeyOk = false;
+    }
+    if (!JOURNEY_EXECUTION_CLASSES.includes(journey.executionClass)) {
+      fail(
+        err("journey-class-invalid", "journey execution class is unknown", {
+          journey: id,
+          executionClass: journey.executionClass ?? null,
+        }),
+      );
+      journeyOk = false;
+    }
+    if (
+      journey.pins != null &&
+      (typeof journey.pins !== "object" ||
+        Array.isArray(journey.pins) ||
+        Object.keys(journey.pins).length === 0 ||
+        !Object.values(journey.pins).every((value) => typeof value === "string"))
+    ) {
+      fail(
+        err("journey-pins-invalid", "journey pins must map names to version strings", {
+          journey: id,
+        }),
+      );
+      journeyOk = false;
+    }
+    const steps = Array.isArray(journey.steps) ? journey.steps : [];
+    if (steps.length === 0) {
+      fail(err("journey-without-steps", "journey declares no steps", { journey: id }));
+      journeyOk = false;
+    }
+    const stepRows = [];
+    for (const step of steps) {
+      const stepRow = {
+        exampleId: typeof step?.exampleId === "string" ? step.exampleId : null,
+        file: typeof step?.file === "string" ? step.file : null,
+        command: typeof step?.command === "string" ? step.command : null,
+        args: [],
+        expectExit: 0,
+      };
+      let stepOk = true;
+      if (!byId.has(stepRow.exampleId)) {
+        fail(
+          err("journey-step-unknown-example", "journey step binds no manifest example", {
+            journey: id,
+            exampleId: stepRow.exampleId,
+          }),
+        );
+        stepOk = false;
+      }
+      if ((stepRow.file == null) === (stepRow.command == null)) {
+        fail(
+          err("journey-step-entry-invalid", "journey step needs exactly one file or command entry", {
+            journey: id,
+          }),
+        );
+        stepOk = false;
+      }
+      if (stepRow.file != null) {
+        const facts = stepRow.exampleId != null ? exampleFacts.get(stepRow.exampleId) : undefined;
+        const files = facts?.files ?? [];
+        if (
+          !files.includes(stepRow.file) ||
+          !EXECUTABLE_SOURCE_EXTENSIONS.has(extname(stepRow.file))
+        ) {
+          fail(
+            err(
+              "journey-step-file-outside-example",
+              "journey step file is not an executable file of the bound example",
+              { journey: id, file: stepRow.file },
+            ),
+          );
+          stepOk = false;
+        }
+        if (journey.executionClass === "NativeOnly") {
+          fail(
+            err("journey-class-mismatch", "NativeOnly journeys run shipped commands, not files", {
+              journey: id,
+            }),
+          );
+          stepOk = false;
+        }
+      }
+      if (stepRow.command != null) {
+        const resolved = resolveShippedCommand(bins, stepRow.command);
+        if (!resolved.ok) {
+          fail(
+            err("journey-step-unshipped-command", "journey command is not a shipped bin", {
+              journey: id,
+              command: stepRow.command,
+              reason: resolved.code,
+            }),
+          );
+          stepOk = false;
+        }
+        const facts = stepRow.exampleId != null ? exampleFacts.get(stepRow.exampleId) : undefined;
+        if (!(facts?.commands ?? []).includes(resolved.name)) {
+          fail(
+            err(
+              "journey-step-command-outside-example",
+              "journey command is not declared by the bound example",
+              { journey: id, command: stepRow.command, exampleId: stepRow.exampleId },
+            ),
+          );
+          stepOk = false;
+        }
+        if (journey.executionClass === "NodeOnly") {
+          fail(
+            err("journey-class-mismatch", "NodeOnly journeys run example files, not commands", {
+              journey: id,
+            }),
+          );
+          stepOk = false;
+        }
+      }
+      if (
+        step?.args != null &&
+        (!Array.isArray(step.args) || !step.args.every((arg) => typeof arg === "string"))
+      ) {
+        fail(
+          err("journey-step-args-invalid", "journey step args must be strings", { journey: id }),
+        );
+        stepOk = false;
+      } else if (Array.isArray(step?.args)) {
+        stepRow.args = [...step.args];
+      }
+      if (step?.expectExit != null && !Number.isInteger(step.expectExit)) {
+        fail(
+          err("journey-step-expect-invalid", "journey step expectExit must be an integer", {
+            journey: id,
+          }),
+        );
+        stepOk = false;
+      } else if (Number.isInteger(step?.expectExit)) {
+        stepRow.expectExit = step.expectExit;
+      }
+      stepRows.push(stepRow);
+      if (!stepOk) journeyOk = false;
+    }
+    journeyRows.push({
+      id,
+      description: journey.description ?? null,
+      executionClass: journey.executionClass ?? null,
+      pins: journey.pins ?? null,
+      steps: stepRows,
+      execution: { state: "not-run" },
+      ok: journeyOk,
+    });
+  }
+  journeyRows.sort((a, b) => a.id.localeCompare(b.id));
+
+  if (options.runJourneys === true) {
+    const timeoutMs = options.journeyStepTimeoutMs ?? JOURNEY_STEP_TIMEOUT_MS;
+    for (const row of journeyRows) {
+      if (signal?.aborted) break;
+      if (structuralJourneyError(row.id)) continue;
+      const executedSteps = [];
+      let cancelled = false;
+      for (let index = 0; index < row.steps.length; index += 1) {
+        if (signal?.aborted) {
+          cancelled = true;
+          break;
+        }
+        const step = row.steps[index];
+        let entry;
+        let spawnArgs;
+        if (step.file != null) {
+          entry = { file: step.file };
+          spawnArgs = [join(examplesRoot, step.file), ...step.args];
+        } else {
+          const bin = bins.get(resolveShippedCommand(bins, step.command).name);
+          entry = {
+            command: step.command,
+            package: bin?.package ?? null,
+            packageVersion: bin?.version ?? null,
+          };
+          spawnArgs = [join(bin.dir, bin.path), ...step.args];
+        }
+        const outcome = await runJourneyProcess(repoRoot, spawnArgs, timeoutMs, signal);
+        if (outcome.timedOut) {
+          fail(
+            err("journey-step-timeout", "journey step exceeded its bounded runtime", {
+              journey: row.id,
+              ...entry,
+              timeoutMs,
+            }),
+          );
+          executedSteps.push({
+            ...entry,
+            args: step.args,
+            expectExit: step.expectExit,
+            exitCode: null,
+            timedOut: true,
+            stdoutDigest: outcome.stdoutDigest,
+            ok: false,
+          });
+          continue;
+        }
+        if (signal?.aborted || outcome.signal) {
+          cancelled = true;
+          executedSteps.push({
+            ...entry,
+            args: step.args,
+            expectExit: step.expectExit,
+            exitCode: null,
+            stdoutDigest: outcome.stdoutDigest,
+            ok: false,
+          });
+          break;
+        }
+        const ok = outcome.exitCode === step.expectExit;
+        if (!ok) {
+          fail(
+            err("journey-step-mismatch", "journey step missed its expected exit code", {
+              journey: row.id,
+              ...entry,
+              exitCode: outcome.exitCode,
+              expectExit: step.expectExit,
+              stderr: outcome.stderr.slice(0, 400),
+            }),
+          );
+        }
+        executedSteps.push({
+          ...entry,
+          args: step.args,
+          expectExit: step.expectExit,
+          exitCode: outcome.exitCode,
+          stdoutDigest: outcome.stdoutDigest,
+          ok,
+        });
+      }
+      if (cancelled) {
+        row.execution = { state: "cancelled" };
+        row.ok = false;
+      } else {
+        row.execution = { state: "executed", steps: executedSteps };
+        row.ok = row.ok && executedSteps.every((step) => step.ok);
+      }
+    }
+    if (signal?.aborted) {
+      receipt.completenessState = "cancelled";
+      receipt.journeys = journeyRows;
+      receipt.errors = [...errors, err("cancelled", "validation aborted during journey execution")];
+      receipt.sourceRevisions.digest = sourceDigest(digestEntries);
+      return receipt;
+    }
+  }
+  receipt.journeys = journeyRows;
+
   const generatedRel =
     plan.generatedPages?.[0]?.path ?? "docs/generated/typeinfo-row-registry-counts.md";
   const generatedAbs = join(repoRoot, ...generatedRel.split("/"));
@@ -845,7 +1386,8 @@ export async function validate(options = {}) {
     (item) =>
       item.code === "missing-source" ||
       item.code === "partial-example" ||
-      item.code === "sdk-page-missing",
+      item.code === "sdk-page-missing" ||
+      item.code === "recipes-page-missing",
   );
   const stale = errors.some(
     (item) => item.code === "stale-generated" || item.code === "stale-cache",
@@ -865,8 +1407,10 @@ export function canonicalizeReceipt(receipt) {
   const clone = JSON.parse(JSON.stringify(receipt));
   clone.examples?.sort((a, b) => a.id.localeCompare(b.id));
   clone.sdkGuides?.topics?.sort((a, b) => a.id.localeCompare(b.id));
+  clone.recipes?.topics?.sort((a, b) => a.id.localeCompare(b.id));
+  clone.journeys?.sort((a, b) => a.id.localeCompare(b.id));
   clone.links?.sort((a, b) => `${a.from}:${a.href}`.localeCompare(`${b.from}:${b.href}`));
-  clone.capabilities?.sort((a, b) => `${a.id}:${a.surface}`.localeCompare(`${b.id}:${b.surface}`));
+  clone.capabilities?.sort((a, b) => `${a.id}:${b.surface}`.localeCompare(`${a.id}:${b.surface}`));
   clone.errors?.sort((a, b) =>
     `${a.code}:${a.id ?? ""}:${a.specifier ?? a.command ?? a.path ?? ""}`.localeCompare(
       `${b.code}:${b.id ?? ""}:${b.specifier ?? b.command ?? b.path ?? ""}`,
@@ -878,7 +1422,15 @@ export function canonicalizeReceipt(receipt) {
 async function main() {
   const skipTypeinfoCheck = process.argv.includes("--skip-typeinfo");
   const sdkGate = process.argv.includes("--sdk-gate");
-  const receipt = await validate({ repoRoot: DEFAULT_REPO_ROOT, skipTypeinfoCheck, sdkGate });
+  const recipesGate = process.argv.includes("--recipes-gate");
+  const runJourneys = process.argv.includes("--run-journeys");
+  const receipt = await validate({
+    repoRoot: DEFAULT_REPO_ROOT,
+    skipTypeinfoCheck,
+    sdkGate,
+    recipesGate,
+    runJourneys,
+  });
   const canonical = canonicalizeReceipt(receipt);
   if (receipt.completenessState !== "complete") {
     process.stderr.write(
@@ -888,7 +1440,7 @@ async function main() {
     return;
   }
   process.stdout.write(
-    `${HARNESS_ID}: PASS examples=${canonical.examples.length} sdk=${canonical.sdkGuides?.topics?.length ?? 0} digest=${canonical.sourceRevisions.digest} lint=${canonical.generatedReference?.lintRuleCount}\n`,
+    `${HARNESS_ID}: PASS examples=${canonical.examples.length} sdk=${canonical.sdkGuides?.topics?.length ?? 0} recipes=${canonical.recipes?.topics?.length ?? 0} journeys=${canonical.journeys?.length ?? 0} digest=${canonical.sourceRevisions.digest} lint=${canonical.generatedReference?.lintRuleCount}\n`,
   );
 }
 
