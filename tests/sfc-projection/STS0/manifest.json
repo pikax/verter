@@ -1,0 +1,100 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STS0",
+  "kind": "lock",
+  "products": [
+    "SvelteProjectionPolicy",
+    "SvelteCurrentFeatureInventory",
+    "SvelteEngineFrameworkMatrix"
+  ],
+  "mandatoryCases": [
+    "STS0-svelte-inventory",
+    "STS0-svelte-abi",
+    "STS0-svelte-pin",
+    "STS0-policy-lock"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STS0/probes/positive.ts",
+    "negative": "tests/sfc-projection/STS0/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STS0/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STS0/probes/tsconfig.json",
+    "hoverNeedle": "sts0HoverTarget",
+    "definitionNeedle": "sts0DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "SvelteComponent"
+  },
+  "cases": [
+    {
+      "id": "STS0-policy-lock",
+      "disposition": "accept",
+      "twins": [
+        "every-supported-profile-dialect-has-explicit-checking-and-publishing",
+        "supported-profile-row-deletion",
+        "unchecked-legacy-js-instance-row-deletion",
+        "evidence-file-kind-dialect-context",
+        "runes-selection-joined-to-official-options",
+        "refused-options-fail-closed",
+        "authority-backed-refusal-deletion",
+        "publishing-flip-rejected",
+        "published-symbols-pin-deletion",
+        "owned-backend-gate-clean-both-engines",
+        "owned-backend-gate-evidence-corruption",
+        "owned-backend-gate-carrier-corruption",
+        "owned-backend-gate-publication-renames"
+      ]
+    },
+    {
+      "id": "STS0-svelte-inventory",
+      "disposition": "reject",
+      "twins": [
+        "required-feature-row-dropped",
+        "fabricated-feature-row",
+        "runes-mislabeled-legacy",
+        "fixture-removed",
+        "empty-imported-populations",
+        "official-selected-join-deleted-suite-retained",
+        "css-selected-join-deleted-corpus-retained",
+        "compiler-selected-join-deleted-source-retained",
+        "unowned-selected-population-member",
+        "harness-mappings-deleted-fixture-retained",
+        "selected-members-shrunk-to-one-supplied-row",
+        "benchmark-smoke-case-member-dropped",
+        "benchmark-population-citing-only-the-adapter",
+        "shipped-directive-row-dropped",
+        "mode-shared-feature-misclassified",
+        "deprecated-in-runes-feature-marked-legacy-only",
+        "legacy-only-feature-marked-mode-shared"
+      ]
+    },
+    {
+      "id": "STS0-svelte-abi",
+      "disposition": "reject",
+      "twins": [
+        "vue-constructor-required",
+        "vue-event-model-ref-conventions",
+        "vue-constructor-source-twin",
+        "instance-type-of-class-requirement",
+        "incorrect-derived-callback-signature"
+      ]
+    },
+    {
+      "id": "STS0-svelte-pin",
+      "disposition": "reject",
+      "twins": [
+        "latest-tool-claim",
+        "floating-version-range",
+        "framework-pin-diverged-from-package-json",
+        "engine-denominator-shrunk",
+        "provenance-source-missing",
+        "empty-engine-framework-cells",
+        "missing-engine-framework-cell"
+      ]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STS0 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STS0/svelte-lock.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Ratification lock for the Svelte projection profile. The positive probe exercises the framework-specific function-shaped Svelte Component plus runes and module/instance participation through the legal .svelte.ts module surface, on both admitted engines; the .svelte.ts rune declarations match the CCA1I prelude and pinned svelte/types $derived<T>(expression: T): T, and probes/negative.ts is the callback-form dirty twin (TS2322). probes.expectedInstanceType names the function-shaped component interface declared in probes/positive.ts (pinned by the STS0 protocol), and the Vue-constructor-shaped harness Instance check intentionally does not apply, as recorded for STP7. probes/vue-constructor-twin.ts is the scanned STS0-svelte-abi dirty twin and is never part of a compiled program. runtimeCorrectness is backed by EXECUTION of the owned-backend profile gate (crates/verter_session/tests/cases/sts0_profile_gate.rs, joined by name from the protocol): every policy profile's evidence fixture is projected through the CCA1I SvelteProjectionBackend and the real generated carrier is checked on BOTH claimed engines (ts-js 6.0.3 and ts-native 7.0.2) — clean, with evidence-template and projected-carrier corruption twins that engine-checked rows must fail and js-unchecked rows must not report, and with declaration consumers plus module-export declaration emit whose renaming twins must lose the published symbol. Mode semantics are pinned by the mode-paired svelte compiler controls under probes/modes/, which keep deprecation warnings (on:click, <slot> in runes mode) distinct from unsupported-mode rejection. Population recordedRows are recorded import evidence, never acceptance gates; completeness is identity-based (every RequiredCurrent row keeps an owning selected join, and the harness/benchmark file and smoke-case memberships derive from their live authorities). No production emit, runtime activation, or new public helper shape is authorized by this node."
+}
