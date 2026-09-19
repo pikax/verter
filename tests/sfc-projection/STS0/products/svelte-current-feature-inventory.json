@@ -1,0 +1,238 @@
+{
+  "schema": "SvelteCurrentFeatureInventory",
+  "version": 1,
+  "product": "SvelteCurrentFeatureInventory",
+  "node": "STS0",
+  "kind": "lock",
+  "rule": "every-current-supported-svelte-feature-has-a-mandatory-owning-row",
+  "inputSnapshot": {
+    "svelte": { "package": "svelte", "version": "5.56.10", "source": "package.json devDependencies" },
+    "typescriptJs": { "package": "typescript", "version": "6.0.3", "source": "STP1 EngineMatrix" },
+    "typescriptNative": { "package": "typescript", "version": "7.0.2", "source": "STP1 EngineMatrix" }
+  },
+  "populations": [
+    {
+      "id": "svelte-official-cases",
+      "path": "packages/framework-conformance-harness/evidence/svelte-official-cases.tsv",
+      "role": "official-svelte-tooling-case-classification",
+      "recordedRows": 3475
+    },
+    {
+      "id": "svelte-css-conformance",
+      "path": "crates/verter_svelte_conformance/corpus/fixtures",
+      "role": "verter-svelte-conformance-fixture-corpus",
+      "recordedRows": 609
+    },
+    {
+      "id": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte",
+      "role": "runes-and-legacy-representative-fixtures",
+      "recordedRows": 3
+    },
+    {
+      "id": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte",
+      "role": "verter-svelte-projection-and-prelude-implementation"
+    },
+    {
+      "id": "pinned-official-tooling",
+      "path": "node_modules/svelte/package.json",
+      "role": "pinned-official-svelte-toolchain"
+    }
+  ],
+  "rows": [
+    {
+      "id": "rune-state",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "surface": "verter-prelude"
+    },
+    {
+      "id": "rune-derived",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "surface": "verter-prelude"
+    },
+    {
+      "id": "rune-effect",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "surface": "verter-prelude"
+    },
+    {
+      "id": "rune-props",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte",
+      "surface": "fixture"
+    },
+    {
+      "id": "rune-bindable",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "surface": "verter-prelude"
+    },
+    {
+      "id": "rune-inspect",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "surface": "verter-prelude"
+    },
+    {
+      "id": "rune-host",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/prelude.rs",
+      "surface": "verter-prelude"
+    },
+    {
+      "id": "svelte-ts-modules",
+      "family": "runes",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "tests/sfc-projection/STS0/probes/state-module.svelte.ts",
+      "surface": "probe-fixture"
+    },
+    {
+      "id": "template-each",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
+      "surface": "verter-parser"
+    },
+    {
+      "id": "template-await",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
+      "surface": "verter-parser"
+    },
+    {
+      "id": "template-snippet",
+      "family": "template",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/parser/block_head.rs",
+      "surface": "verter-parser"
+    },
+    {
+      "id": "template-if-else",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte",
+      "surface": "fixture"
+    },
+    {
+      "id": "template-interpolation",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte",
+      "surface": "fixture"
+    },
+    {
+      "id": "template-svelte-specials",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/special.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "events-attribute-handlers",
+      "family": "events",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte",
+      "surface": "fixture"
+    },
+    {
+      "id": "events-legacy-directive",
+      "family": "events",
+      "semantics": "legacy",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "legacy-slots",
+      "family": "legacy",
+      "semantics": "legacy",
+      "requiredCurrent": true,
+      "path": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte",
+      "surface": "fixture"
+    },
+    {
+      "id": "legacy-export-let",
+      "family": "legacy",
+      "semantics": "legacy",
+      "requiredCurrent": true,
+      "path": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte",
+      "surface": "fixture"
+    },
+    {
+      "id": "legacy-store-auto-subscription",
+      "family": "legacy",
+      "semantics": "legacy",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/store_scan.rs",
+      "surface": "verter-classifier"
+    },
+    {
+      "id": "legacy-transitions-actions-animate",
+      "family": "legacy",
+      "semantics": "legacy",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "bind-directive",
+      "family": "bindings",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/bind.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "script-module-context",
+      "family": "scripts",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "tests/sfc-projection/STS0/probes/positive.ts",
+      "surface": "probe-fixture"
+    },
+    {
+      "id": "component-function-shape",
+      "family": "component",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "tests/sfc-projection/STS0/probes/positive.ts",
+      "surface": "probe-fixture"
+    },
+    {
+      "id": "css-scoping-attr-selectors",
+      "family": "styles",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_svelte_conformance/corpus/fixtures/attr-dec-lit-attr-uq-comp-ext-plain-m.svelte",
+      "surface": "conformance-fixture"
+    }
+  ],
+  "notes": "Runes versus supported legacy semantics is carried per row; a rune mislabeled as legacy (or vice versa) fails STS0-svelte-inventory. Official population counts are recorded observations, not re-derived gates: the protocol checks each population exists and each row cites an existing fixture."
+}

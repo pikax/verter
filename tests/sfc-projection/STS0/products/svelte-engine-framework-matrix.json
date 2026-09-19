@@ -1,0 +1,63 @@
+{
+  "schema": "SvelteEngineFrameworkMatrix",
+  "version": 1,
+  "product": "SvelteEngineFrameworkMatrix",
+  "node": "STS0",
+  "kind": "lock",
+  "pinRule": "every-version-is-an-exact-pinned-version-with-a-named-source",
+  "engines": [
+    {
+      "id": "ts-js",
+      "package": "typescript",
+      "version": "6.0.3",
+      "source": "tests/sfc-projection/STP1/products/engine-matrix.json",
+      "executableResolution": "packages/playground/node_modules/typescript/lib/tsc.js"
+    },
+    {
+      "id": "ts-native",
+      "package": "typescript",
+      "version": "7.0.2",
+      "source": "tests/sfc-projection/STP1/products/engine-matrix.json",
+      "executableResolution": "typescript native platform package (mapper-capable)"
+    }
+  ],
+  "framework": {
+    "id": "svelte-5.56",
+    "package": "svelte",
+    "version": "5.56.10",
+    "source": "package.json devDependencies",
+    "resolvedFrom": "node_modules/svelte",
+    "semanticsAuthority": "packages/framework-conformance-harness/evidence/svelte-options.tsv"
+  },
+  "cells": [
+    {
+      "engine": "ts-js",
+      "framework": "svelte-5.56",
+      "checking": "engine-checked",
+      "provenance": {
+        "package": "typescript",
+        "version": "6.0.3",
+        "source": "tests/sfc-projection/STP1/products/engine-matrix.json"
+      }
+    },
+    {
+      "engine": "ts-native",
+      "framework": "svelte-5.56",
+      "checking": "engine-checked",
+      "provenance": {
+        "package": "typescript",
+        "version": "7.0.2",
+        "source": "tests/sfc-projection/STP1/products/engine-matrix.json"
+      }
+    }
+  ],
+  "frameworkProvenance": {
+    "package": "svelte",
+    "version": "5.56.10",
+    "source": "package.json devDependencies"
+  },
+  "noDenominatorShrinking": true,
+  "toyEvidenceAdmitted": false,
+  "latestToolClaimsAdmitted": false,
+  "notes": "Executable identity (path + sha256) is resolved at run time by the shared STP1 harness against the STP1 EngineMatrix pins; this matrix records the admitted engine/framework pins and their named sources. A latest-tool or floating-range claim is rejected by STS0-svelte-pin."
+}
