@@ -54,6 +54,9 @@ export const REQUIRED_SVELTE_FEATURES = Object.freeze([
   "template-if-else",
   "template-interpolation",
   "template-svelte-specials",
+  "template-html",
+  "template-const",
+  "template-attach",
   "events-attribute-handlers",
   "events-legacy-directive",
   "legacy-slots",
@@ -85,8 +88,38 @@ export const PUBLISHING_BEHAVIORS = Object.freeze([
   "module-exports-published",
 ]);
 
+export const REQUIRED_POPULATION_IDS = Object.freeze([
+  "svelte-official-cases",
+  "svelte-css-conformance",
+  "framework-conformance-harness-fixtures",
+  "verter-svelte-compiler",
+  "pinned-official-tooling",
+  "svelte-benchmarks",
+]);
+
+export const REQUIRED_POLICY_PROFILE_IDS = Object.freeze([
+  "svelte-ts-instance-runes",
+  "svelte-ts-instance-legacy",
+  "svelte-js-instance-runes-unchecked",
+  "svelte-js-instance-runes-checked",
+  "svelte-js-instance-legacy-checked",
+  "svelte-ts-module-context",
+  "svelte-js-module-context-unchecked",
+  "svelte-js-module-context-checked",
+  "svelte-ts-svelte-ts-module",
+  "svelte-js-svelte-js-module-unchecked",
+  "svelte-js-svelte-js-module-checked",
+  "svelte-template-only",
+]);
+
+export const PINNED_DERIVED_DECLARE = "declare function $derived<T>(expression: T): T";
+export const SVELTE_PRELUDE = "crates/verter_compiler/src/svelte/ide/prelude.rs";
+export const PINNED_SVELTE_TYPES = "node_modules/svelte/types/index.d.ts";
+
 export const SVELTE_OPTIONS_TSV =
   "packages/framework-conformance-harness/evidence/svelte-options.tsv";
+export const SVELTE_OFFICIAL_CASES_TSV =
+  "packages/framework-conformance-harness/evidence/svelte-official-cases.tsv";
 export const STP1_ENGINE_MATRIX = "tests/sfc-projection/STP1/products/engine-matrix.json";
 export const STP8_ARCHITECTURE =
   "tests/sfc-projection/STP8/products/accepted-projection-architecture.json";
@@ -167,6 +200,158 @@ function parseOptionsTsv(text) {
 
 function loadOptionsTsv(repoRoot = REPO_ROOT) {
   return parseOptionsTsv(fs.readFileSync(path.resolve(repoRoot, SVELTE_OPTIONS_TSV), "utf8"));
+}
+
+function parseOfficialCasesTsv(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim());
+  if (lines.length < 2) return [];
+  const header = lines[0].split("\t");
+  return lines.slice(1).map((line) => {
+    const cols = line.split("\t");
+    const row = {};
+    for (let i = 0; i < header.length; i += 1) row[header[i]] = cols[i] ?? "";
+    return row;
+  });
+}
+
+export function loadOfficialSvelteCases(repoRoot = REPO_ROOT) {
+  return parseOfficialCasesTsv(
+    fs.readFileSync(path.resolve(repoRoot, SVELTE_OFFICIAL_CASES_TSV), "utf8"),
+  );
+}
+
+function countFilesWithExtension(abs, extension) {
+  if (!fs.existsSync(abs)) return 0;
+  const stat = fs.statSync(abs);
+  if (stat.isFile()) return abs.endsWith(extension) ? 1 : 0;
+  let n = 0;
+  for (const ent of fs.readdirSync(abs, { withFileTypes: true })) {
+    const child = path.join(abs, ent.name);
+    if (ent.isDirectory()) n += countFilesWithExtension(child, extension);
+    else if (ent.name.endsWith(extension)) n += 1;
+  }
+  return n;
+}
+
+export function countPopulationMembers(population, { repoRoot = REPO_ROOT } = {}) {
+  const rel = population?.path;
+  if (!rel) return 0;
+  const abs = path.resolve(repoRoot, rel);
+  if (!fs.existsSync(abs)) return 0;
+  if (rel.endsWith(".tsv")) {
+    return parseOfficialCasesTsv(fs.readFileSync(abs, "utf8")).length;
+  }
+  const stat = fs.statSync(abs);
+  if (stat.isDirectory()) return countFilesWithExtension(abs, ".svelte");
+  return 1;
+}
+
+const TS_LANG_ATTR = /\blang\s*=\s*["'](?:ts|typescript)["']/i;
+const MODULE_ATTR = /\bmodule\b|context\s*=\s*["']module["']/i;
+const TS_NOCHECK = /@ts-nocheck/;
+const TS_CHECK = /@ts-check/;
+
+export function classifySvelteEvidence(rel, text) {
+  const posix = String(rel || "").replace(/\\/g, "/");
+  if (posix.endsWith(".svelte.ts")) {
+    return {
+      fileKind: ".svelte.ts",
+      scriptContext: "module-file",
+      dialect: "ts",
+      jsCheckingHint: null,
+    };
+  }
+  if (posix.endsWith(".svelte.js")) {
+    return {
+      fileKind: ".svelte.js",
+      scriptContext: "module-file",
+      dialect: "js",
+      jsCheckingHint: TS_NOCHECK.test(text)
+        ? "js-unchecked"
+        : TS_CHECK.test(text)
+          ? "engine-checked"
+          : null,
+    };
+  }
+  if (posix.endsWith(".svelte")) {
+    const scripts = [...String(text).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+    if (scripts.length === 0) {
+      return {
+        fileKind: ".svelte",
+        scriptContext: "none",
+        dialect: null,
+        jsCheckingHint: null,
+      };
+    }
+    const module = scripts.some((match) => MODULE_ATTR.test(match[1]));
+    const ts = scripts.some((match) => TS_LANG_ATTR.test(match[1]));
+    const bodies = scripts.map((match) => `${match[1]}\n${match[2]}`).join("\n");
+    return {
+      fileKind: ".svelte",
+      scriptContext: module ? "module" : "instance",
+      dialect: ts ? "ts" : "js",
+      jsCheckingHint: TS_NOCHECK.test(bodies)
+        ? "js-unchecked"
+        : TS_CHECK.test(bodies)
+          ? "engine-checked"
+          : null,
+    };
+  }
+  return {
+    fileKind: path.extname(posix) || "unknown",
+    scriptContext: null,
+    dialect: null,
+    jsCheckingHint: null,
+  };
+}
+
+export function assertRuneProbeMatchesPinnedProjection(
+  probeSource,
+  { preludeSource = "", svelteTypesSource = "" } = {},
+) {
+  const errors = [];
+  if (preludeSource && !preludeSource.includes(PINNED_DERIVED_DECLARE)) {
+    errors.push(
+      err(
+        "STS0-svelte-abi",
+        "rune-signature-drift",
+        "CCA1I prelude lost the pinned $derived expression signature",
+      ),
+    );
+  }
+  if (svelteTypesSource && !svelteTypesSource.includes(PINNED_DERIVED_DECLARE)) {
+    errors.push(
+      err(
+        "STS0-svelte-abi",
+        "rune-signature-drift",
+        "pinned svelte/types lost $derived<T>(expression: T): T",
+      ),
+    );
+  }
+  if (!String(probeSource || "").includes(PINNED_DERIVED_DECLARE)) {
+    errors.push(
+      err(
+        "STS0-svelte-abi",
+        "incorrect-rune-signature",
+        "rune probe does not use the pinned $derived expression signature",
+      ),
+    );
+  }
+  if (
+    /\$derived\s*<\s*T\s*>\s*\(\s*compute\s*:/.test(probeSource) ||
+    /\$derived\(\(\)\s*=>/.test(probeSource)
+  ) {
+    errors.push(
+      err(
+        "STS0-svelte-abi",
+        "incorrect-rune-signature",
+        "clean rune probe uses callback $derived; that form is $derived.by",
+      ),
+    );
+  }
+  return errors;
 }
 
 function isExactPin(version) {
@@ -411,7 +596,18 @@ export function assertSvelteInventory(
       );
     }
   }
-  for (const population of inventory?.populations || []) {
+  const populations = Array.isArray(inventory?.populations) ? inventory.populations : [];
+  if (populations.length === 0) {
+    errors.push(
+      err(
+        "STS0-svelte-inventory",
+        "removed-fixture",
+        "selected fixture populations were not imported",
+      ),
+    );
+  }
+  const populationById = new Map();
+  for (const population of populations) {
     if (
       !population?.id ||
       !population?.path ||
@@ -422,6 +618,85 @@ export function assertSvelteInventory(
           "STS0-svelte-inventory",
           "removed-fixture",
           `selected population ${population?.id || "?"} missing at ${population?.path}`,
+        ),
+      );
+      continue;
+    }
+    populationById.set(population.id, population);
+    if (typeof population.recordedRows === "number") {
+      const live = countPopulationMembers(population, { repoRoot });
+      if (live !== population.recordedRows) {
+        errors.push(
+          err(
+            "STS0-svelte-inventory",
+            "population-count-mismatch",
+            `population ${population.id} recordedRows ${population.recordedRows} does not match imported live count ${live}`,
+          ),
+        );
+      }
+    }
+  }
+  for (const id of REQUIRED_POPULATION_IDS) {
+    if (!populationById.has(id)) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "removed-fixture",
+          `required fixture population ${id} was not imported`,
+        ),
+      );
+    }
+  }
+  const officialCases = populationById.has("svelte-official-cases")
+    ? loadOfficialSvelteCases(repoRoot)
+    : [];
+  const selectedMembers = Array.isArray(inventory?.selectedMembers)
+    ? inventory.selectedMembers
+    : [];
+  if (selectedMembers.length === 0) {
+    errors.push(
+      err(
+        "STS0-svelte-inventory",
+        "unowned-feature",
+        "imported populations have no selected members joined to owning rows",
+      ),
+    );
+  }
+  for (const member of selectedMembers) {
+    if (!member?.id || !member?.population || !populationById.has(member.population)) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "removed-fixture",
+          `selected member ${member?.id || "?"} cites unknown population ${member?.population}`,
+        ),
+      );
+      continue;
+    }
+    if (!member.owner || !ids.has(member.owner)) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "unowned-feature",
+          `upstream selected case ${member.id} has no mandatory owning row`,
+        ),
+      );
+    }
+    if (member.path && !fs.existsSync(path.resolve(repoRoot, member.path))) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "removed-fixture",
+          `selected member ${member.id} cites missing fixture ${member.path}`,
+        ),
+      );
+    }
+    if (member.suite && !officialCases.some((row) => row.suite === member.suite)) {
+      errors.push(
+        err(
+          "STS0-svelte-inventory",
+          "removed-fixture",
+          `selected official suite ${member.suite} is missing from the imported official population`,
         ),
       );
     }
@@ -504,40 +779,77 @@ export function assertPolicyLock(policy, { repoRoot = REPO_ROOT, optionsTsv = nu
           `profile ${row.id} cites missing evidence fixture ${row.evidencePath}`,
         ),
       );
+    } else {
+      const evidenceText = fs.readFileSync(path.resolve(repoRoot, row.evidencePath), "utf8");
+      const classified = classifySvelteEvidence(row.evidencePath, evidenceText);
+      if (classified.fileKind !== row.fileKind) {
+        errors.push(
+          err(
+            "STS0-policy-lock",
+            "evidence-mismatch",
+            `profile ${row.id} fileKind ${row.fileKind} does not match evidence ${classified.fileKind}`,
+          ),
+        );
+      }
+      if (classified.scriptContext && classified.scriptContext !== row.scriptContext) {
+        errors.push(
+          err(
+            "STS0-policy-lock",
+            "evidence-mismatch",
+            `profile ${row.id} scriptContext ${row.scriptContext} does not match evidence ${classified.scriptContext}`,
+          ),
+        );
+      }
+      if (classified.dialect && classified.dialect !== row.dialect) {
+        errors.push(
+          err(
+            "STS0-policy-lock",
+            "evidence-mismatch",
+            `profile ${row.id} dialect ${row.dialect} does not match evidence ${classified.dialect}`,
+          ),
+        );
+      }
+      if (row.dialect === "js") {
+        if (row.checking === "engine-checked" && row.checkJs !== true) {
+          errors.push(
+            err(
+              "STS0-policy-lock",
+              "unspecified-behavior",
+              `profile ${row.id} engine-checked JS must set checkJs true`,
+            ),
+          );
+        }
+        if (classified.jsCheckingHint && classified.jsCheckingHint !== row.checking) {
+          errors.push(
+            err(
+              "STS0-policy-lock",
+              "evidence-mismatch",
+              `profile ${row.id} checking ${row.checking} does not match evidence ${classified.jsCheckingHint}`,
+            ),
+          );
+        }
+        if (!classified.jsCheckingHint) {
+          errors.push(
+            err(
+              "STS0-policy-lock",
+              "evidence-mismatch",
+              `profile ${row.id} JS evidence must carry @ts-check or @ts-nocheck`,
+            ),
+          );
+        }
+      }
     }
   }
-  const fileKinds = new Set(rows.map((row) => row?.fileKind));
-  for (const kind of SVELTE_FILE_KINDS) {
-    if (!fileKinds.has(kind)) {
+  for (const id of REQUIRED_POLICY_PROFILE_IDS) {
+    if (!ids.has(id)) {
       errors.push(
-        err("STS0-policy-lock", "missing-policy", `no supported profile row for file kind ${kind}`),
+        err(
+          "STS0-policy-lock",
+          "missing-policy",
+          `supported profile ${id} is missing explicit checking and publishing behavior`,
+        ),
       );
     }
-  }
-  const jsRows = rows.filter((row) => row?.dialect === "js" || row?.fileKind === ".svelte.js");
-  if (!jsRows.some((row) => row.checking === "js-unchecked")) {
-    errors.push(
-      err("STS0-policy-lock", "missing-policy", "no checkJs-off (js-unchecked) js profile row"),
-    );
-  }
-  if (!jsRows.some((row) => row.checking === "engine-checked")) {
-    errors.push(
-      err("STS0-policy-lock", "missing-policy", "no checkJs-on (engine-checked) js profile row"),
-    );
-  }
-  const semantics = new Set(rows.map((row) => row?.semantics));
-  if (!semantics.has("runes")) {
-    errors.push(err("STS0-policy-lock", "missing-policy", "no runes-semantics profile row"));
-  }
-  if (!semantics.has("legacy")) {
-    errors.push(err("STS0-policy-lock", "missing-policy", "no legacy-semantics profile row"));
-  }
-  if (
-    !rows.some((row) => row?.scriptContext === "module" || row?.scriptContext === "module-file")
-  ) {
-    errors.push(
-      err("STS0-policy-lock", "missing-policy", "no module-context participation profile row"),
-    );
   }
 
   const tsv = optionsTsv || loadOptionsTsv(repoRoot);
@@ -576,7 +888,8 @@ export function assertPolicyLock(policy, { repoRoot = REPO_ROOT, optionsTsv = nu
       );
     }
   }
-  for (const refused of policy.refusedOptions || []) {
+  const refusedOptions = Array.isArray(policy.refusedOptions) ? policy.refusedOptions : [];
+  for (const refused of refusedOptions) {
     if (refused?.behavior !== "refused-fail-closed") {
       errors.push(
         err(
@@ -595,6 +908,23 @@ export function assertPolicyLock(policy, { repoRoot = REPO_ROOT, optionsTsv = nu
           "STS0-policy-lock",
           "silently-ignored-option",
           `refused option ${refused?.surface}/${refused?.option} is not classified unsupported fail-closed by the official population`,
+        ),
+      );
+    }
+  }
+  const failClosed = Array.isArray(tsv)
+    ? tsv.filter((entry) => entry.classification === "unsupported fail-closed")
+    : [];
+  for (const entry of failClosed) {
+    const kept = refusedOptions.some(
+      (refused) => refused.surface === entry.surface && refused.option === entry.option,
+    );
+    if (!kept) {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "silently-ignored-option",
+          `required fail-closed option ${entry.surface}/${entry.option} is missing from refusedOptions`,
         ),
       );
     }
@@ -750,7 +1080,28 @@ export function assertEngineFrameworkPins(
     );
   }
   const engineIds = new Set(engines.map((engine) => engine.id));
-  for (const cell of matrix?.cells || []) {
+  const cells = Array.isArray(matrix?.cells) ? matrix.cells : [];
+  if (cells.length === 0) {
+    errors.push(
+      err(
+        "STS0-svelte-pin",
+        "missing-cell",
+        "engine/framework matrix has no cells for the admitted pairs",
+      ),
+    );
+  }
+  for (const engine of engines) {
+    if (!cells.some((cell) => cell.engine === engine.id && cell.framework === framework.id)) {
+      errors.push(
+        err(
+          "STS0-svelte-pin",
+          "missing-cell",
+          `missing engine/framework cell ${engine.id}/${framework.id}`,
+        ),
+      );
+    }
+  }
+  for (const cell of cells) {
     if (!engineIds.has(cell.engine)) {
       errors.push(
         err("STS0-svelte-pin", "unpinned-engine", `cell cites unknown engine ${cell.engine}`),
@@ -1025,13 +1376,24 @@ export const DIRTY_POLICY_UNSPECIFIED_PROFILE = Object.freeze({
   semantics: "runes",
   checking: "unspecified",
   publishing: "",
-  evidencePath: "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte",
+  evidencePath: "tests/sfc-projection/STS0/probes/profiles/instance-runes.svelte",
 });
 
 export const DIRTY_POLICY_REFUSED_OPTION = Object.freeze({
   surface: "svelte:CompileOptions",
   option: "made-up-option",
   behavior: "refused-fail-closed",
+});
+
+export const DIRTY_POLICY_DROP_PROFILE = "svelte-ts-instance-runes";
+export const DIRTY_POLICY_DROP_MODULE = "svelte-ts-module-context";
+export const DIRTY_POLICY_DROP_REFUSAL = "accessors";
+
+export const DIRTY_INVENTORY_UNOWNED_SELECTED = Object.freeze({
+  id: "unowned-upstream-case",
+  population: "framework-conformance-harness-fixtures",
+  path: "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte",
+  owner: "not-an-inventory-row",
 });
 
 export const DIRTY_PIN_LATEST_VERSION = "latest";
@@ -1087,6 +1449,58 @@ export function evaluateRejectTwins() {
         "STS0-policy-lock",
         "missed-unspecified",
         "a refusal not classified by the official options population was not rejected",
+      ),
+    );
+  }
+  const droppedProfile = cloneJson(policy);
+  droppedProfile.profiles = droppedProfile.profiles.filter(
+    (row) => row.id !== DIRTY_POLICY_DROP_PROFILE,
+  );
+  if (!assertPolicyLock(droppedProfile).some((error) => error.code === "missing-policy")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "deleting svelte-ts-instance-runes was not rejected",
+      ),
+    );
+  }
+  const droppedModule = cloneJson(policy);
+  droppedModule.profiles = droppedModule.profiles.filter(
+    (row) => row.id !== DIRTY_POLICY_DROP_MODULE,
+  );
+  if (!assertPolicyLock(droppedModule).some((error) => error.code === "missing-policy")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "deleting a .svelte module-context profile was not rejected",
+      ),
+    );
+  }
+  const emptiedRefusals = cloneJson(policy);
+  emptiedRefusals.refusedOptions = [];
+  if (
+    !assertPolicyLock(emptiedRefusals).some((error) => error.code === "silently-ignored-option")
+  ) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "clearing every required option refusal was not rejected",
+      ),
+    );
+  }
+  const droppedRefusal = cloneJson(policy);
+  droppedRefusal.refusedOptions = droppedRefusal.refusedOptions.filter(
+    (row) => row.option !== DIRTY_POLICY_DROP_REFUSAL,
+  );
+  if (!assertPolicyLock(droppedRefusal).some((error) => error.code === "silently-ignored-option")) {
+    errors.push(
+      err(
+        "STS0-policy-lock",
+        "missed-unspecified",
+        "deleting one authority-backed refusal was not rejected",
       ),
     );
   }
@@ -1159,6 +1573,47 @@ export function evaluateRejectTwins() {
         "STS0-svelte-inventory",
         "missed-unowned-feature",
         "a feature row citing a missing fixture was not rejected",
+      ),
+    );
+  }
+  const emptiedPopulations = cloneJson(inventory);
+  emptiedPopulations.populations = [];
+  if (
+    !assertSvelteInventory(emptiedPopulations).some((error) => error.code === "removed-fixture")
+  ) {
+    errors.push(
+      err(
+        "STS0-svelte-inventory",
+        "missed-unowned-feature",
+        "empty imported populations were not rejected",
+      ),
+    );
+  }
+  const zeroRows = cloneJson(inventory);
+  const official = zeroRows.populations.find((row) => row.id === "svelte-official-cases");
+  if (official) official.recordedRows = 0;
+  if (
+    !assertSvelteInventory(zeroRows).some((error) => error.code === "population-count-mismatch")
+  ) {
+    errors.push(
+      err(
+        "STS0-svelte-inventory",
+        "missed-unowned-feature",
+        "zeroing official recordedRows was not rejected",
+      ),
+    );
+  }
+  const unownedSelected = cloneJson(inventory);
+  unownedSelected.selectedMembers = [
+    ...(unownedSelected.selectedMembers || []),
+    cloneJson(DIRTY_INVENTORY_UNOWNED_SELECTED),
+  ];
+  if (!assertSvelteInventory(unownedSelected).some((error) => error.code === "unowned-feature")) {
+    errors.push(
+      err(
+        "STS0-svelte-inventory",
+        "missed-unowned-feature",
+        "an upstream selected case without an owning row was not rejected",
       ),
     );
   }
@@ -1249,6 +1704,28 @@ export function evaluateRejectTwins() {
       ),
     );
   }
+  const emptyCells = cloneJson(matrix);
+  emptyCells.cells = [];
+  if (!assertEngineFrameworkPins(emptyCells).some((error) => error.code === "missing-cell")) {
+    errors.push(
+      err(
+        "STS0-svelte-pin",
+        "missed-latest-claim",
+        "an empty engine/framework cell set was not rejected",
+      ),
+    );
+  }
+  const droppedCell = cloneJson(matrix);
+  droppedCell.cells = droppedCell.cells.filter((cell) => cell.engine !== "ts-native");
+  if (!assertEngineFrameworkPins(droppedCell).some((error) => error.code === "missing-cell")) {
+    errors.push(
+      err(
+        "STS0-svelte-pin",
+        "missed-latest-claim",
+        "removing one required engine/framework cell was not rejected",
+      ),
+    );
+  }
   return errors;
 }
 
@@ -1261,6 +1738,29 @@ export function evaluateSts0() {
   errors.push(
     ...assertInstanceShapePin(positiveSource, loadSts0Manifest()?.probes?.expectedInstanceType),
   );
+  const probeAbs = path.join(STS0_DIR, "probes", "state-module.svelte.ts");
+  const preludeAbs = path.resolve(REPO_ROOT, SVELTE_PRELUDE);
+  const typesAbs = path.resolve(REPO_ROOT, PINNED_SVELTE_TYPES);
+  errors.push(
+    ...assertRuneProbeMatchesPinnedProjection(fs.readFileSync(probeAbs, "utf8"), {
+      preludeSource: fs.existsSync(preludeAbs) ? fs.readFileSync(preludeAbs, "utf8") : "",
+      svelteTypesSource: fs.existsSync(typesAbs) ? fs.readFileSync(typesAbs, "utf8") : "",
+    }),
+  );
+  const negativeAbs = path.join(STS0_DIR, "probes", "negative.ts");
+  const negativeSource = fs.readFileSync(negativeAbs, "utf8");
+  if (
+    !negativeSource.includes(PINNED_DERIVED_DECLARE) ||
+    !negativeSource.includes("$derived(() =>")
+  ) {
+    errors.push(
+      err(
+        "STS0-svelte-abi",
+        "incorrect-rune-signature",
+        "negative probe must keep the pinned $derived expression signature and the callback dirty twin",
+      ),
+    );
+  }
   // The scanned STS0-svelte-abi dirty twin must be rejected on sight.
   const twinAbs = path.join(STS0_DIR, "probes", "vue-constructor-twin.ts");
   const twinSource = fs.readFileSync(twinAbs, "utf8");

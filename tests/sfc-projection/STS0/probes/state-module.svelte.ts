@@ -1,11 +1,13 @@
 /**
- * Legal `.svelte.ts` module surface: runes participate in module-context
- * files outside the component file. The projection's ambient prelude types
- * the runes; for this stock-engine probe world the used runes are declared
- * in-module so both pinned engines observe the same typed surface.
+ * Legal `.svelte.ts` module surface. Rune declarations match the CCA1I
+ * projection prelude and the pinned Svelte 5.56.10 types
+ * (`$derived<T>(expression: T): T`; callback evaluation is `$derived.by`).
  */
 declare function $state<T>(initial: T): T;
-declare function $derived<T>(compute: () => T): T;
+declare function $derived<T>(expression: T): T;
+declare namespace $derived {
+  function by<T>(fn: () => T): T;
+}
 
 export interface CounterCell {
   count: number;
@@ -13,7 +15,7 @@ export interface CounterCell {
 
 export const counter: CounterCell = $state({ count: 0 });
 
-export const derivedCount: number = $derived(() => counter.count + 1);
+export const derivedCount: number = $derived(counter.count + 1);
 
 export function bump(cell: CounterCell): number {
   return cell.count + 1;

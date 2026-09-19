@@ -38,6 +38,73 @@
       "id": "pinned-official-tooling",
       "path": "node_modules/svelte/package.json",
       "role": "pinned-official-svelte-toolchain"
+    },
+    {
+      "id": "svelte-benchmarks",
+      "path": "crates/verter_validation_probe/src/corpus/svelte_benchmarks.rs",
+      "role": "external-svelte-benchmarks-corpus-adapter"
+    }
+  ],
+  "selectedMembers": [
+    {
+      "id": "official-runtime-runes",
+      "population": "svelte-official-cases",
+      "suite": "runtime-runes",
+      "owner": "rune-state"
+    },
+    {
+      "id": "harness-basic-runes",
+      "population": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte",
+      "owner": "template-if-else"
+    },
+    {
+      "id": "harness-legacy-slots",
+      "population": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte",
+      "owner": "legacy-slots"
+    },
+    {
+      "id": "harness-props-events",
+      "population": "framework-conformance-harness-fixtures",
+      "path": "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte",
+      "owner": "rune-props"
+    },
+    {
+      "id": "css-attr-selectors",
+      "population": "svelte-css-conformance",
+      "path": "crates/verter_svelte_conformance/corpus/fixtures/attr-dec-lit-attr-uq-comp-ext-plain-m.svelte",
+      "owner": "css-scoping-attr-selectors"
+    },
+    {
+      "id": "template-html",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "owner": "template-html"
+    },
+    {
+      "id": "template-const",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "owner": "template-const"
+    },
+    {
+      "id": "template-attach",
+      "population": "verter-svelte-compiler",
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "owner": "template-attach"
+    },
+    {
+      "id": "svelte-ts-modules",
+      "population": "verter-svelte-compiler",
+      "path": "tests/sfc-projection/STS0/probes/state-module.svelte.ts",
+      "owner": "svelte-ts-modules"
+    },
+    {
+      "id": "svelte-benchmarks-adapter",
+      "population": "svelte-benchmarks",
+      "path": "crates/verter_validation_probe/src/corpus/svelte_benchmarks.rs",
+      "owner": "component-function-shape"
     }
   ],
   "rows": [
@@ -154,6 +221,30 @@
       "surface": "verter-projector"
     },
     {
+      "id": "template-html",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "template-const",
+      "family": "template",
+      "semantics": "both",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "surface": "verter-projector"
+    },
+    {
+      "id": "template-attach",
+      "family": "template",
+      "semantics": "runes",
+      "requiredCurrent": true,
+      "path": "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+      "surface": "verter-projector"
+    },
+    {
       "id": "events-attribute-handlers",
       "family": "events",
       "semantics": "runes",
@@ -234,5 +325,5 @@
       "surface": "conformance-fixture"
     }
   ],
-  "notes": "Runes versus supported legacy semantics is carried per row; a rune mislabeled as legacy (or vice versa) fails STS0-svelte-inventory. Official population counts are recorded observations, not re-derived gates: the protocol checks each population exists and each row cites an existing fixture."
+  "notes": "Runes versus supported legacy semantics is carried per row; a rune mislabeled as legacy (or vice versa) fails STS0-svelte-inventory. Official, css, and harness population recordedRows are joined to the live imported members; selectedMembers join imported fixtures and official suites to mandatory owning rows."
 }

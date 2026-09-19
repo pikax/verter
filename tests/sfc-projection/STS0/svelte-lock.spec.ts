@@ -14,9 +14,16 @@ import {
   DIRTY_PIN_FLOATING_VERSION,
   DIRTY_PIN_LATEST_VERSION,
   DIRTY_PIN_UNKNOWN_ENGINE,
+  DIRTY_INVENTORY_UNOWNED_SELECTED,
+  DIRTY_POLICY_DROP_MODULE,
+  DIRTY_POLICY_DROP_PROFILE,
+  DIRTY_POLICY_DROP_REFUSAL,
   DIRTY_POLICY_REFUSED_OPTION,
   DIRTY_POLICY_UNSPECIFIED_PROFILE,
+  PINNED_DERIVED_DECLARE,
+  REQUIRED_POLICY_PROFILE_IDS,
   REQUIRED_SVELTE_FEATURES,
+  assertRuneProbeMatchesPinnedProjection,
   assertEngineFrameworkPins,
   assertInstanceShapePin,
   assertPolicyLock,
@@ -58,6 +65,44 @@ test("STS0-policy-lock: every supported profile has explicit checking and publis
     ),
     JSON.stringify(assertPolicyLock(inventedRefusal)),
   );
+  const droppedProfile = cloneJson(POLICY());
+  droppedProfile.profiles = droppedProfile.profiles.filter(
+    (row) => row.id !== DIRTY_POLICY_DROP_PROFILE,
+  );
+  assert.ok(
+    assertPolicyLock(droppedProfile).some(
+      (error) => error.caseId === "STS0-policy-lock" && error.code === "missing-policy",
+    ),
+    JSON.stringify(assertPolicyLock(droppedProfile)),
+  );
+  const droppedModule = cloneJson(POLICY());
+  droppedModule.profiles = droppedModule.profiles.filter(
+    (row) => row.id !== DIRTY_POLICY_DROP_MODULE,
+  );
+  assert.ok(
+    assertPolicyLock(droppedModule).some((error) => error.code === "missing-policy"),
+    JSON.stringify(assertPolicyLock(droppedModule)),
+  );
+  const emptiedRefusals = cloneJson(POLICY());
+  emptiedRefusals.refusedOptions = [];
+  assert.ok(
+    assertPolicyLock(emptiedRefusals).some((error) => error.code === "silently-ignored-option"),
+    JSON.stringify(assertPolicyLock(emptiedRefusals)),
+  );
+  const droppedRefusal = cloneJson(POLICY());
+  droppedRefusal.refusedOptions = droppedRefusal.refusedOptions.filter(
+    (row) => row.option !== DIRTY_POLICY_DROP_REFUSAL,
+  );
+  assert.ok(
+    assertPolicyLock(droppedRefusal).some((error) => error.code === "silently-ignored-option"),
+    JSON.stringify(assertPolicyLock(droppedRefusal)),
+  );
+  for (const id of REQUIRED_POLICY_PROFILE_IDS) {
+    assert.ok(
+      POLICY().profiles.some((row) => row.id === id),
+      `missing required profile ${id}`,
+    );
+  }
 });
 
 test("STS0-policy-lock: runes selection and refusals join the official options population", () => {
@@ -110,6 +155,29 @@ test("STS0-svelte-inventory: every canonical feature has a mandatory owning row"
   assert.ok(
     gained.some((error) => error.code === "unowned-feature"),
     JSON.stringify(gained),
+  );
+  const emptiedPopulations = cloneJson(INVENTORY());
+  emptiedPopulations.populations = [];
+  assert.ok(
+    assertSvelteInventory(emptiedPopulations).some((error) => error.code === "removed-fixture"),
+    JSON.stringify(assertSvelteInventory(emptiedPopulations)),
+  );
+  const zeroRows = cloneJson(INVENTORY());
+  const official = zeroRows.populations.find((row) => row.id === "svelte-official-cases");
+  assert.ok(official, "official population must exist");
+  official.recordedRows = 0;
+  assert.ok(
+    assertSvelteInventory(zeroRows).some((error) => error.code === "population-count-mismatch"),
+    JSON.stringify(assertSvelteInventory(zeroRows)),
+  );
+  const unowned = cloneJson(INVENTORY());
+  unowned.selectedMembers = [
+    ...(unowned.selectedMembers || []),
+    cloneJson(DIRTY_INVENTORY_UNOWNED_SELECTED),
+  ];
+  assert.ok(
+    assertSvelteInventory(unowned).some((error) => error.code === "unowned-feature"),
+    JSON.stringify(assertSvelteInventory(unowned)),
   );
 });
 
@@ -208,6 +276,57 @@ test("STS0-svelte-pin: latest-tool claims without pinned provenance are rejected
   assert.ok(
     assertEngineFrameworkPins(unknownEngine).some((error) => error.code === "unpinned-engine"),
     JSON.stringify(assertEngineFrameworkPins(unknownEngine)),
+  );
+  const emptyCells = cloneJson(MATRIX());
+  emptyCells.cells = [];
+  assert.ok(
+    assertEngineFrameworkPins(emptyCells).some((error) => error.code === "missing-cell"),
+    JSON.stringify(assertEngineFrameworkPins(emptyCells)),
+  );
+  const droppedCell = cloneJson(MATRIX());
+  droppedCell.cells = droppedCell.cells.filter((cell) => cell.engine !== "ts-native");
+  assert.ok(
+    assertEngineFrameworkPins(droppedCell).some((error) => error.code === "missing-cell"),
+    JSON.stringify(assertEngineFrameworkPins(droppedCell)),
+  );
+});
+
+test("STS0-svelte-abi: clean rune probe matches the pinned $derived expression signature", () => {
+  const probe = fs.readFileSync(path.join(HERE, "probes", "state-module.svelte.ts"), "utf8");
+  const prelude = fs.readFileSync(
+    path.resolve(HERE, "../../../crates/verter_compiler/src/svelte/ide/prelude.rs"),
+    "utf8",
+  );
+  const svelteTypes = fs.readFileSync(
+    path.resolve(HERE, "../../../node_modules/svelte/types/index.d.ts"),
+    "utf8",
+  );
+  assert.equal(
+    assertRuneProbeMatchesPinnedProjection(probe, {
+      preludeSource: prelude,
+      svelteTypesSource: svelteTypes,
+    }).length,
+    0,
+    JSON.stringify(
+      assertRuneProbeMatchesPinnedProjection(probe, {
+        preludeSource: prelude,
+        svelteTypesSource: svelteTypes,
+      }),
+    ),
+  );
+  assert.ok(probe.includes(PINNED_DERIVED_DECLARE));
+  const negative = fs.readFileSync(path.join(HERE, "probes", "negative.ts"), "utf8");
+  assert.ok(negative.includes(PINNED_DERIVED_DECLARE));
+  assert.ok(negative.includes("$derived(() =>"));
+  const dirty = probe.replace(
+    PINNED_DERIVED_DECLARE,
+    "declare function $derived<T>(compute: () => T): T",
+  );
+  assert.ok(
+    assertRuneProbeMatchesPinnedProjection(dirty, {
+      preludeSource: prelude,
+      svelteTypesSource: svelteTypes,
+    }).some((error) => error.code === "incorrect-rune-signature"),
   );
 });
 

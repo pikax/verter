@@ -22,7 +22,7 @@
       "semantics": "runes",
       "checking": "engine-checked",
       "publishing": "declarations-published",
-      "evidencePath": "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-runes.svelte"
     },
     {
       "id": "svelte-ts-instance-legacy",
@@ -32,7 +32,7 @@
       "semantics": "legacy",
       "checking": "engine-checked",
       "publishing": "declarations-published",
-      "evidencePath": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy.svelte"
     },
     {
       "id": "svelte-js-instance-runes-unchecked",
@@ -42,7 +42,18 @@
       "semantics": "runes",
       "checking": "js-unchecked",
       "publishing": "declarations-published",
-      "evidencePath": "packages/framework-conformance-harness/fixtures/svelte/props-events.svelte"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-runes-js-unchecked.svelte"
+    },
+    {
+      "id": "svelte-js-instance-runes-checked",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "js",
+      "semantics": "runes",
+      "checking": "engine-checked",
+      "publishing": "declarations-published",
+      "checkJs": true,
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-runes-js-checked.svelte"
     },
     {
       "id": "svelte-js-instance-legacy-checked",
@@ -53,7 +64,7 @@
       "checking": "engine-checked",
       "publishing": "declarations-published",
       "checkJs": true,
-      "evidencePath": "packages/framework-conformance-harness/fixtures/svelte/legacy-slots.svelte"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-checked.svelte"
     },
     {
       "id": "svelte-ts-module-context",
@@ -63,7 +74,7 @@
       "semantics": "both",
       "checking": "engine-checked",
       "publishing": "module-exports-published",
-      "evidencePath": "tests/sfc-projection/STS0/probes/positive.ts"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/module-context.svelte"
     },
     {
       "id": "svelte-js-module-context-unchecked",
@@ -73,7 +84,18 @@
       "semantics": "both",
       "checking": "js-unchecked",
       "publishing": "module-exports-published",
-      "evidencePath": "packages/framework-conformance-harness/fixtures/svelte/basic-runes.svelte"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/module-context-js-unchecked.svelte"
+    },
+    {
+      "id": "svelte-js-module-context-checked",
+      "fileKind": ".svelte",
+      "scriptContext": "module",
+      "dialect": "js",
+      "semantics": "both",
+      "checking": "engine-checked",
+      "publishing": "module-exports-published",
+      "checkJs": true,
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/module-context-js-checked.svelte"
     },
     {
       "id": "svelte-ts-svelte-ts-module",
@@ -93,7 +115,7 @@
       "semantics": "runes",
       "checking": "js-unchecked",
       "publishing": "module-exports-published",
-      "evidencePath": "tests/sfc-projection/STS0/probes/state-module.svelte.ts"
+      "evidencePath": "tests/sfc-projection/STS0/probes/state-module-unchecked.svelte.js"
     },
     {
       "id": "svelte-js-svelte-js-module-checked",
@@ -104,7 +126,7 @@
       "checking": "engine-checked",
       "publishing": "module-exports-published",
       "checkJs": true,
-      "evidencePath": "tests/sfc-projection/STS0/probes/state-module.svelte.ts"
+      "evidencePath": "tests/sfc-projection/STS0/probes/state-module-checked.svelte.js"
     },
     {
       "id": "svelte-template-only",
@@ -114,7 +136,7 @@
       "semantics": "both",
       "checking": "engine-checked",
       "publishing": "declarations-published",
-      "evidencePath": "crates/verter_svelte_conformance/corpus/fixtures/attr-dec-lit-attr-uq-comp-ext-plain-m.svelte"
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/template-only.svelte"
     }
   ],
   "semanticsSelection": {
