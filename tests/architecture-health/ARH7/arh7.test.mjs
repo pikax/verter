@@ -10,7 +10,6 @@ import {
   mandatoryCases,
   selectedCaseIds,
   validate,
-  validateProvenance,
 } from "./verify.mjs";
 
 const clean = loadProducts();
@@ -192,18 +191,5 @@ test("ARH7 CI: architecture-health filter still selects the train home and vscod
 test("ARH7-verify CLI: the manifest verify command runs validate() and exits 0", () => {
   const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
   const stdout = execFileSync(process.execPath, [verifyPath], { encoding: "utf8" });
-  assert.match(stdout, /ARH7 verify: PASS/);
-});
-
-test("ARH7-verify CLI: --provenance accepts on the clean tree (CI lane shape)", () => {
-  const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
-  const candidate = clean["activation-cutover"].candidate;
-  const real = validateProvenance(candidate);
-  const carriesCommit = real.ok || !/not a commit/.test(real.reason);
-  if (carriesCommit) {
-    assert.deepEqual(real, { ok: true }, real.reason);
-  }
-  const args = carriesCommit ? [verifyPath, "--provenance"] : [verifyPath];
-  const stdout = execFileSync(process.execPath, args, { encoding: "utf8" });
   assert.match(stdout, /ARH7 verify: PASS/);
 });

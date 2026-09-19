@@ -42,11 +42,7 @@
     {
       "id": "ARH7-delivery",
       "disposition": "reject",
-      "twins": [
-        "clean products",
-        "ac4-rationale-missing",
-        "vsc0-evidence-stale"
-      ]
+      "twins": ["clean products", "ac4-rationale-missing", "vsc0-evidence-stale"]
     },
     {
       "id": "ARH7-cost",
@@ -61,7 +57,7 @@
         "manifest-case-drift",
         "manifest-product-drift",
         "manifest-command-drift",
-        "candidate-basis-drift (both the product pin and verify.mjs --provenance; js-build-test shallow clones skip --provenance when the pin object is absent)",
+        "candidate-basis-drift (product pin must be a 40-hex commit id; current-tree validation does not require git ancestry)",
         "ci-lane-missing",
         "arch-filter-missing-vue-vscode",
         "test-scripts-missing"

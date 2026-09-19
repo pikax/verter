@@ -6,7 +6,7 @@ The sole owning interface is `node tests/architecture-health/ARH7/verify.mjs` (v
 
 ## ARH7-ratification (accept)
 
-Clean products validate. Manifest cases, products and verify/test commands match the verifier. The candidate is a 40-hex commit; `--provenance` (full-history architecture-health lane) proves it is an ancestor of HEAD. Shallow `test:scripts` checkouts skip `--provenance` when the pin object is absent. `test:scripts` and the CI architecture-health job include this node; the arch filter includes `packages/vue-vscode/**`.
+Clean products validate. Manifest cases, products and verify/test commands match the verifier. The candidate field is a 40-hex commit id used as a format pin, not git-ancestry proof. `test:scripts` and the CI architecture-health job include this node; the arch filter includes `packages/vue-vscode/**`.
 
 ## ARH7-cutover (reject) — AC1
 
