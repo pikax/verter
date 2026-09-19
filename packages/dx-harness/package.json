@@ -25,12 +25,17 @@
       "types": "./dist/protocol-replay/index.d.ts",
       "import": "./dist/protocol-replay/index.js",
       "default": "./dist/protocol-replay/index.js"
+    },
+    "./jetbrains": {
+      "types": "./dist/jetbrains/index.d.ts",
+      "import": "./dist/jetbrains/index.js",
+      "default": "./dist/jetbrains/index.js"
     }
   },
   "scripts": {
-    "build": "npx shx rm -rf dist tsconfig.tsbuildinfo && tsc -b --force",
+    "build": "npx shx rm -rf dist tsconfig.tsbuildinfo tsconfig.jetbrains.tsbuildinfo && tsc -b --force",
     "dev": "tsc -b --watch",
-    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo tsconfig.jetbrains.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test": "pnpm run typecheck && vitest --run",
     "test:unit": "pnpm run typecheck && vitest --run --exclude '**/*Integration.test.ts'",
