@@ -108,6 +108,7 @@ fn package_version(dir: &Path) -> Option<String> {
 #[derive(Clone)]
 struct Engine {
     label: &'static str,
+    version: &'static str,
     launcher: PathBuf,
     through_node: bool,
 }
@@ -142,6 +143,7 @@ impl Engine {
         match launcher {
             Some((launcher, through_node)) => Some(Engine {
                 label,
+                version: expected,
                 launcher,
                 through_node,
             }),
@@ -160,11 +162,9 @@ impl Engine {
     }
 }
 
-/// Resolve the pinned native engine binary: the hoisted platform package
-/// first, then the pnpm store entries (`node_modules/.pnpm/@typescript+
-/// typescript-<platform>-<arch>@<version>/…`), keeping the entry whose
-/// owning package matches the pinned version exactly.
-fn resolve_native_tsc(expected: &str) -> Option<(PathBuf, bool)> {
+/// The pinned platform package identity for the HOST platform:
+/// (`@typescript/typescript-<platform>-<arch>`, `lib/tsc(.exe)`).
+fn native_platform_package() -> (String, &'static str) {
     let platform = match std::env::consts::OS {
         "windows" => "win32",
         "macos" => "darwin",
@@ -176,13 +176,33 @@ fn resolve_native_tsc(expected: &str) -> Option<(PathBuf, bool)> {
         "aarch64" => "arm64",
         other => other,
     };
-    let pkg_name = format!("@typescript/typescript-{platform}-{arch}");
-    let exe = if cfg!(windows) { "tsc.exe" } else { "tsc" };
-    let root = workspace_root().join("node_modules");
+    (
+        format!("@typescript/typescript-{platform}-{arch}"),
+        if cfg!(windows) { "tsc.exe" } else { "tsc" },
+    )
+}
 
-    let hoisted = root.join(&pkg_name).join("lib").join(exe);
+/// Resolve the pinned native engine binary under `root`'s node_modules: the
+/// hoisted platform package first, then the pnpm store entries
+/// (`node_modules/.pnpm/@typescript+typescript-<platform>-<arch>@<version>/…`),
+/// keeping the entry whose owning package matches the pinned version exactly.
+/// The hoisted launcher is executed ONLY when its own package `version`
+/// matches the pin — a stale hoist must never supersede the pinned store
+/// binary (STS0-svelte-pin: the executed compiler is the recorded engine).
+fn resolve_native_tsc_under(root: &Path, expected: &str) -> Option<(PathBuf, bool)> {
+    let (pkg_name, exe) = native_platform_package();
+    let hoisted_root = root.join(&pkg_name);
+    let hoisted = hoisted_root.join("lib").join(exe);
     if hoisted.is_file() {
-        return Some((hoisted, false));
+        match package_version(&hoisted_root) {
+            Some(version) if version == expected => return Some((hoisted, false)),
+            other => {
+                eprintln!(
+                    "STS0-ENGINE-PIN: refusing hoisted {pkg_name} at version {other:?} \
+                     (pin is {expected}); using the pnpm store entry"
+                );
+            }
+        }
     }
 
     let store = root.join(".pnpm");
@@ -213,6 +233,10 @@ fn resolve_native_tsc(expected: &str) -> Option<(PathBuf, bool)> {
         .map(|(_, launcher)| (launcher, false))
 }
 
+fn resolve_native_tsc(expected: &str) -> Option<(PathBuf, bool)> {
+    resolve_native_tsc_under(&workspace_root().join("node_modules"), expected)
+}
+
 fn claimed_engines() -> Vec<Engine> {
     let root = workspace_root();
     [
@@ -225,6 +249,13 @@ fn claimed_engines() -> Vec<Engine> {
     ]
     .into_iter()
     .flatten()
+    .inspect(|engine| {
+        // Engine manifest for the STS0 protocol: the live acceptance gate
+        // (tests/sfc-projection/STS0/protocol.mjs) requires BOTH pinned
+        // engines' manifest lines in the cargo output, so a green run cannot
+        // certify itself with an engine silently dropped.
+        eprintln!("STS0-ENGINE {} {}", engine.label, engine.version);
+    })
     .collect()
 }
 
@@ -835,22 +866,30 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                         row.id
                     );
                 }
-                // An actual declaration consumer on each claimed engine; the
+                // An actual declaration consumer on each claimed engine: the
+                // consumer imports the PUBLISHED DECLARATION sidecar, never
+                // the IDE carrier, so a declaration regression cannot hide
+                // behind a still-valid carrier. The pinned symbols must be
+                // keys of the consumed props surface, and the
                 // @ts-expect-error discriminates a collapsed `any` surface.
                 let carrier = carrier_for(&row);
+                let pinned = row
+                    .published_symbols
+                    .iter()
+                    .map(|symbol| format!("\"{symbol}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let consumer = format!(
-                    "import Comp from './{}';\n\
-                     import type {{ Component, ComponentProps }} from 'svelte';\n\
+                    "import Comp from './{DECLARATION_ENTRY_STEM}';\n\
+                     import type {{ ComponentProps }} from 'svelte';\n\
                      type Props = ComponentProps<typeof Comp>;\n\
-                     type Exports = ReturnType<typeof Comp>;\n\
-                     const asComponent: Component<Props, Exports, \"\"> = Comp;\n\
-                     void asComponent;\n\
+                     const pinnedProps: (keyof Props)[] = [{pinned}];\n\
+                     void pinnedProps;\n\
                      // @ts-expect-error the published component surface is concrete, not any\n\
                      const notAny: string = Comp;\n\
-                     void notAny;\n",
-                    carrier.entry
+                     void notAny;\n"
                 );
-                let extras = consumer_sidecars(&row, &consumer);
+                let extras = declaration_consumer_sidecars(&row, &consumer, &declaration);
                 for engine in &engines {
                     let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false)
                     else {
@@ -863,6 +902,33 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                         engine.label,
                         run.output
                     );
+                }
+                // DIRTY TWIN: collapse ONLY the published declaration's
+                // default export to `any` — every pinned symbol spelling and
+                // the IDE carrier stay byte-identical, so only the
+                // declaration consumer can catch it.
+                let corrupted = any_default_export_declaration(&declaration).unwrap_or_else(|| {
+                    panic!(
+                        "profile {} declaration must be a `declare const …; export default …` \
+                         pair for the any-default twin:\n{declaration}",
+                        row.id
+                    )
+                });
+                for symbol in &row.published_symbols {
+                    assert!(
+                        names_symbol(&corrupted, symbol),
+                        "the any-default twin for profile {} must preserve the {symbol} spelling:\n{corrupted}",
+                        row.id
+                    );
+                }
+                let twin_extras = declaration_consumer_sidecars(&row, &consumer, &corrupted);
+                for engine in &engines {
+                    let Some(run) =
+                        run_engine(engine, &engine.launcher, &carrier, &twin_extras, false)
+                    else {
+                        return;
+                    };
+                    assert_failed(&run, engine.label, &row.id, "any-default declaration");
                 }
                 if let Some(symbol) = first {
                     let renamed =
@@ -932,10 +998,139 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
     }
 }
 
-/// The declaration-consumer run reuses the carrier plus the consumer file
-/// and any self-import sidecar the carrier's imports resolve against.
+/// The carrier-and-consumer extras shared by every engine run in the
+/// publication test: any self-import sidecar the carrier's imports resolve
+/// against, plus the consumer file itself.
 fn consumer_sidecars(row: &ProfileRow, consumer: &str) -> Vec<(&'static str, String)> {
     let mut extras = sidecars_for(row);
     extras.push(("consumer.ts", consumer.to_string()));
     extras
+}
+
+/// The declaration-consumer run reuses the carrier plus the consumer file,
+/// the actual host DECLARATION as the module the consumer imports, and any
+/// self-import sidecar the carrier's imports resolve against.
+fn declaration_consumer_sidecars(
+    row: &ProfileRow,
+    consumer: &str,
+    declaration: &str,
+) -> Vec<(&'static str, String)> {
+    let mut extras = consumer_sidecars(row, consumer);
+    extras.push((DECLARATION_ENTRY, declaration.to_string()));
+    extras
+}
+
+/// The sidecar file the declaration consumer imports: the PUBLISHED host
+/// declaration (a strictly-valid `.d.ts`), not the IDE carrier. The consumer
+/// imports the extensionless stem; TS resolves it to this `.d.ts`.
+const DECLARATION_ENTRY: &str = "sts0-host-declaration.d.ts";
+const DECLARATION_ENTRY_STEM: &str = "sts0-host-declaration";
+
+/// Collapse ONLY the default export's type to `any`: the component const
+/// binding that `export default` names has its type intersected with `any`
+/// (`T & any` is `any` to the checker), so every spelling — including the
+/// prop names inside the `Component<…>` generics — is preserved
+/// byte-for-byte. `None` when the declaration is not the expected
+/// `declare const …; export default …;` pair — the twin must break loudly
+/// rather than corrupt nothing.
+fn any_default_export_declaration(declaration: &str) -> Option<String> {
+    let marker = "\nexport default ";
+    let export_at = declaration.rfind(marker)?;
+    let name_start = export_at + marker.len();
+    let name_end = name_start + declaration[name_start..].find(';')?;
+    let name = &declaration[name_start..name_end];
+    let head = format!("declare const {name}:");
+    let head_at = declaration.find(&head)?;
+    // The type extends to the first statement-terminating `;` at bracket
+    // depth zero (both the `import("svelte").Component<…>` spelling and the
+    // generic `{ … }` spelling nest, so a plain find would cut early).
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, ch) in declaration[head_at..].char_indices() {
+        match ch {
+            '<' | '{' | '(' | '[' => depth += 1,
+            '>' | '}' | ')' | ']' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => {
+                end = Some(head_at + offset);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    Some(format!(
+        "{}& any;{}",
+        &declaration[..end],
+        &declaration[end + 1..]
+    ))
+}
+
+// --- STS0-svelte-pin: the executed native launcher is the pinned one ------
+
+/// A synthetic hoisted platform package under `root` at `version`.
+fn fake_hoisted_native_package(root: &Path, version: &str) {
+    let (pkg_name, exe) = native_platform_package();
+    let dir = root.join(&pkg_name);
+    std::fs::create_dir_all(dir.join("lib")).expect("fake package lib dir");
+    std::fs::write(
+        dir.join("package.json"),
+        format!("{{\"name\":\"{pkg_name}\",\"version\":\"{version}\"}}"),
+    )
+    .expect("fake package.json");
+    std::fs::write(dir.join("lib").join(exe), "stub launcher").expect("fake launcher");
+}
+
+/// A synthetic pnpm store entry (`.pnpm/<scoped-name>@<version>/…`) at
+/// `version`.
+fn fake_native_store_entry(root: &Path, version: &str) {
+    let (pkg_name, exe) = native_platform_package();
+    let entry = root
+        .join(".pnpm")
+        .join(format!("{}@{}", pkg_name.replace('/', "+"), version))
+        .join("node_modules")
+        .join(&pkg_name);
+    std::fs::create_dir_all(entry.join("lib")).expect("fake store lib dir");
+    std::fs::write(
+        entry.join("package.json"),
+        format!("{{\"name\":\"{pkg_name}\",\"version\":\"{version}\"}}"),
+    )
+    .expect("fake store package.json");
+    std::fs::write(entry.join("lib").join(exe), "stub launcher").expect("fake store launcher");
+}
+
+#[test]
+fn a_mismatched_hoisted_native_package_is_never_selected() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    fake_hoisted_native_package(root, "0.0.0");
+    fake_native_store_entry(root, "7.0.2");
+    let (launcher, _) =
+        resolve_native_tsc_under(root, "7.0.2").expect("the pinned store entry resolves");
+    assert!(
+        launcher.starts_with(root.join(".pnpm")),
+        "a mismatched hoisted platform package must never supersede the pinned store binary: {}",
+        launcher.display()
+    );
+}
+
+#[test]
+fn a_matching_hoisted_native_package_is_admitted() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    fake_hoisted_native_package(root, "7.0.2");
+    let (launcher, _) =
+        resolve_native_tsc_under(root, "7.0.2").expect("the matching hoisted package resolves");
+    let (pkg_name, exe) = native_platform_package();
+    assert_eq!(launcher, root.join(pkg_name).join("lib").join(exe));
+}
+
+#[test]
+fn an_unpinned_hoisted_native_package_alone_is_refused() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    fake_hoisted_native_package(root, "0.0.0");
+    assert!(
+        resolve_native_tsc_under(root, "7.0.2").is_none(),
+        "a version-mismatched hoisted launcher with no pinned store entry must not resolve"
+    );
 }

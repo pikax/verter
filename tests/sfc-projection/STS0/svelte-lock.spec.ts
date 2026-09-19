@@ -48,6 +48,7 @@ import {
   evaluateRejectTwins,
   evaluateSts0,
   STS0_PROFILE_GATE_TESTS,
+  STS0_PROFILE_GATE_ENGINES,
   loadEngineMatrix,
   loadRootPackageJson,
   loadSts0Product,
@@ -417,6 +418,58 @@ test("STS0-policy-lock: profile-gate spawn and cargo outcomes are classified sep
   assert.ok(
     failedRun.some((error) => error.code === "profile-gate-failed"),
     JSON.stringify(failedRun),
+  );
+});
+
+test("STS0-policy-lock: a green profile gate must show both pinned engines and no skip", () => {
+  const engineLines = STS0_PROFILE_GATE_ENGINES.map(
+    (engine) => `STS0-ENGINE ${engine.label} ${engine.version}`,
+  ).join("\n");
+  const greenReceipt = `running 5 tests\n${STS0_PROFILE_GATE_TESTS.map(
+    (name) => `${name} ... ok`,
+  ).join("\n")}\n${engineLines}\ntest result: ok. 5 passed; 0 failed`;
+  assert.equal(
+    assertProfileGateRun({ status: 0, error: null, stdout: greenReceipt }).length,
+    0,
+    "a green receipt with both engine manifest lines and every test ok must pass",
+  );
+  // Missing-both: all five names ok, no engine manifest lines, plus an
+  // explicit skip note — the exact receipt a no-engine machine produces.
+  const skippedReceipt = assertProfileGateRun({
+    status: 0,
+    error: null,
+    stdout: `${greenReceipt.replace(/^STS0-ENGINE.*$/gm, "")}
+SKIP STS0 backend projection clean check: a pinned STS0 engine launcher was not found under node_modules`,
+  });
+  assert.ok(
+    skippedReceipt.some(
+      (error) =>
+        error.code === "profile-gate-missing" && /launcher was not found/.test(error.message),
+    ),
+    "a green receipt carrying a skip note was not rejected",
+  );
+  assert.equal(
+    skippedReceipt.filter((error) => /did not execute on the pinned/.test(error.message)).length,
+    STS0_PROFILE_GATE_ENGINES.length,
+    "a receipt without any engine manifest line must name every missing engine",
+  );
+  // Missing-one: only the ts-js manifest line survives.
+  const missingNative = assertProfileGateRun({
+    status: 0,
+    error: null,
+    stdout: greenReceipt.replace("STS0-ENGINE ts-native 7.0.2", ""),
+  });
+  assert.ok(
+    missingNative.some(
+      (error) =>
+        error.code === "profile-gate-missing" &&
+        /did not execute on the pinned ts-native 7\.0\.2 engine/.test(error.message),
+    ),
+    "a green receipt missing the ts-native manifest line was not rejected",
+  );
+  assert.ok(
+    missingNative.every((error) => !/did not execute on the pinned ts-js/.test(error.message)),
+    "the present ts-js engine must not be reported missing",
   );
 });
 

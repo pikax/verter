@@ -1154,6 +1154,17 @@ export const STS0_PROFILE_GATE_TESTS = Object.freeze([
   "cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines",
 ]);
 
+/**
+ * Both pinned engines the live profile gate must EXECUTE on. The Rust gate
+ * prints an `STS0-ENGINE <label> <version>` manifest line per resolved
+ * engine, so a green receipt that cannot show both lines did not run the
+ * claimed engine matrix (STS0-AC1).
+ */
+export const STS0_PROFILE_GATE_ENGINES = Object.freeze([
+  { label: "ts-js", version: "6.0.3" },
+  { label: "ts-native", version: "7.0.2" },
+]);
+
 const CARGO_SUMMARY_RE = /test result: (ok|FAILED)\. (\d+) passed; (\d+) failed/;
 
 export function runSts0ProfileGate(repoRoot = REPO_ROOT) {
@@ -1168,13 +1179,20 @@ export function runSts0ProfileGate(repoRoot = REPO_ROOT) {
       "cases::sts0_profile_gate",
       "--",
       "--test-threads=1",
+      // The engine manifest lines and skip notes the receipt is validated
+      // against are test stderr — libtest hides captured output of passing
+      // tests, so the acceptance run must not capture it.
+      "--nocapture",
     ],
     {
       cwd: repoRoot,
       encoding: "utf8",
       windowsHide: true,
       timeout: 600000,
-      env: process.env,
+      // Both pinned engines are REQUIRED for this acceptance invocation: a
+      // missing launcher makes the Rust gate hard-fail instead of skipping,
+      // so the gate cannot certify itself green on one engine (STS0-AC1).
+      env: { ...process.env, VERTER_REQUIRE_TYPECHECKER: "1" },
     },
   );
   const stdout = `${result.stdout || ""}${result.stderr || ""}`;
@@ -1254,6 +1272,34 @@ export function assertProfileGateRun(run) {
             : `owned-backend profile gate test ${name} did not pass (status=${run.status})`,
         ),
       );
+    }
+  }
+  // A GREEN receipt must additionally prove it executed on BOTH pinned
+  // engines: any skip note, or a missing engine manifest line, means the
+  // run certified itself without the claimed engine matrix (STS0-AC1). Red
+  // receipts are already rejected above and keep their failure
+  // classification.
+  if (run.status === 0) {
+    const stdout = run.stdout || "";
+    if (stdout.includes("a pinned STS0 engine launcher was not found")) {
+      errors.push(
+        err(
+          "STS0-policy-lock",
+          "profile-gate-missing",
+          "the owned-backend profile gate skipped: a pinned STS0 engine launcher was not found (both engines are required for this acceptance run)",
+        ),
+      );
+    }
+    for (const { label, version } of STS0_PROFILE_GATE_ENGINES) {
+      if (!stdout.includes(`STS0-ENGINE ${label} ${version}`)) {
+        errors.push(
+          err(
+            "STS0-policy-lock",
+            "profile-gate-missing",
+            `the owned-backend profile gate did not execute on the pinned ${label} ${version} engine`,
+          ),
+        );
+      }
     }
   }
   return errors;
