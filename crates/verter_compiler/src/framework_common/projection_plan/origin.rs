@@ -15,7 +15,9 @@ use verter_identity::canonical::Canonical;
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncoder};
 
 pub use crate::code_transform::MappingProduct;
-use crate::code_transform::{CodeTransform, MappingSpan, ProjectedClass, SourceMapChainError};
+use crate::code_transform::{
+    CodeTransform, MappingSpan, ProjectedClass, ProjectedRegion, SourceMapChainError,
+};
 use crate::ide::template::emit::EmitOp;
 
 use super::{AdmittedExpressionId, BindingOriginId, ComponentUseId};
@@ -246,9 +248,7 @@ impl ProjectionEmission {
     ) -> Result<Self, EmissionRefusal> {
         let checking_text = transform.build_string();
         let current = MappingProduct::of(transform);
-        if checking_text == previous.checking_text
-            && !carrier_geometry_eq(&current, &previous.mapping)
-        {
+        if checking_text == previous.checking_text && current != previous.mapping {
             return Err(EmissionRefusal::StaleMap);
         }
         assemble(checking_text, current, observations)
@@ -466,26 +466,68 @@ fn span_is_verbatim(mapping: &MappingProduct, span: MappingSpan) -> bool {
     true
 }
 
-fn carrier_for_generated(mapping: &MappingProduct, span: MappingSpan) -> Option<MappingSpan> {
-    let start_region = mapping.projected_at(span.start)?;
-    let last_offset = span.end.saturating_sub(1).max(span.start);
-    let end_region = mapping.projected_at(last_offset)?;
-    let start = start_region.carrier?;
-    let end = end_region.carrier?;
-    Some(MappingSpan {
-        start: start.start,
-        end: end.end,
-    })
+fn carrier_offset(region: &ProjectedRegion, generated: u32) -> Option<u32> {
+    let carrier = region.carrier?;
+    let local = generated.checked_sub(region.generated.start)?;
+    if local > region.generated.len() || local > carrier.len() {
+        return None;
+    }
+    Some(carrier.start + local)
 }
 
-fn carrier_geometry_eq(left: &MappingProduct, right: &MappingProduct) -> bool {
-    if left.carrier_len() != right.carrier_len() || left.carrier().len() != right.carrier().len() {
-        return false;
+fn carrier_for_generated(mapping: &MappingProduct, span: MappingSpan) -> Option<MappingSpan> {
+    if span.end > mapping.projected_len() || span.start > span.end {
+        return None;
     }
-    left.carrier()
-        .iter()
-        .zip(right.carrier())
-        .all(|(a, b)| a.source == b.source && a.class == b.class)
+    if span.is_empty() {
+        let region = mapping.projected_at(span.start)?;
+        if !matches!(
+            region.class,
+            ProjectedClass::Identity | ProjectedClass::Relocated
+        ) {
+            return None;
+        }
+        let point = carrier_offset(region, span.start)?;
+        return Some(MappingSpan {
+            start: point,
+            end: point,
+        });
+    }
+
+    let mut offset = span.start;
+    let mut carrier_start = None;
+    let mut expected_next: Option<u32> = None;
+    while offset < span.end {
+        let region = mapping.projected_at(offset)?;
+        if !matches!(
+            region.class,
+            ProjectedClass::Identity | ProjectedClass::Relocated
+        ) {
+            return None;
+        }
+        let overlap_end = span.end.min(region.generated.end);
+        if overlap_end <= offset {
+            return None;
+        }
+        let piece_start = carrier_offset(region, offset)?;
+        let piece_end = carrier_offset(region, overlap_end)?;
+        if piece_end < piece_start {
+            return None;
+        }
+        if let Some(expected) = expected_next {
+            if piece_start != expected {
+                return None;
+            }
+        } else {
+            carrier_start = Some(piece_start);
+        }
+        expected_next = Some(piece_end);
+        offset = overlap_end;
+    }
+    Some(MappingSpan {
+        start: carrier_start?,
+        end: expected_next?,
+    })
 }
 
 fn mint_text_revision(checking_text: &str) -> CheckingTextRevision {
@@ -550,6 +592,11 @@ fn mint_correspondence_revision(
                 .as_ref()
                 .map(AdmittedExpressionId::canonical_bytes),
         );
+    }
+    for (index, anchor) in mapping.insertion_anchors().iter().enumerate() {
+        encoder.field_u32(19, index as u32);
+        encoder.field_u32(20, anchor.projected);
+        encoder.field_u32(21, anchor.carrier);
     }
     CorrespondenceRevision(Canonical::from_encoder(&encoder))
 }
@@ -888,6 +935,164 @@ mod tests {
                 Err(EmissionRefusal::EditNotVerbatim { .. })
             ),
             "feature participation is not edit safety"
+        );
+    }
+
+    fn carrier_span_class_eq(left: &MappingProduct, right: &MappingProduct) -> bool {
+        left.carrier_len() == right.carrier_len()
+            && left.carrier().len() == right.carrier().len()
+            && left
+                .carrier()
+                .iter()
+                .zip(right.carrier())
+                .all(|(a, b)| a.source == b.source && a.class == b.class)
+    }
+
+    fn helper_preamble_at<'a>(
+        allocator: &'a Allocator,
+        source: &'a str,
+        preamble: &str,
+        carrier_anchor: u32,
+    ) -> CodeTransform<'a> {
+        let mut ct = CodeTransform::new(source, allocator);
+        let allocated = ct.alloc_str(preamble);
+        ct.batch_prepend_left_static(&[(0, allocated)]);
+        ct.set_helper_preamble_content_at(allocated, carrier_anchor);
+        ct
+    }
+
+    #[test]
+    fn stp10_stale_map_rejects_equal_carrier_partition_with_moved_preimage() {
+        let allocator = Allocator::default();
+        let mut previous_ct = CodeTransform::new("AAAA", &allocator);
+        previous_ct.move_slice(0, 1, 0);
+        previous_ct.move_slice(0, 1, 0);
+        let previous =
+            ProjectionEmission::from_operation(&previous_ct, Vec::new()).expect("previous");
+        let mut current_ct = CodeTransform::new("AAAA", &allocator);
+        current_ct.move_slice(0, 1, 0);
+        current_ct.move_slice(0, 1, 4);
+        assert_eq!(current_ct.build_string(), previous.checking_text());
+        let current = MappingProduct::of(&current_ct);
+        assert!(
+            carrier_span_class_eq(&current, previous.mapping()),
+            "carrier span/class partition stays identical across this move"
+        );
+        let previous_head = previous
+            .mapping()
+            .projected_at(0)
+            .and_then(|region| region.carrier);
+        let current_head = current.projected_at(0).and_then(|region| region.carrier);
+        assert_ne!(
+            previous_head, current_head,
+            "generated 0..1 preimage must move"
+        );
+        let dirty = ProjectionEmission::reuse_mapping(&previous, &current_ct, Vec::new());
+        assert!(matches!(dirty, Err(EmissionRefusal::StaleMap)), "{dirty:?}");
+        let control_ct = {
+            let mut ct = CodeTransform::new("AAAA", &allocator);
+            ct.move_slice(0, 1, 0);
+            ct.move_slice(0, 1, 0);
+            ct
+        };
+        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, Vec::new());
+        assert!(control.is_ok(), "{control:?}");
+    }
+
+    #[test]
+    fn stp10_correspondence_revision_includes_insertion_anchors() {
+        let allocator = Allocator::default();
+        let at_zero = helper_preamble_at(&allocator, "abc", "X", 0);
+        let at_two = helper_preamble_at(&allocator, "abc", "X", 2);
+        assert_eq!(at_zero.build_string(), at_two.build_string());
+        let previous = ProjectionEmission::from_operation(&at_zero, Vec::new()).expect("anchor 0");
+        let current = ProjectionEmission::from_operation(&at_two, Vec::new()).expect("anchor 2");
+        assert_eq!(previous.text_revision(), current.text_revision());
+        assert_ne!(
+            previous.mapping().insertion_anchors(),
+            current.mapping().insertion_anchors()
+        );
+        assert_eq!(
+            previous.mapping().insertion_anchors()[0].carrier,
+            0,
+            "control keeps the preamble pointer-identity anchor at carrier 0"
+        );
+        assert_eq!(current.mapping().insertion_anchors()[0].carrier, 2);
+        assert_ne!(
+            previous.correspondence_revision(),
+            current.correspondence_revision()
+        );
+        let dirty = ProjectionEmission::reuse_mapping(&previous, &at_two, Vec::new());
+        assert!(matches!(dirty, Err(EmissionRefusal::StaleMap)), "{dirty:?}");
+        let control_ct = helper_preamble_at(&allocator, "abc", "X", 0);
+        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, Vec::new());
+        assert!(control.is_ok(), "{control:?}");
+        assert_eq!(
+            control.expect("control").correspondence_revision(),
+            previous.correspondence_revision()
+        );
+    }
+
+    #[test]
+    fn stp10_edit_origin_rejects_reordered_source_regions() {
+        let allocator = Allocator::default();
+        let mut ct = CodeTransform::new("AABB", &allocator);
+        ct.move_slice(2, 4, 0);
+        assert_eq!(ct.build_string(), "BBAA");
+        let origin = authored(binding_item());
+        let edits = RoleQualifiedObservation::new(
+            MappingSpan { start: 0, end: 4 },
+            ObservationRole::Edits,
+            origin,
+        );
+        let emission = ProjectionEmission::from_operation(&ct, vec![edits.clone()]).expect("moved");
+        let mapped = emission.edit_origin(&edits);
+        assert!(
+            matches!(mapped, Err(EmissionRefusal::EditNotVerbatim { .. })),
+            "reordered BB+AA cannot collapse to one carrier span: {mapped:?}"
+        );
+    }
+
+    #[test]
+    fn stp10_edit_origin_maps_exact_subspan_and_rejects_discontiguous_preimage() {
+        let allocator = Allocator::default();
+        let source = "const foo = 1;";
+        let ct = CodeTransform::new(source, &allocator);
+        let origin = authored(binding_item());
+        let token = RoleQualifiedObservation::new(
+            MappingSpan { start: 6, end: 9 },
+            ObservationRole::Edits,
+            origin.clone(),
+        );
+        let emission =
+            ProjectionEmission::from_operation(&ct, vec![token.clone()]).expect("identity");
+        let edit = emission.edit_origin(&token).expect("token subspan");
+        assert_eq!(edit.carrier(), MappingSpan { start: 6, end: 9 });
+        assert_eq!(&source[6..9], "foo");
+
+        let mut moved = CodeTransform::new("abcdef", &allocator);
+        moved.move_slice(0, 3, 6);
+        assert_eq!(moved.build_string(), "defabc");
+        let whole = RoleQualifiedObservation::new(
+            MappingSpan { start: 0, end: 6 },
+            ObservationRole::Edits,
+            origin.clone(),
+        );
+        let prefix = RoleQualifiedObservation::new(
+            MappingSpan { start: 0, end: 3 },
+            ObservationRole::Edits,
+            origin,
+        );
+        let moved_emission =
+            ProjectionEmission::from_operation(&moved, vec![prefix.clone()]).expect("relocated");
+        let prefix_edit = moved_emission
+            .edit_origin(&prefix)
+            .expect("exact relocated region");
+        assert_eq!(prefix_edit.carrier(), MappingSpan { start: 3, end: 6 });
+        let whole_edit = moved_emission.edit_origin(&whole);
+        assert!(
+            matches!(whole_edit, Err(EmissionRefusal::EditNotVerbatim { .. })),
+            "def+abc is a reordered preimage, not carrier [3,3): {whole_edit:?}"
         );
     }
 }
