@@ -1,0 +1,65 @@
+{
+  "id": "wsp1l-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "WSP1L",
+  "finalOwner": "expansion.workspace-responsiveness",
+  "retirementObligation": "LapceInteractionDriver, UiTimeline and the pinned Lapce/volt/server/provider version manifest stay owned here until a successor constitution supersedes them; the volt launch-stamp hook stays a default-off instrumentation seam (never an always-on build cost) and is removed when a real capture session retires it; client decode/apply/paint attribution retired here from WSP1 stays with this owner; Issue 93 remains unverified until a real-client run on a recorded reference machine blocks a stage",
+  "preservedOwners": [
+    "semantic algorithms",
+    "project resolution",
+    "format/lint logic",
+    "TypeScript projection",
+    "edit transactions",
+    "server/protocol InteractionTrace and RecordedLspReplay (WSP1)"
+  ],
+  "conflictDomains": ["lsp_publication", "performance_evidence", "scheduler_admission"],
+  "outcomes": [
+    {
+      "id": "LapceInteractionDriver",
+      "currentOwner": "WSP1L",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "packages/dx-harness/lapce/driver.ts"
+    },
+    {
+      "id": "UiTimeline",
+      "currentOwner": "WSP1L",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "packages/dx-harness/lapce/timeline.ts"
+    },
+    {
+      "id": "PinnedVersionManifest",
+      "currentOwner": "WSP1L",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "packages/dx-harness/lapce/manifest.ts + tests/workspace-responsiveness/WSP1L/products/version-manifest.v1.json",
+      "state": "lapce-client unrecorded (no reference machine yet); volt/server/provider pinned"
+    },
+    {
+      "id": "VoltLaunchStampHook",
+      "currentOwner": "WSP1L",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "extensions/lapce/src/lib.rs (LaunchStamp + LspLauncher::record_launch_stamp, default off behind uiTrace.enabled)",
+      "state": "instrumentation hook only, no semantic logic"
+    },
+    {
+      "id": "RealLapceCapture",
+      "currentOwner": "WSP1L",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "tests/workspace-responsiveness/WSP1L/products/gui-instrumentation-availability.v1.json",
+      "state": "unavailable-on-reference-machine"
+    }
+  ],
+  "receivingAmendments": [
+    {
+      "receiver": "WSP1A",
+      "product": "evidence-bounded early repair consumes the correlated UI+server timeline once a real-client capture exists to locate the first blocked stage",
+      "productionCapable": true
+    },
+    {
+      "receiver": "DX1",
+      "product": "exposure descriptor registration over the Lapce driver operations",
+      "productionCapable": true
+    }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": []
+}

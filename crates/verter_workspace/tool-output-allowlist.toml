@@ -53,6 +53,10 @@ path = "crates/verter_lsp/src/audit_harness.rs"
 rationale = "LSP audit telemetry — `VERTER_LSP_AUDIT_TRACE_OUT` JSON-lines drainer (tool output, not semantic state)"
 
 [[entries]]
+path = "crates/verter_lsp/src/interaction_trace.rs"
+rationale = "LSP interaction-trace telemetry — `VERTER_LSP_INTERACTION_TRACE_DUMP` JSON-lines drainer (session correlation anchor + one line per terminal trace; tool output, not semantic state)"
+
+[[entries]]
 path = "crates/verter_session/src/component_meta_audit/mod.rs"
 rationale = "audit telemetry — `/proc/self/statm` resource sample + audit JSON dump file output"
 

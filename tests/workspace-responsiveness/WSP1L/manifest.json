@@ -1,0 +1,70 @@
+{
+  "node": "WSP1L",
+  "kind": "implementation",
+  "products": [
+    "LapceInteractionDriver (open/type/complete/navigate/close/teardown with certification rules)",
+    "UiTimeline (input-to-paint, event-loop stall, decode/apply/paint, correlated to request/source epochs)",
+    "DrivenLapceHost + driveLapceSession producer (packages/dx-harness/lapce/producer.ts): spawns the instrumented Lapce reference build, drives the script over the WSP1L drive channel, captures the session",
+    "Recorded real-client capture artifact (products/real-client-capture.v1.json, digest-sealed driven-lapce-capture.v1)",
+    "Instrumented-client build recipe (packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch + README)",
+    "Pinned Lapce/volt/server/provider version manifest (lapce-client pinned to the recorded reference build)",
+    "Volt launch-stamp instrumentation hook (default off behind uiTrace.enabled) + WASI windows workspace-root normalization",
+    "gui-instrumentation-availability.v1 (real-client capture recorded; remaining unavailability recorded, not simulated)",
+    "ownership-map.json",
+    "exposure-registration.v1 (DX1 schema/case; promotion blocked)"
+  ],
+  "cases": [
+    {
+      "id": "WSP1L-AC1",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC1 describes: stalled-UI+immediate-server detection, server-side stall kept distinct, undecided-immediacy not certified",
+      "twins": [
+        "server-stall-claimed-as-ui-stall",
+        "undecided-server-timeline-certified-as-ui-stall",
+        "no-stall-reported-as-stall"
+      ]
+    },
+    {
+      "id": "WSP1L-AC2",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC2 describes: two-run comparability within the recorded noise bound",
+      "twins": [
+        "divergent-runs-accepted",
+        "unknown-input-to-paint-compared-as-zero",
+        "different-interactions-compared"
+      ]
+    },
+    {
+      "id": "WSP1L-AC3",
+      "disposition": "reject",
+      "binding": "packages/dx-harness/test/lapceDriver.test.ts WSP1L-AC3 describes: protocol-smoke-only run refused, rejected hosts refused, sleep-as-readiness refused",
+      "twins": [
+        "protocol-smoke-certified",
+        "mock-lsp-certified",
+        "screenshot-certified"
+      ]
+    },
+    {
+      "id": "WSP1L-AC-OWNER",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1L/products/ownership-map.json; final owner expansion.workspace-responsiveness; volt launch-stamp hook carries a retirement obligation; client decode/apply/paint attribution retired here from WSP1"
+    },
+    {
+      "id": "WSP1L-AC-BASIS",
+      "disposition": "accept",
+      "binding": "runs carry a ProductReceiptBasis (source/project/engine/host/completeness); stale runs are refused certification; this node changes no caching, mapping, snapshot or result-handle publication"
+    },
+    {
+      "id": "WSP1L-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "unavailable metrics stay { status: unknown } with reasons (never guessed zeros); real-client paint claims require the real-lapce host with measured input-to-paint; the fixture host is inadmissible and carries GUI_INSTRUMENTATION_UNAVAILABLE_REASON"
+    },
+    {
+      "id": "WSP1L-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "tests/workspace-responsiveness/WSP1L/products/exposure-registration.v1.json; promotionBlocked until DX1 executable explorer"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "Hermetic driver proof plus one recorded real-client capture: the instrumented Lapce reference build (v0.4.6 + WSP1L patch) was driven on the local interactive windows machine with the production volt and native server; the artifact seals client-observed UI stamps, the anchored server trace dump and the correlation. Cross-machine comparability and Issue 93 reproduction stay unavailable until a manifested reference-client population and a second recorded run exist."
+}

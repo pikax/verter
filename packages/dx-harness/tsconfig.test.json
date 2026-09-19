@@ -4,7 +4,7 @@
   // `strict` bar. The runtime `tsc -b` excludes `test`; this `--noEmit` pass is the
   // additive gate that catches latent test-type drift the dist build never sees.
   "extends": "./tsconfig.json",
-  "include": ["./src", "./test", "./jetbrains"],
+  "include": ["./src", "./test", "./jetbrains", "./lapce"],
   "exclude": ["dist", "node_modules"],
   "compilerOptions": {
     // Typecheck only — never emit and never write incremental state. `rootDir: ".."`
@@ -23,7 +23,8 @@
     // Path is relative to this config (no `baseUrl` needed under `moduleResolution:
     // Bundler`); the target matches the vitest alias exactly.
     "paths": {
-      "@verter/lsp-test-client": ["../lsp-test-client/src/index.ts"]
+      "@verter/lsp-test-client": ["../lsp-test-client/src/index.ts"],
+      "@verter/dx-harness/jetbrains": ["./jetbrains/index.ts"]
     }
   }
 }

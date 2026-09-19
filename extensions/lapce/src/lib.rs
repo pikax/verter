@@ -164,6 +164,27 @@ fn server_source_urn(source: &ServerSource) -> String {
     format!("urn:{}", source.path())
 }
 
+/// Normalize a workspace root that a WASI `Url::to_file_path()` conversion
+/// rendered in Unix form (`/D:/path`). On the windows host OS that leading
+/// slash makes the path root-relative on the current drive, so no filesystem
+/// walk under it resolves (the server's configured-project scan finds nothing
+/// and the type provider stays `none`). Restore the native drive-absolute
+/// form; every other root passes through unchanged. `os` is the
+/// `VoltEnvironment::operating_system()` string of the host running the volt.
+pub fn normalize_workspace_root(root: &str, os: &str) -> String {
+    if os == "windows" {
+        let bytes = root.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+        {
+            return root[1..].to_string();
+        }
+    }
+    root.to_string()
+}
+
 /// Build the complete [`LspLaunchPlan`] from the resolved workspace root, the
 /// volt config, and the host platform strings.
 ///
@@ -218,6 +239,63 @@ pub fn plan_launch(
     })
 }
 
+/// WSP1L instrumentation hook: a one-time launch stamp recorded when
+/// `initialize` hands the server to Lapce (or refuses to). The volt owns no
+/// semantics — the stamp only marks the server-launch epoch so the dx-harness
+/// Lapce driver can correlate Lapce UI events with the WSP1 server timeline.
+/// Emitted exactly once per `initialize`; never on the per-message path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchStamp {
+    /// `"server_launch_issued"` or `"launch_refused"`.
+    pub phase: &'static str,
+    /// Unix epoch milliseconds at the stamp, from the injected clock.
+    pub at_unix_ms: u64,
+    /// The resolved `urn:` server token that was launched (or attempted).
+    pub server_uri: String,
+    /// The workspace root the launch was rooted at.
+    pub workspace_root: String,
+    /// Carrier languages from the document selector (`vue`, `svelte`).
+    pub document_languages: Vec<String>,
+    /// Present only on `launch_refused`: why the launch did not happen.
+    pub refusal: Option<String>,
+}
+
+impl LaunchStamp {
+    /// Serialize without pulling a `serde` derive dependency into the volt.
+    pub fn to_json(&self) -> Value {
+        let mut root = serde_json::json!({
+            "phase": self.phase,
+            "atUnixMs": self.at_unix_ms,
+            "serverUri": self.server_uri,
+            "workspaceRoot": self.workspace_root,
+            "documentLanguages": self.document_languages,
+        });
+        if let Some(refusal) = &self.refusal {
+            root["refusal"] = serde_json::json!(refusal);
+        }
+        root
+    }
+}
+
+/// Build the pure, host-testable launch stamp. `at_unix_ms` is injected so the
+/// stamp is deterministic under test; the wasi glue supplies the wall clock.
+pub fn launch_stamp(
+    phase: &'static str,
+    plan: &LspLaunchPlan,
+    workspace_root: &str,
+    at_unix_ms: u64,
+    refusal: Option<String>,
+) -> LaunchStamp {
+    LaunchStamp {
+        phase,
+        at_unix_ms,
+        server_uri: plan.uri.clone(),
+        workspace_root: workspace_root.to_string(),
+        document_languages: plan.selector.iter().map(|s| s.language.clone()).collect(),
+        refusal,
+    }
+}
+
 /// Seam over the host launch call so the contract is testable without the WASI
 /// runtime. The real wasi implementation forwards to `PLUGIN_RPC.start_lsp`; a
 /// test injects a recorder and asserts the exact plan.
@@ -227,6 +305,10 @@ pub trait LspLauncher {
     fn start_lsp(&mut self, plan: &LspLaunchPlan);
     /// Surface a loud, user-facing error (real impl calls `window_show_message`).
     fn show_error(&mut self, message: &str);
+    /// WSP1L instrumentation sink. Default no-op so the hook costs nothing in
+    /// always-on builds; an instrumented session overrides it to capture the
+    /// one-time launch epoch marker.
+    fn record_launch_stamp(&mut self, _stamp: &LaunchStamp) {}
 }
 
 /// The loud, actionable error shown when an `initialize` request carries no
@@ -244,9 +326,10 @@ const NO_WORKSPACE_ROOT_ERROR: &str =
 /// A WASI launch REQUIRES a resolved workspace root: the volt's cwd is the volt
 /// directory (not the workspace), so [`build_server_args`] forwards the workspace
 /// root as the trailing positional and the server cannot infer it. A `None`
-/// `workspace_root` therefore FAILS LOUD here — it surfaces
-/// [`NO_WORKSPACE_ROOT_ERROR`] and returns `false` WITHOUT launching, rather than
-/// spawning a rootless server that would root at the volt dir.
+/// `workspace_root` therefore FAILS LOUD here — it records a `launch_refused`
+/// stamp, surfaces [`NO_WORKSPACE_ROOT_ERROR`] and returns `false` WITHOUT
+/// launching, rather than spawning a rootless server that would root at the volt
+/// dir.
 pub fn handle_initialize(
     launcher: &mut dyn LspLauncher,
     workspace_root: Option<&str>,
@@ -254,24 +337,84 @@ pub fn handle_initialize(
     os: &str,
     arch: &str,
 ) -> bool {
+    handle_initialize_at(launcher, workspace_root, cfg, os, arch, unix_epoch_ms())
+}
+
+/// Clock seam twin of [`handle_initialize`]: the stamp epoch is injected so the
+/// instrumentation hook is deterministically host-testable.
+pub fn handle_initialize_at(
+    launcher: &mut dyn LspLauncher,
+    workspace_root: Option<&str>,
+    cfg: &Value,
+    os: &str,
+    arch: &str,
+    at_unix_ms: u64,
+) -> bool {
     // Enforce the launch-entry invariant: a launch is only valid with a resolved
     // workspace root. Fail loud on `None` before discovery so a missing root can
-    // never produce a rootless launch.
+    // never produce a rootless launch. This is also a refused launch, so it
+    // stamps `launch_refused` (the correlated timeline sees a refused epoch, not
+    // a gap) before the loud error.
     if workspace_root.is_none() {
+        launcher.record_launch_stamp(&refused_launch_stamp(
+            at_unix_ms,
+            "",
+            NO_WORKSPACE_ROOT_ERROR.to_string(),
+        ));
         launcher.show_error(NO_WORKSPACE_ROOT_ERROR);
         return false;
     }
+    let workspace_root = workspace_root.unwrap_or_default();
 
-    match plan_launch(workspace_root, cfg, os, arch) {
+    match plan_launch(Some(workspace_root), cfg, os, arch) {
         Ok(plan) => {
+            launcher.record_launch_stamp(&launch_stamp(
+                "server_launch_issued",
+                &plan,
+                workspace_root,
+                at_unix_ms,
+                None,
+            ));
             launcher.start_lsp(&plan);
             true
         }
         Err(err) => {
+            launcher.record_launch_stamp(&refused_launch_stamp(
+                at_unix_ms,
+                workspace_root,
+                err.to_string(),
+            ));
             launcher.show_error(&err.to_string());
             false
         }
     }
+}
+
+/// The refused-launch stamp: every refused initialize (no workspace root, no
+/// resolvable server source) records one so the correlated timeline sees a
+/// refused epoch instead of a hole.
+fn refused_launch_stamp(at_unix_ms: u64, workspace_root: &str, refusal: String) -> LaunchStamp {
+    LaunchStamp {
+        phase: "launch_refused",
+        at_unix_ms,
+        server_uri: String::new(),
+        workspace_root: workspace_root.to_string(),
+        document_languages: document_selector()
+            .into_iter()
+            .map(|entry| entry.language)
+            .collect(),
+        refusal: Some(refusal),
+    }
+}
+
+/// Wall-clock epoch for the default [`handle_initialize`] path. A clock read
+/// before the Unix epoch (impossible in practice) yields 0 rather than
+/// panicking; tests inject the epoch instead.
+fn unix_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +422,7 @@ pub fn handle_initialize(
 // ---------------------------------------------------------------------------
 #[cfg(target_os = "wasi")]
 mod wasi_volt {
-    use super::{handle_initialize, LspLaunchPlan, LspLauncher};
+    use super::{handle_initialize, LaunchStamp, LspLaunchPlan, LspLauncher};
     use lapce_plugin::{
         psp_types::{
             lsp_types::{
@@ -296,8 +439,12 @@ mod wasi_volt {
     struct State {}
     register_plugin!(State);
 
-    /// Real launcher backed by Lapce's `PLUGIN_RPC`.
-    struct PluginRpcLauncher;
+    /// Real launcher backed by Lapce's `PLUGIN_RPC`. Carries the one-bit
+    /// `uiTrace.enabled` opt-in so the WSP1L launch stamp is emitted only in
+    /// instrumented sessions, never in always-on builds.
+    struct PluginRpcLauncher {
+        ui_trace_enabled: bool,
+    }
 
     impl PluginRpcLauncher {
         /// Convert the host-testable selector into Lapce's `DocumentSelector`.
@@ -336,6 +483,17 @@ mod wasi_volt {
         fn show_error(&mut self, message: &str) {
             let _ = PLUGIN_RPC.window_show_message(MessageType::ERROR, message.to_string());
         }
+        fn record_launch_stamp(&mut self, stamp: &LaunchStamp) {
+            if !self.ui_trace_enabled {
+                return;
+            }
+            // Instrumentation sink: host stderr, never a UI notification. A
+            // window message would both perturb the event loop being measured
+            // and never reach the harness; the capture session reads
+            // `verter launch-stamp <json>` lines from the driven client's
+            // stderr and `@verter/dx-harness/lapce` parses them.
+            PLUGIN_RPC.stderr(&format!("verter launch-stamp {}", stamp.to_json()));
+        }
     }
 
     impl LapcePlugin for State {
@@ -351,7 +509,12 @@ mod wasi_volt {
             let params: InitializeParams = match serde_json::from_value(params) {
                 Ok(parsed) => parsed,
                 Err(parse_err) => {
-                    let mut launcher = PluginRpcLauncher;
+                    // The params could not be parsed, so the `uiTrace.enabled`
+                    // opt-in is unreadable; the least-perturbation choice is a
+                    // non-instrumented launcher (no stamp on this error path).
+                    let mut launcher = PluginRpcLauncher {
+                        ui_trace_enabled: false,
+                    };
                     launcher
                         .show_error(&format!("Verter: malformed initialize params: {parse_err}"));
                     return;
@@ -382,7 +545,20 @@ mod wasi_volt {
             let os = VoltEnvironment::operating_system().unwrap_or_default();
             let arch = VoltEnvironment::architecture().unwrap_or_default();
 
-            let mut launcher = PluginRpcLauncher;
+            // WASI `Url::to_file_path()` renders windows roots in Unix form
+            // (`/D:/path`); restore the native drive-absolute form so the
+            // server's workspace scans resolve on the windows host.
+            let root = root.map(|root| crate::normalize_workspace_root(&root, &os));
+
+            // WSP1L instrumentation opt-in: `uiTrace.enabled` (default false) is
+            // the only thing that turns the one-time launch stamp on.
+            let ui_trace_enabled = cfg
+                .get("uiTrace")
+                .and_then(|u| u.get("enabled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            let mut launcher = PluginRpcLauncher { ui_trace_enabled };
             handle_initialize(&mut launcher, root.as_deref(), &cfg, &os, &arch);
         }
     }
@@ -399,6 +575,7 @@ mod tests {
     struct RecordingLauncher {
         launched: Option<LspLaunchPlan>,
         error: Option<String>,
+        stamps: Vec<LaunchStamp>,
     }
 
     impl LspLauncher for RecordingLauncher {
@@ -408,6 +585,162 @@ mod tests {
         fn show_error(&mut self, message: &str) {
             self.error = Some(message.to_string());
         }
+        fn record_launch_stamp(&mut self, stamp: &LaunchStamp) {
+            self.stamps.push(stamp.clone());
+        }
+    }
+
+    /// Proves the `record_launch_stamp` default is a true no-op sink: an
+    /// implementor that does not opt into instrumentation compiles and runs
+    /// identically (the hook costs nothing in always-on builds).
+    #[derive(Default)]
+    struct DefaultStampSinkLauncher {
+        launched: Option<LspLaunchPlan>,
+    }
+
+    impl LspLauncher for DefaultStampSinkLauncher {
+        fn start_lsp(&mut self, plan: &LspLaunchPlan) {
+            self.launched = Some(plan.clone());
+        }
+        fn show_error(&mut self, _message: &str) {}
+    }
+
+    #[test]
+    fn launch_stamp_marks_the_server_launch_epoch_for_wsp1l_correlation() {
+        // WSP1L instrumentation hook: initialize must record exactly ONE
+        // `server_launch_issued` stamp carrying the injected epoch, the resolved
+        // server token, the workspace root and the carrier languages, so the
+        // dx-harness Lapce driver can correlate UI events with the server
+        // timeline on the same epoch basis.
+        let root = "/home/dev/proj";
+        let cfg = json!({ "lsp": { "serverPath": "/opt/verter/verter-lsp" } });
+
+        let mut launcher = RecordingLauncher::default();
+        let launched = handle_initialize_at(
+            &mut launcher,
+            Some(root),
+            &cfg,
+            "linux",
+            "x86_64",
+            1_758_000_000_000,
+        );
+        assert!(launched, "explicit serverPath must launch");
+
+        assert_eq!(launcher.stamps.len(), 1, "exactly one launch stamp");
+        let stamp = &launcher.stamps[0];
+        assert_eq!(stamp.phase, "server_launch_issued");
+        assert_eq!(
+            stamp.at_unix_ms, 1_758_000_000_000,
+            "injected epoch verbatim"
+        );
+        assert_eq!(
+            stamp.server_uri,
+            launcher.launched.as_ref().expect("plan launched").uri,
+            "stamp server token matches the launched plan"
+        );
+        assert_eq!(stamp.workspace_root, root);
+        assert_eq!(stamp.document_languages, vec!["vue", "svelte"]);
+        assert_eq!(stamp.refusal, None, "success stamps carry no refusal");
+        // JSON shape the driver consumes; refusal is absent on success.
+        let value = stamp.to_json();
+        assert_eq!(value["phase"], "server_launch_issued");
+        assert_eq!(value["atUnixMs"], 1_758_000_000_000u64);
+        assert!(value.get("refusal").is_none());
+    }
+
+    #[test]
+    fn launch_refusal_records_a_refused_stamp_not_a_gap() {
+        // A refused launch must still stamp (phase launch_refused + reason), so
+        // the correlated timeline sees a refused epoch instead of a hole.
+        let cfg = json!({}); // fresh default: no discovery source selected.
+
+        let mut launcher = RecordingLauncher::default();
+        let launched = handle_initialize_at(&mut launcher, Some("/x"), &cfg, "linux", "x86_64", 42);
+        assert!(!launched);
+        assert_eq!(launcher.stamps.len(), 1);
+        let stamp = &launcher.stamps[0];
+        assert_eq!(stamp.phase, "launch_refused");
+        assert_eq!(stamp.at_unix_ms, 42);
+        let refusal = stamp.refusal.as_ref().expect("refusal reason present");
+        assert!(
+            refusal.contains("lsp.serverPath"),
+            "refusal keeps the actionable guidance; got: {refusal}"
+        );
+        assert_eq!(stamp.document_languages, vec!["vue", "svelte"]);
+        assert!(stamp.to_json()["refusal"].is_string());
+    }
+
+    #[test]
+    fn missing_workspace_root_records_a_refused_stamp_not_a_gap() {
+        // A rootless initialize is also a refused launch: it must record exactly
+        // one `launch_refused` stamp (carrying the no-workspace-root reason) so
+        // the correlated timeline sees a refused epoch instead of a hole, and it
+        // must never reach start_lsp — even when discovery would otherwise
+        // succeed (a valid serverPath is supplied to isolate the root rule).
+        let cfg = json!({ "lsp": { "serverPath": "/opt/verter/verter-lsp" } });
+        let mut launcher = RecordingLauncher::default();
+        let launched = handle_initialize_at(&mut launcher, None, &cfg, "linux", "x86_64", 99);
+        assert!(!launched, "a rootless initialize must not launch");
+        assert!(
+            launcher.launched.is_none(),
+            "start_lsp must not be called without a workspace root"
+        );
+        assert_eq!(
+            launcher.stamps.len(),
+            1,
+            "a rootless initialize must stamp exactly once"
+        );
+        let stamp = &launcher.stamps[0];
+        assert_eq!(stamp.phase, "launch_refused");
+        assert_eq!(stamp.at_unix_ms, 99);
+        assert_eq!(stamp.workspace_root, "", "no root resolved to stamp");
+        let refusal = stamp.refusal.as_ref().expect("refusal reason present");
+        assert!(
+            refusal.contains("workspace root"),
+            "refusal names the missing workspace root; got: {refusal}"
+        );
+        assert!(
+            refusal.contains("root_uri"),
+            "refusal names root_uri; got: {refusal}"
+        );
+        assert!(stamp.to_json()["refusal"].is_string());
+    }
+
+    #[test]
+    fn default_stamp_sink_launches_without_instrumentation() {
+        // The un-overridden trait default must not change launch behavior: an
+        // always-on build pays nothing for the hook.
+        let cfg = json!({ "lsp": { "serverPath": "/opt/verter/verter-lsp" } });
+        let mut launcher = DefaultStampSinkLauncher::default();
+        let launched = handle_initialize_at(&mut launcher, Some("/x"), &cfg, "linux", "x86_64", 7);
+        assert!(launched);
+        assert!(launcher.launched.is_some());
+    }
+
+    #[test]
+    fn wasi_unix_form_windows_root_is_normalized_to_drive_absolute() {
+        // WASI `Url::to_file_path()` converts with Unix rules, so a windows
+        // workspace root arrives as `/D:/...`; the server's filesystem scans
+        // under that leading-slash form find nothing on the windows host.
+        assert_eq!(
+            normalize_workspace_root("/D:/dev/personal/ws", "windows"),
+            "D:/dev/personal/ws"
+        );
+        // Only the windows host normalizes, and only the drive-letter form.
+        assert_eq!(
+            normalize_workspace_root("/D:/dev/ws", "linux"),
+            "/D:/dev/ws"
+        );
+        assert_eq!(
+            normalize_workspace_root("/home/dev/ws", "windows"),
+            "/home/dev/ws"
+        );
+        assert_eq!(
+            normalize_workspace_root("D:\\dev\\ws", "windows"),
+            "D:\\dev\\ws"
+        );
+        assert_eq!(normalize_workspace_root("/", "windows"), "/");
+        assert_eq!(normalize_workspace_root("", "windows"), "");
     }
 
     #[test]

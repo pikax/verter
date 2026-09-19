@@ -50,6 +50,20 @@ cargo test -p verter_compiler test_name    # Targeted iteration
 
 See the [Testing Guide](./testing.md) for detailed testing patterns and requirements.
 
+## Architecture and Ownership
+
+Before changing hot paths or adding surfaces, read the ratified contracts
+these pages deliver:
+
+- [Architecture Contracts](./architecture-contracts.md) — owner boundaries,
+  layer rules, retained surfaces and the capability evidence basis.
+- [Source and Map Identity](./source-identity.md) — canonical paths, span
+  types, position encodings, stable hashes and source maps.
+- [Query Lifetimes and Determinism](./query-lifetimes.md) — lifetime
+  classes, memo identity, scheduler generations, deterministic ordering.
+- [First Contribution](./first-contribution.md) — an end-to-end walkthrough
+  (add a lint rule) that uses only the owning interfaces.
+
 ## Code Style
 
 Run these checks after making changes:

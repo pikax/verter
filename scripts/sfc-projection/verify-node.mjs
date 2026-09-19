@@ -37,6 +37,7 @@ import {
   STP6_MANDATORY_CASES,
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
+  STP9_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
 export {
@@ -48,6 +49,7 @@ export {
   STP6_MANDATORY_CASES,
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
+  STP9_MANDATORY_CASES,
 };
 
 export function canonicalMandatoryCases(nodeId) {
@@ -1715,6 +1717,11 @@ export async function verifyNode(options) {
     errors.push(...stp8.errors);
   }
 
+  if (nodeId === "STP9") {
+    const stp9 = await evaluateStp9Node({ repoRoot });
+    errors.push(...stp9.errors);
+  }
+
   return summarize({
     options,
     errors,
@@ -1828,6 +1835,15 @@ async function evaluateStp8Node({ repoRoot }) {
   const protocol = await import(protocolHref);
   const stp8 = await protocol.evaluateStp8();
   return { errors: stp8.errors };
+}
+
+async function evaluateStp9Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP9/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp9 = await protocol.evaluateStp9({ repoRoot });
+  return { errors: stp9.errors };
 }
 
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
@@ -1953,6 +1969,8 @@ function summarize({
     "tests/sfc-projection/STP7/probes/negative.ts",
     "tests/sfc-projection/STP8/probes/positive.ts",
     "tests/sfc-projection/STP8/probes/negative.ts",
+    "tests/sfc-projection/STP9/probes/positive.ts",
+    "tests/sfc-projection/STP9/probes/negative.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -2001,10 +2019,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
@@ -2020,7 +2038,10 @@ so a native-only --engine selection is rejected rather than skipped. STP8
 rejects unmatched, fabricated, or uncited feasibility rows; TypeScript 5.8-only
 toy evidence or a shrunken engine denominator; checker-only public shapes that
 respell InstanceType or remap Vue utilities; and event/slot inference
-contributors postponed until after specialization.
+contributors postponed until after specialization. STP9 rejects TypeInfo or
+assignability during plan construction, complete-cache admission of malformed
+or unknown syntax, and use identities that shift under comment or unrelated
+sibling insertion.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
