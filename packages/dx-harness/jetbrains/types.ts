@@ -151,4 +151,9 @@ export interface IdeCapture {
   readonly side: Side;
   readonly sessionState: SessionState;
   readonly basisKind: BasisKind;
+  /** Present when the capture measured the aggregate; otherwise derived or unknown. */
+  readonly retainedMemory?: Metric;
+  readonly providerCpu?: Metric;
+  readonly providerWall?: Metric;
+  readonly outboundBytes?: Metric;
 }

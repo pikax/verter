@@ -6,10 +6,13 @@
 
 import {
   unknownMetric,
+  type IdeCapture,
   type Metric,
   type ProcessTreeSnapshot,
   type TypeProviderStatus,
 } from "./types.js";
+
+export const OUTBOUND_BYTES_UNINSTRUMENTED = "outbound bytes not instrumented (WSP1 owns counters)";
 
 export type MemoryRowStatus = "valid" | "invalidated" | "unknown";
 
@@ -100,4 +103,39 @@ export function evaluateMemoryRow(input: {
 function keepUnknown(metric: Metric, reason: string): Metric {
   if (metric.status === "measured") return unknownMetric(`invalidated: ${reason}`);
   return metric;
+}
+
+/**
+ * Resolve the AC-RESOURCE aggregates for a capture: explicit fields win;
+ * otherwise retained-memory is the sum of measured member RSS, and the rest
+ * stay unknown-with-reason (never guessed zeros).
+ */
+export function memoryMetricsFromCapture(capture: IdeCapture): {
+  readonly retainedMemory: Metric;
+  readonly providerCpu: Metric;
+  readonly providerWall: Metric;
+  readonly outboundBytes: Metric;
+} {
+  return {
+    retainedMemory: capture.retainedMemory ?? deriveRetainedMemory(capture.processTree),
+    providerCpu: capture.providerCpu ?? unknownMetric(capture.processTree.typeProviderReason),
+    providerWall: capture.providerWall ?? unknownMetric(capture.processTree.typeProviderReason),
+    outboundBytes: capture.outboundBytes ?? unknownMetric(OUTBOUND_BYTES_UNINSTRUMENTED),
+  };
+}
+
+function deriveRetainedMemory(tree: ProcessTreeSnapshot): Metric {
+  const values: number[] = [];
+  for (const member of tree.members) {
+    if (member.rssBytes.status !== "measured") {
+      return unknownMetric(
+        `retained-memory unmeasured on this capture (${tree.typeProviderReason})`,
+      );
+    }
+    values.push(member.rssBytes.value);
+  }
+  if (values.length === 0) {
+    return unknownMetric(`retained-memory unmeasured on this capture (${tree.typeProviderReason})`);
+  }
+  return { status: "measured", value: values.reduce((sum, n) => sum + n, 0), unit: "bytes" };
 }

@@ -262,79 +262,89 @@ describe("JBT1H-AC3 — swapped-order paired runs stay within the recorded noise
   });
 
   it("accepts two swapped pairs whose per-side paint stays inside the bound", () => {
-    const official = capture({
-      side: "official",
-      paint: {
-        uiApplyPaintMs: { status: "measured", value: 20, unit: "ms" },
-        rpcDurationMs: unknownMetric("n/a"),
-      },
-    });
-    const verter = capture({
-      side: "verter",
-      paint: {
-        uiApplyPaintMs: { status: "measured", value: 22, unit: "ms" },
-        rpcDurationMs: unknownMetric("n/a"),
-      },
-    });
     const campaign = runPairedCampaign({
       seed: 2,
       sessionState: "cold",
-      official,
-      verter,
+      first: {
+        official: capture({
+          side: "official",
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 20, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+        verter: capture({
+          side: "verter",
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 22, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+      },
+      swapped: {
+        official: capture({
+          side: "official",
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 21, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+        verter: capture({
+          side: "verter",
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 24, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+      },
       noiseBound: { maxAbsMs: 8, recordedAs: "campaign-predeclared" },
     });
     expect(campaign.first.order).toEqual(["official", "verter"]);
     expect(campaign.swapped.order).toEqual(["verter", "official"]);
     expect(campaign.comparable.comparable).toBe(true);
+    expect(campaign.comparable.deltasMs.some((delta) => delta.absMs > 0)).toBe(true);
   });
 
-  it("rejects swapped pairs that exceed the recorded noise bound", () => {
-    const first = recordPair({
+  it("rejects swapped pairs that exceed the recorded noise bound through the campaign entry", () => {
+    const campaign = runPairedCampaign({
       seed: 2,
       sessionState: "cold",
-      captures: [
-        capture({
+      first: {
+        official: capture({
           side: "official",
           paint: {
             uiApplyPaintMs: { status: "measured", value: 10, unit: "ms" },
             rpcDurationMs: unknownMetric("n/a"),
           },
         }),
-        capture({
+        verter: capture({
           side: "verter",
           paint: {
             uiApplyPaintMs: { status: "measured", value: 11, unit: "ms" },
             rpcDurationMs: unknownMetric("n/a"),
           },
         }),
-      ],
-    });
-    const second = recordPair({
-      seed: 3,
-      sessionState: "cold",
-      captures: [
-        capture({
+      },
+      swapped: {
+        official: capture({
           side: "official",
           paint: {
             uiApplyPaintMs: { status: "measured", value: 40, unit: "ms" },
             rpcDurationMs: unknownMetric("n/a"),
           },
         }),
-        capture({
+        verter: capture({
           side: "verter",
           paint: {
             uiApplyPaintMs: { status: "measured", value: 12, unit: "ms" },
             rpcDurationMs: unknownMetric("n/a"),
           },
         }),
-      ],
+      },
+      noiseBound: { maxAbsMs: 5, recordedAs: "campaign-predeclared" },
     });
-    const verdict = compareSwappedPairs(first, second, {
-      maxAbsMs: 5,
-      recordedAs: "campaign-predeclared",
-    });
-    expect(verdict.comparable).toBe(false);
-    expect(verdict.reason).toMatch(/noise bound/);
+    expect(campaign.comparable.comparable).toBe(false);
+    expect(campaign.comparable.reason).toMatch(/noise bound/);
   });
 });
 
@@ -363,21 +373,71 @@ describe("fixture driver and receipt basis", () => {
   });
 
   it("parses a Kotlin-shaped capture and refuses a guessed unknown-with-value metric", () => {
-    const parsed = parseIdeCapture(capture({ side: "official" }));
+    const kotlinShape = {
+      hostKind: REAL_IDE_HOST,
+      usedSleepForReadiness: false,
+      versions: {
+        ideProduct: "WebStorm",
+        ideBuild: "WS-262.10968.77",
+        pluginVersion: "0.1.0-jbt1",
+        engine: unknownMetric("skeleton carries no TypeScript engine (JBT2)"),
+      },
+      paint: {
+        uiApplyPaintMs: { status: "measured", value: 12, unit: "ms" },
+        rpcDurationMs: unknownMetric("no semantic RPC on the skeleton health-action path"),
+      },
+      processTree: {
+        rootPid: 10,
+        members: [
+          {
+            pid: 10,
+            parentPid: null,
+            image: "idea",
+            role: "ide",
+            rssBytes: unknownMetric("RSS not sampled in the platform test hook"),
+          },
+          {
+            pid: 11,
+            parentPid: 10,
+            image: "descendant",
+            role: "descendant",
+            rssBytes: unknownMetric("RSS not sampled in the platform test hook"),
+          },
+        ],
+        typeProviderStatus: "unknown",
+        typeProviderPids: [],
+        typeProviderReason:
+          "no TypeScript provider process in the test-IDE tree (skeleton has no engine; JBT2 owns lifecycle)",
+      },
+      workflows: defaultWorkflowRows("verter"),
+      receiptBasis: BASIS,
+      side: "verter",
+      sessionState: "cold",
+      basisKind: "fresh",
+    };
+    const parsed = parseIdeCapture(kotlinShape);
     expect(parsed.hostKind).toBe(REAL_IDE_HOST);
+    expect(parsed.workflows).toHaveLength(COMPARISON_WORKFLOWS.length);
+    expect(parsed.receiptBasis.sourceRevisions).toBe(BASIS.sourceRevisions);
     expect(parsed.versions.ideBuild).toMatch(/262/);
     expect(() =>
       parseIdeCapture({
-        ...capture(),
+        ...kotlinShape,
         paint: {
           uiApplyPaintMs: { status: "unknown", reason: "missing", value: 0 },
           rpcDurationMs: unknownMetric("n/a"),
         },
       }),
     ).toThrow(/must not carry a value/);
+    expect(() => parseIdeCapture({ ...kotlinShape, workflows: undefined })).toThrow(
+      /workflows must be an array/,
+    );
+    expect(() => parseIdeCapture({ ...kotlinShape, receiptBasis: undefined })).toThrow(
+      /receiptBasis missing/,
+    );
   });
 
-  it("binds incremental vs fresh on the same receipt basis", () => {
+  it("binds incremental vs fresh on the same receipt basis and rejects mixed bases", () => {
     const fresh = capture({ basisKind: "fresh" });
     const incremental = capture({ basisKind: "incremental" });
     expect(sameReceiptBasis(fresh.receiptBasis, incremental.receiptBasis)).toBe(true);
@@ -385,6 +445,128 @@ describe("fixture driver and receipt basis", () => {
     expect(sameReceiptBasis(fresh.receiptBasis, { ...BASIS, sourceRevisions: "old-source" })).toBe(
       false,
     );
+    expect(() =>
+      recordPair({
+        seed: 2,
+        sessionState: "cold",
+        captures: [
+          capture({ side: "official" }),
+          capture({
+            side: "verter",
+            receiptBasis: { ...BASIS, sourceRevisions: "old-source" },
+          }),
+        ],
+      }),
+    ).toThrow(/mixes receipt bases/);
+    const first = recordPair({
+      seed: 2,
+      sessionState: "cold",
+      captures: [
+        capture({
+          side: "official",
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 10, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+        capture({
+          side: "verter",
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 10, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+      ],
+    });
+    const second = recordPair({
+      seed: 3,
+      sessionState: "cold",
+      captures: [
+        capture({
+          side: "official",
+          receiptBasis: { ...BASIS, sourceRevisions: "old-source" },
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 10, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+        capture({
+          side: "verter",
+          receiptBasis: { ...BASIS, sourceRevisions: "old-source" },
+          paint: {
+            uiApplyPaintMs: { status: "measured", value: 10, unit: "ms" },
+            rpcDurationMs: unknownMetric("n/a"),
+          },
+        }),
+      ],
+    });
+    const verdict = compareSwappedPairs(first, second, {
+      maxAbsMs: 5,
+      recordedAs: "campaign-predeclared",
+    });
+    expect(verdict.comparable).toBe(false);
+    expect(verdict.reason).toMatch(/receipt basis mismatch/);
+  });
+
+  it("carries measured retained-memory through ingestCapture when member RSS is measured", () => {
+    const snapshot = tree({
+      typeProviderStatus: "observed",
+      typeProviderPids: [20],
+      typeProviderReason: "tsgo descendant of the IDE",
+      members: [
+        {
+          pid: 10,
+          parentPid: null,
+          image: "idea",
+          role: "ide",
+          rssBytes: { status: "measured", value: 100, unit: "bytes" },
+        },
+        {
+          pid: 20,
+          parentPid: 10,
+          image: "tsgo",
+          role: "provider",
+          rssBytes: { status: "measured", value: 50, unit: "bytes" },
+        },
+      ],
+    });
+    const result = ingestCapture(
+      capture({
+        processTree: snapshot,
+        providerCpu: { status: "measured", value: 3, unit: "ms" },
+        providerWall: { status: "measured", value: 5, unit: "ms" },
+        outboundBytes: { status: "measured", value: 80, unit: "bytes" },
+      }),
+    );
+    expect(result.memory.status).toBe("valid");
+    expect(result.memory.retainedMemory).toEqual({
+      status: "measured",
+      value: 150,
+      unit: "bytes",
+    });
+    const pair = recordPair({
+      seed: 2,
+      sessionState: "cold",
+      captures: [
+        capture({ side: "official", processTree: snapshot }),
+        capture({ side: "verter", processTree: snapshot }),
+      ],
+    });
+    expect(pair.memory.every((row) => row.status === "valid")).toBe(true);
+    expect(pair.memory[0]?.retainedMemory).toEqual({
+      status: "measured",
+      value: 150,
+      unit: "bytes",
+    });
+  });
+
+  it("exports ./jetbrains from compiled dist, not TypeScript source", () => {
+    const pkg = JSON.parse(
+      readFileSync(path.join(repoRoot, "packages/dx-harness/package.json"), "utf8"),
+    ) as { exports: { "./jetbrains": { import: string; types: string; default: string } } };
+    expect(pkg.exports["./jetbrains"].import).toBe("./dist/jetbrains/index.js");
+    expect(pkg.exports["./jetbrains"].types).toBe("./dist/jetbrains/index.d.ts");
+    expect(pkg.exports["./jetbrains"].default).toBe("./dist/jetbrains/index.js");
   });
 
   it("does not count a mock-LSP capture that sneaks in through parse+ingest", () => {

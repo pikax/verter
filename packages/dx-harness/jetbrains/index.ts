@@ -44,6 +44,7 @@ export { assertRealIdeUiEvidence, classifyUiEvidence, type UiEvidenceVerdict } f
 
 export {
   evaluateMemoryRow,
+  memoryMetricsFromCapture,
   providerRequiredForMemory,
   type MemoryRow,
   type MemoryRowStatus,

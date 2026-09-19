@@ -5,7 +5,7 @@
  */
 
 import { classifyUiEvidence } from "./evidence.js";
-import { evaluateMemoryRow, type MemoryRow } from "./process-tree.js";
+import { evaluateMemoryRow, memoryMetricsFromCapture, type MemoryRow } from "./process-tree.js";
 import {
   isSide,
   metricValue,
@@ -83,6 +83,16 @@ export function recordPair(input: {
     }
     bySide.set(capture.side, capture);
   }
+  const basis = input.captures[0]?.receiptBasis;
+  if (basis) {
+    for (const capture of input.captures) {
+      if (!sameReceiptBasis(basis, capture.receiptBasis)) {
+        throw new Error(
+          `pair mixes receipt bases (sourceRevisions '${basis.sourceRevisions}' vs '${capture.receiptBasis.sourceRevisions}')`,
+        );
+      }
+    }
+  }
   const sides: TimedSide[] = [];
   for (const side of order) {
     const capture = bySide.get(side);
@@ -96,13 +106,7 @@ export function recordPair(input: {
   const memory = input.captures.map((capture) =>
     evaluateMemoryRow({
       tree: capture.processTree,
-      retainedMemory: unknownFromTree(capture),
-      providerCpu: { status: "unknown", reason: capture.processTree.typeProviderReason },
-      providerWall: { status: "unknown", reason: capture.processTree.typeProviderReason },
-      outboundBytes: {
-        status: "unknown",
-        reason: "outbound bytes not instrumented (WSP1 owns counters)",
-      },
+      ...memoryMetricsFromCapture(capture),
     }),
   );
   return {
@@ -113,13 +117,6 @@ export function recordPair(input: {
     captures: input.captures,
     retainedFailed: input.retainedFailed ?? [],
     memory,
-  };
-}
-
-function unknownFromTree(capture: IdeCapture): MemoryRow["retainedMemory"] {
-  return {
-    status: "unknown",
-    reason: `retained-memory unmeasured on this capture (${capture.processTree.typeProviderReason})`,
   };
 }
 
@@ -157,6 +154,20 @@ export function compareSwappedPairs(
       reason: `sessionState mismatch (${first.sessionState} vs ${second.sessionState})`,
       deltasMs: [],
     };
+  }
+  const bases = [...first.captures, ...second.captures].map((capture) => capture.receiptBasis);
+  const basis = bases[0];
+  if (basis) {
+    for (const other of bases) {
+      if (!sameReceiptBasis(basis, other)) {
+        return {
+          comparable: false,
+          reason:
+            "receipt basis mismatch (sourceRevisions/projectConfiguration/engineIdentity/hostIdentity differ; old-source outcomes are not comparable)",
+          deltasMs: [],
+        };
+      }
+    }
   }
   const deltas: { side: Side; absMs: number }[] = [];
   for (const sideName of ["official", "verter"] as const) {

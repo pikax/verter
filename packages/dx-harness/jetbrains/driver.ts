@@ -16,7 +16,7 @@ import {
   type NoiseBound,
   type PairRecord,
 } from "./paired-run.js";
-import { evaluateMemoryRow } from "./process-tree.js";
+import { evaluateMemoryRow, memoryMetricsFromCapture } from "./process-tree.js";
 import {
   COMPARISON_WORKFLOWS,
   REAL_IDE_HOST,
@@ -25,7 +25,6 @@ import {
   isRejectedUiHost,
   isSessionState,
   isSide,
-  unknownMetric,
   type ComparisonWorkflowId,
   type CompletenessState,
   type CorrectnessRow,
@@ -96,10 +95,7 @@ export function ingestCapture(capture: IdeCapture): DriverRunResult {
     uiAdmissible: true,
     memory: evaluateMemoryRow({
       tree: capture.processTree,
-      retainedMemory: unknownMetric(capture.processTree.typeProviderReason),
-      providerCpu: unknownMetric(capture.processTree.typeProviderReason),
-      providerWall: unknownMetric(capture.processTree.typeProviderReason),
-      outboundBytes: unknownMetric("outbound bytes not instrumented (WSP1 owns counters)"),
+      ...memoryMetricsFromCapture(capture),
     }),
   };
 }
@@ -129,6 +125,7 @@ export function parseIdeCapture(raw: unknown): IdeCapture {
     side: record.side,
     sessionState: record.sessionState,
     basisKind: record.basisKind,
+    ...parseOptionalAggregates(record),
   };
 }
 
@@ -273,6 +270,30 @@ function parseBasis(raw: unknown): ProductReceiptBasis {
   };
 }
 
+function parseOptionalAggregates(
+  record: Record<string, unknown>,
+): Pick<IdeCapture, "retainedMemory" | "providerCpu" | "providerWall" | "outboundBytes"> {
+  const out: {
+    retainedMemory?: IdeCapture["retainedMemory"];
+    providerCpu?: IdeCapture["providerCpu"];
+    providerWall?: IdeCapture["providerWall"];
+    outboundBytes?: IdeCapture["outboundBytes"];
+  } = {};
+  if (record.retainedMemory !== undefined) {
+    out.retainedMemory = parseMetric(record.retainedMemory, "retainedMemory");
+  }
+  if (record.providerCpu !== undefined) {
+    out.providerCpu = parseMetric(record.providerCpu, "providerCpu");
+  }
+  if (record.providerWall !== undefined) {
+    out.providerWall = parseMetric(record.providerWall, "providerWall");
+  }
+  if (record.outboundBytes !== undefined) {
+    out.outboundBytes = parseMetric(record.outboundBytes, "outboundBytes");
+  }
+  return out;
+}
+
 function parseMetric(raw: unknown, path: string): PaintSample["uiApplyPaintMs"] {
   if (raw === null || typeof raw !== "object") throw new Error(`${path} missing`);
   const record = raw as Record<string, unknown>;
@@ -304,21 +325,25 @@ function invalid(path: string): never {
 export function runPairedCampaign(input: {
   readonly seed: number;
   readonly sessionState: IdeCapture["sessionState"];
-  readonly official: IdeCapture;
-  readonly verter: IdeCapture;
+  readonly first: { readonly official: IdeCapture; readonly verter: IdeCapture };
+  readonly swapped: { readonly official: IdeCapture; readonly verter: IdeCapture };
   readonly noiseBound: NoiseBound;
 }): {
   readonly first: PairRecord;
   readonly swapped: PairRecord;
   readonly comparable: ReturnType<typeof compareSwappedPairs>;
 } {
-  const firstCaptures = pairOrderCaptures(input.seed, input.official, input.verter);
+  const firstCaptures = pairOrderCaptures(input.seed, input.first.official, input.first.verter);
   const first = labelOutliers(
     recordPair({ seed: input.seed, sessionState: input.sessionState, captures: firstCaptures }),
     input.noiseBound,
   );
   const swappedSeed = input.seed ^ 1;
-  const swappedCaptures = pairOrderCaptures(swappedSeed, input.official, input.verter);
+  const swappedCaptures = pairOrderCaptures(
+    swappedSeed,
+    input.swapped.official,
+    input.swapped.verter,
+  );
   const swapped = labelOutliers(
     recordPair({ seed: swappedSeed, sessionState: input.sessionState, captures: swappedCaptures }),
     input.noiseBound,
