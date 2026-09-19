@@ -1041,6 +1041,27 @@ impl VerterHost {
                 committed_generation,
             );
         }
+        self.ingest_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
+        let pending_overlay =
+            (crate::global_contributors::source_has_ambient_contribution(req.source.as_ref())
+                && !canonical_id.ends_with(".d.ts")
+                && !canonical_id.ends_with(".d.tsx")
+                && !canonical_id.ends_with(".d.cts")
+                && !canonical_id.ends_with(".d.mts")
+                && !canonical_id.starts_with("ambient:/"))
+                || (crate::host_construction::is_ordinary_typescript_canonical(
+                    canonical_id.as_ref(),
+                )
+                    && crate::global_contributors::source_may_have_file_scope_global_contribution(
+                        req.source.as_ref(),
+                    ));
+        if pending_overlay {
+            self.project_type_store()
+                .indexed()
+                .global_contributor_index()
+                .note_pending_overlay_ambient(canonical_id.as_ref());
+        }
+        self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
         crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
         Ok((result, workspace_commit))

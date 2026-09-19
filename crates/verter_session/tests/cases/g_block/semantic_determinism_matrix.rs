@@ -1244,3 +1244,45 @@ fn signature_kernel_interned_identities_are_schedule_independent() {
         "opposite intern order changed logical binder identity"
     );
 }
+
+/// Global contributor snapshots: ingesting the same `declare global`
+/// files in opposite order yields one fingerprint and one precedence.
+#[test]
+fn global_contributor_ingest_order_is_declaration_authority() {
+    use verter_session::file_artifact_store::AugmentationTargetKind;
+
+    let files_fwd = [
+        (
+            "/det/ga.d.ts",
+            "export {};\ndeclare global { interface Window { a: 1 } }\n",
+        ),
+        (
+            "/det/gb.d.ts",
+            "export {};\ndeclare global { interface Window { b: 2 } }\n",
+        ),
+    ];
+    let files_rev = [files_fwd[1], files_fwd[0]];
+    let host_fwd = build_host(&files_fwd);
+    let host_rev = build_host(&files_rev);
+    let names = |host: &VerterHost| {
+        host.project_type_store()
+            .indexed()
+            .global_contributor_index()
+            .snapshot()
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "Window",
+                None,
+                true,
+            )
+            .entries
+            .iter()
+            .map(|entry| entry.artifact_key.canonical.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&host_fwd),
+        names(&host_rev),
+        "declaration precedence must not follow ingest order"
+    );
+}

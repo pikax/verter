@@ -22,7 +22,7 @@
       "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
       "fileLoc": 15020
     },
-    { "path": "crates/verter_session/src/project_semantic_dispatch/build.rs", "fileLoc": 12498 },
+    { "path": "crates/verter_session/src/project_semantic_dispatch/build.rs", "fileLoc": 12697 },
     { "path": "crates/verter_session/src/semantic_query.rs", "fileLoc": 10658 },
     { "path": "crates/verter_session/src/flow_slice_content.rs", "fileLoc": 9426 }
   ],
@@ -30,7 +30,7 @@
   "godModuleBasis": {
     "thresholdLoc": 4000,
     "classification": "same classification as god_module_size_budget: .rs files under crates/*/src, excluding test fixtures (files ending _tests.rs, files named tests.rs, anything under a tests/ directory); generated data sources are included exactly as the existing guard includes them",
-    "productionFilesOverThreshold": 33,
+    "productionFilesOverThreshold": 34,
     "hotspotsWithinPopulation": 5
   },
   "thresholds": [
@@ -40,7 +40,7 @@
       "guardFile": "crates/verter_session/tests/cases/architecture_guards.rs",
       "currentScope": "the five retired Phase 11 targets only",
       "defaultMaxLines": 4000,
-      "rule": "ARH12 may extend the existing guard's walk beyond the five Phase 11 targets on exactly this measured basis (33 production files over 4000 LOC, five of them the ARH1 hotspots); 4000 is the existing ratified ceiling re-measured, not a new budget invented by this node, and no second status system is created"
+      "rule": "ARH12 may extend the existing guard's walk beyond the five Phase 11 targets on exactly this measured basis (34 production files over 4000 LOC, five of them the ARH1 hotspots); 4000 is the existing ratified ceiling re-measured, not a new budget invented by this node, and no second status system is created"
     }
   ],
   "dimensions": [

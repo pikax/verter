@@ -891,6 +891,7 @@
           "fact_emission",
           "fact_signature_helpers",
           "file_artifact_store",
+          "global_contributors",
           "host_manage",
           "intrinsic_registry",
           "loop5_instrumentation",
@@ -913,7 +914,7 @@
         ],
         "importers": [],
         "ownerCratePopulation": "referenced only inside project_semantic_dispatch (build_* impl block on ProjectSemanticDispatch); no cross-crate importer (the enforced cross-crate population is empty)",
-        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_span:: qualified items, tracing::error!/indexmap::IndexMap/rustc_hash:: references, and crate::module::Item paths like crate::semantic_query::, crate::resolver_core::, crate::cache_runtime:: and crate::request_context:: references) are measured, so the declared sets equal the production direction both ways; types and VerterHost (carrier_type_param_descent_tests) are imported only by the file's test configuration at ratification and are therefore not declared here"
+        "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (verter_span:: qualified items, tracing::error!/indexmap::IndexMap/rustc_hash:: references, and crate::module::Item paths like crate::semantic_query::, crate::resolver_core::, crate::cache_runtime::, crate::request_context:: and crate::global_contributors:: references) are measured, so the declared sets equal the production direction both ways; types and VerterHost (carrier_type_param_descent_tests) are imported only by the file's test configuration at ratification and are therefore not declared here"
       },
       "constructorCapabilities": [],
       "constructorRationale": "no constructors: dispatch-layer builders kept on ProjectSemanticDispatch via impl blocks so inner helpers stay pub(super) without widening visibility",

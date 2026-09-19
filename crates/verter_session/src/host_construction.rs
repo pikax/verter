@@ -24,6 +24,21 @@ use crate::shared::default_shared;
 use crate::types::{HostConfig, HostMetrics};
 use crate::{host_executor, VerterHost};
 
+fn is_ambient_declaration_canonical(canonical: &str) -> bool {
+    canonical.starts_with("ambient:/")
+        || canonical.ends_with(".d.ts")
+        || canonical.ends_with(".d.tsx")
+        || canonical.ends_with(".d.cts")
+        || canonical.ends_with(".d.mts")
+}
+
+pub(crate) fn is_ordinary_typescript_canonical(canonical: &str) -> bool {
+    if is_ambient_declaration_canonical(canonical) {
+        return false;
+    }
+    canonical.ends_with(".ts") || canonical.ends_with(".tsx")
+}
+
 /// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
 ///
 /// - `force_overflow_observations`: test-injection for the cold relation
@@ -677,6 +692,7 @@ impl VerterHost {
         if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
             worker_pools.record_host_shell_created();
         }
+        host.ingest_injected_ambient_roots(None);
         host
     }
 
@@ -1103,6 +1119,117 @@ impl VerterHost {
     ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
         let root = self.workspace().published_root()?;
         root.snapshot.owners_for_file(canonical).first().copied()
+    }
+
+    /// Configured `files` index for `canonical`, or `u32::MAX` when the
+    /// path was discovered by include/globs (unordered inputs are then
+    /// normalized by canonical spelling).
+    pub(crate) fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
+        let Some(pid) = self.resolve_project_for_canonical(canonical) else {
+            return u32::MAX;
+        };
+        let Some(root) = self.workspace().published_root() else {
+            return u32::MAX;
+        };
+        match &root.snapshot.project(pid).payload {
+            verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                membership, ..
+            } => membership
+                .spec
+                .files
+                .iter()
+                .position(|file| file.as_str() == canonical)
+                .map(|index| index as u32)
+                .unwrap_or(u32::MAX),
+            _ => u32::MAX,
+        }
+    }
+
+    /// IndexedReady for a declaration file whose source is a global/ambient
+    /// contributor (`declare global` / `declare module`, or an automatic
+    /// lib). Ordinary `.ts` / export-only `.d.ts` stay on the shallow
+    /// upsert path so cold/fence flights are not consumed at upsert.
+    pub(crate) fn ingest_ambient_contributor(&self, canonical: &str, source: &str) {
+        if !is_ambient_declaration_canonical(canonical) {
+            return;
+        }
+        if !canonical.starts_with("ambient:/")
+            && !crate::global_contributors::source_has_ambient_contribution(source)
+        {
+            return;
+        }
+        let _ = self.ensure_loaded(canonical);
+        let _ = self.ensure_indexed_ready_serve(canonical);
+    }
+
+    /// Drain overlay `.ts` ambient / file-scope script contributors
+    /// recorded at construction or upsert. Contribution collection calls
+    /// this so a never-imported contributor is IndexedReady before the
+    /// index scan, without a whole-program `read_file` on every edit and
+    /// without consuming cold flights at upsert.
+    pub(crate) fn ingest_program_ambient_roots(&self) {
+        self.ingest_injected_ambient_roots(None);
+        let pending = self
+            .project_type_store()
+            .indexed()
+            .global_contributor_index()
+            .take_pending_overlay_ambient();
+        for member in pending {
+            let _ = self.ensure_loaded(&member);
+            let _ = self.ensure_indexed_ready_serve(&member);
+        }
+    }
+
+    /// Ingest snapshot members that contribute globally and were never
+    /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`
+    /// or unrelated ordinary scripts. Re-runs only when snapshot
+    /// content or membership changes.
+    pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
+        let index = self
+            .project_type_store()
+            .indexed()
+            .global_contributor_index();
+        // Read the cheap owner revision before enumerating or cloning any IDs.
+        // If the snapshot changes during this scan, the next call sees a newer
+        // revision and scans again. Workspaces without a revision always scan.
+        let revision = self.workspace().snapshot_revision();
+        if index.snapshot_revision_is_ingested(revision) {
+            return;
+        }
+        let members = self.workspace().snapshot_canonicals();
+        #[cfg(test)]
+        for _ in &members {
+            index.note_snapshot_scan_visit();
+        }
+        for member in &members {
+            if except == Some(member.as_str()) {
+                continue;
+            }
+            if member.starts_with("ambient:/") {
+                let _ = self.ensure_loaded(member);
+                let _ = self.ensure_indexed_ready_serve(member);
+                continue;
+            }
+            if is_ambient_declaration_canonical(member) {
+                let Some(source) = self.workspace().read_file(member) else {
+                    continue;
+                };
+                self.ingest_ambient_contributor(member, source.as_ref());
+                continue;
+            }
+            if !is_ordinary_typescript_canonical(member) {
+                continue;
+            }
+            let Some(source) = self.workspace().read_file(member) else {
+                continue;
+            };
+            if crate::global_contributors::source_may_have_file_scope_global_contribution(
+                source.as_ref(),
+            ) {
+                index.note_pending_overlay_ambient(member);
+            }
+        }
+        index.set_ingested_snapshot_revision(revision);
     }
 
     /// Host-owned scratch cache for the typeinfo

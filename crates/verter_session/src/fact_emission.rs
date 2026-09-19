@@ -1126,7 +1126,7 @@ fn hash16_from_pair(lo: u64, hi: u64) -> Hash16 {
 /// names/kinds/flags, contributor count. Moves on any skeleton edit
 /// (member add/remove/rename, kind change, contributor add/remove);
 /// body-VALUE sensitivity is the per-contributor `FileWholeHash` rail.
-pub(super) fn augmentation_header_fingerprint(
+pub(crate) fn augmentation_header_fingerprint(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,

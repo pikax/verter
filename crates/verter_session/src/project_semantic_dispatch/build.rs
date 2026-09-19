@@ -3735,7 +3735,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, decl_name.as_ref(), &[], context)?;
+        } = self.collect_augmentation_contributions(
+            target,
+            decl_name.as_ref(),
+            &[],
+            context,
+            decl_canonical.as_ref(),
+        )?;
 
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
@@ -3814,11 +3820,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         decl_name: &str,
         type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
+        request_canonical: &str,
     ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
         let host = self.ctx.host_for_fact_tracer_install();
+        host.ingest_program_ambient_roots();
         // Store-view / workspace-default basis: the warm-validate
         // `AugmentationTargetKey` is recomposed from the sealed store
         // view's `project_env_root` (workspace-default env + identity).
@@ -3896,7 +3904,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
-                    canonical_id: shape_attribution,
+                    canonical_id: shape_attribution.clone(),
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
@@ -3906,7 +3914,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
         );
 
-        if augmenter_set.entries.is_empty() {
+        let options = host.semantic_compiler_options_for(request_canonical);
+        let allow_automatic_libs = !options.no_lib;
+        let selected_libs: rustc_hash::FxHashSet<String> = options
+            .effective_lib_file_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let population_hit = artifact_store.global_contributor_index().snapshot().lookup(
+            &target,
+            decl_name,
+            overlay_discriminator,
+            allow_automatic_libs,
+        );
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: shape_attribution.clone(),
+                    key: crate::global_contributors::population_contributor_fact_key(
+                        &target, decl_name,
+                    ),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: population_hit.fingerprint,
+                },
+            ),
+        );
+        let has_file_scope = population_hit.entries.iter().any(|entry| {
+            matches!(
+                entry.origin,
+                crate::global_contributors::ContributorOrigin::FileScopeInterface
+                    | crate::global_contributors::ContributorOrigin::FileScopeNamespace
+            )
+        });
+        if augmenter_set.entries.is_empty() && !has_file_scope {
             return None;
         }
 
@@ -3923,205 +3963,379 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // fast exact-key path instead of re-healing every call.
         let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
             Vec::new();
-        for (augmenter_idx, augmenter) in augmenter_set.entries.iter().enumerate() {
-            let augmenter_canonical = augmenter.canonical();
-            let Some(indexed) = self
-                .ctx
-                .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
-                .map(|serve| serve.indexed)
-            else {
-                // A set member the live view cannot serve is a torn state:
-                // its contribution (and source-env identity) cannot be
-                // observed coherently — the parent result must not warm. The
-                // generalized non-cacheability rail is fanned ONCE at the single
-                // CONSUMER (`instantiate_shell`, where this flag becomes
-                // `output.cache_suppress`), covering every unobservable source.
-                source_env_unobservable = true;
-                continue;
-            };
-            // The addressable contribution pointers: each augmenter
-            // `ModuleAugmentationFact` that targets THIS decl gives the raw
-            // `declare module "<spec>"` specifier under which the typed inner
-            // body is retained in `augmentation_scopes`.
-            //
-            // Self-heal a STALE captured `artifact_key`: a cosmetic /
-            // member-body re-key of the augmenter advances its content hash
-            // (draining the captured key) without moving its decl skeleton,
-            // so the cached `AugmenterSet` keeps the pre-edit key. Skipping
-            // the augmenter on that miss would silently drop a real
-            // augmentation. `ensure_indexed_ready_serve` above already materialised
-            // the augmenter's CURRENT version, so `indexed.whole_hash` is the
-            // scheduler-authoritative current content hash.
-            let Some((art, refreshed_key)) = artifact_store
-                .augmenter_artifacts_self_healing(&augmenter.artifact_key, indexed.whole_hash)
-            else {
-                // Unhealable captured key: the augmenter's exact artifact
-                // identity is unobservable — refuse warm admission. The
-                // generalized non-cacheability rail is fanned ONCE at the
-                // consumer (see the unservable arm above).
-                source_env_unobservable = true;
-                continue;
-            };
-            // The EXACT key the contributor read serves from (the healed
-            // current key when the captured one was stale).
-            let effective_artifact_key = refreshed_key
-                .clone()
-                .unwrap_or_else(|| augmenter.artifact_key.clone());
-            if let Some(refreshed_key) = refreshed_key {
-                refreshed_keys.push((augmenter_idx, refreshed_key));
-            }
-            let mut matched_specs: Vec<(String, verter_type_expr::TopLevelOwnerId)> = Vec::new();
-            for fact in art.augmentations.iter() {
-                if fact.augmented_name.as_ref() != decl_name {
-                    continue;
-                }
-                if !crate::file_artifact_store::augmenter_matches_target(
-                    fact,
-                    &key,
-                    augmenter_canonical.as_ref(),
-                    resolve_rel,
-                ) {
-                    continue;
-                }
-                let spec = fact.specifier.as_ref().to_string();
-                let matched = (spec, fact.owner);
-                if !matched_specs.contains(&matched) {
-                    matched_specs.push(matched);
-                }
-            }
-            if matched_specs.is_empty() {
-                continue;
-            }
+        enum OrderedOrigin {
+            Augmenter(usize),
+            FileScope(usize),
+        }
+        struct OrderedCandidate {
+            rank: u32,
+            canonical: Arc<str>,
+            parse_stable_hash: verter_semantic::analysis::Hash16,
+            origin: OrderedOrigin,
+        }
+        let file_scope_entries: Vec<&crate::global_contributors::ContributorEntry> = population_hit
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.origin,
+                    crate::global_contributors::ContributorOrigin::FileScopeInterface
+                        | crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                )
+            })
+            .collect();
+        let mut ordered: Vec<OrderedCandidate> =
+            Vec::with_capacity(augmenter_set.entries.len() + file_scope_entries.len());
+        for (idx, augmenter) in augmenter_set.entries.iter().enumerate() {
+            ordered.push(OrderedCandidate {
+                rank: host.declaration_sequence_rank(augmenter.canonical().as_ref()),
+                canonical: Arc::clone(augmenter.canonical()),
+                parse_stable_hash: augmenter.parse_stable_hash,
+                origin: OrderedOrigin::Augmenter(idx),
+            });
+        }
+        for (idx, entry) in file_scope_entries.iter().enumerate() {
+            ordered.push(OrderedCandidate {
+                rank: host.declaration_sequence_rank(entry.artifact_key.canonical.as_ref()),
+                canonical: Arc::clone(&entry.artifact_key.canonical),
+                parse_stable_hash: entry.parse_stable_hash,
+                origin: OrderedOrigin::FileScope(idx),
+            });
+        }
+        ordered.sort_by(|left, right| {
+            left.rank
+                .cmp(&right.rank)
+                .then_with(|| left.canonical.as_ref().cmp(right.canonical.as_ref()))
+                .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
+        });
+        for candidate in ordered {
+            match candidate.origin {
+                OrderedOrigin::Augmenter(augmenter_idx) => {
+                    let augmenter = &augmenter_set.entries[augmenter_idx];
+                    let augmenter_canonical = augmenter.canonical();
+                    let Some(indexed) = self
+                        .ctx
+                        .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
+                        .map(|serve| serve.indexed)
+                    else {
+                        // A set member the live view cannot serve is a torn state:
+                        // its contribution (and source-env identity) cannot be
+                        // observed coherently — the parent result must not warm. The
+                        // generalized non-cacheability rail is fanned ONCE at the single
+                        // CONSUMER (`instantiate_shell`, where this flag becomes
+                        // `output.cache_suppress`), covering every unobservable source.
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    // The addressable contribution pointers: each augmenter
+                    // `ModuleAugmentationFact` that targets THIS decl gives the raw
+                    // `declare module "<spec>"` specifier under which the typed inner
+                    // body is retained in `augmentation_scopes`.
+                    //
+                    // Self-heal a STALE captured `artifact_key`: a cosmetic /
+                    // member-body re-key of the augmenter advances its content hash
+                    // (draining the captured key) without moving its decl skeleton,
+                    // so the cached `AugmenterSet` keeps the pre-edit key. Skipping
+                    // the augmenter on that miss would silently drop a real
+                    // augmentation. `ensure_indexed_ready_serve` above already materialised
+                    // the augmenter's CURRENT version, so `indexed.whole_hash` is the
+                    // scheduler-authoritative current content hash.
+                    let Some((art, refreshed_key)) = artifact_store
+                        .augmenter_artifacts_self_healing(
+                            &augmenter.artifact_key,
+                            indexed.whole_hash,
+                        )
+                    else {
+                        // Unhealable captured key: the augmenter's exact artifact
+                        // identity is unobservable — refuse warm admission. The
+                        // generalized non-cacheability rail is fanned ONCE at the
+                        // consumer (see the unservable arm above).
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    // The EXACT key the contributor read serves from (the healed
+                    // current key when the captured one was stale).
+                    let effective_artifact_key = refreshed_key
+                        .clone()
+                        .unwrap_or_else(|| augmenter.artifact_key.clone());
+                    if let Some(refreshed_key) = refreshed_key {
+                        refreshed_keys.push((augmenter_idx, refreshed_key));
+                    }
+                    let mut matched_specs: Vec<(String, verter_type_expr::TopLevelOwnerId)> =
+                        Vec::new();
+                    for fact in art.augmentations.iter() {
+                        if fact.augmented_name.as_ref() != decl_name {
+                            continue;
+                        }
+                        if !crate::file_artifact_store::augmenter_matches_target(
+                            fact,
+                            &key,
+                            augmenter_canonical.as_ref(),
+                            resolve_rel,
+                        ) {
+                            continue;
+                        }
+                        let spec = fact.specifier.as_ref().to_string();
+                        let matched = (spec, fact.owner);
+                        if !matched_specs.contains(&matched) {
+                            matched_specs.push(matched);
+                        }
+                    }
+                    if matched_specs.is_empty() {
+                        continue;
+                    }
 
-            let Some(bundle) = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref()) else {
-                source_env_unobservable = true;
-                continue;
-            };
+                    let Some(bundle) = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref())
+                    else {
+                        source_env_unobservable = true;
+                        continue;
+                    };
 
-            let mut any_contribution = false;
-            for (spec, contributor_owner) in &matched_specs {
-                let aug_scope = NodeScopeId::File {
-                    canonical_id: Arc::clone(augmenter_canonical),
-                    owner: *contributor_owner,
-                    whole_hash: indexed.whole_hash,
-                    local_scope: None,
-                };
-                let aug_scope_payload = Some(
+                    let mut any_contribution = false;
+                    for (spec, contributor_owner) in &matched_specs {
+                        let aug_scope = NodeScopeId::File {
+                            canonical_id: Arc::clone(augmenter_canonical),
+                            owner: *contributor_owner,
+                            whole_hash: indexed.whole_hash,
+                            local_scope: None,
+                        };
+                        let aug_scope_payload = Some(
                     crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                         &bundle,
                         *contributor_owner,
                     ),
                 );
-                let aug_shadowing =
+                        let aug_shadowing =
                     crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                         aug_scope_payload.as_ref(),
                     );
-                // A `declare global` augmenter is indexed under the global tag;
-                // its retained body lives in the GLOBAL augmentation scope, not
-                // in a module scope named after the tag.
-                let is_global = spec.as_str() == crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
-                let scope_kind = if is_global {
-                    AugmentationScopeKind::Global
-                } else {
-                    AugmentationScopeKind::Module(spec.clone())
-                };
-                let aug_prepared = match bundle.prepare_augmentation_type_decl_outcome_in(
-                    &scope_kind,
-                    *contributor_owner,
-                    decl_name,
-                ) {
-                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(Some(
-                        prepared,
-                    )) => prepared,
-                    // Genuine absence: this augmenter has no contributor for the spec.
-                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(None) => {
-                        continue
-                    }
-                    // A broken decl-body lease pin (the augmenter body demand
-                    // ReturnOnly'd): the augmenter's source-env is UNOBSERVABLE —
-                    // fold into the fold's no-warm rail so the enclosing query's
-                    // `cache_suppress` is set, rather than silently dropping the
-                    // contributor and warm-admitting an under-merged surface. The
-                    // generalized non-cacheability rail is fanned ONCE at the
-                    // consumer (`instantiate_shell`) for every unobservable
-                    // source, so the enclosing component-meta tracer refuses the
-                    // final result too. A later demand under a live lease recovers.
-                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::LeaseMiss => {
-                        source_env_unobservable = true;
-                        continue;
-                    }
-                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::Failed(_) => {
-                        source_env_unobservable = true;
-                        continue;
-                    }
-                };
-                let aug_env: FxHashMap<String, SemanticNodeId> = aug_prepared
-                    .type_parameters
-                    .iter()
-                    .zip(type_arguments.iter())
-                    .map(|(param, argument)| (param.name.clone(), *argument))
-                    .collect();
-                let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                // Demand the augmenter's RETAINED contribution body through
-                // the augmenter's OWN `LowerLocator` (the augmentation-scoped
-                // locator leaf) — never an inline lowering of another file's
-                // prepared body. An augmenter contribution is never the
-                // macro-T own body — downgrade provenance to structural
-                // (same rule the builtin / heritage paths apply).
-                let locator = verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
-                    verter_type_expr::locators::AugmentationBodyLocator {
-                        anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: Arc::clone(augmenter_canonical),
-                            owner: *contributor_owner,
-                            symbol: Arc::from(decl_name),
-                            space: verter_type_expr::locators::LocatorSymbolSpace::Type,
-                        },
-                        scope: if is_global {
-                            verter_type_expr::locators::AuthoredAugmentationScope::Global
+                        // A `declare global` augmenter is indexed under the global tag;
+                        // its retained body lives in the GLOBAL augmentation scope, not
+                        // in a module scope named after the tag.
+                        let is_global =
+                            spec.as_str() == crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
+                        let scope_kind = if is_global {
+                            AugmentationScopeKind::Global
                         } else {
-                            verter_type_expr::locators::AuthoredAugmentationScope::Module {
+                            AugmentationScopeKind::Module(spec.clone())
+                        };
+                        let aug_prepared = match bundle.prepare_augmentation_type_decl_outcome_in(
+                            &scope_kind,
+                            *contributor_owner,
+                            decl_name,
+                        ) {
+                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(
+                                Some(prepared),
+                            ) => prepared,
+                            // Genuine absence: this augmenter has no contributor for the spec.
+                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(
+                                None,
+                            ) => continue,
+                            // A broken decl-body lease pin (the augmenter body demand
+                            // ReturnOnly'd): the augmenter's source-env is UNOBSERVABLE —
+                            // fold into the fold's no-warm rail so the enclosing query's
+                            // `cache_suppress` is set, rather than silently dropping the
+                            // contributor and warm-admitting an under-merged surface. The
+                            // generalized non-cacheability rail is fanned ONCE at the
+                            // consumer (`instantiate_shell`) for every unobservable
+                            // source, so the enclosing component-meta tracer refuses the
+                            // final result too. A later demand under a live lease recovers.
+                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::LeaseMiss => {
+                                source_env_unobservable = true;
+                                continue;
+                            }
+                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::Failed(_) => {
+                                source_env_unobservable = true;
+                                continue;
+                            }
+                        };
+                        let aug_env: FxHashMap<String, SemanticNodeId> = aug_prepared
+                            .type_parameters
+                            .iter()
+                            .zip(type_arguments.iter())
+                            .map(|(param, argument)| (param.name.clone(), *argument))
+                            .collect();
+                        let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                        // Demand the augmenter's RETAINED contribution body through
+                        // the augmenter's OWN `LowerLocator` (the augmentation-scoped
+                        // locator leaf) — never an inline lowering of another file's
+                        // prepared body. An augmenter contribution is never the
+                        // macro-T own body — downgrade provenance to structural
+                        // (same rule the builtin / heritage paths apply).
+                        let locator =
+                            verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
+                                verter_type_expr::locators::AugmentationBodyLocator {
+                                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                                        canonical_id: Arc::clone(augmenter_canonical),
+                                        owner: *contributor_owner,
+                                        symbol: Arc::from(decl_name),
+                                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                                    },
+                                    scope: if is_global {
+                                        verter_type_expr::locators::AuthoredAugmentationScope::Global
+                                    } else {
+                                        verter_type_expr::locators::AuthoredAugmentationScope::Module {
                                 specifier: Arc::from(spec.as_str()),
                             }
+                                    },
+                                    // The whole augmentation contribution body (no sub-slot).
+                                    path: Arc::from(
+                                        Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
+                                            .into_boxed_slice(),
+                                    ),
+                                },
+                            );
+                        let node = self.lower_located_body_with_provenance(
+                            locator,
+                            aug_prepared.kind,
+                            &aug_prepared.type_parameters,
+                            &aug_prepared.name_resolution,
+                            &aug_env,
+                            &aug_scope,
+                            aug_scope_payload.as_ref(),
+                            &aug_shadowing,
+                            &mut aug_subs,
+                            context.into_structural_provenance(),
+                        );
+                        contributor_nodes.push(node);
+                        any_contribution = true;
+                    }
+                    if any_contribution {
+                        // Root on the OVERLAY-AWARE content version the body was
+                        // actually lowered from (`indexed.whole_hash` == `aug_scope`'s
+                        // hash), NOT `get_whole_hash` (which can report the BASE hash
+                        // under a session view). A session-overlay augmenter rooted on
+                        // the base hash would tear: the value reflects overlay content
+                        // but the fact pins base content, so a BASE re-query validates
+                        // the session candidate and is poisoned. Rooting on the
+                        // overlay hash makes the base re-query miss and recompute.
+                        // The version root and the source-env artifact key travel as
+                        // ONE carrier: a contributor cannot be version-rooted without
+                        // its source-env identity.
+                        contributor_roots.push(AugmentationContributorRoot {
+                            canonical: Arc::clone(augmenter_canonical),
+                            whole_hash: indexed.whole_hash,
+                            artifact_key: effective_artifact_key,
+                        });
+                    }
+                }
+                OrderedOrigin::FileScope(file_scope_idx) => {
+                    let entry = file_scope_entries[file_scope_idx];
+                    if entry.is_automatic_lib {
+                        let name = entry
+                            .artifact_key
+                            .canonical
+                            .rsplit(['/', '\\'])
+                            .next()
+                            .unwrap_or("");
+                        if !selected_libs.contains(name) {
+                            continue;
+                        }
+                    }
+                    let canonical = entry.artifact_key.canonical.as_ref();
+                    let Some(indexed) = self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .map(|serve| serve.indexed)
+                    else {
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    let Some((art, refreshed_key)) = artifact_store
+                        .augmenter_artifacts_self_healing(&entry.artifact_key, indexed.whole_hash)
+                    else {
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    let effective_artifact_key = refreshed_key
+                        .clone()
+                        .unwrap_or_else(|| entry.artifact_key.clone());
+                    if entry.origin
+                        == crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                        && population_hit.entries.iter().any(|other| {
+                            other.origin
+                                == crate::global_contributors::ContributorOrigin::FileScopeInterface
+                                && other.artifact_key.canonical == entry.artifact_key.canonical
+                                && other.symbol.as_ref() == entry.symbol.as_ref()
+                        })
+                    {
+                        continue;
+                    }
+                    let Some(bundle) = self.ctx.prepared_decl_bundle(canonical) else {
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    let prepared = match bundle.prepared_type_decls.get_in(entry.owner, decl_name) {
+                        Ok(Some(prepared)) => prepared,
+                        Ok(None) => continue,
+                        Err(_) => {
+                            source_env_unobservable = true;
+                            continue;
+                        }
+                    };
+                    let aug_scope = NodeScopeId::File {
+                        canonical_id: Arc::clone(&entry.artifact_key.canonical),
+                        owner: entry.owner,
+                        whole_hash: indexed.whole_hash,
+                        local_scope: None,
+                    };
+                    let aug_scope_payload = Some(
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                    entry.owner,
+                ),
+            );
+                    let aug_shadowing =
+                        crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                            aug_scope_payload.as_ref(),
+                        );
+                    let aug_env: FxHashMap<String, SemanticNodeId> = prepared
+                        .type_parameters
+                        .iter()
+                        .zip(type_arguments.iter())
+                        .map(|(param, argument)| (param.name.clone(), *argument))
+                        .collect();
+                    let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                    let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::clone(&entry.artifact_key.canonical),
+                        owner: entry.owner,
+                        symbol: Arc::from(decl_name),
+                        space: if entry.origin
+                            == crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                        {
+                            verter_type_expr::locators::LocatorSymbolSpace::Namespace
+                        } else {
+                            verter_type_expr::locators::LocatorSymbolSpace::Type
                         },
-                        // The whole augmentation contribution body (no sub-slot).
-                        path: Arc::from(
-                            Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
-                                .into_boxed_slice(),
-                        ),
                     },
-                );
-                let node = self.lower_located_body_with_provenance(
-                    locator,
-                    aug_prepared.kind,
-                    &aug_prepared.type_parameters,
-                    &aug_prepared.name_resolution,
-                    &aug_env,
-                    &aug_scope,
-                    aug_scope_payload.as_ref(),
-                    &aug_shadowing,
-                    &mut aug_subs,
-                    context.into_structural_provenance(),
-                );
-                contributor_nodes.push(node);
-                any_contribution = true;
-            }
-            if any_contribution {
-                // Root on the OVERLAY-AWARE content version the body was
-                // actually lowered from (`indexed.whole_hash` == `aug_scope`'s
-                // hash), NOT `get_whole_hash` (which can report the BASE hash
-                // under a session view). A session-overlay augmenter rooted on
-                // the base hash would tear: the value reflects overlay content
-                // but the fact pins base content, so a BASE re-query validates
-                // the session candidate and is poisoned. Rooting on the
-                // overlay hash makes the base re-query miss and recompute.
-                // The version root and the source-env artifact key travel as
-                // ONE carrier: a contributor cannot be version-rooted without
-                // its source-env identity.
-                contributor_roots.push(AugmentationContributorRoot {
-                    canonical: Arc::clone(augmenter_canonical),
-                    whole_hash: indexed.whole_hash,
-                    artifact_key: effective_artifact_key,
-                });
+                    path: Arc::from(
+                        Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
+                            .into_boxed_slice(),
+                    ),
+                },
+            );
+                    let node = self.lower_located_body_with_provenance(
+                        locator,
+                        prepared.kind,
+                        &prepared.type_parameters,
+                        &prepared.name_resolution,
+                        &aug_env,
+                        &aug_scope,
+                        aug_scope_payload.as_ref(),
+                        &aug_shadowing,
+                        &mut aug_subs,
+                        context.into_structural_provenance(),
+                    );
+                    contributor_nodes.push(node);
+                    contributor_roots.push(AugmentationContributorRoot {
+                        canonical: Arc::clone(&entry.artifact_key.canonical),
+                        whole_hash: indexed.whole_hash,
+                        artifact_key: effective_artifact_key,
+                    });
+                    let _ = art;
+                }
             }
         }
 
@@ -4287,23 +4501,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .import_target(name)
             .map(|t| t.source_specifier.clone())?;
 
-        // Program-completeness discovery for ambient external modules. Unlike a
-        // relative `declare module "./base"` augmenter (discovered via the
-        // base's reverse-dependency set), an ambient `declare module "<bare>"`
-        // DECLARER may be a program-root `.d.ts` that NOTHING imports (the
-        // canonical `vite/client` shape — referenced through tsconfig `types`/
-        // `include`, not the import graph). It is reachable only via program
-        // membership, so ensure every known program member is indexed BEFORE
-        // the `ExternalSpecifier` index scan — the augmentation index only sees
-        // loaded artifacts (R29). Loads are idempotent / content-hash cached;
-        // this mirrors the relative stitch's "index the candidate set, then scan
-        // once" shape, widened to program membership because an ambient module
-        // has no base-file anchor.
-        let host = self.ctx.host_for_fact_tracer_install();
-        for canonical in host.workspace().known_canonicals() {
-            let _ = self.ctx.ensure_indexed_ready_serve(&canonical);
-        }
-
+        // Contributor discovery for ambient external modules is the
+        // ingestion-time global contributor population: a program-root
+        // `.d.ts` that nothing imports is recorded when its `IndexedReady`
+        // publishes, so lookup does not scan program membership.
         let target =
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
         let AugmentationContributions {
@@ -4322,7 +4523,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, name, &[], context)?;
+        } = self.collect_augmentation_contributions(target, name, &[], context, scope_canonical)?;
         // A torn contributor (unobservable source-env identity — a
         // torn/unhealable/unservable augmenter) is SERVED but must NEVER be
         // warm-admitted. This carrier is interned mid-reference-resolution and
@@ -10857,15 +11058,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name: &str,
         type_arguments: &[SemanticNodeId],
     ) -> Option<Vec<SemanticNodeId>> {
-        // Program-completeness discovery, as for an ambient external module: a
-        // `declare global` augmenter is typically a program-root `.d.ts` that
-        // nothing imports, and the augmentation index only sees loaded
-        // artifacts, so every known program member is indexed before the scan.
-        // Loads are idempotent and content-hash cached.
-        let host = self.ctx.host_for_fact_tracer_install();
-        for canonical in host.workspace().known_canonicals() {
-            let _ = self.ctx.ensure_indexed_ready_serve(&canonical);
-        }
+        // Contributor discovery for `declare global` is the ingestion-time
+        // population: a program-root `.d.ts` that nothing imports is
+        // recorded when its artifact publishes, so lookup does not scan
+        // program membership. Compiler options (noLib / lib) come from
+        // the request's owning project, not the first workspace file.
+        let request_canonical = crate::request_context::current_request_canonical();
         let Some(AugmentationContributions {
             contributor_nodes,
             contributor_roots: _,
@@ -10877,6 +11075,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
+            request_canonical.as_deref().unwrap_or(""),
         )
         else {
             return Some(Vec::new());
