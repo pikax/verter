@@ -1,0 +1,122 @@
+{
+  "schema": "ARH2ComplexityMeasurements",
+  "version": 1,
+  "contractNode": "ARH2",
+  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
+  "predecessorProducts": {
+    "codebaseInventory": "tests/architecture-health/ARH0/products/codebase-inventory.json",
+    "dependencyContracts": "tests/architecture-health/ARH1/products/dependency-contracts.json"
+  },
+  "measuredAt": "2026-09-19",
+  "platform": "win32-x64, Node 26, deterministic structural derivation over the working tree",
+  "populations": {
+    "arh0Inventory": { "crates": 49, "packages": 25 },
+    "arh1HotspotContracts": 5,
+    "arh0GodModuleCandidates": 5,
+    "rederivationRule": "the ARH2 verifier runs the shipped ARH0 and ARH1 validate() implementations against the live tree on every execution (imported, not re-implemented), so every population recorded here is re-derived on the then-current candidate and any drift fails this node together with the drifted predecessor",
+    "basisDrift": "ARH1's products previously pinned 260be884014110ffd3b72850509e765c8752b011 (pre-squash ARH1 branch merge). The #636 squash-merge shipped that content as 30012d45df4e3369728a7cc09250c5e009bfd18d without branch ancestry, so the ancestor proof failed on every main-descended head. ARH2 re-ratifies both ARH1 product candidate fields onto that shipped squash (the last main-line ancestor containing the ARH1 contracts) so verify.mjs --provenance holds; the CUT-1 row refresh is this node's same-change mutation and is not a byte-identity claim against the pin. ARH2's own products pin the same shipped head."
+  },
+  "structural": [
+    { "path": "crates/verter_scheduler/src/scheduler.rs", "fileLoc": 20789 },
+    {
+      "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "fileLoc": 15020
+    },
+    { "path": "crates/verter_session/src/project_semantic_dispatch/build.rs", "fileLoc": 12498 },
+    { "path": "crates/verter_session/src/semantic_query.rs", "fileLoc": 10658 },
+    { "path": "crates/verter_session/src/flow_slice_content.rs", "fileLoc": 9426 }
+  ],
+  "structuralMethod": "line count of each hotspot file with Rust lines() semantics (split on LF, a trailing newline does not add a line); re-derived live by the verifier on every run",
+  "godModuleBasis": {
+    "thresholdLoc": 4000,
+    "classification": "same classification as god_module_size_budget: .rs files under crates/*/src, excluding test fixtures (files ending _tests.rs, files named tests.rs, anything under a tests/ directory); generated data sources are included exactly as the existing guard includes them",
+    "productionFilesOverThreshold": 33,
+    "hotspotsWithinPopulation": 5
+  },
+  "thresholds": [
+    {
+      "ratifies": "ARH0-DEBT-5",
+      "guard": "god_module_size_budget",
+      "guardFile": "crates/verter_session/tests/cases/architecture_guards.rs",
+      "currentScope": "the five retired Phase 11 targets only",
+      "defaultMaxLines": 4000,
+      "rule": "ARH12 may extend the existing guard's walk beyond the five Phase 11 targets on exactly this measured basis (33 production files over 4000 LOC, five of them the ARH1 hotspots); 4000 is the existing ratified ceiling re-measured, not a new budget invented by this node, and no second status system is created"
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "production-behavior",
+      "mechanismKind": "cargo-nextest",
+      "mechanisms": [
+        "cargo nextest run -p verter_scheduler dag_tests",
+        "cargo nextest run -p verter_scheduler dag_lanes_tests",
+        "cargo nextest run -p verter_scheduler cancellation_token",
+        "cargo nextest run -p verter_scheduler scheduler::tests",
+        "cargo nextest run -p verter_session flow_return_tests",
+        "cargo nextest run -p verter_session flow_return_coverage_tests",
+        "cargo nextest run -p verter_session flow_return_frame_seal_tests",
+        "cargo nextest run -p verter_session cycle_gate_tests",
+        "cargo nextest run -p verter_session dispatch_txn_tests",
+        "cargo nextest run -p verter_session semantic_query_memo::tests",
+        "cargo nextest run -p verter_session stable_key_tests",
+        "cargo nextest run -p verter_session flow_slice_content_tests"
+      ],
+      "measures": "whether the characterized boundaries still behave as pinned (pass/fail per lane); this list is exactly the characterization product's pinned commands, joined by the verifier in both directions",
+      "separates": "behavior only: a lane's outcome is never reported as a timing, a size or a cost, and a failing lane cannot be exchanged for a cheaper one"
+    },
+    {
+      "id": "clean-warm-build-time",
+      "mechanismKind": "cargo-build",
+      "mechanisms": [
+        {
+          "command": "cargo build -p verter_scheduler -p verter_session --timings",
+          "cacheState": "clean",
+          "prepare": "cargo clean -p verter_scheduler -p verter_session"
+        },
+        {
+          "command": "cargo build -p verter_scheduler -p verter_session --timings",
+          "cacheState": "warm",
+          "prepare": "cargo build -p verter_scheduler -p verter_session"
+        }
+      ],
+      "measures": "repository compilation of the characterized crates (verter_scheduler, verter_session) under cargo --timings telemetry already used by the gate runner: a clean target (prepare cargo clean of those packages, then the timed build) versus a warm target (prepare a first cargo build of those packages, then the timed second build); receipts are not committed",
+      "separates": "clean and warm repository-build time are measured on distinct established cache states of the same cargo build recipe; a label alone is not a cache state; test execution and host/session application latency never enter this dimension"
+    },
+    {
+      "id": "test-cost",
+      "mechanismKind": "cargo-nextest",
+      "mechanisms": [
+        "cargo nextest run -p verter_scheduler dag_tests",
+        "cargo nextest run -p verter_scheduler dag_lanes_tests",
+        "cargo nextest run -p verter_scheduler cancellation_token",
+        "cargo nextest run -p verter_scheduler scheduler::tests",
+        "cargo nextest run -p verter_session flow_return_tests",
+        "cargo nextest run -p verter_session flow_return_coverage_tests",
+        "cargo nextest run -p verter_session flow_return_frame_seal_tests",
+        "cargo nextest run -p verter_session cycle_gate_tests",
+        "cargo nextest run -p verter_session dispatch_txn_tests",
+        "cargo nextest run -p verter_session semantic_query_memo::tests",
+        "cargo nextest run -p verter_session stable_key_tests",
+        "cargo nextest run -p verter_session flow_slice_content_tests"
+      ],
+      "measures": "per-lane runtime cost of the twelve pinned characterization nextest lanes (the same commands as production-behavior; this dimension accounts wall/RSS, never pass/fail)",
+      "separates": "test cost is never reported as application latency or build time: the pinned behavior lanes may be run cheaply for pass/fail while their cost is accounted only here"
+    },
+    {
+      "id": "application-latency",
+      "mechanismKind": "gate-cell",
+      "mechanisms": ["A6_META_COMPILE_40_COLD_RUST"],
+      "measures": "end-to-end host/session latency of the characterized product surface: A6_META_COMPILE_40_COLD_RUST is the locked host-backed VerterHost batch (component meta then compile) on the bound runner class",
+      "separates": "latency is measured by the locked host/session cell on the bound runner class only; it is never derived from test-lane timings, cargo build timings, or a standalone compiler process that bypasses the host"
+    }
+  ],
+  "numberPolicy": {
+    "committedNumbers": "deterministic structural counts only (populations, fileLoc, the over-threshold file count): every committed number is re-derived live by the verifier on each run",
+    "wallClock": "no wall-clock, RSS or speedup number is committed in any ARH2 product; measured numbers exist only in receipts produced under the ratified methodology (performance-gates.toml) on its bound runner class",
+    "runnerClass": "apple-silicon-laptop-8core-24gib",
+    "runnerClassNote": "locked [runner] class in performance-gates.toml; a different runner class is a recalibration under that file's rules, not a local adjustment"
+  },
+  "ac3Rationale": "see the characterization product's ac3 block: ARH2 mutates no production state/query/map boundary, so fresh/incremental, edit/revert, cancellation, stale/partial and ordering are bound as existing named evidence rather than new invariants",
+  "ac4Rationale": "the measurement entry points are the recorded commands and gate cells; documenting them in contributor documentation is DOC2's obligation",
+  "ac5Rationale": "every dimension is bound to an existing ratified measurement mechanism before any measurement (pinned nextest lanes, cargo --timings, locked host/session gate cell); no gate is weakened and no lower-LOC win is claimed (the only LOC change this node makes is a deletion with no consumer)"
+}
