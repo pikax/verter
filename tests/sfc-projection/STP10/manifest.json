@@ -1,0 +1,62 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP10",
+  "kind": "implementation",
+  "products": [
+    "ProjectionEmission",
+    "ProjectionOrigin",
+    "ObservationRole",
+    "EditOrigin",
+    "MappingProduct"
+  ],
+  "mandatoryCases": [
+    "STP10-roundtrip",
+    "STP10-role",
+    "STP10-overlap",
+    "STP10-stale-map",
+    "STP10-synthetic"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP10/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP10/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP10/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP10/probes/tsconfig.json",
+    "hoverNeedle": "stp10HoverTarget",
+    "definitionNeedle": "stp10DefinitionTarget",
+    "expectedNegativeCode": 2345,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp<unknown, unknown>"
+  },
+  "cases": [
+    {
+      "id": "STP10-roundtrip",
+      "disposition": "accept",
+      "twins": ["unicode-crlf"]
+    },
+    {
+      "id": "STP10-role",
+      "disposition": "accept",
+      "twins": ["view-property-vs-binding"]
+    },
+    {
+      "id": "STP10-overlap",
+      "disposition": "reject",
+      "twins": ["overlapping-virtual-spans"]
+    },
+    {
+      "id": "STP10-stale-map",
+      "disposition": "reject",
+      "twins": ["reused-pre-edit-positions"]
+    },
+    {
+      "id": "STP10-synthetic",
+      "disposition": "reject",
+      "twins": ["scaffold-authored-location"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP10 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP10/emission.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Emission correspondence and role-qualified source mappings. Checking text and MappingProduct come from one CodeTransform record. Binding/use identity and ObservationRole are independent of mapping geometry. Generated-text revision is distinct from source-correspondence revision. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::projection_emission. STP58 owns atomic Vue activation. TCM1 MappingProduct is consumed, not duplicated."
+}

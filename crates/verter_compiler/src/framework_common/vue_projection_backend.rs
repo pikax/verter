@@ -9,6 +9,7 @@ use verter_language::{
     SyntaxProfileId,
 };
 
+use crate::code_transform::CodeTransform;
 use crate::compile::types::{
     CompileDiagnostic, VerterTsxBlock, VueExecutionInputs, VueMacroSemanticInput,
 };
@@ -21,6 +22,9 @@ use crate::framework_common::carrier_compiler::{
 use crate::framework_common::catalog::{ProjectionCap, TypedCapabilityRegistration};
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
+};
+use crate::framework_common::projection_plan::origin::{
+    EmissionRefusal, ProjectionEmission, RoleQualifiedObservation,
 };
 use crate::framework_common::projection_plan::{
     build_projection_plan, incomplete_missing_parse, incomplete_parse_snapshot_mismatch, PlanInput,
@@ -123,6 +127,18 @@ impl VueProjectionBackend {
             }
             None => incomplete_missing_parse(canonical_id, source),
         }
+    }
+
+    /// Checking text and correspondence from one CodeTransform record, with
+    /// role-qualified origins. Dormant relative to [`Self::project_ide`]:
+    /// qualification harnesses call this path directly. STP58 owns Vue
+    /// atomic activation.
+    pub fn projection_emission(
+        &self,
+        transform: &CodeTransform<'_>,
+        observations: Vec<RoleQualifiedObservation>,
+    ) -> Result<ProjectionEmission, EmissionRefusal> {
+        ProjectionEmission::from_operation(transform, observations)
     }
 }
 

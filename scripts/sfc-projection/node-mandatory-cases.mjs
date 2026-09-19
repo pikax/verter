@@ -76,6 +76,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP9-complete-cache",
     "STP9-determinism",
   ]),
+  STP10: Object.freeze([
+    "STP10-roundtrip",
+    "STP10-role",
+    "STP10-overlap",
+    "STP10-stale-map",
+    "STP10-synthetic",
+  ]),
 });
 
 export const MANDATORY_CASES = NODE_MANDATORY_CASES.STP1;
@@ -87,3 +94,4 @@ export const STP6_MANDATORY_CASES = NODE_MANDATORY_CASES.STP6;
 export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
 export const STP8_MANDATORY_CASES = NODE_MANDATORY_CASES.STP8;
 export const STP9_MANDATORY_CASES = NODE_MANDATORY_CASES.STP9;
+export const STP10_MANDATORY_CASES = NODE_MANDATORY_CASES.STP10;
