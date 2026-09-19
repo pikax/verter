@@ -195,7 +195,7 @@ new file mode 100644
 index 0000000..0f9e88b
 --- /dev/null
 +++ b/lapce-app/src/wsp1l.rs
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,339 @@
 +//! WSP1L instrumentation for Lapce (reference instrumented-client build).
 +//!
 +//! This module is the instrumentation half of the Verter WSP1L "instrumented
@@ -227,6 +227,7 @@ index 0000000..0f9e88b
 +use std::io::{BufRead, BufReader, Write};
 +use std::net::TcpStream;
 +use std::path::PathBuf;
++use std::sync::atomic::{AtomicBool, Ordering};
 +use std::sync::Mutex;
 +use std::sync::mpsc::Sender;
 +use std::time::Duration;
@@ -254,6 +255,12 @@ index 0000000..0f9e88b
 +}
 +
 +static ACTIVE_STEP: Mutex<Option<ActiveStep>> = Mutex::new(None);
++
++/// Whether the external drive channel is live (`VERTER_WSP1L_DRIVE_ADDR`
++/// set at startup and the driver connected). Stock runs leave this false,
++/// so the paint hook and the pipeline seams cost one atomic load and never
++/// lock `ACTIVE_STEP`.
++static DRIVE_ENABLED: AtomicBool = AtomicBool::new(false);
 +
 +pub fn unix_now_ms() -> u64 {
 +    std::time::SystemTime::now()
@@ -289,6 +296,9 @@ index 0000000..0f9e88b
 +/// No-ops when no step is active (stock runs and interleaved background
 +/// work never stamp).
 +pub fn emit_stage(stage: &str) {
++    if !DRIVE_ENABLED.load(Ordering::Acquire) {
++        return; // stock runs: no channel, no step, no lock
++    }
 +    let mut guard = ACTIVE_STEP.lock().unwrap();
 +    if let Some(step) = guard.as_mut() {
 +        emit_stage_locked(step, stage);
@@ -298,6 +308,9 @@ index 0000000..0f9e88b
 +/// The first `EditorView` paint after `applied` completes the step: stamps
 +/// `painted` and hands the collected observations to the drive thread.
 +pub fn on_editor_paint() {
++    if !DRIVE_ENABLED.load(Ordering::Acquire) {
++        return; // stock runs: the per-paint hook never locks
++    }
 +    let mut guard = ACTIVE_STEP.lock().unwrap();
 +    if !guard
 +        .as_ref()
@@ -390,6 +403,9 @@ index 0000000..0f9e88b
 +        return;
 +    }
 +    let _ = stream.flush();
++    // The channel is live: steps can now arrive, so the paint hook and the
++    // pipeline seams may lock `ACTIVE_STEP` again.
++    DRIVE_ENABLED.store(true, Ordering::Release);
 +    let reader = BufReader::new(match stream.try_clone() {
 +        Ok(reader) => reader,
 +        Err(err) => {

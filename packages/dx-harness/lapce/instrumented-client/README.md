@@ -11,7 +11,9 @@ build; record which is used and its perturbation"). The patch
    (go-to-definition), `close` (force-close the active editor tab). Each
    command is actuated **on the UI event loop** through the app's reactive
    dispatch; the ack carries exactly the UI stage stamps the loop observed.
-   Without the env var the module is inert — stock runs are untouched.
+   Without the env var the module is inert — stock runs are untouched: the
+   paint hook and stage seams check one `AtomicBool` (set only once the drive
+   channel connects) and never lock.
 2. **UI stage stamps** — `verter ui-stamp {json}` lines on stderr, observed
    at the real pipeline seams:
    - `input_dispatched` — the drive command was accepted on the UI thread;
