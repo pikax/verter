@@ -13,7 +13,8 @@
       "requiredCitations": [
         "tests/architecture-health/ARH1/products/dependency-contracts.json",
         "tests/architecture-health/ARH0/products/responsibility-map.json",
-        "tests/architecture-health/ARH0/products/capability-matrix.json"
+        "tests/architecture-health/ARH0/products/capability-matrix.json",
+        "tests/documentation/DOC0/products/generated-reference-plan.v1.json"
       ],
       "documentsHotspots": [
         "crates/verter_scheduler/src/scheduler.rs",
@@ -54,6 +55,9 @@
       "requiredCitations": [
         "crates/verter_diagnostics/src/rules/mod.rs",
         "crates/verter_diagnostics/src/rules/reactivity/mod.rs",
+        "crates/verter_diagnostics/src/rules/vue/no_unused_props.rs",
+        "crates/verter_diagnostics/src/rules/vue/block_lang.rs",
+        "crates/verter_diagnostics/src/linter.rs",
         "docs/lint-rules.md",
         "tests/documentation/DOC0/products/generated-reference-plan.v1.json",
         "tests/architecture-health/ARH1/products/dependency-contracts.json"
@@ -128,5 +132,112 @@
       "symbol": "submit_batch_atomic",
       "taughtIn": "docs/contributing/query-lifetimes.md"
     }
-  ]
+  ],
+  "capabilityAuthorities": [
+    {
+      "capability": "lint-rule-registration",
+      "path": "crates/verter_diagnostics/src/rules/mod.rs"
+    },
+    {
+      "capability": "lint-rule-contract",
+      "path": "crates/verter_diagnostics/src/rules/mod.rs"
+    },
+    {
+      "capability": "span-identity",
+      "path": "crates/verter_span/src/lib.rs"
+    },
+    {
+      "capability": "workspace-access",
+      "path": "crates/verter_workspace/src/traits.rs"
+    },
+    {
+      "capability": "position-mapping",
+      "path": "crates/verter_lsp/src/documents/position_map.rs"
+    },
+    {
+      "capability": "artifact-store",
+      "path": "crates/verter_session/src/file_artifact_store.rs"
+    },
+    {
+      "capability": "semantic-query-envelope",
+      "path": "crates/verter_session/src/semantic_query.rs"
+    },
+    {
+      "capability": "semantic-query-memo",
+      "path": "crates/verter_session/src/semantic_query_memo/mod.rs"
+    },
+    {
+      "capability": "scheduler-submission",
+      "path": "crates/verter_scheduler/src/scheduler.rs"
+    }
+  ],
+  "retainedSurfaceCapabilities": [
+    {
+      "hotspot": "crates/verter_scheduler/src/scheduler.rs",
+      "item": "*",
+      "catalogIds": [
+        "vue.language_service.typing",
+        "vue.language_service.edit",
+        "svelte.language_service.typing",
+        "svelte.language_service.edit",
+        "vue.tsc.project_check",
+        "svelte.tsc.project_check",
+        "vue.managed.compile.raw",
+        "svelte.managed.compile.raw",
+        "vue.component_meta.scalar",
+        "svelte.component_meta.scalar",
+        "vue.host_lint",
+        "svelte.host_lint"
+      ]
+    },
+    {
+      "hotspot": "crates/verter_session/src/semantic_query.rs",
+      "item": "*",
+      "catalogIds": [
+        "vue.language_service.typing",
+        "svelte.language_service.typing",
+        "vue.tsc.project_check",
+        "svelte.tsc.project_check"
+      ]
+    },
+    {
+      "hotspot": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "item": "*",
+      "catalogIds": [
+        "vue.language_service.typing",
+        "svelte.language_service.typing",
+        "vue.tsc.project_check",
+        "svelte.tsc.project_check"
+      ]
+    },
+    {
+      "hotspot": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+      "item": "*",
+      "catalogIds": [
+        "vue.language_service.typing",
+        "svelte.language_service.typing",
+        "vue.tsc.project_check",
+        "svelte.tsc.project_check"
+      ]
+    },
+    {
+      "hotspot": "crates/verter_session/src/flow_slice_content.rs",
+      "item": "*",
+      "catalogIds": [
+        "vue.language_service.typing",
+        "svelte.language_service.typing",
+        "vue.tsc.project_check",
+        "svelte.tsc.project_check"
+      ]
+    }
+  ],
+  "populationEvidenceBasis": {
+    "ratificationCandidateField": "candidate",
+    "originalHostProfile": null,
+    "originalHostProfileNote": "unrecorded in ARH1 contract products",
+    "liveRederivationHost": "ubuntu-latest",
+    "liveRederivationNode": ".nvmrc",
+    "liveRederivationJob": "architecture-health",
+    "liveRederivationCommand": "node tests/architecture-health/ARH1/verify.mjs"
+  }
 }

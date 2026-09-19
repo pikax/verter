@@ -83,6 +83,26 @@ test("the walkthrough teaches the canonical owners, not local substitutes", () =
     "the walkthrough wires the category barrel before register_builtin_rules",
   );
   assert.ok(
+    walkthrough.includes("crates/verter_diagnostics/src/rules/vue/no_unused_props.rs"),
+    "the walkthrough copies an emitting rule with positive and negative tests",
+  );
+  assert.ok(
+    /Do not copy `no_ref_as_operand\.rs`/.test(walkthrough),
+    "the walkthrough must not recommend the non-emitting stub",
+  );
+  assert.ok(
+    walkthrough.includes("applicability()"),
+    "the walkthrough teaches LintRule::applicability",
+  );
+  assert.ok(
+    walkthrough.includes("RuleApplicability::CarrierNeutral"),
+    "the walkthrough names the carrier-neutral override",
+  );
+  assert.ok(
+    walkthrough.includes("crates/verter_diagnostics/src/linter.rs"),
+    "the walkthrough points at registry-selection tests",
+  );
+  assert.ok(
     walkthrough.includes("pub use your_rule::YourRule"),
     "the walkthrough shows the category re-export",
   );
@@ -113,10 +133,21 @@ test("the walkthrough teaches the canonical owners, not local substitutes", () =
 test("architecture contracts distinguish sync constructors from the native driver", () => {
   assert.ok(architecturePage.includes("new_sync"));
   assert.ok(architecturePage.includes("drive_one"));
+  assert.ok(architecturePage.includes("source_directory"));
+  assert.ok(architecturePage.includes("wait_or_drive"));
+  assert.ok(architecturePage.includes("resolved_dag_budget"));
   assert.ok(!/every constructor[\s\S]*spawns exactly one driver thread/.test(architecturePage));
   assert.ok(
     architecturePage.includes("node tests/architecture-health/ARH1/verify.mjs"),
     "the page cites the canonical ARH1 verifier",
+  );
+  assert.ok(
+    architecturePage.includes("unrecorded in ARH1 contract products"),
+    "the page resolves the original host/profile as unrecorded",
+  );
+  assert.ok(
+    architecturePage.includes("260be884014110ffd3b72850509e765c8752b011"),
+    "the page names the contract candidate SHA",
   );
   assert.ok(
     !/whose `--provenance` mode\s+proves the pinned candidate is a real ancestor/.test(
@@ -398,7 +429,123 @@ test("mid-page cancellation yields cancelled with a source digest", async () => 
 
 test("the walkthrough cites the current contracts and real code", () => {
   assert.ok(model.pages.every((page) => Array.isArray(page.requiredCitations)));
-  const architecturePage = model.pages.find((page) => page.id === "architecture-contracts");
-  assert.ok(architecturePage.requiredCitations.includes(model.contractSources.dependencyContracts));
-  assert.ok(contracts.includes(architecturePage.documentsHotspots[0]));
+  const architecturePageRow = model.pages.find((page) => page.id === "architecture-contracts");
+  assert.ok(
+    architecturePageRow.requiredCitations.includes(model.contractSources.dependencyContracts),
+  );
+  assert.ok(contracts.includes(architecturePageRow.documentsHotspots[0]));
+  const exampleRel = "crates/verter_diagnostics/src/rules/vue/no_unused_props.rs";
+  const example = readFileSync(join(repoRoot, ...exampleRel.split("/")), "utf8");
+  assert.ok(/ctx\.report/.test(example), "the copied rule must emit a diagnostic");
+  assert.ok(
+    example.includes("assert_eq!(diags[0].span"),
+    "the copied rule tests must assert the reported span",
+  );
+});
+
+function citeOnPage(page, path, symbol) {
+  return `${page}\nAlso: \`${path}\` (\`${symbol}\`).\n`;
+}
+
+test("a same-crate duplicate memo cache fails on authority", async () => {
+  const fakeCacheRel = "crates/verter_session/src/local_semantic_cache.rs";
+  const mutated = structuredClone(model);
+  mutated.taughtInterfaces.push({
+    capability: "semantic-query-memo",
+    path: fakeCacheRel,
+    symbol: "LocalSemanticCache",
+    taughtIn: queryPageRel,
+  });
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [modelRel]: JSON.stringify(mutated),
+        [fakeCacheRel]: "pub struct LocalSemanticCache;\n",
+        [queryPageRel]: citeOnPage(queryPage, fakeCacheRel, "LocalSemanticCache"),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "second-authority"));
+  assert.ok(
+    !receipt.errors.some(
+      (item) =>
+        item.code === "taught-page-missing-path" || item.code === "taught-page-missing-symbol",
+    ),
+  );
+});
+
+test("substituting the memo authority fails on authority", async () => {
+  const fakeCacheRel = "crates/verter_lsp/src/duplicate_memo.rs";
+  const mutated = structuredClone(model);
+  const row = mutated.taughtInterfaces.find((item) => item.capability === "semantic-query-memo");
+  row.path = fakeCacheRel;
+  row.symbol = "DuplicateMemo";
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [modelRel]: JSON.stringify(mutated),
+        [fakeCacheRel]: "pub struct DuplicateMemo;\n",
+        [queryPageRel]: citeOnPage(queryPage, fakeCacheRel, "DuplicateMemo"),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "authority-mismatch"));
+  assert.ok(
+    !receipt.errors.some(
+      (item) =>
+        item.code === "taught-page-missing-path" || item.code === "taught-page-missing-symbol",
+    ),
+  );
+});
+
+test("a catalog-only edit changes receipt identity", async () => {
+  const catalogRel = model.contractSources.capabilityCatalog;
+  const catalog = JSON.parse(readFileSync(join(repoRoot, ...catalogRel.split("/")), "utf8"));
+  const mutated = structuredClone(catalog);
+  mutated.capabilityMatrix.surfaceIds.push("doc2.catalog.identity.probe");
+  mutated.capabilityMatrix.surfaceCount = mutated.capabilityMatrix.surfaceIds.length;
+  const fresh = canonicalizeReceipt(await validate(opts()));
+  const edited = canonicalizeReceipt(
+    await validate(
+      opts({
+        overlays: { [catalogRel]: JSON.stringify(mutated) },
+      }),
+    ),
+  );
+  assert.equal(fresh.completenessState, "complete");
+  assert.equal(edited.completenessState, "complete");
+  assert.notEqual(edited.sourceRevisions.digest, fresh.sourceRevisions.digest);
+  const reverted = await clean();
+  assert.deepEqual(reverted, fresh);
+});
+
+test("an undocumented retained scheduler surface fails", async () => {
+  const receipt = await validate(
+    opts({
+      overlays: {
+        [architecturePageRel]: architecturePage.replaceAll(
+          "`source_directory`",
+          "source directory",
+        ),
+      },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "surface-undocumented"));
+});
+
+test("an unmapped retained surface fails", async () => {
+  const mutated = structuredClone(model);
+  mutated.retainedSurfaceCapabilities = mutated.retainedSurfaceCapabilities.filter(
+    (row) => row.hotspot !== "crates/verter_scheduler/src/scheduler.rs",
+  );
+  const receipt = await validate(
+    opts({
+      overlays: { [modelRel]: JSON.stringify(mutated) },
+    }),
+  );
+  assert.notEqual(receipt.completenessState, "complete");
+  assert.ok(receipt.errors.some((item) => item.code === "surface-unmapped"));
 });

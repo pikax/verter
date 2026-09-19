@@ -1481,7 +1481,39 @@ function canonicalContributorModelBytes(model) {
       `${b?.capability ?? ""}:${b?.path ?? ""}:${b?.symbol ?? ""}:${b?.taughtIn ?? ""}`,
     ),
   );
-  return JSON.stringify({ ...model, pages: sorted, taughtInterfaces: interfaces });
+  const authorities = Array.isArray(model?.capabilityAuthorities)
+    ? [...model.capabilityAuthorities]
+    : [];
+  authorities.sort((a, b) =>
+    `${a?.capability ?? ""}:${a?.path ?? ""}`.localeCompare(
+      `${b?.capability ?? ""}:${b?.path ?? ""}`,
+    ),
+  );
+  const mappings = Array.isArray(model?.retainedSurfaceCapabilities)
+    ? [...model.retainedSurfaceCapabilities]
+    : [];
+  mappings.sort((a, b) =>
+    `${a?.hotspot ?? ""}:${a?.item ?? ""}`.localeCompare(`${b?.hotspot ?? ""}:${b?.item ?? ""}`),
+  );
+  return JSON.stringify({
+    ...model,
+    pages: sorted,
+    taughtInterfaces: interfaces,
+    capabilityAuthorities: authorities,
+    retainedSurfaceCapabilities: mappings,
+  });
+}
+
+function hotspotRetainedItems(hotspot) {
+  const surface = hotspot?.minimalPublicSurface ?? {};
+  const items = [];
+  for (const name of surface.retainedFns ?? []) items.push({ name, kind: "fn" });
+  for (const name of surface.retainedTypes ?? []) items.push({ name, kind: "type" });
+  for (const name of surface.retainedAssocItems ?? []) items.push({ name, kind: "assoc" });
+  if (items.length === 0 && typeof hotspot?.path === "string") {
+    items.push({ name: hotspot.path, kind: "module" });
+  }
+  return items;
 }
 
 function contributorOwnerRoots(contracts, responsibilityMap) {
@@ -1539,12 +1571,19 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
   const sources = model.contractSources ?? {};
   const contractsRel = sources.dependencyContracts;
   const mapRel = sources.responsibilityMap;
-  if (typeof contractsRel !== "string" || typeof mapRel !== "string") {
+  const catalogRel = sources.capabilityCatalog;
+  if (
+    typeof contractsRel !== "string" ||
+    typeof mapRel !== "string" ||
+    typeof catalogRel !== "string"
+  ) {
     fail(err("contributor-model-invalid", "model names no contract sources"));
     return { cancelled: false, fragment };
   }
   let contracts = null;
   let responsibilityMap = null;
+  let catalogSurfaces = new Set();
+  let catalogOk = false;
   const contractsAbs = join(repoRoot, ...contractsRel.split("/"));
   if (!exists(contractsAbs)) {
     fail(
@@ -1565,7 +1604,21 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
     digestEntry(mapRel, mapBytes);
     responsibilityMap = JSON.parse(mapBytes);
   }
-  if (contracts == null || responsibilityMap == null) {
+  const catalogAbs = join(repoRoot, ...catalogRel.split("/"));
+  if (!exists(catalogAbs)) {
+    fail(
+      err("contract-source-missing", "capability catalog product is missing", {
+        path: catalogRel,
+      }),
+    );
+  } else {
+    const catalogBytes = read(catalogAbs);
+    digestEntry(catalogRel, catalogBytes);
+    const catalog = JSON.parse(catalogBytes);
+    catalogSurfaces = new Set(catalog?.capabilityMatrix?.surfaceIds ?? []);
+    catalogOk = true;
+  }
+  if (contracts == null || responsibilityMap == null || !catalogOk) {
     return { cancelled: false, fragment };
   }
   const ownerRoots = contributorOwnerRoots(contracts, responsibilityMap);
@@ -1696,6 +1749,31 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
     fragment.pages.push({ id, path, listed, ok: pageOk });
   }
 
+  const authorityByCapability = new Map();
+  for (const row of Array.isArray(model.capabilityAuthorities) ? model.capabilityAuthorities : []) {
+    const capability = typeof row?.capability === "string" ? row.capability : null;
+    const path = typeof row?.path === "string" ? row.path : null;
+    if (!capability || !path) {
+      fail(
+        err("contributor-model-invalid", "capability authority row is incomplete", {
+          capability,
+          path,
+        }),
+      );
+      continue;
+    }
+    const prior = authorityByCapability.get(capability);
+    if (prior && prior !== path) {
+      fail(
+        err("second-authority", "one capability is bound to two authority paths", {
+          capability,
+          paths: [prior, path].sort(),
+        }),
+      );
+    }
+    authorityByCapability.set(capability, path);
+  }
+
   const capabilityRoots = new Map();
   const declaredInterfaces = Array.isArray(model.taughtInterfaces) ? model.taughtInterfaces : [];
   for (const row of declaredInterfaces) {
@@ -1817,9 +1895,27 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
       );
       rowOk = false;
     }
-    const root = path.split("/").slice(0, 2).join("/");
+    const declaredAuthority = authorityByCapability.get(capability);
+    if (!declaredAuthority) {
+      fail(
+        err("authority-mismatch", "taught capability has no declared authority", {
+          capability,
+          path,
+        }),
+      );
+      rowOk = false;
+    } else if (path !== declaredAuthority) {
+      fail(
+        err("authority-mismatch", "taught interface is not the declared authority", {
+          capability,
+          path,
+          authority: declaredAuthority,
+        }),
+      );
+      rowOk = false;
+    }
     const roots = capabilityRoots.get(capability) ?? new Set();
-    roots.add(root);
+    roots.add(path);
     capabilityRoots.set(capability, roots);
     if (roots.size > 1) {
       fail(
@@ -1841,6 +1937,115 @@ async function validateContributorDocs({ repoRoot, read, exists, signal, fail, d
       fail(err("hotspot-undocumented", "contract hotspot is not documented by any page", { path }));
     }
     fragment.hotspots.push({ path, documented });
+  }
+
+  const architecturePageRel = (model.pages ?? []).find(
+    (page) => page?.id === "architecture-contracts",
+  )?.path;
+  const architectureBytes =
+    typeof architecturePageRel === "string" ? pageBytesByPath.get(architecturePageRel) : null;
+  const mappingByHotspot = new Map();
+  for (const row of Array.isArray(model.retainedSurfaceCapabilities)
+    ? model.retainedSurfaceCapabilities
+    : []) {
+    const hotspot = typeof row?.hotspot === "string" ? row.hotspot : null;
+    const item = typeof row?.item === "string" ? row.item : "*";
+    const catalogIds = Array.isArray(row?.catalogIds) ? row.catalogIds.filter(Boolean) : [];
+    if (!hotspot || catalogIds.length === 0) {
+      fail(
+        err("contributor-model-invalid", "retained surface capability row is incomplete", {
+          hotspot,
+          item,
+        }),
+      );
+      continue;
+    }
+    const byItem = mappingByHotspot.get(hotspot) ?? new Map();
+    byItem.set(item, catalogIds);
+    mappingByHotspot.set(hotspot, byItem);
+  }
+  for (const hotspot of contracts.hotspots ?? []) {
+    if (typeof hotspot?.path !== "string") continue;
+    const byItem = mappingByHotspot.get(hotspot.path) ?? new Map();
+    for (const item of hotspotRetainedItems(hotspot)) {
+      const catalogIds = byItem.get(item.name) ?? byItem.get("*") ?? [];
+      if (catalogIds.length === 0) {
+        fail(
+          err("surface-unmapped", "retained surface has no catalog capability mapping", {
+            hotspot: hotspot.path,
+            item: item.name,
+            kind: item.kind,
+          }),
+        );
+        continue;
+      }
+      for (const id of catalogIds) {
+        if (!catalogSurfaces.has(id)) {
+          fail(
+            err("unknown-catalog-id", "mapped catalog id is absent from the capability catalog", {
+              hotspot: hotspot.path,
+              item: item.name,
+              catalogId: id,
+            }),
+          );
+        }
+        if (architectureBytes != null && !architectureBytes.includes(id)) {
+          fail(
+            err(
+              "surface-capability-undocumented",
+              "mapped catalog id is absent from the architecture page",
+              {
+                hotspot: hotspot.path,
+                item: item.name,
+                catalogId: id,
+              },
+            ),
+          );
+        }
+      }
+      const documentedName = item.kind === "module" ? item.name : `\`${item.name}\``;
+      if (architectureBytes != null && !architectureBytes.includes(documentedName)) {
+        fail(
+          err("surface-undocumented", "retained surface is absent from the architecture page", {
+            hotspot: hotspot.path,
+            item: item.name,
+            kind: item.kind,
+          }),
+        );
+      }
+    }
+  }
+  if (architectureBytes != null && typeof contracts.candidate === "string") {
+    if (!architectureBytes.includes(contracts.candidate)) {
+      fail(
+        err(
+          "population-basis-missing",
+          "architecture page does not name the contract candidate SHA",
+          {
+            candidate: contracts.candidate,
+          },
+        ),
+      );
+    }
+    const basis = model.populationEvidenceBasis ?? {};
+    for (const token of [
+      basis.originalHostProfileNote,
+      basis.liveRederivationHost,
+      basis.liveRederivationNode,
+      basis.liveRederivationCommand,
+    ]) {
+      if (typeof token === "string" && token && !architectureBytes.includes(token)) {
+        fail(
+          err(
+            "population-basis-missing",
+            "architecture page omits a declared population-evidence token",
+            {
+              token,
+            },
+          ),
+        );
+      }
+    }
   }
   fragment.pages.sort((a, b) => String(a.id).localeCompare(String(b.id)));
   fragment.taughtInterfaces.sort((a, b) =>

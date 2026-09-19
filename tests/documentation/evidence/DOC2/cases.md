@@ -29,24 +29,29 @@ and taught interfaces are all validated through it by the existing
 `pnpm --filter docs check` command.
 
 AC2: a taught interface under `docs/` fails `unowned-taught-path` (local
-resolver); a second module root for one capability fails `second-authority`
-(duplicate cache); a `test_`-prefixed symbol fails `test-only-api`
-(unsupported test-only API); a symbol absent from its source fails
-`taught-symbol-missing`; a cited repo path that vanished fails
-`broken-citation`.
+resolver); a second taught path for one capability fails `second-authority`
+(duplicate cache, including a same-crate second file); substituting the
+declared `semantic-query-memo` authority fails `authority-mismatch`; a
+`test_`-prefixed symbol fails `test-only-api` (unsupported test-only API);
+a symbol absent from its source fails `taught-symbol-missing`; a cited
+repo path that vanished fails `broken-citation`.
 
 AC3: N/A for production state/query/map boundaries (none touched; their
 proofs stay with rev11.scheduler-runtime, rev11.flow, B4R0, LSO0). The
 docs-boundary equivalents are proven: canonical-receipt equality under
-reversed model arrays, incremental digest match, edit/revert,
-pre-aborted and mid-page cancellation, missing-page partial.
+reversed model arrays, incremental digest match, taught-source identity,
+catalog-only identity (capabilityCatalog participates in the receipt
+digest), edit/revert, pre-aborted and mid-page cancellation, missing-page
+partial.
 
 AC4: pages are public delivery under the DOC0 information architecture
 (inventory rows appended, owner DOC2, audience contributor), linked from
-`docs/contributing/index.md`. Capability evidence and host/profile basis
-cite the ARH0 capability matrix, the DOC0 catalog and the pinned-candidate
-CI architecture-health lane; `examples/reference` is consumed, not
-duplicated. Permissions N/A (no capability surface created).
+`docs/contributing/index.md`. Each retained hotspot surface is mapped to
+DOC0 catalog ids and listed on the architecture page; host/profile basis
+names the ARH1 `candidate` SHA, records the original measurement host as
+unrecorded in the contract products, and names the live `ubuntu-latest` /
+`.nvmrc` architecture-health re-derivation. `examples/reference` is
+consumed, not duplicated. Permissions N/A (no capability surface created).
 
 AC5: no performance budget is bound; empty deletion population; no
 required check dropped.

@@ -73,17 +73,25 @@ Constructor capabilities, two modes — do not mix them:
 The scheduler constructs no pool and performs no file I/O at construction;
 no parse, analysis or compile work happens in a constructor.
 
-Minimal public surface: the submission API (`submit_request`,
+Minimal public surface is the complete `minimalPublicSurface` row, not a
+subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
+`handles`, `into_handles`, `new`, `with_executor`, `new_sync`,
+`new_sync_with_executor`, `execute_scoped_cache_node`, `submit_request`,
 `submit_batch_atomic`, `wait_batch`, `account_batch_submission`,
-`execute_scoped_cache_node`), constructors, snapshot readers
-(`try_get_source`, `try_get_analysis`, `try_get_artifact`,
-`try_get_last_known_good`, `capture_source_root`), and lifecycle
-(`reset`, `restart_driver`, `quiesce`, `invalidate`, `remove`). The full
-retained list is the `minimalPublicSurface` row of the contract. The three
-bookkeeping fields (`tombstones`, `generation_floors`,
-`deferred_blocker_ids`) and the fifteen `test_`-prefixed hooks are ratified
-for narrowing to `pub(crate)` / test configuration — do not add new
-consumers of them; they are not a supported API for contributions.
+`counters`, `try_get_source`, `capture_source_root`, `source_directory`,
+`try_get_analysis`, `try_get_artifact`, `try_get_last_known_good`,
+`has_node`, `node_ids`, `reset`, `restart_driver`, `quiesce`,
+`register_resolved_deps`, `config`, `commit_artifact`,
+`remove_artifact_if_not_newer_than`, `overlay`, `invalidate`, `remove`,
+`close_file`, `has_driver_thread`, `driver_loop_native`, `drive_one`,
+`drive_all`, `wait_or_drive`, `wait_or_drive_with_caller`. Retained types:
+`SchedulerCounters`, `SchedulerConfig`, `Request`,
+`ScopedCacheNodeRequest`, `ScopedCacheNodeError`, `ScopedCacheFlight`,
+`Admission`, `BatchHandle`, `Scheduler`. The three bookkeeping fields
+(`tombstones`, `generation_floors`, `deferred_blocker_ids`) and the
+fifteen `test_`-prefixed hooks are ratified for narrowing to `pub(crate)` /
+test configuration — do not add new consumers of them; they are not a
+supported API for contributions.
 
 ### Flow-return dispatch — `crates/verter_session/src/project_semantic_dispatch/flow_return.rs`
 
@@ -110,8 +118,11 @@ The host-owned memo table keyed by `SemanticQueryKey`. The cross-crate
 surface is cut to exactly ten retained envelope types (`HashValue`,
 `SemanticNodeId`, `ScopeId`, `ResolveDeclKey`, `SemanticQueryKey`,
 `ResultCompleteness`, `PartialReason`, `PartialReasonSet`,
-`ProjectionMode`, `OriginEdgeKind`) plus seven retained associated items —
-everything else is ratified `pub(crate)` (see the bulk narrowing row and
+`ProjectionMode`, `OriginEdgeKind`) plus seven retained associated items
+(`PartialReasonSet::PROPAGATED`, `PartialReasonSet::SEMANTIC_QUERY_FAULT`,
+`PartialReasonSet::empty`, `PartialReasonSet::is_empty`,
+`PartialReasonSet::iter`, `ResultCompleteness::partial`, `ScopeId::file`)
+— everything else is ratified `pub(crate)` (see the bulk narrowing row and
 its 68-file consumer migration in the contract). The per-variant key/env
 binding table lives in
 `crates/verter_session/src/semantic_query/query_key_spec.rs` and is
@@ -126,20 +137,36 @@ admission.
 
 ## Capability mapping and evidence basis
 
-These substrate surfaces are not user-facing capabilities; they serve the
-capability catalog (sole truth: the product surface catalog cited by
-`tests/documentation/DOC0/products/generated-reference-plan.v1.json` —
-surface ids such as `vue.language_service.typing`, `vue.tsc.project_check`,
-`vue.component_meta.scalar`). Per-capability engine and version evidence,
-with its exact sources, is the ARH0 capability matrix linked above; this
-page adds no second matrix.
+These substrate surfaces are not user-facing capabilities. Each retained
+hotspot surface maps onto the existing product-surface catalog (sole
+truth: `tests/documentation/DOC0/products/generated-reference-plan.v1.json`;
+no second matrix). Engine and version pins stay in the ARH0 capability
+matrix linked above.
 
-Population and snapshot counts in the contract (importers, retained
-surfaces, test-hook consumers) were measured on the candidate commit
-recorded in the contract JSON, and the CI architecture-health lane
-re-derives them from the live tree on every run — a drifted count fails
-`node tests/architecture-health/ARH1/verify.mjs`. That command is the
-canonical ARH1 ratification; it does not require `--provenance`.
+| Hotspot | Catalog surfaces served |
+| ------- | ----------------------- |
+| `crates/verter_scheduler/src/scheduler.rs` (every retained fn/type above) | `vue.language_service.typing`, `vue.language_service.edit`, `svelte.language_service.typing`, `svelte.language_service.edit`, `vue.tsc.project_check`, `svelte.tsc.project_check`, `vue.managed.compile.raw`, `svelte.managed.compile.raw`, `vue.component_meta.scalar`, `svelte.component_meta.scalar`, `vue.host_lint`, `svelte.host_lint` |
+| `crates/verter_session/src/semantic_query.rs` (every retained type/assoc item above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_session/src/project_semantic_dispatch/flow_return.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_session/src/project_semantic_dispatch/build.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_session/src/flow_slice_content.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+
+The contributor-docs model joins that table to every retained fn/type/assoc
+item (and to the hotspot path itself when the retained list is empty). A
+retained surface without a catalog id, or a mapped id absent from the
+catalog, fails `pnpm --filter docs check`.
+
+Population and snapshot counts (importers, retained surfaces, test-hook
+consumers) were ratified on contract `candidate`
+`260be884014110ffd3b72850509e765c8752b011`. Each hotspot's
+`importDirection.measurementBasis` records the measurement *method*
+(production import tree, `cfg(test)` stripped, use-statements and inline
+paths). The original host/profile of that measurement is unrecorded in ARH1 contract products;
+ARH2 records host/profile drift when it re-derives
+counts. Live re-derivation is the CI `architecture-health` job on
+`ubuntu-latest` with Node from `.nvmrc`, running
+`node tests/architecture-health/ARH1/verify.mjs`. A drifted count fails
+that command. Canonical ARH1 ratification does not require `--provenance`.
 
 `--provenance` is an extra ancestor check on the product-pinned candidate.
 After ARH1's squash onto main that pin is not an ancestor of this tree, so
