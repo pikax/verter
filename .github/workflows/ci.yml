@@ -98,6 +98,8 @@ jobs:
               - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/provider-ci*.mjs'
               - 'scripts/svelte-golden-lib.mjs'
+              - 'scripts/browser-host-gate.mjs'
+              - 'scripts/browser-host-gate.test.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               # test:scripts validates the required BF2 dependencies in the
               # release graph; release-only changes must execute that guard.
@@ -127,6 +129,10 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'packages/wasm/**'
+              - 'packages/browser-host/**'
+              - 'scripts/browser-host-gate.mjs'
+              - 'scripts/browser-host-gate.test.mjs'
+              - 'tests/browser-host/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
             playground:
@@ -1116,6 +1122,41 @@ jobs:
         run: pnpm --filter @verter/wasm test
 
   # ---------------------------------------------------------------------------
+  # Browser-host-domain gate (BWH1). Builds nothing itself: wasm-build already
+  # produced the session artifact. This lane re-runs the wasm32 census, the
+  # native same-fixture probe, and Chromium/Firefox/WebKit workers over that
+  # artifact. Missing browsers, exports, tests or empty operation arrays fail.
+  # ---------------------------------------------------------------------------
+  browser-host:
+    name: Browser host (feasibility gate)
+    needs: [detect-changes, wasm-build]
+    if: needs.detect-changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: browser-host
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: wasm-build
+      - name: Install Playwright browsers (Chromium, Firefox, WebKit)
+        run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
+      - name: Run the browser-host-domain gate
+        run: node scripts/browser-host-gate.mjs --skip-build
+
+  # ---------------------------------------------------------------------------
   # The ONE debug build of the Rust binaries every editor/DX integration job
   # drives. `build-vscode-e2e` (via `prepare:e2e`) and `dx-harness-hermetic`
   # each used to run their own debug `cargo build -p verter_lsp`, so a PR
@@ -2026,6 +2067,7 @@ jobs:
       - editor-zed
       - editor-neovim
       - jetbrains-plugin
+      - browser-host
     steps:
       - name: Verify no dependency failed
         env:

@@ -1,0 +1,13 @@
+{
+  "name": "@verter/browser-host",
+  "version": "0.0.1-beta.1",
+  "private": true,
+  "description": "Shared browser language and semantic host (BWH1 feasibility artifact over the existing WASM session, not a second authority)",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./worker": "./src/worker.js",
+    "./probes": "./src/probes.js"
+  }
+}

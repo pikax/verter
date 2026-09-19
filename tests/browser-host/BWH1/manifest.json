@@ -1,0 +1,64 @@
+{
+  "node": "BWH1",
+  "kind": "proof",
+  "products": [
+    "BrowserHostFeasibilityReceipt v1",
+    "Minimal real-worker artifact and source-linked semantic probes (packages/browser-host/src)",
+    "Scoped portability-cut list assigned to named existing owners",
+    "scripts/browser-host-gate.mjs (browser-host-domain gate profile)"
+  ],
+  "cases": [
+    {
+      "id": "BWH1-AC1",
+      "disposition": "reject",
+      "binding": "scripts/browser-host-gate.mjs compareIdentities + native probe cargo test -p verter_wasm --lib bwh1_native_feasibility_probe and the three-engine worker receipts",
+      "twins": [
+        "clean evidence",
+        "native/browser symbol identity divergence",
+        "TypeInfo observation divergence"
+      ]
+    },
+    {
+      "id": "BWH1-AC2",
+      "disposition": "reject",
+      "binding": "emptyOperationFailures: a worker or native receipt that replaces session/typeinfo/style/mapping/query with [] fails the gate",
+      "twins": [
+        "clean evidence",
+        "empty session array",
+        "empty query array"
+      ]
+    },
+    {
+      "id": "BWH1-AC3",
+      "disposition": "reject",
+      "binding": "the worker inspects process/require/module/__dirname before calling the session host; Node globals fail the gate",
+      "twins": [
+        "clean evidence",
+        "process present in worker",
+        "playwright missing"
+      ]
+    },
+    {
+      "id": "BWH1-AC-OWNER",
+      "disposition": "accept",
+      "binding": "final owner expansion.browser-host; throwaway feasibility glue is deleted when BWH3 adopts the proven seams; semantic algorithms stay with their producing owners"
+    },
+    {
+      "id": "BWH1-AC-BASIS",
+      "disposition": "accept",
+      "binding": "this node does not change caching, mapping, snapshots, result handles or incremental publication; native vs browser identity is a same-fixture comparison, not an incremental-vs-fresh cache claim. BWH8 owns cache/artifact integrity runtime tests"
+    },
+    {
+      "id": "BWH1-AC-RESOURCE",
+      "disposition": "accept",
+      "binding": "the gate records artifact bytes, worker startupMs, and Chromium performance.memory when present; Firefox/WebKit retained memory is labelled unavailable. No general performance claim. WSP equal-work corpus binds to BWH11/VSW5"
+    },
+    {
+      "id": "BWH1-AC-EXPOSURE",
+      "disposition": "accept",
+      "binding": "no new DX0 operation is admitted Portable; typeinfo.graph-operations stays NativeOnly. DX1 owns registration; product promotion stays blocked until a producer-owned Portable port (BWH3+)"
+    }
+  ],
+  "runtimeCorrectness": true,
+  "notes": "The runtime harness IS scripts/browser-host-gate.mjs: real wasm32 build, cargo tree census, native session probe, Chromium/Firefox/WebKit workers over the existing verter_wasm VerterHost. The Node selftest proves every fail-closed discrimination without WASM or browsers. packages/browser-host is a probe/worker facade, not a second semantic authority."
+}

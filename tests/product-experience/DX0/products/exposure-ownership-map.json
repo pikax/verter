@@ -48,6 +48,7 @@
     { "receiver": "DX7", "product": "local doctor and actionable failure explanations on completeness states", "productionCapable": true },
     { "receiver": "DX8", "product": "inspection and reproduction cross-surface terminal proving exposure end-to-end", "productionCapable": true },
     { "receiver": "BWH0", "product": "browser execution and dependency-closure constitution consumes Portable/NativeOnly law (contract-only receiver; BWH1+ own browser-host production)", "productionCapable": false },
+    { "receiver": "BWH1", "product": "browser semantic-host feasibility and build proof (real worker probes over the existing WASM session; no second authority; no DX0 class change)", "productionCapable": true },
     { "receiver": "COX0", "product": "per-profile editor participation and coexistence consumes the preserved-client inventory", "productionCapable": true },
     { "receiver": "ED0", "product": "non-VS-Code client preservation and acceptance contract", "productionCapable": true },
     { "receiver": "EPR0", "product": "external engine provisioning policy consumes ExternalOwner law", "productionCapable": false },
