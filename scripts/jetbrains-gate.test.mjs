@@ -17,6 +17,7 @@ import { deflateRawSync } from "node:zlib";
 
 import {
   DECLARATION_PATH,
+  GRADLE_PROJECT_DIR,
   GRADLE_PROPERTIES_PATH,
   collectTestEvidence,
   defaultGradleInvocation,
@@ -447,6 +448,37 @@ test("runGate passes only with complete evidence", () => {
   }
 });
 
+test("runGate removes stale evidence before gradle runs, so an up-to-date no-op cannot pass", () => {
+  const sandbox = makeSandbox();
+  try {
+    // Leftovers from an earlier run: a JUnit suite, a packaged zip and a
+    // verifier report, all present BEFORE gradle is invoked.
+    makeFakeGradle()("gradlew", [], {
+      cwd: path.join(sandbox.root, GRADLE_PROJECT_DIR),
+    });
+    const seenBeforeGradle = {};
+    const outcome = runGate({
+      repoRoot: sandbox.root,
+      javaHomeArg: sandbox.jdkHome,
+      env: gateEnv(sandbox),
+      spawnFn: (command, args, options) => {
+        const build = path.join(options.cwd, "build");
+        seenBeforeGradle.tests = existsSync(path.join(build, "test-results", "test"));
+        seenBeforeGradle.dist = existsSync(path.join(build, "distributions"));
+        seenBeforeGradle.verifier = existsSync(path.join(build, "reports", "pluginVerifier"));
+        // A no-op "up-to-date" gradle: regenerates nothing.
+        return { status: 0 };
+      },
+      log: () => {},
+    });
+    assert.deepEqual(seenBeforeGradle, { tests: false, dist: false, verifier: false });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.failures.join("\n"), /no JUnit XML test results|zero TEST-/);
+  } finally {
+    cleanup(sandbox);
+  }
+});
+
 test("runGate fails without a JDK (JBT1-AC1)", () => {
   const sandbox = makeSandbox();
   try {
@@ -543,17 +575,21 @@ test("runGate fails when the packaged descriptor drifts from the declared range 
       // Simulate a zip built with a different range than the declaration:
       // overwrite the artifact after the fake gradle run materializes it.
     });
-    // Overwrite with drifted zip and rerun — runGate re-reads artifacts.
+    // A build whose packaged zip carries a different range than the
+    // declaration: the gate re-reads the artifacts THIS build produced.
     const distDir = path.join(sandbox.root, "extensions", "jetbrains", "build", "distributions");
-    writeFileSync(
-      path.join(distDir, "verter-jetbrains-0.1.0-jbt1.zip"),
-      makePluginZip({ id: "com.verter.jetbrains", sinceBuild: "261.1", untilBuild: "261.*" }),
-    );
     const drifted = runGate({
       repoRoot: sandbox.root,
       javaHomeArg: sandbox.jdkHome,
       env: gateEnv(sandbox),
-      spawnFn: () => ({ status: 0 }),
+      spawnFn: (command, args, options) => {
+        const result = makeFakeGradle()(command, args, options);
+        writeFileSync(
+          path.join(distDir, "verter-jetbrains-0.1.0-jbt1.zip"),
+          makePluginZip({ id: "com.verter.jetbrains", sinceBuild: "261.1", untilBuild: "261.*" }),
+        );
+        return result;
+      },
       log: () => {},
     });
     assert.equal(drifted.ok, false);
@@ -625,15 +661,21 @@ test("runGate fails when the distribution cannot be unpacked outside the reposit
     });
     assert.equal(outcome.ok, true, JSON.stringify(outcome.failures));
 
-    // Replace the distribution with garbage: the gate must fail at the
+    // A build whose distribution is garbage: the gate must fail at the
     // outside-the-repository unpack step instead of passing on a broken zip.
     const distDir = path.join(sandbox.root, "extensions", "jetbrains", "build", "distributions");
-    writeFileSync(path.join(distDir, "verter-jetbrains-0.1.0-jbt1.zip"), Buffer.from("garbage"));
     const broken = runGate({
       repoRoot: sandbox.root,
       javaHomeArg: sandbox.jdkHome,
       env: gateEnv(sandbox),
-      spawnFn: () => ({ status: 0 }),
+      spawnFn: (command, args, options) => {
+        const result = makeFakeGradle()(command, args, options);
+        writeFileSync(
+          path.join(distDir, "verter-jetbrains-0.1.0-jbt1.zip"),
+          Buffer.from("garbage"),
+        );
+        return result;
+      },
       log: () => {},
     });
     assert.equal(broken.ok, false);

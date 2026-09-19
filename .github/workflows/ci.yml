@@ -297,6 +297,10 @@ jobs:
               - 'scripts/jetbrains-gate.mjs'
               - 'scripts/jetbrains-gate.test.mjs'
               - 'tests/jetbrains-product/**'
+              # The Node pin and the gradlew line-ending attribute are checkout
+              # and runtime inputs of this lane's Gradle wrapper run.
+              - '.nvmrc'
+              - '.gitattributes'
               - '.github/workflows/ci.yml'
             svelte_perf:
               - 'crates/verter_compiler/**'
