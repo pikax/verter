@@ -197,7 +197,7 @@ impl GlobalContributorPopulation {
         if matched.is_empty() {
             return SymbolContributors::empty();
         }
-        matched.sort_by(compare_contributors);
+        sort_contributor_entries(&mut matched);
         let fingerprint = fingerprint_of(&matched);
         SymbolContributors {
             entries: Arc::from(matched.into_boxed_slice()),
@@ -220,6 +220,10 @@ fn overlay_replacements(
         })
         .map(|entry| Arc::clone(&entry.artifact_key.canonical))
         .collect()
+}
+
+fn sort_contributor_entries(entries: &mut [ContributorEntry]) {
+    entries.sort_by(compare_contributors);
 }
 
 fn compare_contributors(a: &ContributorEntry, b: &ContributorEntry) -> std::cmp::Ordering {
@@ -522,7 +526,7 @@ impl GlobalContributorIndex {
                     match grouped.by_symbol.get(key) {
                         Some(entries) if !entries.is_empty() => {
                             let mut sorted = entries.clone();
-                            sorted.sort_by(compare_contributors);
+                            sort_contributor_entries(&mut sorted);
                             #[cfg(test)]
                             self.publish_sorted_entries
                                 .fetch_add(sorted.len() as u64, Ordering::Relaxed);
