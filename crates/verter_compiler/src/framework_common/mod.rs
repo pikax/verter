@@ -13,10 +13,10 @@
 //! framework substrate: the immutable per-capability catalogs
 //! (`registered_carrier_projection::built_in_frontend_catalog` and
 //! friends) production selectors dispatch through.
-//! [`vue_bridge::VueCarrierCompiler`] exposes the equivalent typed
-//! capabilities as inherent methods, delegating call-for-call to the
-//! existing Vue pipeline with ZERO edits to any Vue parser/codegen
-//! module.
+//! [`vue_bridge::VueCarrierCompiler`] is the Vue parse/identity/downcast
+//! surface the typed Vue backends and frontend row build on, matching
+//! [`crate::svelte::SvelteCarrierCompiler`]. Production IDE projection
+//! and runtime-bundle emission are the typed capability backends.
 
 pub mod capability;
 pub mod carrier_compiler;
