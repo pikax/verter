@@ -11,5 +11,5 @@
     "lib": ["ESNext"],
     "types": ["node"]
   },
-  "references": [{ "path": "./tsconfig.jetbrains.json" }]
+  "references": [{ "path": "./tsconfig.jetbrains.json" }, { "path": "./tsconfig.lapce.json" }]
 }
