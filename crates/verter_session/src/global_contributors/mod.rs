@@ -223,9 +223,13 @@ fn overlay_replacements(
 }
 
 fn sort_contributor_entries(entries: &mut [ContributorEntry]) {
+    // Function-pointer form: `|a, b| compare_contributors(a, b)` is
+    // clippy::redundant_closure and fails rust-clippy plus the
+    // transport-authoritative clippy step of rust-build-configs.
     entries.sort_by(compare_contributors);
 }
 
+#[inline]
 fn compare_contributors(a: &ContributorEntry, b: &ContributorEntry) -> std::cmp::Ordering {
     a.artifact_key
         .canonical
