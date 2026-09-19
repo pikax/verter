@@ -25,7 +25,7 @@ export const PROTOCOL_VERSION = 1;
 /** The job baseline this node's branch started from. */
 export const BASELINE_INPUT_SNAPSHOT = "b9ef7e31023c6a3c06fcb1963630b8c54a17f752";
 /** The commit that introduced the ratified STS0 products (recorded by the follow-up evidence commit). */
-export const RATIFICATION_CANDIDATE = "0000000000000000000000000000000000000000";
+export const RATIFICATION_CANDIDATE = "063560adbe3c3cdd191d41e544e1ee29702b47b0";
 
 export const STS0_MANDATORY_CASES = Object.freeze([
   "STS0-svelte-inventory",
