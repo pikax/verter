@@ -19,7 +19,27 @@
  *   - the publish loop itself, including the OTP re-prompt.
  */
 
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
+
+/**
+ * Whether the invoked script (`process.argv[1]`) is the module at
+ * `moduleUrl`. Both sides are resolved through the filesystem so a script
+ * reached through a symlinked path still recognises itself as the entrypoint.
+ */
+export function invokedAsEntrypoint(argvPath, moduleUrl, { realpath = realpathSync } = {}) {
+  if (typeof argvPath !== "string" || argvPath.length === 0) return false;
+  const real = (candidate) => {
+    try {
+      return realpath(candidate);
+    } catch {
+      return resolvePath(candidate);
+    }
+  };
+  return real(argvPath) === real(fileURLToPath(moduleUrl));
+}
 
 // ---------------------------------------------------------------------------
 // Artifact → platform-package staging
