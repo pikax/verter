@@ -108,11 +108,17 @@ export function censusForbiddenHits(treeText) {
   return [...new Set(hits)];
 }
 
+/** wasm-bindgen 0.2.122 `--target web` emits `export { initSync, __wbg_init as default }`, not `export default`. */
+export function hasDefaultExport(jsText) {
+  const text = jsText ?? "";
+  return /\bexport\s+default\b/.test(text) || /\bexport\s*\{[^}]*\bas\s+default\b/.test(text);
+}
+
 export function missingArtifactExports(jsText) {
   const missing = [];
   for (const name of REQUIRED_ARTIFACT_EXPORTS) {
     const present =
-      name === "default" ? /export default/.test(jsText) : new RegExp(`\\b${name}\\b`).test(jsText);
+      name === "default" ? hasDefaultExport(jsText) : new RegExp(`\\b${name}\\b`).test(jsText);
     if (!present) missing.push(name);
   }
   for (const method of REQUIRED_HOST_METHODS) {
@@ -287,6 +293,12 @@ async function loadPlaywright(repoRoot) {
   return null;
 }
 
+/** `@playwright/test` is CJS; `import(fileURL)` exposes launchers on `ns.default`, not the namespace. */
+export function playwrightEngine(playwrightModule, engine) {
+  if (playwrightModule == null) return undefined;
+  return playwrightModule[engine] ?? playwrightModule.default?.[engine];
+}
+
 export async function defaultRunBrowsers({ origin, engines = ENGINES, playwrightModule }) {
   if (!playwrightModule) {
     return {
@@ -297,7 +309,7 @@ export async function defaultRunBrowsers({ origin, engines = ENGINES, playwright
   const results = {};
   const failures = [];
   for (const engine of engines) {
-    const launcher = playwrightModule[engine];
+    const launcher = playwrightEngine(playwrightModule, engine);
     if (typeof launcher?.launch !== "function") {
       failures.push(`${engine}: playwright launcher missing`);
       continue;

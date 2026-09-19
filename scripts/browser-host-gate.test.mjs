@@ -12,9 +12,11 @@ import {
   RECEIPT_MARKER,
   censusForbiddenHits,
   compareIdentities,
+  defaultRunBrowsers,
   evaluateBrowserResult,
   missingArtifactExports,
   parseNativeReceipt,
+  playwrightEngine,
   runGate,
   stableSerialize,
 } from "./browser-host-gate.mjs";
@@ -65,7 +67,6 @@ function browserResult(overrides = {}) {
 }
 
 const WASM_JS = `
-export default function init() {}
 export function initSync() {}
 export class VerterHost {
   upsert() {}
@@ -75,6 +76,7 @@ export class VerterHost {
   resolveTypeWithAudit() {}
   matchCssSelectors() {}
 }
+export { initSync, __wbg_init as default };
 `;
 
 function makeSandbox() {
@@ -234,6 +236,13 @@ test("missingArtifactExports fails a stub without host methods", () => {
   assert.deepEqual(missingArtifactExports(WASM_JS), []);
 });
 
+test("missingArtifactExports accepts wasm-bindgen 0.2.122 export-list default", () => {
+  assert.ok(!/export default/.test(WASM_JS));
+  assert.match(WASM_JS, /as\s+default/);
+  assert.deepEqual(missingArtifactExports(WASM_JS), []);
+  assert.ok(missingArtifactExports("export function initSync() {}").includes("default"));
+});
+
 test("parseNativeReceipt requires the marker", () => {
   assert.equal(parseNativeReceipt("ok\n").ok, false);
   const parsed = parseNativeReceipt(`${RECEIPT_MARKER}{"operations":{}}\n`);
@@ -354,14 +363,51 @@ test("runGate default build launches pnpm via cmd.exe on win32 and surfaces spaw
       JSON.stringify(outcome.failures),
     );
     assert.equal(launched.length, 1);
-    assert.notEqual(path.basename(launched[0].command).toLowerCase(), "pnpm");
+    const launchedCmd = path.basename(launched[0].command).toLowerCase();
     if (process.platform === "win32") {
+      assert.notEqual(launchedCmd, "pnpm");
       assert.match(path.basename(launched[0].command), /cmd\.exe/i);
       assert.ok(launched[0].args.some((arg) => /pnpm/i.test(String(arg))));
+    } else {
+      assert.equal(launchedCmd, "pnpm");
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("playwrightEngine reads CJS namespace default when named exports are absent", () => {
+  const launch = () => {};
+  const cjs = { default: { chromium: { launch } }, "module.exports": {} };
+  assert.equal(playwrightEngine(cjs, "chromium")?.launch, launch);
+  assert.equal(playwrightEngine({ chromium: { launch } }, "chromium")?.launch, launch);
+  assert.equal(playwrightEngine(cjs, "firefox"), undefined);
+});
+
+test("defaultRunBrowsers launches off CJS default instead of reporting launcher missing", async () => {
+  const launched = [];
+  const fakeEngine = {
+    launch: async () => {
+      launched.push("ok");
+      return {
+        newPage: async () => ({
+          goto: async () => {},
+          waitForFunction: async () => ({
+            jsonValue: async () => browserResult(),
+          }),
+        }),
+        close: async () => {},
+      };
+    },
+  };
+  const outcome = await defaultRunBrowsers({
+    origin: "http://127.0.0.1:1",
+    engines: ["chromium"],
+    playwrightModule: { default: { chromium: fakeEngine }, "module.exports": {} },
+  });
+  assert.deepEqual(launched, ["ok"]);
+  assert.equal(outcome.ok, true, JSON.stringify(outcome.failures));
+  assert.equal(outcome.results.chromium.ok, true);
 });
 
 test("runGate passes only with matching native/browser evidence", async () => {
