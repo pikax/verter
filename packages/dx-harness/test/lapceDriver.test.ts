@@ -275,6 +275,25 @@ describe("WSP1L-AC1 — stalled UI thread detected while the server timeline is 
     expect(verdict.firstBlockedStage).toBeNull();
   });
 
+  it("measures the stall across a missing intermediate stage instead of dropping it", () => {
+    // decoded is never observed; the 320 ms stall sits between input_dispatched
+    // and applied, the two present neighbours, and must be named after the
+    // earlier present stage rather than skipped as an unmeasurable pair.
+    const host = new FixtureLapceHost({
+      clockMs: sequenceClock(0),
+      omitStages: ["decoded"],
+      stall: { afterStage: "input_dispatched", ms: 320 },
+    });
+    const timeline = buildUiTimeline(
+      host.runScriptedStep({ kind: "close", requestEpoch: 1, sourceEpoch: 1 }),
+      immediateServerTrace(1),
+      { stallThreshold: STALL_THRESHOLD, immediacyBound: IMMEDIACY_BOUND },
+    );
+    expect(timeline.eventLoopStallMs).toEqual({ status: "measured", value: 328, unit: "ms" });
+    expect(timeline.stall.stalledAfter).toBe("input_dispatched");
+    expect(detectUiStallWithImmediateServer(timeline).uiStallDetected).toBe(true);
+  });
+
   it("does not certify a UI stall when server immediacy is undecided", () => {
     const host = new FixtureLapceHost({
       clockMs: sequenceClock(0),
@@ -841,6 +860,17 @@ describe("real-client claims, pinned manifest and package surface", () => {
     expect(lapce.status).toBe("pinned");
     expect(lapce.version).toMatch(/^0\.4\.6/);
     expect(lapce.reason).toMatch(/WSP1L instrumentation patch/);
+  });
+
+  it("treats a pinned item recorded with another status as drift, even at the pinned version", () => {
+    const items = PINNED_LAPCE_VERSION_MANIFEST.items.map((item) =>
+      item.item === "lapce-client"
+        ? { ...item, status: "unrecorded" as const, reason: "not captured on this machine" }
+        : item,
+    );
+    const drift = versionsMatchPinnedManifest({ ...PINNED_LAPCE_VERSION_MANIFEST, items });
+    expect(drift.ok).toBe(false);
+    expect(drift.drift.join("; ")).toMatch(/lapce-client.*status 'unrecorded'.*pinned/);
   });
 
   it("exports ./lapce from compiled dist, not TypeScript source", () => {

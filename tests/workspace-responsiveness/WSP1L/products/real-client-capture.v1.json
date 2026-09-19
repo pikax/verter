@@ -10,7 +10,7 @@
   "lapceClient": {
     "version": "0.4.6+Nightly.126d356",
     "source": "Lapce v0.4.6 (github.com/lapce/lapce tag v0.4.6 source tarball) + the WSP1L instrumented-client patch",
-    "patch": "D:/dev/personal/tama-worktrees/verter/wt/workflow_job_bb8a8dc9bb58384e73fed0e0eaa3a9146e8380104b8e425e89edc229e7ab734f/packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch",
+    "patch": "packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch",
     "patchSha256": "0d8babf431562182589dec17ea56f11b2756101aea19973081cb5d4695260d66"
   },
   "automationPath": {
@@ -392,5 +392,5 @@
     "timelineMs": 1789814386581,
     "recordedAs": "identity: the driven capture's timeline clock is the Unix-ms wall clock both the client stamps and the anchored server dump already use"
   },
-  "contentSha256": "3af5c9ef28a653d982b77c12310b3ce1b4f05fedfc632abba7b820dc8e802bd9"
+  "contentSha256": "cfb96099b864cee74191c83ea6b5e75b86e6bef0edbd520fc9a7928f6090ca6c"
 }

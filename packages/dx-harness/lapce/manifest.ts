@@ -62,7 +62,11 @@ export function versionsMatchPinnedManifest(manifest: LapceVersionManifest): Man
       continue;
     }
     if (pinned.status === "pinned") {
-      if (actual.version !== pinned.version) {
+      if (actual.status !== pinned.status) {
+        drift.push(
+          `'${pinned.item}' is recorded with status '${actual.status}' but the pinned manifest pins it; a pinned item matches on status and version, never on the version string alone`,
+        );
+      } else if (actual.version !== pinned.version) {
         drift.push(
           `'${pinned.item}' version '${String(actual.version)}' does not match the pinned '${pinned.version}'`,
         );

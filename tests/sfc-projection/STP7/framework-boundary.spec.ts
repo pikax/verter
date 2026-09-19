@@ -14,6 +14,7 @@ import {
   DIRTY_REALM,
   DIRTY_REUSE,
   DIRTY_SCOPE,
+  MANDATORY_CASE_DISPOSITIONS,
   assertInstanceShapePin,
   assertRealmLeak,
   assertSvelteShape,
@@ -114,6 +115,37 @@ test("STP7-scope-claim: receiving obligations are not full Astro/MDX/Lit support
 
 test("STP7 products name every mandatory case and AC3/AC4 untouched-owner rationale", () => {
   assert.equal(validateStp7Products().length, 0, JSON.stringify(validateStp7Products()));
+});
+
+test("STP7 products dirty twins: a reversed disposition or duplicate case id is rejected", () => {
+  const evidence = JSON.parse(
+    fs.readFileSync(path.join(HERE, "products", "second-framework-boundary-evidence.json"), "utf8"),
+  );
+  for (const [id, disposition] of Object.entries(MANDATORY_CASE_DISPOSITIONS)) {
+    const reversed = structuredClone(evidence);
+    reversed.cases.find((row: { id: string }) => row.id === id).disposition =
+      disposition === "reject" ? "accept" : "reject";
+    const errors = validateStp7Products({ evidence: reversed });
+    assert.ok(
+      errors.some((error) => error.caseId === id && error.code === "disposition-drift"),
+      `${id}: ${JSON.stringify(errors)}`,
+    );
+  }
+  const duplicated = structuredClone(evidence);
+  duplicated.cases.push(
+    structuredClone(duplicated.cases.find((row: { id: string }) => row.id === "STP7-realm")),
+  );
+  const errors = validateStp7Products({ evidence: duplicated });
+  assert.ok(
+    errors.some((error) => error.caseId === "STP7-realm" && error.code === "duplicate-case"),
+    JSON.stringify(errors),
+  );
+});
+
+test("STP7-svelte-shape: the fixture component derives from the installed svelte Component", () => {
+  const source = fs.readFileSync(path.join(HERE, "probes", "positive.ts"), "utf8");
+  assert.match(source, /import type \{ Component \} from "svelte"/);
+  assert.match(source, /interface Svelte5Component[\s\S]*?extends Component<Props, Exports>/);
 });
 
 test("STP7 evaluateStp7: clean twins plus reject dirty twins", async () => {

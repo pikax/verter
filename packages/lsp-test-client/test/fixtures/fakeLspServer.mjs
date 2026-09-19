@@ -30,19 +30,25 @@
 //   FAKE_DROP_DIAGNOSTICS=1  skip diagnostic publication (AC3).
 //   FAKE_DUPLICATE_DIAGNOSTICS=1  emit the same publishDiagnostics twice.
 //   FAKE_PROVIDER_STARTED=1  emit `$/verter/typeProviderStarted` after initialize.
-//   FAKE_SERVER_COMPLETE_STDERR=1  write `server-complete` after the response is on stdout.
+//   FAKE_SERVER_COMPLETE_STDERR=1  write `server-complete` once stdout has finished writing the response.
 import process from "node:process";
 
 const env = process.env;
 const SEP = String.fromCharCode(1); // SOH delimiter between stderr lines
 const PROVOKE_REQUEST_ID = 9001; // id of the server→client request FAKE_PROVOKE_ON sends
 const REQUEST_CANCELLED = -32800;
-const cancelledIds = new Set(); // request ids cancelled via $/cancelRequest
+// Request ids cancelled via $/cancelRequest while still in flight. An id is
+// dropped again once its terminal response is written, so the set only ever
+// holds active requests and a later request reusing an id is never mistaken
+// for a cancelled one.
+const cancelledIds = new Set();
 
-function write(payload) {
+// `onFlushed` runs only after stdout has finished the write, so a marker
+// emitted from it can never precede the frame it announces.
+function write(payload, onFlushed) {
   const body = Buffer.from(JSON.stringify(payload), "utf-8");
   const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "utf-8");
-  process.stdout.write(Buffer.concat([header, body]));
+  process.stdout.write(Buffer.concat([header, body]), onFlushed);
 }
 
 function notify(method, params) {
@@ -169,24 +175,27 @@ function handle(msg) {
 
   if (env.FAKE_NO_RESPONSE === "1") return;
 
+  const serverComplete = () => {
+    if (env.FAKE_SERVER_COMPLETE_STDERR === "1") {
+      process.stderr.write("server-complete\n");
+    }
+  };
   const sendEcho = () => {
-    if (cancelledIds.has(id)) {
-      write({
-        jsonrpc: "2.0",
-        id,
-        error: { code: REQUEST_CANCELLED, message: "request cancelled" },
-      });
-      if (env.FAKE_SERVER_COMPLETE_STDERR === "1") {
-        process.stderr.write("server-complete\n");
-      }
+    const wasCancelled = cancelledIds.delete(id);
+    if (wasCancelled) {
+      write(
+        {
+          jsonrpc: "2.0",
+          id,
+          error: { code: REQUEST_CANCELLED, message: "request cancelled" },
+        },
+        serverComplete,
+      );
       return;
     }
     const payloadBytes = Number.parseInt(env.FAKE_PAYLOAD_BYTES ?? "0", 10);
     const pad = payloadBytes > 0 ? "x".repeat(payloadBytes) : undefined;
-    write({ jsonrpc: "2.0", id, result: { echo: params ?? null, pad } });
-    if (env.FAKE_SERVER_COMPLETE_STDERR === "1") {
-      process.stderr.write("server-complete\n");
-    }
+    write({ jsonrpc: "2.0", id, result: { echo: params ?? null, pad } }, serverComplete);
   };
   const delayMs = Number.parseInt(env.FAKE_QUERY_DELAY_MS ?? "0", 10);
   if (delayMs > 0) setTimeout(sendEcho, delayMs);
