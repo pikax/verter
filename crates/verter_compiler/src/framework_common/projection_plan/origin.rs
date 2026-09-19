@@ -312,27 +312,44 @@ impl ProjectionEmission {
 
     /// Attempt to keep a previous mapping when checking text is unchanged.
     /// Unchanged text with moved source positions is [`EmissionRefusal::StaleMap`].
-    /// A previous plan binding is retained only when the current original bytes
-    /// still mint that snapshot; equal checking text and geometry cannot keep a
-    /// stale source identity.
+    ///
+    /// A previous plan binding is retained only when `current` is the same
+    /// snapshot and input basis, and the current original bytes still mint
+    /// that snapshot. Reminting the previous identity against current bytes
+    /// cannot witness a different canonical or parse identity. Equal checking
+    /// text and geometry cannot keep a stale source identity.
     pub fn reuse_mapping(
         previous: &Self,
         transform: &CodeTransform<'_>,
+        current: Option<(&ProjectionPlan, &str)>,
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<Self, EmissionRefusal> {
+        if previous.snapshot.is_some() || previous.mint.is_some() {
+            let Some((plan, canonical_id)) = current else {
+                return Err(EmissionRefusal::StaleMap);
+            };
+            if !plan_matches_transform(plan, canonical_id, transform.original()) {
+                return Err(EmissionRefusal::StaleMap);
+            }
+            if previous.snapshot.as_ref() != Some(&plan.snapshot)
+                || previous.input_basis.as_ref() != Some(&plan.input_basis)
+            {
+                return Err(EmissionRefusal::StaleMap);
+            }
+        }
         if let Some(mint) = previous.mint.as_ref() {
             if previous.snapshot.as_ref() != Some(&mint.remint(transform.original())) {
                 return Err(EmissionRefusal::StaleMap);
             }
         }
         let checking_text = transform.build_string();
-        let current = MappingProduct::of(transform);
-        if checking_text == previous.checking_text && current != previous.mapping {
+        let mapping = MappingProduct::of(transform);
+        if checking_text == previous.checking_text && mapping != previous.mapping {
             return Err(EmissionRefusal::StaleMap);
         }
         assemble(
             checking_text,
-            current,
+            mapping,
             observations,
             binding_from_previous(previous),
         )
@@ -754,7 +771,11 @@ fn preserved_classes_from_mapping(
         if overlap_start >= overlap_end {
             continue;
         }
-        let generated = if region.generated.len() == region_carrier.len() {
+        let generated = if matches!(
+            region.class,
+            ProjectedClass::Identity | ProjectedClass::Relocated
+        ) && region.generated.len() == region_carrier.len()
+        {
             let local = overlap_start - region_carrier.start;
             let len = overlap_end - overlap_start;
             MappingSpan {
@@ -762,9 +783,9 @@ fn preserved_classes_from_mapping(
                 end: region.generated.start + local + len,
             }
         } else if overlap_start == region_carrier.start && overlap_end == region_carrier.end {
-            // Rewritten is region-to-region. A partial carrier overlap has no
-            // exact generated image; returning the whole generated span would
-            // claim bytes past the requested overlap.
+            // Rewritten is region-to-region, including equal generated and
+            // carrier lengths. A partial carrier overlap has no exact
+            // generated image; offset arithmetic can split a UTF-8 scalar.
             region.generated
         } else {
             continue;
@@ -1036,9 +1057,11 @@ mod tests {
     use super::*;
     use crate::code_transform::CarrierClass;
     use crate::framework_common::projection_plan::{
-        plan_from_source, BindingOriginId, ExpressionKind, ProjectionPlan,
+        build_projection_plan, plan_from_source, BindingOriginId, ExpressionKind, PlanInput,
+        ProjectionPlan,
     };
     use crate::ide::template::emit::EmitText;
+    use verter_identity::encoding::CanonicalEncode;
 
     const ROLE_SFC: &str = concat!(
         "<script setup lang=\"ts\">\n",
@@ -1308,7 +1331,7 @@ mod tests {
             current_identity, previous_identity,
             "eliding the leading byte must move the surviving identity preimage"
         );
-        let dirty = ProjectionEmission::reuse_mapping(&previous, &after, Vec::new());
+        let dirty = ProjectionEmission::reuse_mapping(&previous, &after, None, Vec::new());
         assert!(matches!(dirty, Err(EmissionRefusal::StaleMap)), "{dirty:?}");
         let clean = ProjectionEmission::from_operation(&after, Vec::new()).expect("current map");
         assert_eq!(clean.text_revision(), previous.text_revision());
@@ -1568,6 +1591,54 @@ mod tests {
     }
 
     #[test]
+    fn preserve_original_omits_equal_length_rewritten_partial() {
+        let allocator = Allocator::default();
+        let mut rewritten = CodeTransform::new("abcdef", &allocator);
+        rewritten.overwrite(0, 6, "é😃");
+        assert_eq!(rewritten.build_string(), "é😃");
+        let mapping = MappingProduct::of(&rewritten);
+        let region = mapping
+            .projected()
+            .iter()
+            .find(|region| region.class == ProjectedClass::Rewritten)
+            .expect("mapped overwrite is rewritten");
+        assert_eq!(region.generated, MappingSpan { start: 0, end: 6 });
+        assert_eq!(region.carrier, Some(MappingSpan { start: 0, end: 6 }));
+        assert_eq!(
+            region.generated.len(),
+            region.carrier.expect("rewritten carrier").len(),
+            "equal lengths must not imply byte-to-byte rewritten correspondence"
+        );
+        let preserve_partial = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(3),
+            },
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_partial, &rewritten),
+            vec![],
+            "equal-length rewritten partial must not invent generated [0,3) inside 😃"
+        );
+        let preserve_full = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(6),
+            },
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_full, &rewritten),
+            vec![(MappingSpan { start: 0, end: 6 }, ProjectedClass::Rewritten)]
+        );
+        let control = CodeTransform::new("abcdef", &allocator);
+        assert_eq!(
+            projected_class_for_emit_op(&preserve_partial, &control),
+            vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Identity)],
+            "Identity still maps the carrier overlap by offset"
+        );
+    }
+
+    #[test]
     fn compose_source_chain_uses_code_transform_owner() {
         let allocator = Allocator::default();
         let ct = CodeTransform::new("abc", &allocator);
@@ -1671,7 +1742,7 @@ mod tests {
             previous_head, current_head,
             "generated 0..1 preimage must move"
         );
-        let dirty = ProjectionEmission::reuse_mapping(&previous, &current_ct, Vec::new());
+        let dirty = ProjectionEmission::reuse_mapping(&previous, &current_ct, None, Vec::new());
         assert!(matches!(dirty, Err(EmissionRefusal::StaleMap)), "{dirty:?}");
         let control_ct = {
             let mut ct = CodeTransform::new("AAAA", &allocator);
@@ -1679,7 +1750,7 @@ mod tests {
             ct.move_slice(0, 1, 0);
             ct
         };
-        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, Vec::new());
+        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, None, Vec::new());
         assert!(control.is_ok(), "{control:?}");
     }
 
@@ -1706,10 +1777,10 @@ mod tests {
             previous.correspondence_revision(),
             current.correspondence_revision()
         );
-        let dirty = ProjectionEmission::reuse_mapping(&previous, &at_two, Vec::new());
+        let dirty = ProjectionEmission::reuse_mapping(&previous, &at_two, None, Vec::new());
         assert!(matches!(dirty, Err(EmissionRefusal::StaleMap)), "{dirty:?}");
         let control_ct = helper_preamble_at(&allocator, "abc", "X", 0);
-        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, Vec::new());
+        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, None, Vec::new());
         assert!(control.is_ok(), "{control:?}");
         assert_eq!(
             control.expect("control").correspondence_revision(),
@@ -2073,8 +2144,19 @@ mod tests {
             ProjectionEmission::from_plan(&ct, &plan, ROLE_CANONICAL, observations.clone())
                 .expect("plan-bound emission");
         assert_eq!(previous.snapshot(), Some(&plan.snapshot));
-        let reused =
-            ProjectionEmission::reuse_mapping(&previous, &ct, observations.clone()).expect("reuse");
+        let missing_current =
+            ProjectionEmission::reuse_mapping(&previous, &ct, None, observations.clone());
+        assert!(
+            matches!(missing_current, Err(EmissionRefusal::StaleMap)),
+            "bound reuse without the current plan is stale lineage: {missing_current:?}"
+        );
+        let reused = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan, ROLE_CANONICAL)),
+            observations.clone(),
+        )
+        .expect("reuse");
         assert_eq!(reused.snapshot(), previous.snapshot());
         assert_eq!(reused.input_basis(), previous.input_basis());
         assert_eq!(
@@ -2084,7 +2166,7 @@ mod tests {
 
         let unbound = ProjectionEmission::from_operation(&ct, Vec::new()).expect("unbound");
         assert!(unbound.snapshot().is_none());
-        let dirty = ProjectionEmission::reuse_mapping(&unbound, &ct, observations);
+        let dirty = ProjectionEmission::reuse_mapping(&unbound, &ct, None, observations);
         assert!(
             matches!(dirty, Err(EmissionRefusal::UnboundOrigin)),
             "reuse of an unbound emission cannot admit authored origins: {dirty:?}"
@@ -2121,7 +2203,12 @@ mod tests {
         )
         .expect("elided comment binds");
         assert!(previous.edit_origin(&observations[0]).is_ok());
-        let dirty = ProjectionEmission::reuse_mapping(&previous, &current_ct, observations.clone());
+        let dirty = ProjectionEmission::reuse_mapping(
+            &previous,
+            &current_ct,
+            Some((&plan, ROLE_CANONICAL)),
+            observations.clone(),
+        );
         assert!(matches!(dirty, Err(EmissionRefusal::StaleMap)), "{dirty:?}");
         let plan_b = plan_from_source(ROLE_CANONICAL, &source_b);
         assert_ne!(plan.snapshot, plan_b.snapshot);
@@ -2140,13 +2227,132 @@ mod tests {
             ct.overwrite_unmapped(0, prefix, "");
             ct
         };
-        let control = ProjectionEmission::reuse_mapping(&previous, &control_ct, observations)
-            .expect("unchanged source");
+        let control = ProjectionEmission::reuse_mapping(
+            &previous,
+            &control_ct,
+            Some((&plan, ROLE_CANONICAL)),
+            observations,
+        )
+        .expect("unchanged source");
         assert_eq!(control.snapshot(), previous.snapshot());
         assert_eq!(
             control.correspondence_revision(),
             previous.correspondence_revision()
         );
+    }
+
+    struct ParseKeyMarker(&'static str);
+
+    impl CanonicalEncode for ParseKeyMarker {
+        const DOMAIN_TAG: &'static str = "verter.test.stp10.parse_key_marker";
+        fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
+            encoder.field_str(1, self.0);
+        }
+    }
+
+    fn plan_from_source_with_parse(
+        canonical_id: &str,
+        source: &str,
+        parse_key: Option<&ParseKey>,
+    ) -> ProjectionPlan {
+        let parsed = crate::compile::parse_sfc(source, None, None);
+        build_projection_plan(PlanInput {
+            canonical_id,
+            source,
+            parsed: &parsed,
+            parse_key,
+            syntax_profile: None,
+        })
+    }
+
+    fn hover_on_alias(plan: &ProjectionPlan, source: &str) -> Vec<RoleQualifiedObservation> {
+        vec![RoleQualifiedObservation::new(
+            vfor_alias_span(source),
+            ObservationRole::Hover,
+            authored_in(plan),
+        )]
+    }
+
+    #[test]
+    fn stp10_reuse_mapping_rejects_cross_canonical_same_bytes() {
+        let allocator = Allocator::default();
+        let plan_a = plan_from_source("file:///a.vue", ROLE_SFC);
+        let plan_b = plan_from_source("file:///b.vue", ROLE_SFC);
+        assert_ne!(
+            plan_a.snapshot, plan_b.snapshot,
+            "identical bytes under different canonicals must mint distinct snapshots"
+        );
+        let ct = CodeTransform::new(ROLE_SFC, &allocator);
+        let observations = hover_on_alias(&plan_a, ROLE_SFC);
+        let previous =
+            ProjectionEmission::from_plan(&ct, &plan_a, "file:///a.vue", observations.clone())
+                .expect("a.vue binds");
+        let dirty = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan_b, "file:///b.vue")),
+            observations.clone(),
+        );
+        assert!(
+            matches!(dirty, Err(EmissionRefusal::StaleMap)),
+            "reuse must not keep a.vue under b.vue: {dirty:?}"
+        );
+        let from_b =
+            ProjectionEmission::from_plan(&ct, &plan_b, "file:///b.vue", observations.clone());
+        assert!(
+            matches!(from_b, Err(EmissionRefusal::UnboundOrigin)),
+            "a.vue origin cannot bind b.vue: {from_b:?}"
+        );
+        let control = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan_a, "file:///a.vue")),
+            observations,
+        )
+        .expect("same canonical reuses");
+        assert_eq!(control.snapshot(), previous.snapshot());
+    }
+
+    #[test]
+    fn stp10_reuse_mapping_rejects_parse_key_twin() {
+        let allocator = Allocator::default();
+        let key_a = ParseKey::from_canonical(&ParseKeyMarker("a"));
+        let key_b = ParseKey::from_canonical(&ParseKeyMarker("b"));
+        let plan_a = plan_from_source_with_parse(ROLE_CANONICAL, ROLE_SFC, Some(&key_a));
+        let plan_b = plan_from_source_with_parse(ROLE_CANONICAL, ROLE_SFC, Some(&key_b));
+        assert_ne!(
+            plan_a.snapshot, plan_b.snapshot,
+            "same source and canonical with a different parse key must mint distinct snapshots"
+        );
+        let ct = CodeTransform::new(ROLE_SFC, &allocator);
+        let observations = hover_on_alias(&plan_a, ROLE_SFC);
+        let previous =
+            ProjectionEmission::from_plan(&ct, &plan_a, ROLE_CANONICAL, observations.clone())
+                .expect("parse-key A binds");
+        let dirty = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan_b, ROLE_CANONICAL)),
+            observations.clone(),
+        );
+        assert!(
+            matches!(dirty, Err(EmissionRefusal::StaleMap)),
+            "reuse must not keep parse-key A under parse-key B: {dirty:?}"
+        );
+        let from_b =
+            ProjectionEmission::from_plan(&ct, &plan_b, ROLE_CANONICAL, observations.clone());
+        assert!(
+            matches!(from_b, Err(EmissionRefusal::UnboundOrigin)),
+            "parse-key A origin cannot bind parse-key B: {from_b:?}"
+        );
+        let control = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan_a, ROLE_CANONICAL)),
+            observations,
+        )
+        .expect("same parse key reuses");
+        assert_eq!(control.snapshot(), previous.snapshot());
     }
 
     #[test]

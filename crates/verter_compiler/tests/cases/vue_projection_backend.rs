@@ -964,7 +964,8 @@ fn projection_emission_binds_registered_plan() {
     let reused = verter_compiler::framework_common::ProjectionEmission::reuse_mapping(
         &bound,
         &transform,
-        vec![observation],
+        Some((&plan, canonical)),
+        vec![observation.clone()],
     )
     .expect("reuse keeps the registered plan binding");
     assert_eq!(reused.snapshot(), bound.snapshot());
@@ -974,6 +975,19 @@ fn projection_emission_binds_registered_plan() {
         registered_artifact_with_grammar(canonical, SIMPLE, "{{", "}}", std::iter::once("ion-"));
     let profiled = VueProjectionBackend.projection_plan(SIMPLE, &other_profile, canonical);
     assert_ne!(plan.snapshot, profiled.snapshot);
+    let profiled_reuse = verter_compiler::framework_common::ProjectionEmission::reuse_mapping(
+        &bound,
+        &transform,
+        Some((&profiled, canonical)),
+        vec![observation],
+    );
+    assert!(
+        matches!(
+            profiled_reuse,
+            Err(verter_compiler::framework_common::EmissionRefusal::StaleMap)
+        ),
+        "reuse must not keep the registered snapshot under a different parse identity: {profiled_reuse:?}"
+    );
     let profiled_emission = VueProjectionBackend
         .projection_emission(&transform, &profiled, canonical, Vec::new())
         .expect("same source still matches a different parse identity");
