@@ -2,7 +2,7 @@
   "schema": "ARH1DependencyContracts",
   "version": 2,
   "contractNode": "ARH1",
-  "candidate": "260be884014110ffd3b72850509e765c8752b011",
+  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
   "predecessorProducts": {
     "responsibilityMap": "../ARH0/products/responsibility-map.json",
     "debtRegister": "../ARH0/products/debt-register.json"
