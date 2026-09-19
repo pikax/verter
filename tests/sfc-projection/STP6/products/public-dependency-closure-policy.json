@@ -44,15 +44,15 @@
     "rejectCase": "STP6-hidden-metadata"
   },
   "closureLeakTwin": {
-    "file": "tests/sfc-projection/STP6/packed/dist/leaky.d.ts",
+    "file": "tests/sfc-projection/STP6/packed/types/leaky.d.ts",
     "inExports": false,
     "inFiles": false,
     "virtualSpecifier": "./__virtual_sfc/script",
     "rejectCase": "STP6-closure"
   },
   "liftedSibling": {
-    "file": "tests/sfc-projection/STP6/packed/dist/row.d.ts",
-    "importedFrom": "tests/sfc-projection/STP6/packed/dist/generic.d.ts",
+    "file": "tests/sfc-projection/STP6/packed/types/row.d.ts",
+    "importedFrom": "tests/sfc-projection/STP6/packed/types/generic.d.ts",
     "inFiles": true
   },
   "abiOwner": "STP8"

@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "file": "index.d.ts",
+  "sourceRoot": "",
+  "sources": ["../src/Concrete.vue"],
+  "names": [],
+  "mappings": "AAAA"
+}

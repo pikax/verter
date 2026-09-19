@@ -13,15 +13,15 @@ import { fileURLToPath } from "node:url";
 const STP6_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKED_DIR = path.join(STP6_DIR, "packed");
 const PUBLIC_DTS = Object.freeze([
-  "dist/index.d.ts",
-  "dist/concrete.d.ts",
-  "dist/generic.d.ts",
-  "dist/row.d.ts",
+  "types/index.d.ts",
+  "types/concrete.d.ts",
+  "types/generic.d.ts",
+  "types/row.d.ts",
 ]);
 const PUBLIC_MAPS = Object.freeze([
-  "dist/index.d.ts.map",
-  "dist/concrete.d.ts.map",
-  "dist/generic.d.ts.map",
+  "types/index.d.ts.map",
+  "types/concrete.d.ts.map",
+  "types/generic.d.ts.map",
 ]);
 const REQUIRED_EXPORTS = Object.freeze([".", "./concrete", "./generic"]);
 const RESOLUTION_MODES = Object.freeze([
@@ -81,8 +81,8 @@ export function assertPublicDeclarationsClosed({
   return errors;
 }
 
-export function assertLeakyTwinPresent({ text = readPacked("dist/leaky.d.ts") } = {}) {
-  const leaks = scanDeclarationText(text, "dist/leaky.d.ts", "STP6-closure");
+export function assertLeakyTwinPresent({ text = readPacked("types/leaky.d.ts") } = {}) {
+  const leaks = scanDeclarationText(text, "types/leaky.d.ts", "STP6-closure");
   if (leaks.length === 0) {
     return [
       err("STP6-closure", "missed-closure", "leaky declaration twin has no private virtual path"),
@@ -133,9 +133,9 @@ export function assertDeclMaps({
   return errors;
 }
 
-export function assertLeakyMapRejected({ raw = readPacked("dist/leaky.d.ts.map") } = {}) {
+export function assertLeakyMapRejected({ raw = readPacked("types/leaky.d.ts.map") } = {}) {
   const errors = assertDeclMaps({
-    maps: { "dist/leaky.d.ts.map": raw },
+    maps: { "types/leaky.d.ts.map": raw },
     caseId: "STP6-decl-map",
   });
   if (errors.length === 0) {
@@ -190,7 +190,7 @@ export function assertPackInventory(pkg = loadPackedPackage()) {
     );
   }
   const published = new Set(publishedPackPaths(pkg));
-  if (published.has("unpublished-meta.d.ts") || published.has("dist/leaky.d.ts")) {
+  if (published.has("unpublished-meta.d.ts") || published.has("types/leaky.d.ts")) {
     errors.push(
       err(
         "STP6-hidden-metadata",

@@ -25,7 +25,7 @@ test("STP6-closure: published declarations do not import private virtual paths",
 test("STP6-closure dirty twin: a public virtual import is rejected", () => {
   const dirty = scanDeclarationText(
     'import type { Hidden } from "./__virtual_sfc/script";\nexport declare class Comp {}\n',
-    "dist/index.d.ts",
+    "types/index.d.ts",
   );
   assert.ok(dirty.some((error) => error.caseId === "STP6-closure"));
 });
@@ -38,7 +38,7 @@ test("STP6-decl-map: shipped maps resolve authored Vue sources in the pack", () 
 test("STP6-decl-map dirty twin: a virtual map source is rejected", () => {
   const dirty = assertDeclMaps({
     maps: {
-      "dist/concrete.d.ts.map": JSON.stringify({
+      "types/concrete.d.ts.map": JSON.stringify({
         version: 3,
         file: "concrete.d.ts",
         sources: ["../__virtual_sfc/script.ts"],

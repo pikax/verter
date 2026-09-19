@@ -11,8 +11,8 @@
     "lib": ["ES2022", "DOM"],
     "baseUrl": ".",
     "paths": {
-      "@stp6/lib": ["../packed/dist/index.d.ts"],
-      "@stp6/lib/*": ["../packed/dist/*"]
+      "@stp6/lib": ["../packed/types/index.d.ts"],
+      "@stp6/lib/*": ["../packed/types/*"]
     }
   },
   "include": ["*.ts", "*.tsx", "source/**/*.ts", "source/**/*.d.ts", "../contract.ts"],

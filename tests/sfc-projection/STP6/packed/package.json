@@ -3,29 +3,29 @@
   "version": "0.0.0-stp6",
   "private": true,
   "type": "module",
-  "types": "./dist/index.d.ts",
+  "types": "./types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.d.ts"
+      "types": "./types/index.d.ts",
+      "default": "./types/index.d.ts"
     },
     "./concrete": {
-      "types": "./dist/concrete.d.ts",
-      "default": "./dist/concrete.d.ts"
+      "types": "./types/concrete.d.ts",
+      "default": "./types/concrete.d.ts"
     },
     "./generic": {
-      "types": "./dist/generic.d.ts",
-      "default": "./dist/generic.d.ts"
+      "types": "./types/generic.d.ts",
+      "default": "./types/generic.d.ts"
     }
   },
   "files": [
-    "dist/index.d.ts",
-    "dist/index.d.ts.map",
-    "dist/concrete.d.ts",
-    "dist/concrete.d.ts.map",
-    "dist/generic.d.ts",
-    "dist/generic.d.ts.map",
-    "dist/row.d.ts",
+    "types/index.d.ts",
+    "types/index.d.ts.map",
+    "types/concrete.d.ts",
+    "types/concrete.d.ts.map",
+    "types/generic.d.ts",
+    "types/generic.d.ts.map",
+    "types/row.d.ts",
     "src",
     "tsconfig.json"
   ]

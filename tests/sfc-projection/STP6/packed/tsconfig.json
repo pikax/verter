@@ -11,5 +11,5 @@
     "moduleResolution": "bundler",
     "lib": ["ES2022"]
   },
-  "include": ["dist/**/*.d.ts"]
+  "include": ["types/**/*.d.ts"]
 }
