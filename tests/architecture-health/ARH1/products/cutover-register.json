@@ -2,7 +2,7 @@
   "schema": "ARH1CutoverRegister",
   "version": 2,
   "contractNode": "ARH1",
-  "candidate": "260be884014110ffd3b72850509e765c8752b011",
+  "candidate": "30012d45df4e3369728a7cc09250c5e009bfd18d",
   "emptyDeletionSetRationale": "ARH1 changes contract bytes only: it introduces the dependency/visibility contracts and decides routes; implementation and deletion are bound to the named successors (ARH2 re-derives populations, ARH3/ARH4 narrow, ARH11 removes residue, ARH12 enforces). No existing API is superseded by a second authority at this node, so ARH1's own deletion set is empty; every row below binds a route to exactly one executing owner.",
   "rows": [
     {
