@@ -12,6 +12,7 @@ import {
   CLEAN_ROOM_KIND,
   assertCleanRoomHosted,
   declaredEntrypoints,
+  hostLibc,
   inspectConsumer,
   runCleanRoomCheck,
 } from "../clean-room.mjs";
@@ -414,6 +415,7 @@ test("REL3 skipped check cannot be reported as PASS", () => {
   const report = runCleanRoomCheck({ skip: true });
   assert.equal(report.ok, false);
   assert.equal(report.reason, "skipped");
+  assert.equal(report.skipped, true);
 });
 
 test("REL3-AC1 rehearsal identity refuses a skipped or missing clean-room host", () => {
@@ -539,18 +541,29 @@ test("REL3-AC1 consumer-side patch and workspace protocol are rejected", () => {
   assert.equal(report.reason, "workspace-resolved");
 });
 
-test("REL3-AC2 TypeScript import targets are types-only", () => {
+test("REL3-AC2 only declaration targets are types-only; runtime .ts targets keep their conditions", () => {
   const rows = declaredEntrypoints({
     name: "@rel3/types",
     exports: {
       ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
+      "./decl": { types: "./dist/decl.d.ts" },
       "./gen": { import: "./gen.ts", default: "./gen.ts" },
     },
   });
+  const decl = rows.filter((row) => row.subpath === "./decl");
+  assert.equal(decl.length > 0, true);
+  assert.equal(
+    decl.every((row) => row.typesOnly),
+    true,
+  );
   const gen = rows.filter((row) => row.subpath === "./gen");
   assert.equal(gen.length > 0, true);
   assert.equal(
-    gen.every((row) => row.typesOnly),
+    gen.every((row) => !row.typesOnly),
+    true,
+  );
+  assert.equal(
+    gen.some((row) => row.conditions.includes("import")),
     true,
   );
   const root = tmp("rel3-ts-");
@@ -572,10 +585,37 @@ test("REL3-AC2 TypeScript import targets are types-only", () => {
       "gen.ts": "export const generated = 1;\n",
     },
   );
+  // A runtime `.ts` export is a declared runtime entrypoint: it is exercised
+  // through its `import` condition and, since Node does not strip types under
+  // node_modules, recorded as unloadable rather than silently relabelled types.
   const report = check([unitFrom(dir)], { repoRoot: root });
-  assert.equal(report.ok, true, report.message ?? JSON.stringify(report.failures, null, 2));
-  const keys = report.entrypoints.map((row) => `${row.entrypoint} ${row.condition}`).sort();
-  assert.deepEqual(keys, [". import", "./gen types"]);
+  assert.equal(report.ok, false);
+  assert.equal(report.reason, "unloadable");
+  const failed = report.failures.find((row) => row.entrypoint === "./gen");
+  assert.equal(failed?.condition, "import");
+  assert.match(failed?.message ?? "", /TYPE_STRIPPING|\.ts/u);
+});
+
+test("REL3-AC4 a bin whose public calls exit nonzero is unloadable, not coerced to ok", () => {
+  const root = tmp("rel3-binexit-");
+  const dir = writePkg(
+    root,
+    "cli",
+    {
+      name: "@rel3/cli-exit",
+      version: "1.0.0",
+      bin: { tool: "./bin.js" },
+      files: ["bin.js"],
+    },
+    { "bin.js": "process.exitCode = 1;\n" },
+  );
+  const report = check([unitFrom(dir)], { repoRoot: root });
+  assert.equal(report.ok, false);
+  assert.equal(report.reason, "unloadable");
+  assert.equal(
+    report.entrypoints.some((row) => row.package === "@rel3/cli-exit" && row.ok),
+    false,
+  );
 });
 
 test("REL3-AC2 packed manifest is the source of entrypoints, not the workspace package.json", () => {
@@ -612,16 +652,9 @@ test("REL3-AC2 packed manifest is the source of entrypoints, not the workspace p
 
 test("REL3-AC2 libc-mismatched platform units are packed, not installed", () => {
   const root = tmp("rel3-libc-");
-  let hostLibc = null;
-  if (process.platform === "linux") {
-    try {
-      const header = process.report?.getReport()?.header;
-      if (header?.glibcVersionRuntime) hostLibc = "glibc";
-    } catch {
-      hostLibc = null;
-    }
-  }
-  const mismatchedLibc = hostLibc === "musl" ? "glibc" : "musl";
+  // The same detection the check itself uses, so a musl host is never handed
+  // a musl fixture that would install instead of staying packed.
+  const mismatchedLibc = hostLibc() === "musl" ? "glibc" : "musl";
   const musl = writePkg(
     root,
     "musl",

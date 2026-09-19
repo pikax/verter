@@ -135,6 +135,19 @@ export function observeInputSnapshot(host, basisId, canonical) {
   return observation;
 }
 
+/**
+ * Release a committed snapshot the caller no longer observes. Every basis
+ * stays addressable until released, so a host that commits repeated waves
+ * releases the superseded basis after switching to the new one.
+ *
+ * @param {{releaseInputSnapshot: (basisId: string) => boolean}} host
+ * @param {string} basisId
+ * @returns {boolean} whether a snapshot was stored under `basisId`
+ */
+export function releaseInputSnapshot(host, basisId) {
+  return host.releaseInputSnapshot(basisId) === true;
+}
+
 /** Canonicals for the next acquisition wave from a typed NeedInputs result. */
 export function needInputsKeys(error) {
   if (error instanceof NeedInputsError) return [...error.keys];

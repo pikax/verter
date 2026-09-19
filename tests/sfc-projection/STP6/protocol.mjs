@@ -53,11 +53,26 @@ function readPacked(rel) {
   return fs.readFileSync(path.join(PACKED_DIR, rel), "utf8");
 }
 
-function importSpecifiers(text) {
+/** Authored sources a declaration map may name: Vue or TypeScript under the pack's src. */
+const AUTHORED_SOURCE = /^src\/.+\.(vue|ts|tsx)$/;
+
+/**
+ * Every module specifier a declaration can depend on: `from "…"` clauses,
+ * `import("…")` type imports and `import x = require("…")` bindings.
+ */
+const SPECIFIER_PATTERNS = Object.freeze([
+  /\bfrom\s+["']([^"']+)["']/g,
+  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+  /\bimport\s+[\w$]+\s*=\s*require\s*\(\s*["']([^"']+)["']\s*\)/g,
+]);
+
+export function importSpecifiers(text) {
   const found = [];
-  const re = /from\s+["']([^"']+)["']/g;
-  let match;
-  while ((match = re.exec(text))) found.push(match[1]);
+  for (const pattern of SPECIFIER_PATTERNS) {
+    const re = new RegExp(pattern.source, pattern.flags);
+    let match;
+    while ((match = re.exec(text))) found.push(match[1]);
+  }
   return found;
 }
 
@@ -95,8 +110,10 @@ export function assertDeclMaps({
   maps = Object.fromEntries(PUBLIC_MAPS.map((rel) => [rel, readPacked(rel)])),
   packRoot = PACKED_DIR,
   caseId = "STP6-decl-map",
+  published = publishedPackPaths(),
 } = {}) {
   const errors = [];
+  const publishedSet = new Set(published);
   for (const [rel, raw] of Object.entries(maps)) {
     let doc;
     try {
@@ -125,6 +142,27 @@ export function assertDeclMaps({
             caseId,
             "missing-authored-source",
             `${rel} source ${source} is not shipped in the pack`,
+          ),
+        );
+        continue;
+      }
+      const relPosix = relToPack.split(path.sep).join("/");
+      if (!publishedSet.has(relPosix)) {
+        errors.push(
+          err(
+            caseId,
+            "unpublished-map-source",
+            `${rel} source ${source} is not in the published pack files`,
+          ),
+        );
+        continue;
+      }
+      if (!AUTHORED_SOURCE.test(relPosix)) {
+        errors.push(
+          err(
+            caseId,
+            "non-authored-map-source",
+            `${rel} source ${source} is not an authored source under src/`,
           ),
         );
       }
@@ -391,7 +429,7 @@ function writeTsconfig(dir, mode) {
       target: "ES2022",
       module: mode.module,
       moduleResolution: mode.moduleResolution,
-      skipLibCheck: true,
+      skipLibCheck: false,
       lib: ["ES2022"],
     },
     include: ["consume-public.ts", "consume-hidden.ts", "consume-virtual.ts"],
@@ -456,6 +494,18 @@ export function evaluateLiveResolution(ts, repoRoot) {
     for (const mode of RESOLUTION_MODES) {
       const tsconfigAbs = writeTsconfig(dest, mode);
       const diags = typecheckDir(ts, tsconfigAbs);
+      const packedDiags = diags.filter((diag) =>
+        posix(diag.file).includes("/node_modules/@stp6/lib/"),
+      );
+      if (packedDiags.length > 0) {
+        errors.push(
+          err(
+            "STP6-closure",
+            "packed-declaration-error",
+            `${mode.id} packed public declarations: ${JSON.stringify(packedDiags)}`,
+          ),
+        );
+      }
       const publicDiags = diagsFor(diags, "consume-public.ts");
       if (publicDiags.length > 0) {
         errors.push(

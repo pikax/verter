@@ -19,7 +19,16 @@ const DEFAULT_REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 
 const SPECIFIER_RE = /(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)["']([^"']+)["']/g;
 const MD_LINK_RE = /\[[^\]]*]\(([^)]+)\)/g;
+const INLINE_CODE_RE = /`([^`\n]+)`/g;
 const INTERNAL_DIR_RE = /^(packages\/[^/]+\/src\/|crates\/|scripts\/)/;
+const PRODUCTION_ROOT_RE = /^(crates|packages)\/[^/]+/;
+const REPO_CITATION_RE = /^(?:crates|packages|tests|scripts|docs|examples)\/[^\s`*{}]+$/;
+const REPO_CITATION_EXT_RE = /\.(?:rs|ts|tsx|mts|cts|js|mjs|cjs|json|md|toml|ya?ml)$/;
+const TEST_ONLY_SYMBOL_RE = /^test_/;
+const TEST_ONLY_CALL_RE = /\btest_[a-z_]+\(/;
+
+export const CONTRIBUTOR_MODEL_REL =
+  "tests/documentation/DOC2/products/contributor-docs-model.v1.json";
 
 const REQUIRED_SDK_GUIDE_TOPICS = [
   "compatibility",
@@ -39,9 +48,32 @@ const REQUIRED_RECIPE_TOPICS = [
   "security",
   "tests",
 ];
+/**
+ * Entry kind each SDK guide topic requires from its supplied example, as
+ * fixed by the topic pages: a shipped-bin `command`, a public package
+ * `import`, or `any` of the two.
+ */
+const SDK_TOPIC_ENTRY_KIND = Object.freeze({
+  compatibility: "command",
+  contribution: "command",
+  debugging: "command",
+  isolation: "import",
+  packaging: "command",
+  permissions: "command",
+});
 const JOURNEY_EXECUTION_CLASSES = ["NodeOnly", "NativeOnly"];
 const JOURNEY_STEP_TIMEOUT_MS = 60_000;
 const EXECUTABLE_SOURCE_EXTENSIONS = new Set([".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"]);
+const SHELL_OPERATOR_RE = /&&|\|\||[;|<>`\n]|\$\(/;
+const NODE_PIN_RANGE_RE = /^(>=|>|=|)\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/;
+/** Bytes of child stderr retained in a receipt; the rest is discarded. */
+const CHILD_STDERR_LIMIT = 64 * 1024;
+/**
+ * Identity of the digest algorithm and its input set. Bump when the set of
+ * material inputs or the hashing scheme changes, so an old receipt can never
+ * match a receipt computed under different rules.
+ */
+const DIGEST_SCHEMA = "docs-reference-harness-digest/2";
 
 export const HARNESS_ID = "docs-reference-harness";
 
@@ -51,6 +83,99 @@ export function posixRel(from, to) {
 
 export function sha256Text(text) {
   return createHash("sha256").update(text.replace(/\r\n/g, "\n"), "utf8").digest("hex");
+}
+
+/**
+ * Streaming counterpart of `sha256Text`: hashes chunks as they arrive with
+ * the same CRLF normalization (a `\r` at a chunk boundary is held back until
+ * the next chunk decides whether it opens a `\r\n` pair).
+ */
+export function createTextDigester() {
+  const hash = createHash("sha256");
+  let pendingCr = false;
+  return {
+    update(chunk) {
+      let text = String(chunk);
+      if (pendingCr) {
+        text = `\r${text}`;
+        pendingCr = false;
+      }
+      if (text.endsWith("\r")) {
+        pendingCr = true;
+        text = text.slice(0, -1);
+      }
+      hash.update(text.replace(/\r\n/g, "\n"), "utf8");
+    },
+    digest() {
+      if (pendingCr) {
+        hash.update("\r", "utf8");
+        pendingCr = false;
+      }
+      return hash.digest("hex");
+    },
+  };
+}
+
+/** Retains at most `limit` characters of a stream; later chunks are dropped. */
+export function createBoundedText(limit = CHILD_STDERR_LIMIT) {
+  let text = "";
+  let truncated = false;
+  return {
+    update(chunk) {
+      if (text.length >= limit) {
+        truncated = true;
+        return;
+      }
+      const room = limit - text.length;
+      const piece = String(chunk);
+      if (piece.length > room) truncated = true;
+      text += piece.slice(0, room);
+    },
+    value() {
+      return text;
+    },
+    truncated() {
+      return truncated;
+    },
+  };
+}
+
+/** Whether `rel` resolves to a path strictly inside `root` (separator-bounded). */
+export function isInsideDir(root, rel) {
+  const base = resolve(root);
+  const target = resolve(base, rel);
+  const between = relative(base, target);
+  return between !== "" && !between.startsWith("..") && !isAbsoluteLike(between);
+}
+
+function isAbsoluteLike(rel) {
+  return rel.startsWith("/") || rel.startsWith("\\") || /^[A-Za-z]:/.test(rel);
+}
+
+function parseVersion(text) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(String(text).trim());
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/**
+ * Checks a manifest engine pin such as `>=22`, `>=22.1`, `22.4.0` or `v22`
+ * against a running version. Returns `null` for a pin outside that grammar.
+ */
+export function nodePinSatisfied(pin, version) {
+  const match = NODE_PIN_RANGE_RE.exec(String(pin).trim());
+  const running = parseVersion(version);
+  if (!match || !running) return null;
+  const operator = match[1] || "=";
+  const wanted = [Number(match[2]), Number(match[3] ?? 0), Number(match[4] ?? 0)];
+  let compare = 0;
+  for (let index = 0; index < 3 && compare === 0; index += 1) {
+    compare = Math.sign(running[index] - wanted[index]);
+  }
+  if (operator === ">=") return compare >= 0;
+  if (operator === ">") return compare > 0;
+  if (match[3] == null) return running[0] === wanted[0];
+  if (match[4] == null) return running[0] === wanted[0] && running[1] === wanted[1];
+  return compare === 0;
 }
 
 export function splitPackageSpecifier(specifier) {
@@ -81,7 +206,7 @@ function exportEntry(exportsField, subpath) {
   return entry.import ?? entry.default ?? entry.require ?? entry.types ?? null;
 }
 
-function walkPackageJsonFiles(repoRoot) {
+export function workspacePackageJsonFiles(repoRoot) {
   const roots = [join(repoRoot, "packages")];
   const files = [];
   for (const root of roots) {
@@ -105,7 +230,7 @@ function walkPackageJsonFiles(repoRoot) {
 
 export function loadWorkspacePackages(repoRoot, readFile = defaultRead) {
   const byName = new Map();
-  for (const file of walkPackageJsonFiles(repoRoot)) {
+  for (const file of workspacePackageJsonFiles(repoRoot)) {
     const pkg = JSON.parse(readFile(file));
     if (!pkg.name) continue;
     const dir = dirname(file);
@@ -173,6 +298,9 @@ export function shippedBins(packages) {
 }
 
 export function resolveShippedCommand(bins, command) {
+  if (SHELL_OPERATOR_RE.test(command)) {
+    return { ok: false, code: "compound-command", command };
+  }
   const name = command.trim().split(/\s+/)[0];
   if (!name) return { ok: false, code: "empty-command", command };
   if (name === "cargo" || name === "rustc" || name === "xtask") {
@@ -248,6 +376,17 @@ export function extractMarkdownHrefs(source) {
   return found;
 }
 
+export function extractRepoCitations(source) {
+  const found = [];
+  INLINE_CODE_RE.lastIndex = 0;
+  let match;
+  while ((match = INLINE_CODE_RE.exec(source))) {
+    const span = match[1].trim();
+    if (REPO_CITATION_RE.test(span) && REPO_CITATION_EXT_RE.test(span)) found.push(span);
+  }
+  return [...new Set(found)];
+}
+
 function isInternalRelative(repoRoot, fromDir, specifier) {
   if (!specifier.startsWith(".")) return false;
   const resolved = resolve(fromDir, specifier);
@@ -280,8 +419,8 @@ async function runTypeinfoCheck(repoRoot, signal) {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
+    const stdout = createTextDigester();
+    const stderr = createBoundedText();
     const onAbort = () => {
       child.kill();
     };
@@ -292,16 +431,32 @@ async function runTypeinfoCheck(repoRoot, signal) {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      stdout.update(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      stderr.update(chunk);
     });
     child.on("close", (code, killedBy) => {
       if (signal) signal.removeEventListener("abort", onAbort);
-      resolvePromise({ code: code ?? 1, signal: killedBy ?? null, stdout, stderr });
+      resolvePromise({
+        code: code ?? 1,
+        signal: killedBy ?? null,
+        stdoutDigest: stdout.digest(),
+        stderr: stderr.value(),
+      });
     });
   });
+}
+
+/**
+ * Classifies a finished journey child: `cancelled` only when the caller's
+ * signal aborted it; a child that died by any other signal is a failed step.
+ */
+export function classifyJourneyOutcome(outcome, aborted) {
+  if (outcome.timedOut) return "timed-out";
+  if (aborted) return "cancelled";
+  if (outcome.signal) return "signalled";
+  return "exited";
 }
 
 function runJourneyProcess(repoRoot, args, timeoutMs, signal) {
@@ -311,8 +466,8 @@ function runJourneyProcess(repoRoot, args, timeoutMs, signal) {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
+    const stdout = createTextDigester();
+    const stderr = createBoundedText();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -328,23 +483,111 @@ function runJourneyProcess(repoRoot, args, timeoutMs, signal) {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      stdout.update(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      stderr.update(chunk);
     });
     child.on("close", (code, killedBy) => {
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
       resolvePromise({
-        exitCode: timedOut ? null : code ?? 1,
+        exitCode: timedOut ? null : (code ?? 1),
         signal: killedBy ?? null,
         timedOut,
-        stdoutDigest: sha256Text(stdout),
-        stderr,
+        stdoutDigest: stdout.digest(),
+        stderr: stderr.value(),
       });
     });
   });
+}
+
+/**
+ * Checks the example home's declared engine and package pins against the
+ * running Node version and the workspace root manifest: a pin the harness
+ * cannot honour is a validation error, never a silently ignored field.
+ */
+export function validateManifestPins(pin, rootManifestBytes) {
+  if (pin == null) return [];
+  const errors = [];
+  if (typeof pin !== "object" || Array.isArray(pin)) {
+    return [err("pin-invalid", "manifest pin must be an object")];
+  }
+  if (pin.node != null) {
+    const satisfied = nodePinSatisfied(pin.node, process.version);
+    if (satisfied == null) {
+      errors.push(
+        err("pin-invalid", "manifest node pin is not a supported range", { pin: pin.node }),
+      );
+    } else if (!satisfied) {
+      errors.push(
+        err("pin-mismatch", "running node does not satisfy the manifest pin", {
+          package: "node",
+          pin: pin.node,
+          actual: process.version,
+        }),
+      );
+    }
+  }
+  let root = null;
+  if (rootManifestBytes != null) {
+    try {
+      root = JSON.parse(rootManifestBytes);
+    } catch {
+      root = null;
+    }
+  }
+  for (const name of Object.keys(pin)
+    .filter((key) => key !== "node")
+    .sort()) {
+    const wanted = pin[name];
+    if (typeof wanted !== "string" || wanted.length === 0) {
+      errors.push(
+        err("pin-invalid", "manifest package pin must be an exact version", { package: name }),
+      );
+      continue;
+    }
+    const actual = root?.devDependencies?.[name] ?? root?.dependencies?.[name] ?? null;
+    if (actual !== wanted) {
+      errors.push(
+        err("pin-mismatch", "manifest package pin differs from the workspace root manifest", {
+          package: name,
+          pin: wanted,
+          actual,
+        }),
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Entry kinds an example actually supplies: a shipped bin its commands
+ * resolve to, and public package exports its imports resolve to. Node
+ * builtins, relative files and peers are not entries into the SDK.
+ */
+export function resolvedEntryKinds(example, facts, packages, bins) {
+  const kinds = new Set();
+  for (const command of facts?.commands ?? example.commands ?? []) {
+    if (resolveShippedCommand(bins, command).ok) kinds.add("command");
+  }
+  for (const specifier of example.imports ?? []) {
+    if (splitPackageSpecifier(specifier).kind !== "package") continue;
+    if (resolvePackageExport(packages, specifier).ok) kinds.add("import");
+  }
+  return kinds;
+}
+
+function duplicateIds(rows) {
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const row of rows) {
+    const id = row?.id;
+    if (typeof id !== "string") continue;
+    if (seen.has(id)) duplicates.add(id);
+    seen.add(id);
+  }
+  return [...duplicates].sort();
 }
 
 export async function validate(options = {}) {
@@ -355,6 +598,10 @@ export async function validate(options = {}) {
   const errors = [];
   const read = (abs) => readAbs(abs, overlays, repoRoot);
   const exists = (abs) => existsAbs(abs, overlays, repoRoot);
+  const overlayFor = (abs) => {
+    const rel = posixRel(repoRoot, abs);
+    return Object.prototype.hasOwnProperty.call(overlays, rel) ? rel : null;
+  };
 
   const receipt = {
     completenessState: "complete",
@@ -371,6 +618,7 @@ export async function validate(options = {}) {
     recipes: null,
     journeys: [],
     generatedReference: null,
+    contributorDocs: null,
     links: [],
     capabilities: [],
     errors: [],
@@ -404,14 +652,27 @@ export async function validate(options = {}) {
     receipt.errors = errors;
     return receipt;
   }
-  const plan = JSON.parse(read(planPath));
+  // Every material validation input joins the source digest, so a receipt
+  // computed under different inputs (or a different digest rule set) can
+  // never match as incremental.
+  const digestEntries = [{ path: "harness:digest-schema", bytes: DIGEST_SCHEMA }];
+  const planBytes = read(planPath);
+  digestEntries.push({ path: posixRel(repoRoot, planPath), bytes: planBytes });
+  const plan = JSON.parse(planBytes);
   const catalogSurfaces = new Set(plan.capabilityMatrix?.surfaceIds ?? []);
   const expectedLint = plan.lintReference?.ruleCount ?? null;
 
   const packages = loadWorkspacePackages(repoRoot, (abs) => read(abs));
   const bins = shippedBins(packages);
+  for (const file of workspacePackageJsonFiles(repoRoot)) {
+    digestEntries.push({ path: posixRel(repoRoot, file), bytes: read(file) });
+  }
+  const rootManifestPath = join(repoRoot, "package.json");
+  const rootManifestBytes = exists(rootManifestPath) ? read(rootManifestPath) : null;
+  if (rootManifestBytes != null) {
+    digestEntries.push({ path: posixRel(repoRoot, rootManifestPath), bytes: rootManifestBytes });
+  }
 
-  const digestEntries = [];
   const manifestPath = join(examplesRoot, "manifest.json");
   if (!exists(manifestPath)) {
     fail(
@@ -429,6 +690,7 @@ export async function validate(options = {}) {
   if (!Array.isArray(manifest.examples) || manifest.examples.length === 0) {
     fail(err("empty-examples", "public example home declares no examples"));
   }
+  for (const item of validateManifestPins(manifest.pin, rootManifestBytes)) fail(item);
 
   const byId = new Map();
   for (const example of manifest.examples ?? []) {
@@ -473,6 +735,16 @@ export async function validate(options = {}) {
     const seenSpecifiers = [];
     let fileOk = true;
     for (const relFile of files) {
+      if (typeof relFile !== "string" || !isInsideDir(examplesRoot, relFile)) {
+        fail(
+          err("example-outside-home", "example source must live inside the example home", {
+            id,
+            file: relFile,
+          }),
+        );
+        fileOk = false;
+        continue;
+      }
       const abs = join(examplesRoot, relFile);
       if (!exists(abs)) {
         fail(err("missing-source", "example source is missing", { id, file: relFile }));
@@ -545,8 +817,10 @@ export async function validate(options = {}) {
       if ((example.peers ?? []).includes(specifier) || (example.peers ?? []).includes(split.name)) {
         continue;
       }
-      if (!packages.has(split.name)) continue;
-      if (!declaredImports.has(specifier) && !declaredImports.has(split.name)) {
+      // Only the exact declared specifier is already validated above; an
+      // observed subpath of a declared package must resolve on its own, and
+      // an undeclared package that is not a peer is unknown here.
+      if (!declaredImports.has(specifier)) {
         const resolved = resolvePackageExport(packages, specifier);
         if (!resolved.ok) {
           fail(
@@ -638,6 +912,9 @@ export async function validate(options = {}) {
     const declaredIds = new Set(
       declaredTopics.map((topic) => topic?.id).filter((id) => typeof id === "string"),
     );
+    for (const id of duplicateIds(declaredTopics)) {
+      fail(err("sdk-duplicate-topic", "sdk guide topic is declared more than once", { id }));
+    }
     const missingTopics = REQUIRED_SDK_GUIDE_TOPICS.filter((id) => !declaredIds.has(id));
     if (missingTopics.length > 0) {
       fail(
@@ -673,10 +950,26 @@ export async function validate(options = {}) {
       } else {
         const bytes = read(indexAbs);
         digestEntries.push({ path: posixRel(repoRoot, indexAbs), bytes });
+        const indexHrefs = extractMarkdownHrefs(bytes).filter(
+          (href) => !/^[a-z]+:/i.test(href) && !href.startsWith("#"),
+        );
+        for (const href of indexHrefs) {
+          const target = resolve(dirname(indexAbs), href.split("#")[0]);
+          receipt.links.push({ from: posixRel(repoRoot, indexAbs), href, ok: exists(target) });
+          if (!exists(target)) {
+            fail(
+              err("broken-link", "sdk guide index link does not resolve", {
+                id: "index",
+                file: indexRelPath,
+                href,
+              }),
+            );
+          }
+        }
         listedPages = new Set(
-          extractMarkdownHrefs(bytes)
-            .filter((href) => !/^[a-z]+:/i.test(href) && !href.startsWith("#"))
-            .map((href) => posixRel(examplesRoot, resolve(dirname(indexAbs), href.split("#")[0]))),
+          indexHrefs.map((href) =>
+            posixRel(examplesRoot, resolve(dirname(indexAbs), href.split("#")[0])),
+          ),
         );
       }
     }
@@ -777,17 +1070,33 @@ export async function validate(options = {}) {
             );
             topicOk = false;
           }
-          const hasEntry =
-            (example.commands ?? []).length > 0 || (example.imports ?? []).length > 0;
-          if (!hasEntry) {
+          const entryKinds = resolvedEntryKinds(
+            example,
+            exampleFacts.get(topic.exampleId),
+            packages,
+            bins,
+          );
+          if (entryKinds.size === 0) {
             fail(
               err(
                 "sdk-example-without-entry",
-                "supplied sdk guide example declares no shipped command or public import",
+                "supplied sdk guide example resolves no shipped command or public import",
                 { id, exampleId: topic.exampleId },
               ),
             );
             topicOk = false;
+          } else {
+            const required = SDK_TOPIC_ENTRY_KIND[id] ?? "any";
+            if (required !== "any" && !entryKinds.has(required)) {
+              fail(
+                err(
+                  "sdk-example-entry-kind",
+                  "supplied sdk guide example lacks the entry kind its topic page requires",
+                  { id, exampleId: topic.exampleId, required, supplied: [...entryKinds].sort() },
+                ),
+              );
+              topicOk = false;
+            }
           }
         }
       }
@@ -826,6 +1135,9 @@ export async function validate(options = {}) {
     const declaredRecipeIds = new Set(
       declaredTopics.map((topic) => topic?.id).filter((id) => typeof id === "string"),
     );
+    for (const id of duplicateIds(declaredTopics)) {
+      fail(err("recipes-duplicate-topic", "recipe topic is declared more than once", { id }));
+    }
     const missingRecipeTopics = REQUIRED_RECIPE_TOPICS.filter((id) => !declaredRecipeIds.has(id));
     if (missingRecipeTopics.length > 0) {
       fail(
@@ -865,10 +1177,7 @@ export async function validate(options = {}) {
           extractMarkdownHrefs(bytes)
             .filter((href) => !/^[a-z]+:/i.test(href) && !href.startsWith("#"))
             .map((href) =>
-              posixRel(
-                examplesRoot,
-                resolve(dirname(recipeIndexAbs), href.split("#")[0]),
-              ),
+              posixRel(examplesRoot, resolve(dirname(recipeIndexAbs), href.split("#")[0])),
             ),
         );
       }
@@ -960,9 +1269,7 @@ export async function validate(options = {}) {
         } else {
           const facts = exampleFacts.get(topic.exampleId);
           const files = facts?.files ?? [];
-          const executable = files.some((file) =>
-            EXECUTABLE_SOURCE_EXTENSIONS.has(extname(file)),
-          );
+          const executable = files.some((file) => EXECUTABLE_SOURCE_EXTENSIONS.has(extname(file)));
           if (!executable) {
             fail(
               err(
@@ -973,13 +1280,11 @@ export async function validate(options = {}) {
             );
             topicOk = false;
           }
-          const hasEntry =
-            (facts?.commands ?? []).length > 0 || (example.imports ?? []).length > 0;
-          if (!hasEntry) {
+          if (resolvedEntryKinds(example, facts, packages, bins).size === 0) {
             fail(
               err(
                 "recipes-example-without-entry",
-                "supplied recipe example declares no shipped command or public import",
+                "supplied recipe example resolves no shipped command or public import",
                 { id, exampleId: topic.exampleId },
               ),
             );
@@ -1027,7 +1332,10 @@ export async function validate(options = {}) {
   }
 
   const declaredJourneys = manifest.journeys;
-  if (declaredJourneys != null && (!Array.isArray(declaredJourneys) || declaredJourneys.length === 0)) {
+  if (
+    declaredJourneys != null &&
+    (!Array.isArray(declaredJourneys) || declaredJourneys.length === 0)
+  ) {
     fail(err("journeys-empty", "the example home declares an empty journeys model"));
   }
   const journeyRows = [];
@@ -1098,9 +1406,13 @@ export async function validate(options = {}) {
       }
       if ((stepRow.file == null) === (stepRow.command == null)) {
         fail(
-          err("journey-step-entry-invalid", "journey step needs exactly one file or command entry", {
-            journey: id,
-          }),
+          err(
+            "journey-step-entry-invalid",
+            "journey step needs exactly one file or command entry",
+            {
+              journey: id,
+            },
+          ),
         );
         stepOk = false;
       }
@@ -1212,9 +1524,12 @@ export async function validate(options = {}) {
         const step = row.steps[index];
         let entry;
         let spawnArgs;
+        let overlaid = null;
         if (step.file != null) {
           entry = { file: step.file };
-          spawnArgs = [join(examplesRoot, step.file), ...step.args];
+          const fileAbs = join(examplesRoot, step.file);
+          spawnArgs = [fileAbs, ...step.args];
+          overlaid = overlayFor(fileAbs);
         } else {
           const bin = bins.get(resolveShippedCommand(bins, step.command).name);
           entry = {
@@ -1222,7 +1537,30 @@ export async function validate(options = {}) {
             package: bin?.package ?? null,
             packageVersion: bin?.version ?? null,
           };
-          spawnArgs = [join(bin.dir, bin.path), ...step.args];
+          const binAbs = join(bin.dir, bin.path);
+          spawnArgs = [binAbs, ...step.args];
+          overlaid = overlayFor(binAbs);
+        }
+        if (overlaid != null) {
+          // Static checks and the digest saw the overlay bytes; the child
+          // would run the on-disk file. Refuse rather than record runtime
+          // evidence for a source the receipt does not identify.
+          fail(
+            err("journey-step-overlaid", "journey step entry is overlaid and cannot be executed", {
+              journey: row.id,
+              ...entry,
+              overlay: overlaid,
+            }),
+          );
+          executedSteps.push({
+            ...entry,
+            args: step.args,
+            expectExit: step.expectExit,
+            exitCode: null,
+            stdoutDigest: null,
+            ok: false,
+          });
+          continue;
         }
         const outcome = await runJourneyProcess(repoRoot, spawnArgs, timeoutMs, signal);
         if (outcome.timedOut) {
@@ -1244,7 +1582,8 @@ export async function validate(options = {}) {
           });
           continue;
         }
-        if (signal?.aborted || outcome.signal) {
+        const classified = classifyJourneyOutcome(outcome, signal?.aborted === true);
+        if (classified === "cancelled") {
           cancelled = true;
           executedSteps.push({
             ...entry,
@@ -1255,6 +1594,26 @@ export async function validate(options = {}) {
             ok: false,
           });
           break;
+        }
+        if (classified === "signalled") {
+          fail(
+            err("journey-step-signalled", "journey step was terminated by a signal", {
+              journey: row.id,
+              ...entry,
+              signal: outcome.signal,
+              stderr: outcome.stderr.slice(0, 400),
+            }),
+          );
+          executedSteps.push({
+            ...entry,
+            args: step.args,
+            expectExit: step.expectExit,
+            exitCode: null,
+            signal: outcome.signal,
+            stdoutDigest: outcome.stdoutDigest,
+            ok: false,
+          });
+          continue;
         }
         const ok = outcome.exitCode === step.expectExit;
         if (!ok) {
@@ -1366,6 +1725,27 @@ export async function validate(options = {}) {
   }
 
   receipt.generatedReference = generated;
+
+  const contributor = await validateContributorDocs({
+    repoRoot,
+    read,
+    exists,
+    signal,
+    fail,
+    digestEntry: (path, bytes) => digestEntries.push({ path, bytes }),
+  });
+  if (contributor.cancelled) {
+    receipt.completenessState = "cancelled";
+    receipt.contributorDocs = contributor.fragment;
+    receipt.errors = [
+      ...errors,
+      err("cancelled", "validation aborted during contributor docs check"),
+    ];
+    receipt.sourceRevisions.digest = sourceDigest(digestEntries);
+    return receipt;
+  }
+  receipt.contributorDocs = contributor.fragment;
+
   receipt.sourceRevisions.digest = sourceDigest(digestEntries);
 
   if (
@@ -1387,7 +1767,10 @@ export async function validate(options = {}) {
       item.code === "missing-source" ||
       item.code === "partial-example" ||
       item.code === "sdk-page-missing" ||
-      item.code === "recipes-page-missing",
+      item.code === "recipes-page-missing" ||
+      item.code === "docs-page-missing" ||
+      item.code === "docs-index-missing" ||
+      item.code === "taught-path-missing",
   );
   const stale = errors.some(
     (item) => item.code === "stale-generated" || item.code === "stale-cache",
@@ -1409,14 +1792,605 @@ export function canonicalizeReceipt(receipt) {
   clone.sdkGuides?.topics?.sort((a, b) => a.id.localeCompare(b.id));
   clone.recipes?.topics?.sort((a, b) => a.id.localeCompare(b.id));
   clone.journeys?.sort((a, b) => a.id.localeCompare(b.id));
+  clone.contributorDocs?.pages?.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  clone.contributorDocs?.taughtInterfaces?.sort((a, b) =>
+    `${a.capability}:${a.path}:${a.symbol}:${a.taughtIn}`.localeCompare(
+      `${b.capability}:${b.path}:${b.symbol}:${b.taughtIn}`,
+    ),
+  );
+  clone.contributorDocs?.hotspots?.sort((a, b) => a.path.localeCompare(b.path));
   clone.links?.sort((a, b) => `${a.from}:${a.href}`.localeCompare(`${b.from}:${b.href}`));
-  clone.capabilities?.sort((a, b) => `${a.id}:${b.surface}`.localeCompare(`${a.id}:${b.surface}`));
+  clone.capabilities?.sort((a, b) => `${a.id}:${a.surface}`.localeCompare(`${b.id}:${b.surface}`));
   clone.errors?.sort((a, b) =>
     `${a.code}:${a.id ?? ""}:${a.specifier ?? a.command ?? a.path ?? ""}`.localeCompare(
       `${b.code}:${b.id ?? ""}:${b.specifier ?? b.command ?? b.path ?? ""}`,
     ),
   );
   return clone;
+}
+
+function canonicalContributorModelBytes(model) {
+  const sorted = Array.isArray(model?.pages) ? [...model.pages] : [];
+  sorted.sort((a, b) => String(a?.id ?? "").localeCompare(String(b?.id ?? "")));
+  const interfaces = Array.isArray(model?.taughtInterfaces) ? [...model.taughtInterfaces] : [];
+  interfaces.sort((a, b) =>
+    `${a?.capability ?? ""}:${a?.path ?? ""}:${a?.symbol ?? ""}:${a?.taughtIn ?? ""}`.localeCompare(
+      `${b?.capability ?? ""}:${b?.path ?? ""}:${b?.symbol ?? ""}:${b?.taughtIn ?? ""}`,
+    ),
+  );
+  const authorities = Array.isArray(model?.capabilityAuthorities)
+    ? [...model.capabilityAuthorities]
+    : [];
+  authorities.sort((a, b) =>
+    `${a?.capability ?? ""}:${a?.path ?? ""}`.localeCompare(
+      `${b?.capability ?? ""}:${b?.path ?? ""}`,
+    ),
+  );
+  const mappings = Array.isArray(model?.retainedSurfaceCapabilities)
+    ? [...model.retainedSurfaceCapabilities]
+    : [];
+  mappings.sort((a, b) =>
+    `${a?.hotspot ?? ""}:${a?.item ?? ""}`.localeCompare(`${b?.hotspot ?? ""}:${b?.item ?? ""}`),
+  );
+  return JSON.stringify({
+    ...model,
+    pages: sorted,
+    taughtInterfaces: interfaces,
+    capabilityAuthorities: authorities,
+    retainedSurfaceCapabilities: mappings,
+  });
+}
+
+function hotspotRetainedItems(hotspot) {
+  const surface = hotspot?.minimalPublicSurface ?? {};
+  const items = [];
+  for (const name of surface.retainedFns ?? []) items.push({ name, kind: "fn" });
+  for (const name of surface.retainedTypes ?? []) items.push({ name, kind: "type" });
+  for (const name of surface.retainedAssocItems ?? []) items.push({ name, kind: "assoc" });
+  if (items.length === 0 && typeof hotspot?.path === "string") {
+    items.push({ name: hotspot.path, kind: "module" });
+  }
+  return items;
+}
+
+function contributorOwnerRoots(contracts, responsibilityMap) {
+  const roots = new Set();
+  for (const row of responsibilityMap?.owners ?? []) {
+    if (typeof row?.module === "string") roots.add(row.module);
+  }
+  for (const rule of contracts?.layerRules ?? []) {
+    if (typeof rule?.crate === "string") roots.add(rule.crate);
+  }
+  for (const hotspot of contracts?.hotspots ?? []) {
+    if (typeof hotspot?.path === "string") roots.add(hotspot.path);
+    for (const module of hotspot?.cohesiveModules ?? []) {
+      if (typeof module?.module === "string") roots.add(module.module);
+    }
+  }
+  return roots;
+}
+
+function isUnderRoot(path, roots) {
+  for (const root of roots) {
+    if (path === root || path.startsWith(`${root}/`)) return true;
+  }
+  return false;
+}
+
+async function validateContributorDocs({ repoRoot, read, exists, signal, fail, digestEntry }) {
+  const modelAbs = join(repoRoot, ...CONTRIBUTOR_MODEL_REL.split("/"));
+  const fragment = {
+    model: CONTRIBUTOR_MODEL_REL,
+    index: null,
+    pages: [],
+    taughtInterfaces: [],
+    hotspots: [],
+  };
+  if (signal?.aborted) return { cancelled: true, fragment };
+  if (!exists(modelAbs)) {
+    fail(
+      err("contributor-model-missing", "contributor docs model is required", {
+        path: CONTRIBUTOR_MODEL_REL,
+      }),
+    );
+    return { cancelled: false, fragment };
+  }
+  const modelBytes = read(modelAbs);
+  let model;
+  try {
+    model = JSON.parse(modelBytes);
+  } catch {
+    fail(err("contributor-model-invalid", "contributor docs model is not valid JSON"));
+    return { cancelled: false, fragment };
+  }
+  digestEntry(CONTRIBUTOR_MODEL_REL, canonicalContributorModelBytes(model));
+
+  const sources = model.contractSources ?? {};
+  const contractsRel = sources.dependencyContracts;
+  const mapRel = sources.responsibilityMap;
+  const catalogRel = sources.capabilityCatalog;
+  if (
+    typeof contractsRel !== "string" ||
+    typeof mapRel !== "string" ||
+    typeof catalogRel !== "string"
+  ) {
+    fail(err("contributor-model-invalid", "model names no contract sources"));
+    return { cancelled: false, fragment };
+  }
+  let contracts = null;
+  let responsibilityMap = null;
+  let catalogSurfaces = new Set();
+  let catalogOk = false;
+  const contractsAbs = join(repoRoot, ...contractsRel.split("/"));
+  if (!exists(contractsAbs)) {
+    fail(
+      err("contract-source-missing", "dependency contracts product is missing", {
+        path: contractsRel,
+      }),
+    );
+  } else {
+    const contractsBytes = read(contractsAbs);
+    digestEntry(contractsRel, contractsBytes);
+    contracts = JSON.parse(contractsBytes);
+  }
+  const mapAbs = join(repoRoot, ...mapRel.split("/"));
+  if (!exists(mapAbs)) {
+    fail(err("contract-source-missing", "responsibility map product is missing", { path: mapRel }));
+  } else {
+    const mapBytes = read(mapAbs);
+    digestEntry(mapRel, mapBytes);
+    responsibilityMap = JSON.parse(mapBytes);
+  }
+  const catalogAbs = join(repoRoot, ...catalogRel.split("/"));
+  if (!exists(catalogAbs)) {
+    fail(
+      err("contract-source-missing", "capability catalog product is missing", {
+        path: catalogRel,
+      }),
+    );
+  } else {
+    const catalogBytes = read(catalogAbs);
+    digestEntry(catalogRel, catalogBytes);
+    const catalog = JSON.parse(catalogBytes);
+    catalogSurfaces = new Set(catalog?.capabilityMatrix?.surfaceIds ?? []);
+    catalogOk = true;
+  }
+  if (contracts == null || responsibilityMap == null || !catalogOk) {
+    return { cancelled: false, fragment };
+  }
+  const ownerRoots = contributorOwnerRoots(contracts, responsibilityMap);
+  const contractHotspots = new Set(
+    (contracts.hotspots ?? []).map((hotspot) => hotspot?.path).filter(Boolean),
+  );
+
+  const indexRelPath = typeof model.index === "string" ? model.index : null;
+  const indexAbs = indexRelPath != null ? join(repoRoot, ...indexRelPath.split("/")) : null;
+  if (indexRelPath == null || !indexRelPath.endsWith(".md") || !exists(indexAbs)) {
+    fail(err("docs-index-missing", "contributor index page is missing", { path: indexRelPath }));
+    return { cancelled: false, fragment };
+  }
+  fragment.index = indexRelPath;
+  const indexBytes = read(indexAbs);
+  digestEntry(indexRelPath, indexBytes);
+  const indexDir = dirname(indexAbs);
+  const listedPages = new Set(
+    extractMarkdownHrefs(indexBytes)
+      .filter((href) => !/^[a-z]+:/i.test(href) && !href.startsWith("#"))
+      .map((href) => posixRel(repoRoot, resolve(indexDir, href.split("#")[0]))),
+  );
+
+  const documentedHotspots = new Set();
+  const seenPageIds = new Set();
+  const pageBytesByPath = new Map();
+  const digestedTaught = new Set();
+  const declaredPages = Array.isArray(model.pages) ? model.pages : [];
+  const declaredPagePaths = new Set(
+    declaredPages.map((page) => page?.path).filter((path) => typeof path === "string"),
+  );
+  if (declaredPages.length === 0) {
+    fail(err("contributor-model-invalid", "model declares no pages"));
+  }
+  for (const page of declaredPages) {
+    if (signal?.aborted) return { cancelled: true, fragment };
+    const id = typeof page?.id === "string" ? page.id : null;
+    const path = typeof page?.path === "string" ? page.path : null;
+    let pageOk = true;
+    if (!id || seenPageIds.has(id)) {
+      fail(err("contributor-model-invalid", "page row needs a unique id", { id }));
+      pageOk = false;
+    }
+    if (id) seenPageIds.add(id);
+    if (path == null || !path.endsWith(".md")) {
+      fail(err("docs-page-missing", "page declares no markdown path", { id, path }));
+      fragment.pages.push({ id, path, listed: false, ok: false });
+      continue;
+    }
+    const pageAbs = join(repoRoot, ...path.split("/"));
+    if (!exists(pageAbs)) {
+      fail(err("docs-page-missing", "contributor page is missing", { id, path }));
+      fragment.pages.push({ id, path, listed: false, ok: false });
+      continue;
+    }
+    const bytes = read(pageAbs);
+    digestEntry(path, bytes);
+    pageBytesByPath.set(path, bytes);
+    const listed = listedPages.has(path) || listedPages.has(path.replace(/\.md$/, ""));
+    if (!listed) {
+      fail(err("docs-page-unlisted", "page is not listed by the contributor index", { id, path }));
+      pageOk = false;
+    }
+    const pageDir = dirname(pageAbs);
+    for (const href of extractMarkdownHrefs(bytes)) {
+      if (/^[a-z]+:/i.test(href) || href.startsWith("#")) continue;
+      const target = resolve(pageDir, href.split("#")[0]);
+      if (!exists(target)) {
+        fail(err("broken-link", "contributor page link does not resolve", { id, path, href }));
+        pageOk = false;
+      }
+    }
+    for (const citation of page.requiredCitations ?? []) {
+      const citationAbs = join(repoRoot, ...String(citation).split("/"));
+      if (!exists(citationAbs)) {
+        fail(
+          err("broken-citation", "required citation is absent from the tree", {
+            id,
+            path,
+            citation,
+          }),
+        );
+        pageOk = false;
+        continue;
+      }
+      if (!bytes.includes(String(citation))) {
+        fail(
+          err("contract-citation-missing", "page cites a required contract source", {
+            id,
+            path,
+            citation,
+          }),
+        );
+        pageOk = false;
+      }
+    }
+    for (const citation of extractRepoCitations(bytes)) {
+      const citationAbs = join(repoRoot, ...citation.split("/"));
+      if (!exists(citationAbs)) {
+        fail(err("broken-citation", "cited repo path does not exist", { id, path, citation }));
+        pageOk = false;
+      }
+    }
+    const taughtCall = bytes.match(TEST_ONLY_CALL_RE);
+    if (taughtCall) {
+      fail(
+        err("test-only-api", "contribution docs must not teach test-only hooks", {
+          id,
+          path,
+          symbol: taughtCall[0].slice(0, -1),
+        }),
+      );
+      pageOk = false;
+    }
+    for (const hotspot of page.documentsHotspots ?? []) {
+      if (!contractHotspots.has(hotspot)) {
+        fail(
+          err("unknown-hotspot", "page names a hotspot absent from the contracts", {
+            id,
+            hotspot,
+          }),
+        );
+        pageOk = false;
+        continue;
+      }
+      documentedHotspots.add(hotspot);
+    }
+    fragment.pages.push({ id, path, listed, ok: pageOk });
+  }
+
+  const authorityByCapability = new Map();
+  for (const row of Array.isArray(model.capabilityAuthorities) ? model.capabilityAuthorities : []) {
+    const capability = typeof row?.capability === "string" ? row.capability : null;
+    const path = typeof row?.path === "string" ? row.path : null;
+    if (!capability || !path) {
+      fail(
+        err("contributor-model-invalid", "capability authority row is incomplete", {
+          capability,
+          path,
+        }),
+      );
+      continue;
+    }
+    const prior = authorityByCapability.get(capability);
+    if (prior && prior !== path) {
+      fail(
+        err("second-authority", "one capability is bound to two authority paths", {
+          capability,
+          paths: [prior, path].sort(),
+        }),
+      );
+    }
+    authorityByCapability.set(capability, path);
+  }
+
+  const capabilityRoots = new Map();
+  const declaredInterfaces = Array.isArray(model.taughtInterfaces) ? model.taughtInterfaces : [];
+  for (const row of declaredInterfaces) {
+    if (signal?.aborted) return { cancelled: true, fragment };
+    const capability = typeof row?.capability === "string" ? row.capability : null;
+    const path = typeof row?.path === "string" ? row.path : null;
+    const symbol = typeof row?.symbol === "string" ? row.symbol : null;
+    const taughtIn = typeof row?.taughtIn === "string" ? row.taughtIn : null;
+    let rowOk = true;
+    if (!capability || !path || !symbol || !taughtIn) {
+      fail(err("contributor-model-invalid", "taught interface row is incomplete", { path }));
+      fragment.taughtInterfaces.push({
+        capability,
+        path,
+        symbol,
+        taughtIn,
+        ok: false,
+      });
+      continue;
+    }
+    const taughtAbs = join(repoRoot, ...path.split("/"));
+    if (!exists(taughtAbs)) {
+      fail(err("taught-path-missing", "taught interface source is missing", { capability, path }));
+      fragment.taughtInterfaces.push({ capability, path, symbol, taughtIn, ok: false });
+      continue;
+    }
+    const taughtBytes = read(taughtAbs);
+    if (!digestedTaught.has(path)) {
+      digestEntry(path, taughtBytes);
+      digestedTaught.add(path);
+    }
+    if (!taughtBytes.includes(symbol)) {
+      fail(
+        err("taught-symbol-missing", "taught symbol is absent from its source", {
+          capability,
+          path,
+          symbol,
+        }),
+      );
+      rowOk = false;
+    }
+    if (!declaredPagePaths.has(taughtIn)) {
+      fail(
+        err("taught-page-unbound", "taughtIn is not a declared contributor page", {
+          capability,
+          path,
+          symbol,
+          taughtIn,
+        }),
+      );
+      rowOk = false;
+    } else {
+      const pageBytes = pageBytesByPath.get(taughtIn);
+      if (pageBytes == null) {
+        fail(
+          err("taught-page-unbound", "taughtIn page could not be read", {
+            capability,
+            path,
+            symbol,
+            taughtIn,
+          }),
+        );
+        rowOk = false;
+      } else {
+        if (!pageBytes.includes(symbol)) {
+          fail(
+            err(
+              "taught-page-missing-symbol",
+              "taught symbol is absent from its documentation page",
+              {
+                capability,
+                path,
+                symbol,
+                taughtIn,
+              },
+            ),
+          );
+          rowOk = false;
+        }
+        if (!pageBytes.includes(path)) {
+          fail(
+            err("taught-page-missing-path", "taught path is absent from its documentation page", {
+              capability,
+              path,
+              symbol,
+              taughtIn,
+            }),
+          );
+          rowOk = false;
+        }
+      }
+    }
+    if (TEST_ONLY_SYMBOL_RE.test(symbol)) {
+      fail(
+        err("test-only-api", "contribution docs must not teach test-only hooks", {
+          capability,
+          path,
+          symbol,
+        }),
+      );
+      rowOk = false;
+    }
+    if (!PRODUCTION_ROOT_RE.test(path)) {
+      fail(
+        err("unowned-taught-path", "taught interface is not a production source", {
+          capability,
+          path,
+          reason: "non-production-root",
+        }),
+      );
+      rowOk = false;
+    } else if (!isUnderRoot(path, ownerRoots)) {
+      fail(
+        err("unowned-taught-path", "taught interface has no recorded owner", {
+          capability,
+          path,
+          reason: "unowned-root",
+        }),
+      );
+      rowOk = false;
+    }
+    const declaredAuthority = authorityByCapability.get(capability);
+    if (!declaredAuthority) {
+      fail(
+        err("authority-mismatch", "taught capability has no declared authority", {
+          capability,
+          path,
+        }),
+      );
+      rowOk = false;
+    } else if (path !== declaredAuthority) {
+      fail(
+        err("authority-mismatch", "taught interface is not the declared authority", {
+          capability,
+          path,
+          authority: declaredAuthority,
+        }),
+      );
+      rowOk = false;
+    }
+    const roots = capabilityRoots.get(capability) ?? new Set();
+    roots.add(path);
+    capabilityRoots.set(capability, roots);
+    if (roots.size > 1) {
+      fail(
+        err("second-authority", "one capability is taught from two module roots", {
+          capability,
+          path,
+          roots: [...roots].sort(),
+        }),
+      );
+      rowOk = false;
+    }
+    fragment.taughtInterfaces.push({ capability, path, symbol, taughtIn, ok: rowOk });
+  }
+
+  const hotspotPaths = [...contractHotspots].sort();
+  for (const path of hotspotPaths) {
+    const documented = documentedHotspots.has(path);
+    if (!documented) {
+      fail(err("hotspot-undocumented", "contract hotspot is not documented by any page", { path }));
+    }
+    fragment.hotspots.push({ path, documented });
+  }
+
+  const architecturePageRel = (model.pages ?? []).find(
+    (page) => page?.id === "architecture-contracts",
+  )?.path;
+  const architectureBytes =
+    typeof architecturePageRel === "string" ? pageBytesByPath.get(architecturePageRel) : null;
+  const mappingByHotspot = new Map();
+  for (const row of Array.isArray(model.retainedSurfaceCapabilities)
+    ? model.retainedSurfaceCapabilities
+    : []) {
+    const hotspot = typeof row?.hotspot === "string" ? row.hotspot : null;
+    const item = typeof row?.item === "string" ? row.item : "*";
+    const catalogIds = Array.isArray(row?.catalogIds) ? row.catalogIds.filter(Boolean) : [];
+    if (!hotspot || catalogIds.length === 0) {
+      fail(
+        err("contributor-model-invalid", "retained surface capability row is incomplete", {
+          hotspot,
+          item,
+        }),
+      );
+      continue;
+    }
+    const byItem = mappingByHotspot.get(hotspot) ?? new Map();
+    byItem.set(item, catalogIds);
+    mappingByHotspot.set(hotspot, byItem);
+  }
+  for (const hotspot of contracts.hotspots ?? []) {
+    if (typeof hotspot?.path !== "string") continue;
+    const byItem = mappingByHotspot.get(hotspot.path) ?? new Map();
+    for (const item of hotspotRetainedItems(hotspot)) {
+      const catalogIds = byItem.get(item.name) ?? byItem.get("*") ?? [];
+      if (catalogIds.length === 0) {
+        fail(
+          err("surface-unmapped", "retained surface has no catalog capability mapping", {
+            hotspot: hotspot.path,
+            item: item.name,
+            kind: item.kind,
+          }),
+        );
+        continue;
+      }
+      for (const id of catalogIds) {
+        if (!catalogSurfaces.has(id)) {
+          fail(
+            err("unknown-catalog-id", "mapped catalog id is absent from the capability catalog", {
+              hotspot: hotspot.path,
+              item: item.name,
+              catalogId: id,
+            }),
+          );
+        }
+        if (architectureBytes != null && !architectureBytes.includes(id)) {
+          fail(
+            err(
+              "surface-capability-undocumented",
+              "mapped catalog id is absent from the architecture page",
+              {
+                hotspot: hotspot.path,
+                item: item.name,
+                catalogId: id,
+              },
+            ),
+          );
+        }
+      }
+      const documentedName = item.kind === "module" ? item.name : `\`${item.name}\``;
+      if (architectureBytes != null && !architectureBytes.includes(documentedName)) {
+        fail(
+          err("surface-undocumented", "retained surface is absent from the architecture page", {
+            hotspot: hotspot.path,
+            item: item.name,
+            kind: item.kind,
+          }),
+        );
+      }
+    }
+  }
+  if (architectureBytes != null && typeof contracts.candidate === "string") {
+    if (!architectureBytes.includes(contracts.candidate)) {
+      fail(
+        err(
+          "population-basis-missing",
+          "architecture page does not name the contract candidate SHA",
+          {
+            candidate: contracts.candidate,
+          },
+        ),
+      );
+    }
+    const basis = model.populationEvidenceBasis ?? {};
+    for (const token of [
+      basis.originalHostProfileNote,
+      basis.liveRederivationHost,
+      basis.liveRederivationNode,
+      basis.liveRederivationCommand,
+    ]) {
+      if (typeof token === "string" && token && !architectureBytes.includes(token)) {
+        fail(
+          err(
+            "population-basis-missing",
+            "architecture page omits a declared population-evidence token",
+            {
+              token,
+            },
+          ),
+        );
+      }
+    }
+  }
+  fragment.pages.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  fragment.taughtInterfaces.sort((a, b) =>
+    `${a.capability}:${a.path}:${a.symbol}:${a.taughtIn}`.localeCompare(
+      `${b.capability}:${b.path}:${b.symbol}:${b.taughtIn}`,
+    ),
+  );
+  return { cancelled: false, fragment };
 }
 
 async function main() {

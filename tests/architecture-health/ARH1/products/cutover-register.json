@@ -7,8 +7,8 @@
   "rows": [
     {
       "id": "ARH1-CUT-1",
-      "candidatePath": "packages/core",
-      "decision": "delete the placeholder",
+      "candidatePath": "tests/architecture-health/ARH2/products/characterization.json",
+      "decision": "delete the placeholder (executed: packages/core is deleted from the tree; candidatePath now binds the ARH2 product recording the executed deletion and the same-change ARH0 population refresh)",
       "disposition": "physical deletion of the .gitignore-only placeholder lands together with the ARH0 inventory population refresh in the same change (the ARH0 verifier binds inventory rows to on-disk paths, so deletion and refresh cannot be separated); re-derivation of populations is ARH2's recorded obligation",
       "owner": {
         "id": "ARH2",
@@ -16,7 +16,7 @@
       },
       "class": "arh0-debt-decision",
       "satisfies": "ARH0-DEBT-1",
-      "evidence": "packages/core contains only a .gitignore reading 'generated' (no package.json, no sources, zero-LOC inventory row); it has no literal pnpm-workspace.yaml entry (covered only by the packages/* glob) and no importer; populating it would invent a package with no consumer"
+      "evidence": "packages/core contained only .gitignore reading 'generated' (no package.json, no sources, zero-LOC inventory row); it had no literal pnpm-workspace.yaml entry (covered only by the packages/* glob) and no importer; populating it would invent a package with no consumer"
     },
     {
       "id": "ARH1-CUT-2",
@@ -35,7 +35,7 @@
       "id": "ARH1-CUT-3",
       "candidatePath": "crates/verter_scheduler/src/scheduler.rs",
       "decision": "move the fifteen test_* Scheduler hooks to test configuration (cfg(any(test, feature = \"test-support\")))",
-      "disposition": "test-seam gating with the exact per-hook consumer inventory recorded on the narrowing rows (nine verter_session files reference the hooks outside crates/verter_scheduler at ratification: host_construction.rs for test_worker_pool_ids, host_batch_coordinator.rs for test_new, four test-case files for test_with_executor, scheduler_audit_queue_dwell_under_load.rs for the pause/depth hooks, host_compile_atomic_upsert_tests.rs for the admit-epoch hooks, compile_style_vbind_source_snapshot_tests.rs for test_clear_analysis; six hooks have no consumer outside the owning crate); every recorded consumer migrates in the same change; lands under the host/session lifecycle reduction heir",
+      "disposition": "test-seam gating with the exact per-hook consumer inventory recorded on the narrowing rows (ten verter_session files reference the hooks outside crates/verter_scheduler at ratification: host_construction.rs for test_worker_pool_ids, host_batch_coordinator.rs and cooperative_scheduler_tests.rs for test_new, cooperative_scheduler_tests.rs for test_new_sync, four test-case files for test_with_executor, cooperative_scheduler_tests.rs, scheduler_audit_queue_dwell_under_load.rs and cooperative_drive_seam.rs for the pause hooks, scheduler_audit_queue_dwell_under_load.rs for test_job_queue_depth, host_compile_atomic_upsert_tests.rs for the admit-epoch hooks, compile_style_vbind_source_snapshot_tests.rs for test_clear_analysis; four hooks have no consumer outside the owning crate); every recorded consumer migrates in the same change; lands under the host/session lifecycle reduction heir",
       "owner": {
         "id": "ARH4",
         "kind": "node"

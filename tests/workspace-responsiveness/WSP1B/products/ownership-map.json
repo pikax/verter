@@ -1,0 +1,45 @@
+{
+  "id": "wsp1b-ownership-map.v1",
+  "schema": 1,
+  "contractNode": "WSP1B",
+  "finalOwner": "expansion.workspace-responsiveness",
+  "retirementObligation": "Issue93EarlyVerification and Issue93CarryForwardCase stay owned here until WSP8 requalifies the retained scenario under ED1; the WSP1A historical issue-93 repair/witness obligation is retired as unreproduced / not planned (cancelled ledger) and must never be restated as a causal fix; client decode/apply/paint stay with WSP1L; server InteractionTrace stays with WSP1",
+  "preservedOwners": [
+    "semantic algorithms",
+    "project resolution",
+    "format/lint logic",
+    "TypeScript projection",
+    "edit transactions",
+    "server/protocol InteractionTrace and RecordedLspReplay (WSP1)",
+    "LapceInteractionDriver, UiTimeline and driven-lapce-capture.v1 (WSP1L)"
+  ],
+  "conflictDomains": ["lsp_publication", "performance_evidence", "scheduler_admission"],
+  "outcomes": [
+    {
+      "id": "Issue93EarlyVerification",
+      "currentOwner": "WSP1B",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "packages/dx-harness/lapce/earlyVerification.ts + tests/workspace-responsiveness/WSP1B/products/issue93-early-verification.v1.json"
+    },
+    {
+      "id": "Issue93CarryForwardCase",
+      "currentOwner": "WSP1B",
+      "finalOwner": "expansion.workspace-responsiveness",
+      "surface": "packages/dx-harness/lapce/earlyVerification.ts + tests/workspace-responsiveness/WSP1B/products/issue93-carry-forward.v1.json"
+    }
+  ],
+  "receivingAmendments": [
+    {
+      "receiver": "WSP8",
+      "product": "requalifies Issue93CarryForwardCase under the final ED1 provisioning/integration",
+      "productionCapable": true
+    },
+    {
+      "receiver": "DX1",
+      "product": "exposure descriptor registration over the early-verification operations",
+      "productionCapable": true
+    }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": []
+}

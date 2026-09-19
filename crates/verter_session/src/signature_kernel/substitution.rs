@@ -12,7 +12,7 @@
 
 use crate::semantic_query::{CanonicalTypeSubstitution, SemanticNodeId};
 
-use super::records::{BinderSpaceId, CallSubstitutionId, TypeToken};
+use super::records::{BinderSpaceId, CallSubstitutionId};
 
 /// Flatten compose chains beyond this depth (history-independent bound).
 pub const MAX_SUBSTITUTION_CHAIN_DEPTH: u8 = 8;
@@ -234,9 +234,9 @@ fn apply_map_term(
     }
 }
 
-/// Type-token apply used when a recipe carries tokens rather than terms.
-#[must_use]
-pub fn apply_token(map: &CanonicalTypeSubstitution, token: TypeToken) -> TypeToken {
-    let as_node = SemanticNodeId(token.as_u64());
-    TypeToken::from_raw(apply_canonical(map, as_node).0)
-}
+// A `TypeToken` is an interned type-shape token in its own numbering
+// space; it is never a `SemanticNodeId`. Substitution applies to binder
+// terms only (`SubstTerm::Binder`), so a recipe that carries tokens must
+// resolve them to binder nodes through the store before applying a map —
+// reinterpreting a token's raw value as a node id would let an unrelated
+// token be silently rewritten whenever its raw value collided with a key.

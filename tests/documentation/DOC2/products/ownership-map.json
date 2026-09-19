@@ -1,0 +1,36 @@
+{
+  "contractNode": "DOC2",
+  "finalOwner": "expansion.documentation:Documentation system, information architecture and executable examples; feature owners author feature truth",
+  "predecessors": ["DOC1", "ARH1"],
+  "receivingAmendments": [
+    { "receiver": "DOC9", "product": "Documentation navigation, accessibility and maintenance qualification", "note": "sidebar/nav disposition of the four new contributing pages stays with DOC9; they are linked from docs/contributing/index.md and recorded as nav=unnavigated" },
+    { "receiver": "DOC3", "product": "Generated public API, CLI and configuration reference", "note": "the architecture-contracts page cites capability evidence but adds no generated reference; DOC3 remains the generator" },
+    { "receiver": "ARH2", "product": "Characterization and re-derivation", "note": "when hotspot populations are re-derived the contract rows change first; these pages are delivery and cite the contract file, so they do not need per-candidate edits" }
+  ],
+  "outcomes": [
+    { "id": "architecture-and-contributor-documentation", "currentOwner": "DOC2", "finalOwner": "DOC2", "receivingAcceptance": "DOC2-AC1" }
+  ],
+  "consumers": [
+    { "id": "reference-harness", "path": "docs/scripts/reference-harness.mjs", "disposition": "extended", "owner": "DOC1", "note": "new contributorDocs validation section; sole owning interface for the checks" },
+    { "id": "contributor-index", "path": "docs/contributing/index.md", "disposition": "extended", "owner": "DOC2" },
+    { "id": "architecture-contracts-page", "path": "docs/contributing/architecture-contracts.md", "disposition": "created", "owner": "DOC2" },
+    { "id": "source-identity-page", "path": "docs/contributing/source-identity.md", "disposition": "created", "owner": "DOC2" },
+    { "id": "query-lifetimes-page", "path": "docs/contributing/query-lifetimes.md", "disposition": "created", "owner": "DOC2" },
+    { "id": "first-contribution-page", "path": "docs/contributing/first-contribution.md", "disposition": "created", "owner": "DOC2" },
+    { "id": "contributor-docs-model", "path": "tests/documentation/DOC2/products/contributor-docs-model.v1.json", "disposition": "created", "owner": "DOC2" },
+    { "id": "dependency-contracts", "path": "tests/architecture-health/ARH1/products/dependency-contracts.json", "disposition": "consumed", "owner": "ARH1" },
+    { "id": "responsibility-map", "path": "tests/architecture-health/ARH0/products/responsibility-map.json", "disposition": "consumed", "owner": "ARH0" },
+    { "id": "docs-inventory", "path": "tests/documentation/DOC0/products/docs-inventory.v1.json", "disposition": "extended", "owner": "DOC0", "note": "four new page rows appended, following the DOC1 precedent of amending DOC0 products" },
+    { "id": "public-example-home", "path": "examples/reference", "disposition": "consumed", "owner": "DOC1", "note": "unchanged; DOC1-tested home stays the executable-example authority" }
+  ],
+  "displacedRoutes": [],
+  "deletionPopulationThisNode": [],
+  "deletionRationale": "genuinely additive boundary: the architecture/contributor topic pages and their taught-interface validation did not exist. No existing docs page is superseded (docs/guide/architecture.md stays the user-facing overview; the new pages are contributor-delivery of the ARH1 contract rows), and no second capability matrix or semantic authority is introduced — the pages cite the ARH1/ARH0 products and the DOC0 catalog as the sole sources",
+  "acRationales": {
+    "ac1": { "applicable": true, "evidence": "docs/scripts/reference-harness.mjs is the sole owning interface (extended with the contributorDocs section); every page, citation, hotspot and taught interface is validated through it via the existing docs check command; the model file is the single machine declaration of the doc set" },
+    "ac2": { "applicable": true, "evidence": "dirty twins fail a tutorial that teaches a local resolver (unowned-taught-path), a duplicate cache in a second crate (second-authority), a same-crate duplicate memo implementation (second-authority on full path), a sole-owner substitution of semantic-query-memo (authority-mismatch against capabilityAuthorities), a model-declared test-only scheduler hook (test-only-api), and a page-only test_new() recommendation with no model edit; a taught symbol dropped from its taughtIn page fails taught-page-missing-symbol; a walkthrough twin also fails on a symbol that left its source and on a cited repo path that no longer exists" },
+    "ac3": { "applicable": true, "evidence": "no production state, query, map or scheduling boundary is touched, so those owners' proofs stand; the docs-boundary equivalents are proven here: perturbed model order yields an identical canonical receipt (digest over canonical model bytes), incremental receipt with the same digest matches a fresh run, a taught-source edit changes the digest (and a breaking rename does not emit a false incremental-mismatch), a catalog-only surfaceId edit changes the digest and revert restores it, edit fails and revert restores, pre-aborted and mid-page AbortSignal yield cancelled with a source digest, and a missing page is a partial result" },
+    "ac4": { "applicable": true, "evidence": "the four pages are public delivery under the DOC0 information architecture (rows appended to docs-inventory.v1.json, audience contributor, owner DOC2), linked from docs/contributing/index.md; each retained hotspot surface is mapped to DOC0 catalog ids (surface-unmapped / unknown-catalog-id); the architecture page lists every retained fn/type/assoc item (surface-undocumented); host/profile basis names contract candidate 30012d45df4e3369728a7cc09250c5e009bfd18d, records the original measurement host as unrecorded in ARH1 contract products, and names the live re-derivation host ubuntu-latest / .nvmrc / architecture-health verify.mjs; examples/reference is consumed, not duplicated; permissions are not applicable (no capability surface created)" },
+    "ac5": { "applicable": true, "evidence": "no latency/work/allocation/RSS budget is bound (documentation-only node; harness additions are build-time checks with no runtime surface); the deletion population is empty with the rationale above; no required check is dropped and no obsolete path is retired elsewhere" }
+  }
+}

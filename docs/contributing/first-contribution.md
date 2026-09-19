@@ -1,0 +1,143 @@
+# First Contribution Walkthrough
+
+An end-to-end walkthrough of the smallest real contribution: adding a lint
+rule to `verter_diagnostics`. It exercises the whole loop — failing test
+first, minimal fix, canonical gate — while teaching the interfaces you are
+allowed to build on. The ownership rules behind every "don't" below are on
+the [architecture contracts](./architecture-contracts.md) page.
+
+## What you will touch
+
+| Concern          | Owning interface                                             |
+| ---------------- | ------------------------------------------------------------ |
+| Rule contract    | `LintRule` trait in `crates/verter_diagnostics/src/rules/mod.rs` |
+| Registration     | `register_builtin_rules` in the same file                    |
+| Rule context     | `crates/verter_diagnostics/src/context.rs` (`LintContext`)   |
+| Diagnostics      | `crates/verter_diagnostics/src/diagnostic_set.rs` (`DiagnosticSet`) |
+| Source positions | `crates/verter_span/src/lib.rs` (`Span`, SFC-absolute bytes) |
+
+An existing rule to copy from:
+`crates/verter_diagnostics/src/rules/vue/no_unused_props.rs`
+(`NoUnusedProps` — it emits, and its tests assert the rule name and
+`Span`). Do not copy `no_ref_as_operand.rs`; that file is a non-emitting
+stub.
+
+## Step 1 — write the failing test first
+
+Open the rule file you will create under
+`crates/verter_diagnostics/src/rules/<category>/` and start with the test
+module, not the implementation. A rule test needs both assertions — see
+the [Testing Guide](./testing.md) for the repository-wide pattern:
+
+- a positive case: source that must produce the diagnostic (assert the
+  rule name and the reported `Span` you expect — copy
+  `reports_unused_props`, which checks `diags[0].rule` and
+  `diags[0].span == Span::new(10, 20)`);
+- a negative case: near-identical source that must NOT produce it (copy
+  `ignores_props_used_in_template`).
+
+Run it and watch it fail for the right reason (the rule does not exist /
+is not registered yet). That failing run is your discriminating evidence;
+without it you cannot tell a passing test from a vacuous one.
+
+## Step 2 — implement the rule
+
+Implement `LintRule`: `name()` (kebab-case, stable — it is public
+surface), `category()`, `default_severity()`, `applicability()`, and the
+`check_*` method(s) for the analysis passes your rule reads
+(`check_script` receives a `ScriptAnalysisSnapshot`, template/style rules
+receive their own snapshots). Report through `LintContext`; never
+`println!`, never a side-channel.
+
+`LintRule::applicability` defaults to the Vue adapter
+(`RuleApplicability::Adapter(FrameworkAdapterId::vue())` in
+`crates/verter_diagnostics/src/rules/mod.rs`). This walkthrough's example
+is Vue, so the default is correct. A carrier-neutral rule must override
+with `RuleApplicability::CarrierNeutral` — copy
+`crates/verter_diagnostics/src/rules/vue/block_lang.rs`. A Svelte-only
+rule names `FrameworkAdapterId::svelte()`. `RuleRegistry::for_carrier`
+then drops rules that do not apply; a direct `check_*` unit test never
+sees that filter. The registry-selection tests in
+`crates/verter_diagnostics/src/linter.rs`
+(`svelte_carrier_selection_drops_vue_only_template_root_rule`,
+`carrier_neutral_rule_runs_on_both_carriers`) are the evidence that the
+intended carrier actually runs the rule.
+
+Positions are `Span` values from the snapshot — SFC-absolute byte ranges.
+Do not compute line/column yourself and do not parse the source text with
+string search to "find" a construct: the analysis snapshot is the parsed
+truth, and [source identity](./source-identity.md) explains why byte
+spans are the only stable currency.
+
+## Step 3 — wire the module, register, and run
+
+Declare and re-export the new rule in that category's `mod.rs` (copy
+`crates/verter_diagnostics/src/rules/reactivity/mod.rs`):
+
+```rust
+mod your_rule;
+pub use your_rule::YourRule;
+```
+
+Without that `mod` / `pub use`, `register_builtin_rules` cannot name the
+type and the crate will not compile. Then add one
+`registry.register(Box::new(...))` line to `register_builtin_rules` in
+`crates/verter_diagnostics/src/rules/mod.rs` (keeping the category
+grouping), then iterate:
+
+```bash
+cargo test -p verter_diagnostics        # targeted iteration
+node scripts/gate.mjs                   # canonical provider-free Rust gate
+```
+
+`node scripts/gate.mjs` is the repository's canonical local verification
+(see `CLAUDE.md` → Testing); a contribution is not done until the gate's
+receipts are complete. The registered-rule count is itself tracked: the
+docs reference harness (`pnpm --filter docs check`) fails if the live
+registry count drifts from the generated-reference plan, so a rule added
+without its count refresh is caught, not silently accepted.
+
+## Step 4 — what you must NOT do
+
+These are the three ways tutorial code rots into architecture debt; each
+has a ratified owner already:
+
+- **No filesystem access of your own.** Rules receive parsed snapshots;
+  if you genuinely need file access for import/workspace resolution, the
+  sole authority is the `WorkspaceAccess` trait in
+  `crates/verter_workspace/src/traits.rs` (`NativeFs` is that crate's
+  adapter, not a repo-wide `std::fs` monopoly). A rule that opens files
+  directly has no review path to merge.
+- **No private caches.** Reuse flows through the session's existing
+  stores — the memo and artifact authorities such as
+  `FileArtifactStore` in
+  `crates/verter_session/src/file_artifact_store.rs`. A rule-local
+  memo table is a second semantic authority; the narrowing contracts in
+  `tests/architecture-health/ARH1/products/dependency-contracts.json`
+  exist precisely to retire those.
+- **No test-only hooks as API.** `test_`-prefixed scheduler/session seams
+  are recorded test-only surfaces under ratified gating. Production code
+  (including rules) builds on the retained public surfaces listed in the
+  contracts page, not on seams that exist so tests can drive scheduling.
+
+## Step 5 — update the owning documentation
+
+`docs/lint-rules.md` is authored prose, not a generated page. If the rule
+is user-visible, add it to the matching category table there by hand.
+The docs harness (`pnpm --filter docs check`) does not regenerate that
+page; it compares the live `register_builtin_rules` count with
+`tests/documentation/DOC0/products/generated-reference-plan.v1.json`
+(`lintReference.ruleCount`). A new rule that does not bump that count
+fails `lint-count-drift`. Typeinfo generated-page freshness is a
+different check (`pnpm gen:typeinfo-manifest:check`) and is not the lint
+reference. For anything else, follow the repository rule: update the
+owning document, keep conventional commits (`feat(diagnostics): ...`),
+and include both test assertions in the PR checklist.
+
+## Where to go next
+
+- [Architecture contracts](./architecture-contracts.md) — owner
+  boundaries for every crate you just avoided duplicating.
+- [Query lifetimes and determinism](./query-lifetimes.md) — before
+  touching anything cached.
+- [Testing](./testing.md) — the full test-design guide.

@@ -1,1 +1,1 @@
-export const asserted = <number>"1";
+export const asserted = <number>1;

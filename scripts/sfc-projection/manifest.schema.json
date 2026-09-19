@@ -44,6 +44,17 @@
     "probes": {
       "type": "object",
       "additionalProperties": false,
+      "required": [
+        "positive",
+        "negative",
+        "cleanTwin",
+        "tsconfig",
+        "hoverNeedle",
+        "definitionNeedle",
+        "expectedNegativeCode",
+        "expectedHoverType",
+        "expectedInstanceType"
+      ],
       "properties": {
         "positive": { "type": "string", "minLength": 1 },
         "negative": { "type": "string", "minLength": 1 },
@@ -53,7 +64,9 @@
         "definitionNeedle": { "type": "string", "minLength": 1 },
         "expectedNegativeCode": { "type": "integer" },
         "expectedHoverType": { "type": "string", "minLength": 1 },
-        "expectedInstanceType": { "type": "string", "minLength": 1 }
+        "expectedInstanceType": { "type": "string", "minLength": 1 },
+        "utilityRecipe": { "type": "string", "minLength": 1 },
+        "utilityErrorTwin": { "type": "string", "minLength": 1 }
       }
     },
     "cases": {

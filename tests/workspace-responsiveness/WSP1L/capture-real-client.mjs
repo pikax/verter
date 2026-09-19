@@ -38,10 +38,12 @@ const serverBin = path.resolve(arg("server"));
 const outPath = path.resolve(
   arg("out", path.join(here, "products", "real-client-capture.v1.json")),
 );
-const patchPath = path.join(
-  repoRoot,
-  "packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch",
-);
+const patchRecordedAs = "packages/dx-harness/lapce/instrumented-client/lapce-0.4.6-wsp1l.patch";
+const patchPath = path.join(repoRoot, patchRecordedAs);
+
+// Only Windows paths use the backslash as a separator; on POSIX it is a legal
+// filename character, so a blanket replacement would corrupt a real path.
+const toSlashes = (value) => (process.platform === "win32" ? value.replaceAll("\\", "/") : value);
 
 // Materialize the fixture workspace into a temp dir with the server path bound.
 const workspaceDir = mkdtempSync(path.join(os.tmpdir(), "wsp1l-ws-"));
@@ -49,10 +51,7 @@ cpSync(path.join(here, "fixtures/ws"), workspaceDir, { recursive: true });
 const settingsPath = path.join(workspaceDir, ".lapce", "settings.toml");
 const settingsTemplate = readFileSync(`${settingsPath}.template`, "utf8");
 mkdirSync(path.dirname(settingsPath), { recursive: true });
-writeFileSync(
-  settingsPath,
-  settingsTemplate.replaceAll("<verter-lsp>", serverBin.replaceAll("\\", "/")),
-);
+writeFileSync(settingsPath, settingsTemplate.replaceAll("<verter-lsp>", toSlashes(serverBin)));
 
 const fixture = path.join(workspaceDir, "Fixture.vue");
 const helper = path.join(workspaceDir, "Helper.vue");
@@ -79,10 +78,11 @@ try {
   const artifact = buildDrivenCaptureArtifact({
     session,
     correlated,
-    recordedAs: path.relative(repoRoot, outPath).replaceAll("\\", "/"),
+    recordedAs: toSlashes(path.relative(repoRoot, outPath)),
     lapceClientSource:
       "Lapce v0.4.6 (github.com/lapce/lapce tag v0.4.6 source tarball) + the WSP1L instrumented-client patch",
     patchPath,
+    patchRecordedAs,
     automationPath: REAL_LAPCE_AUTOMATION_PATH,
   });
   writeDrivenCaptureArtifact(artifact, outPath);

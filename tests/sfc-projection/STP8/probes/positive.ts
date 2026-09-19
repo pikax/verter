@@ -14,6 +14,23 @@ export const coupledValue: number | undefined = coupled.value;
 export const coupledOnChange = coupled.$props.onChange?.(coupled.value ?? 0);
 export const coupledSlot = coupled.$slots.default?.({ row: "a", value: 1 });
 export const coupledModel: unknown = coupled.$props.modelValue;
+
+// Every U-dependent channel must carry the inferred `number`: a widened or
+// collapsed U on the event payload, the model value, or the slot scope fails
+// these exact-type witnesses.
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+export const coupledOnChangePayloadIsNumber: Exact<
+  Parameters<NonNullable<typeof coupled.$props.onChange>>[0],
+  number
+> = true;
+export const coupledModelValueIsNumber: Exact<
+  Exclude<typeof coupled.$props.modelValue, undefined>,
+  number
+> = true;
+export const coupledSlotScopeIsRowValue: Exact<
+  Parameters<NonNullable<typeof coupled.$slots.default>>[0],
+  { row: string; value: number }
+> = true;
 export const stp8HoverTarget: number = coupledValue === undefined ? 0 : 1;
 
 // The one-binder construction stays a specialization of the same family:

@@ -14,6 +14,7 @@ import {
   compareIdentities,
   defaultRunBrowsers,
   evaluateBrowserResult,
+  isInsideDir,
   missingArtifactExports,
   parseNativeReceipt,
   playwrightEngine,
@@ -522,7 +523,8 @@ test("observeInputSnapshot raises typed NeedInputsError only for needInputs", as
       return { canonical, status: "needInputs" };
     },
   };
-  assert.deepEqual(host.observeInputSnapshot("basis", "/present.ts"), {
+  // The adapter passes a committed file through unchanged.
+  assert.deepEqual(observeInputSnapshot(host, "basis", "/present.ts"), {
     canonical: "/present.ts",
     status: "file",
     content: "x",
@@ -543,4 +545,44 @@ test("observeInputSnapshot raises typed NeedInputsError only for needInputs", as
   );
   // A non-NeedInputs error keeps its own shape.
   assert.deepEqual(needInputsKeys(new Error("other")), []);
+});
+
+test("isInsideDir is separator-bounded: a sibling directory sharing the prefix is outside", () => {
+  const root = path.join(tmpdir(), "bwh-src");
+  assert.equal(isInsideDir(root, path.join(root, "harness.html")), true);
+  assert.equal(isInsideDir(root, path.join(root, "nested", "worker.js")), true);
+  assert.equal(isInsideDir(root, root), false);
+  assert.equal(isInsideDir(root, path.join(tmpdir(), "bwh-src-private", "secret.txt")), false);
+  assert.equal(isInsideDir(root, path.join(root, "..", "bwh-src-private", "secret.txt")), false);
+  assert.equal(isInsideDir(root, path.join(tmpdir(), "elsewhere.txt")), false);
+});
+
+test("runProbes requires the query audit record before the worker can report success", async () => {
+  const { runProbes } = await import("../packages/browser-host/src/probes.js");
+  const hostWith = (query) => ({
+    upsert() {},
+    compileRequest: () => ({ products: [{ nodes: [{ sourceMap: "{}" }] }] }),
+    listSymbols: () => JSON.stringify(SYMBOLS),
+    resolveSymbolWithAudit: () => ({ typeExpr: TYPEINFO }),
+    matchCssSelectors: () => [{ selectorText: ".probe", matches: [] }],
+    resolveTypeWithAudit: () => query,
+  });
+  const sources = { tsSource: "export type ProbeAlias = string;", vueSource: "<template/>" };
+  // The stored record arrives as the JSON string the WASM boundary emits for
+  // an `ActiveStored` capture; the probe derives `hasRecord` from that state.
+  const stored = JSON.stringify({ kind: "ResolveDecl", capture_state: "ActiveStored" });
+  const probed = runProbes(hostWith(stored), sources);
+  assert.deepEqual(probed.operations.query, [
+    { decl: "ProbeAlias", kind: "ResolveDecl", hasRecord: true },
+  ]);
+  for (const query of [
+    null,
+    JSON.stringify({ kind: "ResolveDecl", capture_state: "FilteredNoop" }),
+    { kind: "ResolveDecl", capture_state: "AuditDisabled" },
+    { decl: "ProbeAlias", hasRecord: true },
+    { error: "boom" },
+    "[]",
+  ]) {
+    assert.throws(() => runProbes(hostWith(query), sources), /query audit record is absent/);
+  }
 });

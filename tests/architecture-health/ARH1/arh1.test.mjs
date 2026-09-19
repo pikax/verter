@@ -1479,3 +1479,29 @@ test("ARH1-ratification: --provenance proves the pinned candidate is a real ance
   const stdout = execFileSync(process.execPath, args, { encoding: "utf8" });
   assert.match(stdout, /ARH1 verify: PASS/);
 });
+
+// ---------------------------------------------------------------------------
+// A hotspot the tree no longer carries is a recorded contract error, never
+// an exception: every per-hotspot validator skips the missing file so the
+// verifier returns missing-hotspot instead of throwing on the read.
+// ---------------------------------------------------------------------------
+
+test("ARH1-hotspot-coverage dirty twin: a missing hotspot file is recorded, not thrown", () => {
+  const gone = "crates/verter_scheduler/src/scheduler_retired.rs";
+  const dirty = cloneProducts();
+  hotspot(dirty, SCHEDULER).path = gone;
+  const inventory = structuredClone(arh0);
+  inventory["responsibility-map"].godModuleCandidates.find((r) => r.path === SCHEDULER).path = gone;
+  let result;
+  assert.doesNotThrow(() => {
+    result = validate(dirty, loadManifest(), inventory);
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH1-hotspot-coverage" && e.code === "missing-hotspot" && e.detail === gone,
+    ),
+    JSON.stringify(result.errors),
+  );
+});

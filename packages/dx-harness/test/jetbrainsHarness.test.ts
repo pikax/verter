@@ -437,6 +437,131 @@ describe("fixture driver and receipt basis", () => {
     );
   });
 
+  it("requires exactly one row for every comparison workflow, without duplicates", () => {
+    const rows = defaultWorkflowRows("verter");
+    const shape = capture({ side: "verter" });
+    expect(() => parseIdeCapture({ ...shape, workflows: [] })).toThrow(/every comparison workflow/);
+    expect(() => parseIdeCapture({ ...shape, workflows: rows.slice(1) })).toThrow(
+      /every comparison workflow/,
+    );
+    expect(() => parseIdeCapture({ ...shape, workflows: [...rows, rows[0]] })).toThrow(
+      /duplicate workflow/,
+    );
+    expect(parseIdeCapture({ ...shape, workflows: [...rows].reverse() }).workflows).toHaveLength(
+      COMPARISON_WORKFLOWS.length,
+    );
+  });
+
+  it("requires ms for timing metrics and bytes for byte metrics, leaving engine identity alone", () => {
+    const shape = capture();
+    const measured = (value: number, unit: string) =>
+      ({ status: "measured", value, unit }) as const;
+    expect(() =>
+      parseIdeCapture({
+        ...shape,
+        paint: { uiApplyPaintMs: measured(12, "s"), rpcDurationMs: shape.paint.rpcDurationMs },
+      }),
+    ).toThrow(/paint.uiApplyPaintMs.unit must be ms/);
+    expect(() =>
+      parseIdeCapture({
+        ...shape,
+        paint: { uiApplyPaintMs: shape.paint.uiApplyPaintMs, rpcDurationMs: measured(3, "ns") },
+      }),
+    ).toThrow(/paint.rpcDurationMs.unit must be ms/);
+    expect(() =>
+      parseIdeCapture({
+        ...shape,
+        processTree: tree({
+          members: [{ ...tree().members[0], rssBytes: measured(1024, "kb") }],
+        }),
+      }),
+    ).toThrow(/rssBytes.unit must be bytes/);
+    expect(() => parseIdeCapture({ ...shape, retainedMemory: measured(1, "mb") })).toThrow(
+      /retainedMemory.unit must be bytes/,
+    );
+    expect(() => parseIdeCapture({ ...shape, outboundBytes: measured(1, "kib") })).toThrow(
+      /outboundBytes.unit must be bytes/,
+    );
+    expect(() => parseIdeCapture({ ...shape, providerCpu: measured(1, "ticks") })).toThrow(
+      /providerCpu.unit must be ms/,
+    );
+    expect(() => parseIdeCapture({ ...shape, providerWall: measured(1, "s") })).toThrow(
+      /providerWall.unit must be ms/,
+    );
+    const engine = parseIdeCapture({
+      ...shape,
+      versions: { ...shape.versions, engine: measured(6, "typescript-major") },
+    });
+    expect(engine.versions.engine).toEqual(measured(6, "typescript-major"));
+    const wellFormed = parseIdeCapture({
+      ...shape,
+      retainedMemory: measured(2048, "bytes"),
+      providerCpu: measured(4, "ms"),
+    });
+    expect(wellFormed.retainedMemory).toEqual(measured(2048, "bytes"));
+  });
+
+  it("rejects a negative measured ui-apply-paint at the raw-capture boundary", () => {
+    const shape = capture();
+    expect(() =>
+      parseIdeCapture({
+        ...shape,
+        paint: {
+          uiApplyPaintMs: { status: "measured", value: -1, unit: "ms" },
+          rpcDurationMs: shape.paint.rpcDurationMs,
+        },
+      }),
+    ).toThrow(/paint.uiApplyPaintMs.value must not be negative/);
+    expect(
+      parseIdeCapture({
+        ...shape,
+        paint: {
+          uiApplyPaintMs: { status: "measured", value: 0, unit: "ms" },
+          rpcDurationMs: shape.paint.rpcDurationMs,
+        },
+      }).paint.uiApplyPaintMs,
+    ).toEqual({ status: "measured", value: 0, unit: "ms" });
+  });
+
+  it("treats a different completenessState as a different receipt basis", () => {
+    const complete: ProductReceiptBasis = { ...BASIS, completenessState: "complete" };
+    expect(sameReceiptBasis(BASIS, complete)).toBe(false);
+    expect(sameReceiptBasis(BASIS, { ...BASIS })).toBe(true);
+    expect(() =>
+      recordPair({
+        seed: 2,
+        sessionState: "cold",
+        captures: [
+          capture({ side: "official" }),
+          capture({ side: "verter", receiptBasis: complete }),
+        ],
+      }),
+    ).toThrow(/mixes receipt bases/);
+    const paint = {
+      uiApplyPaintMs: { status: "measured", value: 10, unit: "ms" },
+      rpcDurationMs: unknownMetric("n/a"),
+    } as const;
+    const first = recordPair({
+      seed: 2,
+      sessionState: "cold",
+      captures: [capture({ side: "official", paint }), capture({ side: "verter", paint })],
+    });
+    const second = recordPair({
+      seed: 3,
+      sessionState: "cold",
+      captures: [
+        capture({ side: "official", paint, receiptBasis: complete }),
+        capture({ side: "verter", paint, receiptBasis: complete }),
+      ],
+    });
+    const verdict = compareSwappedPairs(first, second, {
+      maxAbsMs: 5,
+      recordedAs: "campaign-predeclared",
+    });
+    expect(verdict.comparable).toBe(false);
+    expect(verdict.reason).toMatch(/completenessState/);
+  });
+
   it("binds incremental vs fresh on the same receipt basis and rejects mixed bases", () => {
     const fresh = capture({ basisKind: "fresh" });
     const incremental = capture({ basisKind: "incremental" });

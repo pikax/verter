@@ -467,3 +467,82 @@ fn threaded_drive_parks_on_the_driver_instead_of_inline_pumping() {
         .join()
         .expect("the drive thread must not panic");
 }
+
+/// A yield hook that cancels the adapter's token at its first offer but
+/// asks the drive to continue: the cancellation is then observed by the
+/// drive's own token check, not reported at the yield point.
+#[derive(Debug)]
+struct CancelTokenAtFirstOffer {
+    cancellation: verter_scheduler::cancellation::CancellationToken,
+}
+
+impl CooperativeYield for CancelTokenAtFirstOffer {
+    fn yield_to_runtime(&self) -> YieldDecision {
+        self.cancellation.cancel();
+        YieldDecision::Continue
+    }
+}
+
+/// On the driver-thread path the adapter pumps no stage itself, so a
+/// cancellation observed at the pre-park check is a before-drive stop:
+/// the handle stays pending with the scheduler and no stage of this
+/// drive ran. Reporting it as between-stages would tell a consumer that
+/// separates "withdrew before any work" from "withdrew mid-request" the
+/// wrong point.
+#[test]
+fn cancellation_observed_before_parking_on_the_driver_is_a_before_drive_stop() {
+    use verter_scheduler::scheduler::Scheduler;
+    use verter_scheduler::source_loader::MemorySourceLoader;
+
+    let scheduler = Scheduler::test_new(
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+        Arc::new(MemorySourceLoader::new()),
+    );
+    assert!(
+        scheduler.has_driver_thread(),
+        "precondition: the threaded test scheduler must have a driver"
+    );
+    scheduler.test_arm_dispatch_pause(0);
+    let _sacrificial = scheduler.submit_request(Request {
+        file_id: "/coop/i1.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const i1 = 1;\n")),
+        file_language: None,
+        request_context: None,
+    });
+    scheduler.test_wait_until_dispatch_paused();
+
+    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let hook = Arc::new(CancelTokenAtFirstOffer {
+        cancellation: cancellation.clone(),
+    });
+    let adapter = CooperativeSchedulerAdapter::with_yield_hook_and_cancellation(hook, cancellation);
+    let request = Request {
+        file_id: "/coop/i2.ts".to_string(),
+        target: TargetStage::Analysis,
+        priority: Priority::Interactive,
+        source: Some(Arc::from("export const i2 = 2;\n")),
+        file_language: None,
+        request_context: None,
+    };
+    let CooperativeSubmit::Submitted(handle) = adapter.submit(&scheduler, request) else {
+        panic!("uncancelled adapter must submit");
+    };
+
+    let stopped = adapter.drive(&scheduler, &handle);
+    assert!(
+        matches!(
+            &stopped,
+            CooperativeDrive::Cancelled(stop) if stop.point == CooperativePoint::BeforeDrive
+        ),
+        "a cancellation observed before parking on the driver stops before \
+         the drive, no stage of this drive having been pumped (got {stopped:?})"
+    );
+    assert!(
+        scheduler.try_get_source("/coop/i2.ts").is_none(),
+        "the parked driver dispatched nothing for the cancelled request"
+    );
+    scheduler.test_release_dispatch_pause();
+    drop(handle);
+}

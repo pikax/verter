@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -42,9 +43,94 @@ describe("WSP1-AC1 stalled client reader", () => {
     const pending = client.sendRequest("echo/method", { n: 1 }, 8_000);
     await client.stderr.waitForLine((line) => line.includes("server-complete"), 8_000);
     expect(client.unreadByteLength).toBeGreaterThan(0);
+    // A stalled reader stalls the transport: the frame is parked in the paused
+    // pipe, not drained into the application buffer and merely left undecoded.
+    expect(client.pausedTransportByteLength).toBeGreaterThan(0);
     client.resumeReads();
     const result = await pending;
     expect(result.echo).toEqual({ n: 1 });
+  });
+
+  it("emits server-complete only after the response bytes are written, even for a large frame", async () => {
+    const payloadBytes = 4_000_000;
+    const client = makeClient(
+      {
+        FAKE_STAY_ALIVE: "1",
+        FAKE_SERVER_COMPLETE_STDERR: "1",
+        FAKE_PAYLOAD_BYTES: String(payloadBytes),
+      },
+      { stallReads: true },
+    );
+    const pending = client.sendRequest("echo/method", { n: 2 }, 20_000);
+    // A frame larger than the pipe cannot finish writing while the reader is
+    // paused, so the marker must stay absent until the client drains it.
+    let markerSeen = false;
+    const marker = client.stderr
+      .waitForLine((line) => line.includes("server-complete"), 20_000)
+      .then(() => {
+        markerSeen = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(client.unreadByteLength).toBeGreaterThan(0);
+    expect(markerSeen).toBe(false);
+    client.resumeReads();
+    const result = await pending;
+    await marker;
+    expect(result.echo).toEqual({ n: 2 });
+    expect(String(result.pad)).toHaveLength(payloadBytes);
+  });
+
+  it("clears a cancelled id once its terminal response is written", async () => {
+    // Drive the fixture over raw frames so a request id can be reused: the
+    // client itself never reuses ids, but a long-lived fixture must not keep
+    // reporting an id cancelled after its terminal response went out.
+    const child = spawn(process.execPath, [FIXTURE], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, FAKE_STAY_ALIVE: "1", FAKE_QUERY_DELAY_MS: "200" },
+    });
+    const responses: Array<{ id: number; error?: { code: number }; result?: unknown }> = [];
+    let buffered = Buffer.alloc(0);
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      for (;;) {
+        const headerEnd = buffered.indexOf("\r\n\r\n");
+        if (headerEnd < 0) break;
+        const header = buffered.subarray(0, headerEnd).toString();
+        const length = Number(/Content-Length: (\d+)/.exec(header)![1]);
+        const bodyStart = headerEnd + 4;
+        if (buffered.length < bodyStart + length) break;
+        const message = JSON.parse(buffered.subarray(bodyStart, bodyStart + length).toString());
+        buffered = buffered.subarray(bodyStart + length);
+        if (message.id !== undefined && message.method === undefined) responses.push(message);
+      }
+    });
+    const send = (payload: unknown) => {
+      const body = Buffer.from(JSON.stringify(payload));
+      const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`);
+      child.stdin.write(Buffer.concat([header, body]));
+    };
+    const responseCount = (count: number) =>
+      new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 8_000;
+        const tick = () => {
+          if (responses.length >= count) resolve();
+          else if (Date.now() > deadline) reject(new Error("timed out waiting for responses"));
+          else setTimeout(tick, 10);
+        };
+        tick();
+      });
+    try {
+      send({ jsonrpc: "2.0", id: 1, method: "echo/method", params: { n: 1 } });
+      send({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: 1 } });
+      await responseCount(1);
+      expect(responses[0]!.error?.code).toBe(-32800);
+      send({ jsonrpc: "2.0", id: 1, method: "echo/method", params: { n: 2 } });
+      await responseCount(2);
+      expect(responses[1]!.error).toBeUndefined();
+      expect((responses[1]!.result as { echo: unknown }).echo).toEqual({ n: 2 });
+    } finally {
+      child.kill();
+    }
   });
 });
 

@@ -78,7 +78,20 @@ export function runProbes(host, { tsSource, vueSource }) {
 
   const style = host.matchCssSelectors(CANONICAL_VUE);
   const mapping = mappingFromCompile(compile);
-  const query = parseMaybeJson(host.resolveTypeWithAudit(CANONICAL_TS, TYPEINFO_SYMBOL));
+  // `resolveTypeWithAudit` hands back the stored `RequestAuditRecord` (JSON)
+  // only when the audit capture state is `ActiveStored`, and `null` when the
+  // record was filtered or audit is disabled. `hasRecord` is derived from
+  // that state exactly like the native probe derives it; anything else (null,
+  // an error-shaped object, an array) is not a successful query operation.
+  const record = parseMaybeJson(host.resolveTypeWithAudit(CANONICAL_TS, TYPEINFO_SYMBOL));
+  const hasRecord =
+    record != null &&
+    typeof record === "object" &&
+    !Array.isArray(record) &&
+    record.capture_state === "ActiveStored";
+  if (!hasRecord) {
+    throw new Error("query audit record is absent from resolveTypeWithAudit");
+  }
 
   return {
     operations: {
@@ -86,7 +99,7 @@ export function runProbes(host, { tsSource, vueSource }) {
       typeinfo: symbols,
       style: Array.isArray(style) ? style : [],
       mapping,
-      query: query == null ? null : [query],
+      query: [{ decl: TYPEINFO_SYMBOL, kind: record.kind, hasRecord }],
     },
     identities: {
       symbols: normalizeSymbolIdentities(symbols),

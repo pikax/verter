@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 
 import { GitHubAdapterError } from "./errors.mjs";
 import { computePublishSet, scanWorkspacePackages } from "../lib/publish-set.mjs";
-import { BINARY_FAMILIES, parsePlatformDir } from "../lib/release-publish.mjs";
+import { BINARY_FAMILIES, invokedAsEntrypoint, parsePlatformDir } from "../lib/release-publish.mjs";
 import { fixExecutableBits, packTarball } from "../release-publish.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -24,7 +24,10 @@ const RUNTIME_CONDITIONS = new Set([
   "module-sync",
 ]);
 const JS_FILE = /\.(?:m?js|cjs|node)$/u;
-const TYPES_FILE = /\.(?:d\.[cm]?ts|[cm]?ts)$/u;
+// Only declaration files are types-only. A runtime `.ts` target is exercised
+// through its declared conditions like any other runtime file (Node refuses to
+// strip types under node_modules, so such a target fails as unloadable).
+const TYPES_FILE = /\.d\.[cm]?ts$/u;
 const TAR_BLOCK = 512;
 const MUSL_LINKER = {
   x64: "/lib/ld-musl-x86_64.so.1",
@@ -357,7 +360,7 @@ function claimWorkDir(workDir) {
   return null;
 }
 
-function hostLibc() {
+export function hostLibc() {
   if (process.platform !== "linux") return null;
   try {
     if (process.report) process.report.excludeNetwork = true;
@@ -483,24 +486,29 @@ function smoke(consumerDir, spec, condition, logPath) {
   });
 }
 
+function binInvocation(binPath, flag) {
+  if (/\.(?:[cm]?js)$/u.test(binPath)) return [process.execPath, [binPath, flag], {}];
+  // A Windows batch entrypoint only runs through the command interpreter.
+  if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(binPath)) {
+    return [
+      process.env.ComSpec || "cmd.exe",
+      ["/d", "/s", "/c", `"${binPath}" ${flag}`],
+      { windowsVerbatimArguments: true },
+    ];
+  }
+  return [binPath, [flag], {}];
+}
+
 function smokeBin(binPath, consumerDir) {
-  const js = /\.(?:[cm]?js)$/u.test(binPath);
-  const attempts = js
-    ? [
-        [process.execPath, [binPath, "--help"]],
-        [process.execPath, [binPath, "--version"]],
-      ]
-    : [
-        [binPath, ["--help"]],
-        [binPath, ["--version"]],
-      ];
+  const attempts = [binInvocation(binPath, "--help"), binInvocation(binPath, "--version")];
   let last = null;
-  for (const [command, args] of attempts) {
+  for (const [command, args, extra] of attempts) {
     last = spawnSync(command, args, {
       cwd: consumerDir,
       encoding: "utf8",
       env: smokeEnv(consumerDir),
       timeout: 15_000,
+      ...extra,
     });
     if (last.status === 0) return last;
     const text = `${last.stderr ?? ""}\n${last.stdout ?? ""}`;
@@ -508,10 +516,9 @@ function smokeBin(binPath, consumerDir) {
       return last;
     }
     if (last.error?.code === "ENOENT") return last;
-    if (last.status !== null && last.status !== 0 && !/ERR_|Cannot find module/u.test(text)) {
-      return { ...last, status: 0 };
-    }
   }
+  // A nonzero exit from both `--help` and `--version` is a failed public
+  // call; it is never coerced to success.
   return last;
 }
 
@@ -642,7 +649,9 @@ function isolationFromLoaded(loaded, resolved, consumerDir, repoRoot) {
 
 function runCleanRoomCheckInner(options = {}) {
   if (options.skip === true) {
-    return fail("skipped", "a rehearsal cannot report PASS with the clean-room check skipped");
+    return fail("skipped", "a rehearsal cannot report PASS with the clean-room check skipped", {
+      skipped: true,
+    });
   }
   const repoRoot = path.resolve(options.repoRoot ?? REPO_ROOT);
   const workDir = path.resolve(
@@ -794,6 +803,14 @@ function runCleanRoomCheckInner(options = {}) {
           });
           continue;
         }
+        failures.push({
+          package: unit.name,
+          entrypoint: file,
+          reason: "unloadable",
+          message:
+            text.trim() || `${unit.name} payload ${file} exited with status ${loaded.status}`,
+        });
+        continue;
       }
       entrypoints.push({
         package: unit.name,
@@ -1044,5 +1061,4 @@ export function main(argv = process.argv.slice(2)) {
   return report.ok ? 0 : 1;
 }
 
-const invoked = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invoked) process.exitCode = main();
+if (invokedAsEntrypoint(process.argv[1], import.meta.url)) process.exitCode = main();

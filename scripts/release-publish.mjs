@@ -63,10 +63,10 @@ import {
 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { computePublishSet, PUBLISHED_CRATES, scanWorkspacePackages } from "./lib/publish-set.mjs";
 import {
   BINARY_FAMILIES,
+  invokedAsEntrypoint,
   classifyCargoPublishOutcome,
   distTagForVersion,
   markTarballEntriesExecutable,
@@ -730,7 +730,7 @@ async function local(flags) {
 // Entry
 // ---------------------------------------------------------------------------
 
-const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const invoked = invokedAsEntrypoint(process.argv[1], import.meta.url);
 if (invoked) {
   const { flags, positional } = parseArgs(process.argv.slice(2));
   const command = positional[0];

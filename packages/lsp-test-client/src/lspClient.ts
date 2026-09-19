@@ -128,6 +128,7 @@ export class LspClient {
       this.stdoutBuf = this.stdoutBuf.length === 0 ? chunk : Buffer.concat([this.stdoutBuf, chunk]);
       if (!this.readsStalled) this.drainMessages();
     });
+    if (this.readsStalled) this.process.stdout!.pause();
 
     this.process.stderr!.on("data", (chunk: Buffer) => {
       this.stderr.append(chunk);
@@ -167,19 +168,39 @@ export class LspClient {
     return this.spawnError_;
   }
 
-  /** Bytes received from the server that have not been decoded yet. */
+  /**
+   * Bytes the server has written that this client has not decoded yet: the
+   * undecoded application buffer plus the bytes still parked in the paused
+   * transport (see {@link pausedTransportByteLength}).
+   */
   get unreadByteLength(): number {
-    return this.stdoutBuf.length;
+    return this.stdoutBuf.length + this.pausedTransportByteLength;
   }
 
-  /** Pause inbound decode so a stalled reader is observable. */
+  /**
+   * Bytes buffered in the stdout transport that the client has not consumed.
+   * While reads are stalled the pipe is paused, so the server's outbound frame
+   * backs up here (and, past the stream's high-water mark, in the OS pipe)
+   * instead of being drained into the application buffer.
+   */
+  get pausedTransportByteLength(): number {
+    return this.process.stdout?.readableLength ?? 0;
+  }
+
+  /**
+   * Stall the client reader: the stdout pipe stops being consumed, so the
+   * server observes transport backpressure, not just a client that decodes
+   * late.
+   */
   stallReads(): void {
     this.readsStalled = true;
+    this.process.stdout?.pause();
   }
 
-  /** Resume inbound decode after {@link stallReads}. */
+  /** Resume consuming and decoding stdout after {@link stallReads}. */
   resumeReads(): void {
     this.readsStalled = false;
+    this.process.stdout?.resume();
     this.drainMessages();
   }
 

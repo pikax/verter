@@ -22,7 +22,8 @@ const REPO_ROOT = path.resolve(HERE, "../..");
 const DEFAULT_ROOT_MANIFEST = "tests/sfc-projection/manifest.json";
 const SCHEMA_PATH = "scripts/sfc-projection/manifest.schema.json";
 const TYPE_FLAGS_ANY = 1;
-const TYPE_FLAGS_NEVER = 262144;
+// TypeScript `TypeFlags.Never` is 1 << 17; 1 << 18 is `TypeParameter`.
+const TYPE_FLAGS_NEVER = 131072;
 
 // The canonical per-node mandatory-case table lives in its own module so node
 // protocols (e.g. tests/sfc-projection/STP8/protocol.mjs) can derive required
@@ -37,6 +38,7 @@ import {
   STP6_MANDATORY_CASES,
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
+  STP9_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
 export {
@@ -48,6 +50,7 @@ export {
   STP6_MANDATORY_CASES,
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
+  STP9_MANDATORY_CASES,
 };
 
 export function canonicalMandatoryCases(nodeId) {
@@ -233,11 +236,41 @@ export function assertNonZeroSelection(selected, nodeId) {
   return [];
 }
 
-export function loadObligation(repoRoot, inventory) {
-  const rel =
+/**
+ * Load one product JSON file as a structured outcome: a missing or malformed
+ * product is a rejection record, never an exception escaping the runner.
+ */
+export function loadProductJson(repoRoot, rel, label) {
+  const abs = repoPath(repoRoot, rel);
+  if (!fs.existsSync(abs)) {
+    return {
+      doc: null,
+      error: err("STP1-zero-selection", "absent-manifest", `missing ${label} ${posix(rel)}`),
+    };
+  }
+  try {
+    return { doc: readJson(abs), error: null };
+  } catch (error) {
+    return {
+      doc: null,
+      error: err(
+        "STP1-zero-selection",
+        "absent-manifest",
+        `malformed ${label} ${posix(rel)}: ${error?.message || error}`,
+      ),
+    };
+  }
+}
+
+export function obligationSourceOf(inventory) {
+  return (
     inventory?.obligationSource ||
-    "tests/sfc-projection/STP0/products/current-feature-obligation.json";
-  return readJson(repoPath(repoRoot, rel));
+    "tests/sfc-projection/STP0/products/current-feature-obligation.json"
+  );
+}
+
+export function loadObligation(repoRoot, inventory) {
+  return readJson(repoPath(repoRoot, obligationSourceOf(inventory)));
 }
 
 export function assertInventoryComplete(inventory, obligation, repoRoot) {
@@ -490,8 +523,23 @@ export function assertStp3Products(repoRoot, nodeManifest) {
 }
 
 const STP4_DIALECTS = Object.freeze(["ts", "tsx", "js", "jsx"]);
+/** Each dialect row must bind its id to the same script language. */
+const STP4_DIALECT_LANGS = Object.freeze({ ts: "ts", tsx: "tsx", js: "js", jsx: "jsx" });
+/** Each checkJs policy row must carry the tuple the topology decision fixes. */
+const STP4_CHECK_JS_ROWS = Object.freeze({
+  off: Object.freeze({
+    policy: "@ts-nocheck",
+    scriptDiagnostics: "suppressed",
+    templateDiagnostics: "reported",
+  }),
+  on: Object.freeze({
+    policy: "@ts-check",
+    scriptDiagnostics: "reported",
+    templateDiagnostics: "reported",
+  }),
+});
 
-export function assertStp4Products(repoRoot, nodeManifest) {
+export function assertStp4Products(repoRoot, nodeManifest, overrides = {}) {
   const errors = [];
   const declared = new Set(nodeManifest?.products || []);
   for (const product of ["DialectTopologyEvidence", "ProjectionTopologyDecisionInputs"]) {
@@ -511,8 +559,8 @@ export function assertStp4Products(repoRoot, nodeManifest) {
     errors.push(err("STP4-js-unchecked", "removed-fixture", `missing ${inputsRel}`));
     return errors;
   }
-  const evidence = readJson(evidenceAbs);
-  const inputs = readJson(inputsAbs);
+  const evidence = overrides.evidence || readJson(evidenceAbs);
+  const inputs = overrides.inputs || readJson(inputsAbs);
   if (evidence.schema !== "DialectTopologyEvidence") {
     errors.push(err("STP4-js-unchecked", "removed-fixture", "DialectTopologyEvidence schema"));
   }
@@ -521,18 +569,40 @@ export function assertStp4Products(repoRoot, nodeManifest) {
       err("STP4-js-unchecked", "removed-fixture", "ProjectionTopologyDecisionInputs schema"),
     );
   }
-  const dialects = new Set((evidence.dialects || []).map((row) => row.id));
+  const dialects = new Map((evidence.dialects || []).map((row) => [row?.id, row]));
   for (const dialect of STP4_DIALECTS) {
-    if (!dialects.has(dialect)) {
+    const row = dialects.get(dialect);
+    if (!row) {
       errors.push(err("STP4-tsx-authored", "removed-fixture", `missing dialect ${dialect}`));
+    } else if (row.lang !== STP4_DIALECT_LANGS[dialect]) {
+      errors.push(
+        err(
+          "STP4-tsx-authored",
+          "dialect-drift",
+          `dialect ${dialect} must bind lang ${STP4_DIALECT_LANGS[dialect]}, got ${JSON.stringify(row.lang)}`,
+        ),
+      );
     }
   }
-  const checkJs = new Set((evidence.checkJs || []).map((row) => row.id));
-  if (!checkJs.has("off")) {
-    errors.push(err("STP4-js-unchecked", "removed-fixture", "missing checkJs off policy"));
-  }
-  if (!checkJs.has("on")) {
-    errors.push(err("STP4-js-checked", "removed-fixture", "missing checkJs on policy"));
+  const checkJs = new Map((evidence.checkJs || []).map((row) => [row?.id, row]));
+  for (const [policyId, required] of Object.entries(STP4_CHECK_JS_ROWS)) {
+    const caseId = policyId === "off" ? "STP4-js-unchecked" : "STP4-js-checked";
+    const row = checkJs.get(policyId);
+    if (!row) {
+      errors.push(err(caseId, "removed-fixture", `missing checkJs ${policyId} policy`));
+      continue;
+    }
+    for (const [field, value] of Object.entries(required)) {
+      if (row[field] !== value) {
+        errors.push(
+          err(
+            caseId,
+            "policy-drift",
+            `checkJs ${policyId}.${field} must be ${JSON.stringify(value)}, got ${JSON.stringify(row[field])}`,
+          ),
+        );
+      }
+    }
   }
   const evidenceIds = new Set((evidence.cases || []).map((row) => row.id));
   for (const id of NODE_MANDATORY_CASES.STP4) {
@@ -573,9 +643,27 @@ export function assertStp4Products(repoRoot, nodeManifest) {
       ),
     );
   }
+  if (inputs.externalScripts?.ownership !== "source-identity") {
+    errors.push(
+      err(
+        "STP4-external-owner",
+        "removed-fixture",
+        "external scripts must be owned by source identity",
+      ),
+    );
+  }
   if (inputs.externalScripts?.checkedOncePerIdentity !== true) {
     errors.push(
       err("STP4-external-owner", "removed-fixture", "external scripts must be checked once"),
+    );
+  }
+  if (inputs.externalScripts?.importersDoNotDuplicateBody !== true) {
+    errors.push(
+      err(
+        "STP4-external-owner",
+        "removed-fixture",
+        "external script importers must not duplicate the script body",
+      ),
     );
   }
   if (inputs.vueLegality?.scriptSetupSrc !== "reject") {
@@ -990,27 +1078,48 @@ function loadJsTypeScript(pin, repoRoot) {
   return require(path.join(pkgDir, "lib/typescript.js"));
 }
 
+/**
+ * The clean twin is measured once: when it names the positive or negative
+ * probe file it shares that result (and that file's single check), otherwise
+ * it is checked as its own file.
+ */
+export function cleanTwinTarget(probes) {
+  const twin = probes?.cleanTwin ? posix(probes.cleanTwin) : null;
+  if (!twin) return { rel: null, sharedWith: "positive" };
+  if (twin === posix(probes.positive)) return { rel: twin, sharedWith: "positive" };
+  if (twin === posix(probes.negative)) return { rel: twin, sharedWith: "negative" };
+  return { rel: twin, sharedWith: null };
+}
+
+export function harnessProbeFiles(probes) {
+  return [
+    ...new Set([probes.positive, probes.negative, probes.cleanTwin].filter(Boolean).map(posix)),
+  ];
+}
+
 export function runJsEngine(resolved, probes, repoRoot) {
   const pin = resolved;
   const ts = loadJsTypeScript(pin, repoRoot);
-  const options = {
-    strict: true,
-    noEmit: true,
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    skipLibCheck: true,
-    types: [],
-  };
+  // Both engines open the same probe tsconfig so they perform equivalent work.
+  const parsed = loadJsTsconfig(ts, repoPath(repoRoot, probes.tsconfig));
+  const options = { ...parsed.options, noEmit: true };
   const positive = repoPath(repoRoot, probes.positive);
   const negative = repoPath(repoRoot, probes.negative);
   const checkCounts = {};
   const pos = runJsFile(ts, positive, options, checkCounts, probes.positive, probes);
   const neg = runJsFile(ts, negative, options, checkCounts, probes.negative, probes);
+  const twin = cleanTwinTarget(probes);
+  const cleanTwin =
+    twin.sharedWith === "positive"
+      ? pos
+      : twin.sharedWith === "negative"
+        ? neg
+        : runJsFile(ts, repoPath(repoRoot, twin.rel), options, checkCounts, twin.rel, probes);
   return {
     engine: pin.id,
     positive: pos,
     negative: neg,
+    cleanTwin,
     checkCounts,
   };
 }
@@ -1037,11 +1146,19 @@ export async function runNativeEngine(resolved, probes, repoRoot) {
     const checkCounts = {};
     const pos = observeNative(project, positive, probes, checkCounts, probes.positive);
     const neg = observeNative(project, negative, probes, checkCounts, probes.negative);
+    const twin = cleanTwinTarget(probes);
+    const cleanTwin =
+      twin.sharedWith === "positive"
+        ? pos
+        : twin.sharedWith === "negative"
+          ? neg
+          : observeNative(project, repoPath(repoRoot, twin.rel), probes, checkCounts, twin.rel);
     snap.dispose();
     return {
       engine: resolved.id,
       positive: pos,
       negative: neg,
+      cleanTwin,
       checkCounts,
     };
   } finally {
@@ -1442,7 +1559,8 @@ function evaluateHarnessRun(
   { maxChecksPerFile = 1, requireInstanceType = true } = {},
 ) {
   const errors = [];
-  errors.push(...assertCleanTwin(run.positive.diags, { fileLabel: `${engineId} clean twin` }));
+  const cleanTwin = run.cleanTwin || run.positive;
+  errors.push(...assertCleanTwin(cleanTwin.diags, { fileLabel: `${engineId} clean twin` }));
   const instance = run.positive.observations.types.Instance;
   if (requireInstanceType) {
     if (!instance) {
@@ -1518,12 +1636,7 @@ function evaluateHarnessRun(
     );
   }
   errors.push(
-    ...assertCheckCounts(
-      run.checkCounts,
-      engineId,
-      [probes.positive, probes.negative],
-      maxChecksPerFile,
-    ),
+    ...assertCheckCounts(run.checkCounts, engineId, harnessProbeFiles(probes), maxChecksPerFile),
   );
   return errors;
 }
@@ -1581,8 +1694,24 @@ export async function verifyNode(options) {
   }
   selected.push(...cases.map((row) => row.id));
 
-  const inventory = options.inventory || readJson(repoPath(repoRoot, rootLoad.manifest.inventory));
-  const obligation = options.obligation || loadObligation(repoRoot, inventory);
+  let inventory = options.inventory || null;
+  if (!inventory) {
+    const load = loadProductJson(repoRoot, rootLoad.manifest.inventory, "inventory");
+    if (load.error) {
+      errors.push(load.error);
+      return summarize({ options, errors, selected, resolvedEngines, harnessRuns, repoRoot });
+    }
+    inventory = load.doc;
+  }
+  let obligation = options.obligation || null;
+  if (!obligation) {
+    const load = loadProductJson(repoRoot, obligationSourceOf(inventory), "obligation");
+    if (load.error) {
+      errors.push(load.error);
+      return summarize({ options, errors, selected, resolvedEngines, harnessRuns, repoRoot });
+    }
+    obligation = load.doc;
+  }
   errors.push(...assertInventoryComplete(inventory, obligation, repoRoot));
   if (nodeId === "STP2") {
     errors.push(...assertStp2Products(repoRoot, nodeLoad.manifest));
@@ -1597,8 +1726,15 @@ export async function verifyNode(options) {
     errors.push(...assertStp6Products(repoRoot, nodeLoad.manifest));
   }
 
-  const matrix =
-    options.engineMatrix || readJson(repoPath(repoRoot, rootLoad.manifest.engineMatrix));
+  let matrix = options.engineMatrix || null;
+  if (!matrix) {
+    const load = loadProductJson(repoRoot, rootLoad.manifest.engineMatrix, "engine matrix");
+    if (load.error) {
+      errors.push(load.error);
+      return summarize({ options, errors, selected, resolvedEngines, harnessRuns, repoRoot });
+    }
+    matrix = load.doc;
+  }
   const pins = selectEngines(matrix, options.engine || "all");
   if (pins.length === 0) {
     errors.push(
@@ -1615,9 +1751,19 @@ export async function verifyNode(options) {
     else resolvedEngines.push(resolved.engine);
   }
 
-  const methodology =
-    options.performanceMethodology ||
-    readJson(repoPath(repoRoot, rootLoad.manifest.performanceMethodology));
+  let methodology = options.performanceMethodology || null;
+  if (!methodology) {
+    const load = loadProductJson(
+      repoRoot,
+      rootLoad.manifest.performanceMethodology,
+      "performance methodology",
+    );
+    if (load.error) {
+      errors.push(load.error);
+      return summarize({ options, errors, selected, resolvedEngines, harnessRuns, repoRoot });
+    }
+    methodology = load.doc;
+  }
   if (methodology?.stateSafety?.incremental !== "fresh") {
     errors.push(
       err("STP1-harness", "stale-incremental", "performance methodology incremental is not fresh"),
@@ -1713,6 +1859,11 @@ export async function verifyNode(options) {
   if (nodeId === "STP8") {
     const stp8 = await evaluateStp8Node({ repoRoot });
     errors.push(...stp8.errors);
+  }
+
+  if (nodeId === "STP9") {
+    const stp9 = await evaluateStp9Node({ repoRoot });
+    errors.push(...stp9.errors);
   }
 
   return summarize({
@@ -1830,6 +1981,15 @@ async function evaluateStp8Node({ repoRoot }) {
   return { errors: stp8.errors };
 }
 
+async function evaluateStp9Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP9/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp9 = await protocol.evaluateStp9({ repoRoot });
+  return { errors: stp9.errors };
+}
+
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
   const protocolHref = pathToFileURL(
     repoPath(repoRoot, "tests/sfc-projection/STP5/protocol.mjs"),
@@ -1910,6 +2070,10 @@ function summarize({
   capabilityRows = [],
 }) {
   const ok = errors.length === 0;
+  const probesSkipped = !!options.skipProbes;
+  // A run that skipped its probes validates products only; it never
+  // qualifies the node.
+  const qualified = ok && !probesSkipped;
   const required = mandatoryCasesFor(nodeManifest || { node: options.node });
   const selectedCaseIds = new Set(selected);
   if (ok) {
@@ -1953,6 +2117,8 @@ function summarize({
     "tests/sfc-projection/STP7/probes/negative.ts",
     "tests/sfc-projection/STP8/probes/positive.ts",
     "tests/sfc-projection/STP8/probes/negative.ts",
+    "tests/sfc-projection/STP9/probes/positive.ts",
+    "tests/sfc-projection/STP9/probes/negative.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -1960,6 +2126,8 @@ function summarize({
   }
   return {
     ok,
+    qualified,
+    probesSkipped,
     node: options.node,
     engine: options.engine || "all",
     requireAll: !!options.requireAll,
@@ -1985,6 +2153,7 @@ function summarize({
       engine: run.engine,
       positiveDiagnostics: run.positive.diags,
       negativeDiagnostics: run.negative.diags,
+      cleanTwinDiagnostics: (run.cleanTwin || run.positive).diags,
       hover: run.positive.observations.hover?.printed || null,
       instanceType: run.positive.observations.types.Instance?.printed || null,
       definition: run.positive.observations.definition?.name || null,
@@ -2001,10 +2170,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
@@ -2020,7 +2189,10 @@ so a native-only --engine selection is rejected rather than skipped. STP8
 rejects unmatched, fabricated, or uncited feasibility rows; TypeScript 5.8-only
 toy evidence or a shrunken engine denominator; checker-only public shapes that
 respell InstanceType or remap Vue utilities; and event/slot inference
-contributors postponed until after specialization.
+contributors postponed until after specialization. STP9 rejects TypeInfo or
+assignability during plan construction, complete-cache admission of malformed
+or unknown syntax, and use identities that shift under comment or unrelated
+sibling insertion.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -2033,8 +2205,9 @@ if (isMain) {
   const result = await verifyNode({ ...args, repoRoot: REPO_ROOT });
   if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result.ok) {
+    const verdict = result.probesSkipped ? "PASS (products only, probes skipped)" : "PASS";
     process.stdout.write(
-      `${result.node} verify: PASS cases=${result.selectedCaseIds.join(",")} engines=${result.engines
+      `${result.node} verify: ${verdict} cases=${result.selectedCaseIds.join(",")} engines=${result.engines
         .map((engine) => `${engine.id}:${posix(engine.executable)}`)
         .join(",")}\n`,
     );
