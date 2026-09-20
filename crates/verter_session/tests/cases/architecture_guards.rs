@@ -497,6 +497,24 @@ transport = { workspace = true }
     assert!(!module_declaration_matches(&nested, &expected));
     let inline = syn::parse_file("pub(crate) mod flow_return {}").unwrap();
     assert!(!module_declaration_matches(&inline, &expected));
+    let direct_path =
+        syn::parse_file("#[path = \"redirected.rs\"] pub(crate) mod flow_return;").unwrap();
+    assert!(!module_declaration_matches(&direct_path, &expected));
+    let cfg_attr_path =
+        syn::parse_file("#[cfg_attr(unix, path = \"redirected.rs\")] pub(crate) mod flow_return;")
+            .unwrap();
+    assert!(!module_declaration_matches(&cfg_attr_path, &expected));
+    let nested_cfg_attr_path = syn::parse_file(
+        "#[cfg_attr(unix, cfg_attr(feature = \"redirect\", path = \"redirected.rs\"))] pub(crate) mod flow_return;",
+    )
+    .unwrap();
+    assert!(!module_declaration_matches(
+        &nested_cfg_attr_path,
+        &expected
+    ));
+    let unrelated_cfg_attr =
+        syn::parse_file("#[cfg_attr(unix, derive(Clone))] pub(crate) mod flow_return;").unwrap();
+    assert!(module_declaration_matches(&unrelated_cfg_attr, &expected));
 
     let nested_comment =
         syn::parse_file("/* outer /* inner */ end */ use verter_lsp :: Server;").unwrap();
@@ -645,8 +663,38 @@ fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
 }
 
 fn module_declaration_matches(file: &syn::File, expected: &syn::ItemMod) -> bool {
+    fn cfg_attr_selects_path(list: &syn::MetaList) -> bool {
+        let Ok(args) = list.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            return false;
+        };
+        args.iter().skip(1).any(|meta| match meta {
+            syn::Meta::NameValue(value) => value.path.is_ident("path"),
+            syn::Meta::List(nested) if nested.path.is_ident("cfg_attr") => {
+                cfg_attr_selects_path(nested)
+            }
+            _ => false,
+        })
+    }
+
+    fn is_source_redirect(attr: &syn::Attribute) -> bool {
+        if attr.path().is_ident("path") {
+            return true;
+        }
+        if !attr.path().is_ident("cfg_attr") {
+            return false;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        cfg_attr_selects_path(list)
+    }
+
     fn is_unconditionally_active(attrs: &[syn::Attribute]) -> bool {
-        !attrs.iter().any(|attr| attr.path().is_ident("cfg"))
+        !attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("cfg") || is_source_redirect(attr))
     }
 
     fn visibility_matches(actual: &syn::Visibility, expected: &syn::Visibility) -> bool {
@@ -711,7 +759,8 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
             .map(|name| name.as_str().expect("forbidden dependency name"))
             .collect();
         let src_root = workspace.join(crate_rel).join("src");
-        for entry in WalkDir::new(&src_root).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(&src_root) {
+            let entry = entry.unwrap_or_else(|e| panic!("walk {}: {e}", src_root.display()));
             if !entry.file_type().is_file()
                 || entry.path().extension().and_then(|ext| ext.to_str()) != Some("rs")
             {
