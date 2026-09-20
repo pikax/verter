@@ -3561,6 +3561,16 @@ const msg = '{marker}'
         active_uri.as_str().to_string(),
         overdue + Duration::from_secs(1),
     );
+    // A background re-arm (semantic enrichment, a generation refresh, an
+    // importer republish) stamps a NEWER receipt on the oldest backlog
+    // document. It is not the user touching that document, so it must not
+    // promote it past anything the user did touch.
+    let (oldest_id, oldest_uri) = &backlog[0];
+    handle.signal_diagnostics_only(
+        oldest_id.clone(),
+        oldest_uri.as_str().to_string(),
+        overdue + Duration::from_secs(2),
+    );
     release.notify_one();
 
     let first_sync_order = |calls: &[MockCall]| {

@@ -112,6 +112,15 @@ struct PendingSignal {
     /// at drain charges all of that waiting to the user as fresh quiet time and
     /// restarts the full debounce window from zero.
     received_at: Instant,
+    /// The latest receipt that came from the USER touching this document (an
+    /// open or an edit), or `None` for purely background work: semantic
+    /// enrichment, a generation refresh, an importer republish, an init re-arm.
+    ///
+    /// This, not `received_at`, is what orders dispatch. Background work
+    /// restamps `received_at` for every open document, so ordering on it lets
+    /// a replayed backlog keep overtaking the one document the user is
+    /// actually looking at.
+    user_received_at: Option<Instant>,
 }
 
 impl SyncCoordinatorHandle {
@@ -137,6 +146,7 @@ impl SyncCoordinatorHandle {
                 // its own. Assigning would walk the window backwards and fire
                 // the sync while the user is still typing.
                 pending.received_at = pending.received_at.max(received_at);
+                pending.user_received_at = pending.user_received_at.max(Some(received_at));
             })
             .or_insert(PendingSignal {
                 uri: uri_str,
@@ -144,6 +154,7 @@ impl SyncCoordinatorHandle {
                 force_diagnostics: false,
                 sync_retries_remaining: 1,
                 received_at,
+                user_received_at: Some(received_at),
             });
         // Full means a wake is already queued, which is exactly the desired
         // coalescing behavior. Closed means the server is shutting down.
@@ -184,6 +195,7 @@ impl SyncCoordinatorHandle {
                 force_diagnostics: true,
                 sync_retries_remaining: 0,
                 received_at,
+                user_received_at: None,
             });
         let _ = self.wake_tx.try_send(());
     }
@@ -492,6 +504,7 @@ fn absorb_inbox(
                 pending.sync_retries_remaining = pending
                     .sync_retries_remaining
                     .max(signal.sync_retries_remaining);
+                pending.user_received_at = pending.user_received_at.max(signal.user_received_at);
             })
             .or_insert((received_at, signal));
     }
@@ -579,6 +592,7 @@ async fn coordinator_loop(
                         .or_insert((received_at, PendingSignal {
                             uri, requires_sync: false, force_diagnostics: true,
                             sync_retries_remaining: 0, received_at,
+                            user_received_at: None,
                         }));
                 }
             }
@@ -624,6 +638,7 @@ async fn coordinator_loop(
                                         force_diagnostics: true,
                                         sync_retries_remaining: 0,
                                         received_at,
+                                        user_received_at: None,
                                     },
                                 ));
                         }
@@ -650,6 +665,7 @@ async fn coordinator_loop(
                                         force_diagnostics: true,
                                         sync_retries_remaining: 0,
                                         received_at,
+                                        user_received_at: None,
                                     },
                                 ),
                             );
@@ -680,7 +696,8 @@ async fn coordinator_loop(
                 // provider sync per keystroke, the exact flood the debounce
                 // exists to prevent.
                 //
-                // ONE document per dispatch, the most recently received first.
+                // ONE document per dispatch: the one the user touched most
+                // recently, then background work newest-first.
                 // The provider sync below is awaited inline, so a batch taken
                 // here is a batch nothing can overtake: a restart replays every
                 // open editor at once, and the document the user touched after
@@ -700,8 +717,14 @@ async fn coordinator_loop(
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
                     .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
-                    .max_by(|(left_id, (left, _)), (right_id, (right, _))| {
-                        left.cmp(right).then_with(|| left_id.cmp(right_id))
+                    .max_by(|(left_id, (left, left_signal)), (right_id, (right, right_signal))| {
+                        // `None < Some(_)`: anything the user touched outranks
+                        // purely background work, newest touch first.
+                        left_signal
+                            .user_received_at
+                            .cmp(&right_signal.user_received_at)
+                            .then_with(|| left.cmp(right))
+                            .then_with(|| left_id.cmp(right_id))
                     })
                     .map(|(id, (_, signal))| (id.clone(), signal.clone()))
                     .into_iter()
@@ -761,6 +784,7 @@ async fn coordinator_loop(
                                             .sync_retries_remaining
                                             .saturating_sub(1),
                                         received_at,
+                                        user_received_at: signal.user_received_at,
                                     },
                                 ),
                             );
@@ -936,6 +960,7 @@ fn arm_open_importer_republish(
                         force_diagnostics: true,
                         sync_retries_remaining: 0,
                         received_at,
+                        user_received_at: None,
                     },
                 ));
         }
