@@ -386,11 +386,8 @@ test("STS0-policy-lock: publishing claims match the profile's script context and
 test("STS0-policy-lock: skipLive is product-only and still joins contract constants", () => {
   const errors = evaluateSts0({ skipLive: true }).errors;
   assert.equal(errors.length, 0, JSON.stringify(errors, null, 2));
-  assert.equal(
-    assertContractConstantsJoin(POLICY()).length,
-    0,
-    JSON.stringify(assertContractConstantsJoin(POLICY()), null, 2),
-  );
+  const contractJoinErrors = assertContractConstantsJoin(POLICY());
+  assert.equal(contractJoinErrors.length, 0, JSON.stringify(contractJoinErrors, null, 2));
 });
 
 test("STS0-policy-lock: profile-gate spawn and cargo outcomes are classified separately", () => {
