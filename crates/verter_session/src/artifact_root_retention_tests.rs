@@ -319,3 +319,80 @@ fn retention_is_flat_under_a_pinned_view_and_drains_after_it() {
          retention is a lease, never an unconditional leak"
     );
 }
+
+/// E4-AC2: eviction and project close preserve live reader handles, and
+/// final reader release makes attributable allocations reclaimable without
+/// changing semantic identity, provenance or completeness.
+///
+/// External conformance negative control: a graph region reachable from a
+/// live public request view cannot be reclaimed while that view can still
+/// materialize from it (the beta.5 "the source has no live graph representation
+/// under the request view" failure is the negative control).
+#[test]
+fn project_close_preserves_live_reader_handles_and_final_release_reclaims() {
+    let host = host_with_file("export interface CloseTarget { val: number; name: string }\n");
+    let initial_indexed = host
+        .ensure_indexed_ready(CANONICAL)
+        .expect("artifact must materialize");
+    let key = host
+        .authoritative_current_artifact_key(CANONICAL)
+        .expect("runtime-authoritative artifact key");
+
+    // Capture an active public reader view before project close.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let root = Arc::clone(view.artifact_root().expect("view carries a lease"));
+    let store = host.project_type_store();
+    let live_roots_before_close = store.indexed().live_root_count();
+    assert!(
+        live_roots_before_close >= 1,
+        "reader lease must be registered"
+    );
+
+    // Close the project/host: full teardown cascades through clear_all(),
+    // resetting resolver and clearing the manager's cached base view.
+    host.close();
+
+    // Positive contract: the live reader handle and its captured root STILL reach
+    // the artifact and preserve complete semantic identity.
+    let through_lease = store
+        .indexed()
+        .indexed_at_root(&root, &key)
+        .expect("the view's lease MUST survive project close and reach its artifact");
+    assert_eq!(
+        through_lease.whole_hash, initial_indexed.whole_hash,
+        "semantic identity and content hash must be preserved exactly"
+    );
+
+    // Negative control: under the request view, the live graph representation is still
+    // accessible and not reclaimed.
+    let raw_payload = store
+        .indexed()
+        .artifacts_at_root(&root, &key)
+        .expect("raw artifact payload must be retrievable at root");
+    assert_eq!(raw_payload.indexed.whole_hash, initial_indexed.whole_hash);
+
+    // The retired version is retained solely because of the reader's live root lease.
+    assert!(
+        store.indexed().retained_retired_version_count() > 0,
+        "retired versions are retained for the reader handle"
+    );
+
+    // Final reader release: drop the reader handle and root lease.
+    drop(through_lease);
+    drop(raw_payload);
+    drop(root);
+    drop(view);
+
+    // After final reader release, reclaim_retired_versions frees all attributable allocations.
+    store.indexed().reclaim_retired_versions();
+    assert_eq!(
+        store.indexed().retained_retired_version_count(),
+        0,
+        "final reader release makes attributable allocations reclaimable"
+    );
+    let probe = store.indexed().capture_root();
+    assert!(
+        store.indexed().artifacts_at_root(&probe, &key).is_none(),
+        "reclaimed artifact is no longer reachable from any root"
+    );
+}
