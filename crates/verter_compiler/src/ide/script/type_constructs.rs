@@ -394,8 +394,7 @@ pub(super) fn emit_helper_imports(
         options,
         builtin_components,
         template_ast,
-        false,
-        false,
+        HelperImportNeeds::default(),
     );
 }
 
@@ -416,8 +415,10 @@ pub(super) fn emit_helper_imports_with_async_component(
         options,
         builtin_components,
         template_ast,
-        false,
-        true,
+        HelperImportNeeds {
+            async_component: true,
+            ..HelperImportNeeds::default()
+        },
     );
 }
 
@@ -436,9 +437,20 @@ pub(super) fn emit_helper_imports_with_define_component(
         options,
         builtin_components,
         template_ast,
-        true,
-        false,
+        HelperImportNeeds {
+            define_component: true,
+            ..HelperImportNeeds::default()
+        },
     );
+}
+
+/// The optional helper imports a particular script shape asks for.
+#[derive(Clone, Copy, Default)]
+struct HelperImportNeeds {
+    /// `defineComponent`, for an Options-API default export that is wrapped.
+    define_component: bool,
+    /// `asyncComponent`, for a proven `defineAsyncComponent` binding.
+    async_component: bool,
 }
 
 fn emit_helper_imports_inner(
@@ -448,8 +460,7 @@ fn emit_helper_imports_inner(
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_ast: Option<&crate::ast::types::TemplateAst>,
-    needs_define_component: bool,
-    needs_async_component: bool,
+    needs: HelperImportNeeds,
 ) {
     use std::fmt::Write;
 
@@ -492,7 +503,7 @@ fn emit_helper_imports_inner(
 
     // Imported only by the files that use it, so every other file's generated
     // preamble is unaffected.
-    if needs_async_component {
+    if needs.async_component {
         writeln!(
             imports,
             "import {{ asyncComponent as {P}asyncComponent }} from \"{}\";",
@@ -504,7 +515,7 @@ fn emit_helper_imports_inner(
 
     // Collect vue imports: built-in components + template helpers (normalizeClass, normalizeStyle)
     let mut vue_imports: Vec<&str> = Vec::new();
-    if needs_define_component {
+    if needs.define_component {
         vue_imports.push("defineComponent as ___VERTER___defineComponent");
     }
     for &name in builtin_components {
