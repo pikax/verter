@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 mod lifetime;
+mod positional;
 mod provenance;
 mod read_view;
 mod records;
@@ -16,6 +17,11 @@ mod substitution;
 
 #[allow(unused_imports)]
 pub use lifetime::{SignatureStore, StoreError};
+#[allow(unused_imports)]
+pub use positional::{
+    MinArityFlags, PositionalMode, PositionalShape, ProjectedElement, ProjectedKind,
+    ProjectedTuple, SlotTypeFacts, TypeAt,
+};
 #[allow(unused_imports)]
 pub use provenance::{
     ArmIdentity, ConstituentSequence, DeclarationGroupId, DeclarationParentId, MappedConstituent,
@@ -27,12 +33,12 @@ pub use read_view::{BorrowedSet, ReadError, SemanticReadView};
 pub use records::{
     BinderDeclaration, BinderSpace, BinderSpaceId, BodyLocatorId, CallSubstitutionId,
     DeclarationInstantiationId, GraphEpoch, ParameterLayout, ParameterLayoutId,
-    ParameterOptionality, ParameterSlot, ParameterSlotId, ReturnObligationKey, SignatureCandidate,
-    SignatureDescriptor, SignatureDescriptorId, SignatureInputShape, SignatureInputShapeId,
-    SignatureKind, SignatureProvenanceId, SignatureResultRecipe, SignatureResultRecipeId,
-    SignatureSemanticFlags, SignatureSetId, SignatureSetRef, SignatureTemplate,
-    SignatureTemplateId, SpellingId, TypeToken, LAYOUT_QUERY_OUTCOME_SET, LAYOUT_READY_SET,
-    LAYOUT_SIGNATURE_CANDIDATE, LAYOUT_SIGNATURE_SET_REF,
+    ParameterOptionality, ParameterSlot, ParameterSlotId, RestKind, RestSlot, ReturnObligationKey,
+    SignatureCandidate, SignatureDescriptor, SignatureDescriptorId, SignatureInputShape,
+    SignatureInputShapeId, SignatureKind, SignatureProvenanceId, SignatureResultRecipe,
+    SignatureResultRecipeId, SignatureSemanticFlags, SignatureSetId, SignatureSetRef,
+    SignatureTemplate, SignatureTemplateId, SpellingId, TypeToken, LAYOUT_QUERY_OUTCOME_SET,
+    LAYOUT_READY_SET, LAYOUT_SIGNATURE_CANDIDATE, LAYOUT_SIGNATURE_SET_REF,
 };
 #[allow(unused_imports)]
 pub use substitution::{CallSubstitution, SubstError, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH};
@@ -42,6 +48,8 @@ pub mod test_support;
 
 #[cfg(test)]
 mod lifetime_tests;
+#[cfg(test)]
+mod positional_tests;
 #[cfg(test)]
 mod provenance_tests;
 #[cfg(test)]

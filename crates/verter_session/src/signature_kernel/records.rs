@@ -140,6 +140,9 @@ pub struct SignatureSemanticFlags(u16);
 impl SignatureSemanticFlags {
     pub const NONE: Self = Self(0);
     pub const LITERAL_SPECIALIZATION: Self = Self(1 << 0);
+    /// Untyped JavaScript signature: every parameter is optional unless a
+    /// strong-arity read is requested.
+    pub const UNTYPED_JS: Self = Self(1 << 1);
 
     #[must_use]
     pub const fn bits(self) -> u16 {
@@ -185,18 +188,50 @@ impl ParameterOptionality {
     }
 }
 
-/// One positional or rest slot.
+/// One positional or rest slot. `name` is diagnostic/signature-help
+/// metadata only: positional type equality never reads it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ParameterSlot {
     pub ty: TypeToken,
     pub optionality: ParameterOptionality,
+    pub name: Option<SpellingId>,
+}
+
+impl ParameterSlot {
+    #[must_use]
+    pub const fn new(ty: TypeToken, optionality: ParameterOptionality) -> Self {
+        Self {
+            ty,
+            optionality,
+            name: None,
+        }
+    }
+}
+
+/// Whether a rest slot's type is a resolved array-like element run or a
+/// still-uninstantiated type-parameter rest (one open inference position).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RestKind {
+    Array,
+    GenericTuple,
+}
+
+/// The rest run of a layout. `slot.ty` is the ELEMENT type for an array
+/// rest; `tail` holds required/optional positions AFTER the run
+/// (`[...string[], number]`). Fixed tuple rests are flattened into
+/// `ParameterLayout::parameters` at construction and never appear here.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct RestSlot {
+    pub slot: ParameterSlot,
+    pub kind: RestKind,
+    pub tail: Box<[ParameterSlot]>,
 }
 
 /// Ordered parameter layout, interned as a whole.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ParameterLayout {
     pub parameters: Box<[ParameterSlot]>,
-    pub rest: Option<ParameterSlot>,
+    pub rest: Option<RestSlot>,
 }
 
 /// One binder in a residual or declaration space: constraints and defaults.

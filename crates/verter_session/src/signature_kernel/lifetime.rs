@@ -287,6 +287,13 @@ impl SignatureStore {
         )
     }
 
+    fn check_slot(inner: &EpochInner, slot: &ParameterSlot) -> Result<(), StoreError> {
+        match slot.name {
+            Some(name) => Self::require_id(inner, name.epoch(), name.index(), &inner.strings),
+            None => Ok(()),
+        }
+    }
+
     fn check_shape(
         &self,
         inner: &EpochInner,
@@ -427,6 +434,7 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<ParameterSlotId, StoreError> {
         let inner = self.inner();
+        Self::check_slot(&inner, &slot)?;
         let raw = inner.slots.intern(slot, cancelled)?;
         Ok(ParameterSlotId::from_raw(raw))
     }
@@ -437,6 +445,14 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<ParameterLayoutId, StoreError> {
         let inner = self.inner();
+        for slot in layout.parameters.iter().chain(
+            layout
+                .rest
+                .iter()
+                .flat_map(|r| std::iter::once(&r.slot).chain(r.tail.iter())),
+        ) {
+            Self::check_slot(&inner, slot)?;
+        }
         let raw = inner.layouts.intern(layout, cancelled)?;
         Ok(ParameterLayoutId::from_raw(raw))
     }
