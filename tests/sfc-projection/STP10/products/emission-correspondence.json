@@ -1,0 +1,89 @@
+{
+  "schema": "EmissionCorrespondence",
+  "version": 1,
+  "product": "ProjectionEmission",
+  "node": "STP10",
+  "kind": "implementation",
+  "products": [
+    "ProjectionEmission",
+    "ProjectionOrigin",
+    "ObservationRole",
+    "EditOrigin",
+    "MappingProduct"
+  ],
+  "owner": "compiler.sfc-ts-projection:mapping",
+  "implementationHome": "crates/verter_compiler/src/framework_common/projection_plan/origin.rs",
+  "backendSurface": "VueProjectionBackend::projection_emission (dormant vs project_ide; STP58 owns activation)",
+  "mappingOwner": "CodeTransform::MappingProduct (TCM1); minted from the same operation record as checking text",
+  "emitOpLowering": "projected_class_for_emit_op; PreserveOriginal classes come from MappingProduct of the transform; other EmitOp variants lower only where local byte geometry justifies the class",
+  "chainOwner": "CodeTransform::chain_source_map",
+  "independentMapGenerator": false,
+  "predecessors": {
+    "STP9": {
+      "consumes": [
+        "ProjectionPlan",
+        "BindingOriginId",
+        "ComponentUseId",
+        "GenericBinderRef",
+        "OrderedAttributeOp",
+        "BranchEdge"
+      ]
+    },
+    "TCM1": {
+      "consumes": "existing MappingProduct API and source/identity contract",
+      "duplicateImplementation": false
+    },
+    "STP8": {
+      "consumes": ["AcceptedVueConstructorABI", "AcceptedTopologyMatrix"],
+      "genericBinders": ["T", "U"],
+      "abiSpelling": "Comp<T = unknown, U = unknown>"
+    }
+  },
+  "identities": {
+    "ProjectionOrigin": {
+      "inputs": ["BindingOriginId", "ComponentUseId", "AdmittedExpressionId", "PlanSnapshotId", "InputBasisId"],
+      "independentOfMappingGeometry": true
+    },
+    "ObservationRole": {
+      "channels": ["hover", "definition", "references", "edits", "diagnostic", "feature"],
+      "featureParticipationIsNotEditSafety": true
+    },
+    "EditOrigin": {
+      "requires": ["ObservationRole::Edits", "Identity or Relocated carrier preimage"]
+    }
+  },
+  "revisions": {
+    "checkingTextRevisionDistinctFromCorrespondenceRevision": true,
+    "reusedTextReceivesCurrentSourcePositions": true,
+    "unchangedCheckingTextCannotJustifyStaleSourceMappings": true
+  },
+  "correspondence": {
+    "overlappingVirtualSpans": false,
+    "syntheticAuthoredLocation": false,
+    "staleMapReuse": false,
+    "oneAuthoredTokenMultipleObservations": true,
+    "verbatimRoundtripIncludesUnicodeAndCrlf": true
+  },
+  "completeCache": {
+    "incompleteCannotWarm": true,
+    "cancelledCannotWarm": true,
+    "configurationMissingCannotWarm": true
+  },
+  "stateSafety": {
+    "incrementalEqualsFresh": true,
+    "logicalUseDistinctFromRevisionObservation": true,
+    "publicationOwner": "existing provider/LSO snapshot authority"
+  },
+  "svelteRoute": "preserved; STS0/STS15 own Svelte activation",
+  "deletionPopulationThisNode": [],
+  "retiredParallelProjectionSourcemap": "migrated records use CodeTransform MappingProduct; canonical CodeTransform map machinery is retained",
+  "ac2Observability": {
+    "diagnostics": "ObservationRole::Diagnostic plus TypeScript diagnostics through existing ProjectionBackend/CodeTransform",
+    "types": "TypeScript type answers; InstanceType<typeof Comp> preserved",
+    "sourceTargets": "ProjectionOrigin + MappingProduct carrier spans; synthesized scaffolding has no authored location",
+    "hoverDefinitionReferencesEdits": "harness probes plus role-qualified observations; feature participation is not edit safety"
+  },
+  "ac3Rationale": "Checking-text revision and correspondence revision are separate. Unchanged checking text with moved source positions is StaleMap. Incomplete/cancelled/configuration-missing observations cannot warm complete caches. Publication stays with provider/LSO.",
+  "ac4Rationale": "Emission walks the existing CodeTransform chunk list once via MappingProduct::of. No second generated-text parse, no independent map generator, no helper expansion.",
+  "runtimeActivationAuthorized": false
+}

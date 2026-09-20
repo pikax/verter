@@ -883,3 +883,113 @@ fn projection_plan_refuses_unbound_parse_artifact() {
         VueProjectionBackend.projection_plan(WITH_USE, &other_profile, "file:///plan.vue");
     assert_ne!(matched.snapshot, profiled.snapshot);
 }
+
+#[test]
+fn projection_emission_is_dormant_from_ide_route() {
+    let allocator = oxc_allocator::Allocator::default();
+    let source = "café\r\n";
+    let transform = verter_compiler::code_transform::CodeTransform::new(source, &allocator);
+    let plan = verter_compiler::framework_common::plan_from_source("file:///cafe.vue", source);
+    let emission = VueProjectionBackend
+        .projection_emission(&transform, &plan, "file:///cafe.vue", Vec::new())
+        .expect("identity emission");
+    emission
+        .roundtrip_verbatim(source)
+        .expect("verbatim unicode+CRLF");
+    let ide = VueProjectionBackend
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &registered_artifact("file:///grant-mint.vue", SIMPLE),
+            &ide_only_request("Simple.vue", false),
+            &VueProjectionInputs::default(),
+        )
+        .expect("existing IDE route stays on the companion path");
+    assert!(!ide.ide.code.is_empty());
+}
+
+#[test]
+fn projection_emission_binds_registered_plan() {
+    let allocator = oxc_allocator::Allocator::default();
+    let canonical = "file:///plan.vue";
+    let artifact = registered_artifact(canonical, SIMPLE);
+    let plan = VueProjectionBackend.projection_plan(SIMPLE, &artifact, canonical);
+    assert!(plan.is_complete(), "{:?}", plan.completeness);
+    let source_only = verter_compiler::framework_common::plan_from_source(canonical, SIMPLE);
+    assert_ne!(
+        plan.snapshot, source_only.snapshot,
+        "registered parse identity must differ from a source-only helper plan"
+    );
+    let transform = verter_compiler::code_transform::CodeTransform::new(SIMPLE, &allocator);
+    let source_only_emission = verter_compiler::framework_common::ProjectionEmission::from_plan(
+        &transform,
+        &source_only,
+        canonical,
+        Vec::new(),
+    )
+    .expect("source-only plan still binds");
+    assert_eq!(source_only_emission.snapshot(), Some(&source_only.snapshot));
+    let emission = VueProjectionBackend
+        .projection_emission(&transform, &plan, canonical, Vec::new())
+        .expect("registered plan binds");
+    assert_eq!(emission.snapshot(), Some(&plan.snapshot));
+
+    let expression = plan
+        .expressions()
+        .iter()
+        .next()
+        .expect("authored interpolation")
+        .id
+        .clone();
+    let origin = verter_compiler::framework_common::ProjectionOrigin::bind(
+        &plan,
+        None,
+        None,
+        Some(expression),
+    )
+    .expect("expression in plan");
+    let start = SIMPLE.rfind("count").expect("view property") as u32;
+    let observation = verter_compiler::framework_common::RoleQualifiedObservation::new(
+        verter_compiler::code_transform::MappingSpan {
+            start,
+            end: start + 5,
+        },
+        verter_compiler::framework_common::ObservationRole::Hover,
+        origin,
+    );
+    let bound = VueProjectionBackend
+        .projection_emission(&transform, &plan, canonical, vec![observation.clone()])
+        .expect("authored origin on a registered plan");
+    assert_eq!(bound.snapshot(), Some(&plan.snapshot));
+    let reused = verter_compiler::framework_common::ProjectionEmission::reuse_mapping(
+        &bound,
+        &transform,
+        Some((&plan, canonical)),
+        vec![observation.clone()],
+    )
+    .expect("reuse keeps the registered plan binding");
+    assert_eq!(reused.snapshot(), bound.snapshot());
+    assert_eq!(reused.input_basis(), bound.input_basis());
+
+    let other_profile =
+        registered_artifact_with_grammar(canonical, SIMPLE, "{{", "}}", std::iter::once("ion-"));
+    let profiled = VueProjectionBackend.projection_plan(SIMPLE, &other_profile, canonical);
+    assert_ne!(plan.snapshot, profiled.snapshot);
+    let profiled_reuse = verter_compiler::framework_common::ProjectionEmission::reuse_mapping(
+        &bound,
+        &transform,
+        Some((&profiled, canonical)),
+        vec![observation],
+    );
+    assert!(
+        matches!(
+            profiled_reuse,
+            Err(verter_compiler::framework_common::EmissionRefusal::StaleMap)
+        ),
+        "reuse must not keep the registered snapshot under a different parse identity: {profiled_reuse:?}"
+    );
+    let profiled_emission = VueProjectionBackend
+        .projection_emission(&transform, &profiled, canonical, Vec::new())
+        .expect("same source still matches a different parse identity");
+    assert_eq!(profiled_emission.snapshot(), Some(&profiled.snapshot));
+}

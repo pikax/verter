@@ -29,6 +29,9 @@ use crate::template::oxc::types::{
 };
 use crate::types::{NodeId, NodeProp, NodeTag};
 
+pub mod origin;
+pub use origin::ObservationRole;
+
 const USE_DOMAIN: &str = "verter.compiler.projection_plan.component_use_id.v1";
 const ORIGIN_DOMAIN: &str = "verter.compiler.projection_plan.binding_origin_id.v1";
 const SCOPE_DOMAIN: &str = "verter.compiler.projection_plan.lexical_scope_id.v1";
@@ -225,15 +228,6 @@ pub struct ExpressionOccurrence {
     pub lexical_env: LexicalScopeId,
 }
 
-/// Observation channels a use participates in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObservationRole {
-    Hover,
-    Definition,
-    References,
-    Edits,
-}
-
 /// A named slot provided by one component use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvidedSlot {
@@ -355,6 +349,10 @@ pub struct ProjectionPlan {
     expressions: Vec<ExpressionOccurrence>,
     /// Syntax/obligation products for CodeTransform.
     syntax_obligations: Vec<SyntaxObligation>,
+    /// Parse-key used to mint `snapshot`, when the caller supplied one.
+    parse_key: Option<ParseKey>,
+    /// Syntax profile used to mint `snapshot`, when the caller supplied one.
+    syntax_profile: Option<SyntaxProfileId>,
 }
 
 impl ProjectionPlan {
@@ -470,6 +468,8 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
     let source_id = carrier_source_id(input.canonical_id);
     let revision = carrier_revision(input.source);
     let template_unit = SourceUnitId::from_lineage(&source_id, "template");
+    let parse_key = input.parse_key.cloned();
+    let syntax_profile = input.syntax_profile.cloned();
     let snapshot = mint_snapshot(
         &source_id,
         &revision,
@@ -485,7 +485,14 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
     }
     let Some(ast) = input.parsed.template_ast() else {
         reasons.push(Incompleteness::MissingParse);
-        return unfinished_plan(snapshot, input_basis, template_unit, reasons);
+        return unfinished_plan(
+            snapshot,
+            input_basis,
+            template_unit,
+            reasons,
+            parse_key,
+            syntax_profile,
+        );
     };
     if let Some(lang) = unknown_template_lang(ast, input.source) {
         reasons.push(Incompleteness::UnknownTemplateLang(lang));
@@ -522,7 +529,13 @@ pub fn build_projection_plan(input: PlanInput<'_>) -> ProjectionPlan {
         .map(|c| c.children.as_slice())
         .unwrap_or(&[]);
     builder.walk_nodes(root_children, &root_scope, &[]);
-    builder.finish(snapshot, input_basis, template_unit)
+    builder.finish(
+        snapshot,
+        input_basis,
+        template_unit,
+        parse_key,
+        syntax_profile,
+    )
 }
 
 /// Incrementally construct a plan for `input`. A complete previous plan
@@ -559,7 +572,7 @@ impl CanonicalEncode for SnapshotBasis<'_> {
     }
 }
 
-fn mint_snapshot(
+pub(crate) fn mint_snapshot(
     source_id: &verter_identity::identity::SourceId,
     revision: &verter_identity::identity::SourceRevision,
     template_unit: &SourceUnitId,
@@ -677,6 +690,8 @@ fn unfinished_plan(
     input_basis: InputBasisId,
     template_unit: SourceUnitId,
     reasons: Vec<Incompleteness>,
+    parse_key: Option<ParseKey>,
+    syntax_profile: Option<SyntaxProfileId>,
 ) -> ProjectionPlan {
     ProjectionPlan {
         snapshot,
@@ -688,6 +703,8 @@ fn unfinished_plan(
         branches: Vec::new(),
         expressions: Vec::new(),
         syntax_obligations: Vec::new(),
+        parse_key,
+        syntax_profile,
     }
 }
 
@@ -762,6 +779,8 @@ impl<'a> PlanBuilder<'a> {
         snapshot: PlanSnapshotId,
         input_basis: InputBasisId,
         template_unit: SourceUnitId,
+        parse_key: Option<ParseKey>,
+        syntax_profile: Option<SyntaxProfileId>,
     ) -> ProjectionPlan {
         let completeness = if self.reasons.is_empty() {
             PlanCompleteness::Complete
@@ -780,6 +799,8 @@ impl<'a> PlanBuilder<'a> {
             branches: self.branches,
             expressions: self.expressions,
             syntax_obligations: self.obligations,
+            parse_key,
+            syntax_profile,
         }
     }
 
@@ -2011,6 +2032,8 @@ pub fn incomplete_missing_parse(canonical_id: &str, source: &str) -> ProjectionP
         input_basis,
         template_unit,
         vec![Incompleteness::MissingParse],
+        None,
+        None,
     )
 }
 
@@ -2023,6 +2046,8 @@ pub fn incomplete_parse_snapshot_mismatch(canonical_id: &str, source: &str) -> P
         input_basis,
         template_unit,
         vec![Incompleteness::ParseSnapshotMismatch],
+        None,
+        None,
     )
 }
 
