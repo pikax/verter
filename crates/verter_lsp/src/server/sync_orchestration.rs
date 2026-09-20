@@ -970,9 +970,7 @@ impl VerterLanguageServer {
             return;
         }
         self.client
-            .send_notification::<super::protocol_types::CarrierStoreChanged>(
-                super::protocol_types::CarrierStoreChangedParams {},
-            )
+            .send_notification::<super::protocol_types::CarrierStoreChanged>(())
             .await;
     }
 

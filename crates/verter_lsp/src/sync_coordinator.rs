@@ -1528,9 +1528,7 @@ async fn sync_file(
     }
     if deps.carrier_publish_coordinator.is_some() {
         deps.client
-            .send_notification::<crate::server::protocol_types::CarrierStoreChanged>(
-                crate::server::protocol_types::CarrierStoreChangedParams {},
-            )
+            .send_notification::<crate::server::protocol_types::CarrierStoreChanged>(())
             .await;
     }
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");

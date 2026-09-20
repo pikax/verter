@@ -153,7 +153,7 @@ export type NotificationParams = {
   [NotificationType.TypeProviderSyncComplete]: {
     gen: number;
   };
-  [NotificationType.CarrierStoreChanged]: Record<string, never>;
+  [NotificationType.CarrierStoreChanged]: null;
   [NotificationType.CarrierStoreReady]: {
     /**
      * The absolute, forward-slash-normalized per-workspace carrier-store dir the

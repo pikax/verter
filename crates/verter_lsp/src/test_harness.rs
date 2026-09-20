@@ -1297,6 +1297,34 @@ impl RealProviderTestSession {
         last
     }
 
+    /// Make `relative_path` appear in the fixture workspace COMPLETE, in one
+    /// rename, and remove it again when the returned guard drops (a panicking
+    /// body included, so a failed run cannot leave strays in the shared tree).
+    ///
+    /// A create-then-write lets the provider's own directory watcher read the
+    /// file between the two steps and keep the empty text.
+    pub(crate) fn publish_workspace_file(
+        &self,
+        relative_path: &str,
+        content: &str,
+    ) -> PublishedWorkspaceFile {
+        let target =
+            std::path::PathBuf::from(Self::uri_to_path(&self.workspace_uri(relative_path)));
+        let staged = std::path::PathBuf::from(Self::uri_to_path(&self.workspace_uri("")))
+            .parent()
+            .expect("the staged fixture has a parent")
+            .join(format!(
+                "{}.staged",
+                target
+                    .file_name()
+                    .expect("a published file has a name")
+                    .to_string_lossy()
+            ));
+        std::fs::write(&staged, content).expect("stage the workspace file");
+        std::fs::rename(&staged, &target).expect("publish the workspace file");
+        PublishedWorkspaceFile(target)
+    }
+
     /// Shut down the type provider process and remove this session's isolated
     /// carrier-publish store dir.
     ///
@@ -1310,6 +1338,23 @@ impl RealProviderTestSession {
         let _ = self.provider.shutdown().await;
         self._drain_handle.abort();
         let _ = std::fs::remove_dir_all(&self.carrier_store_dir);
+    }
+}
+
+/// A file [`RealProviderTestSession::publish_workspace_file`] placed in the
+/// fixture workspace. Removed on drop.
+pub(crate) struct PublishedWorkspaceFile(std::path::PathBuf);
+
+impl PublishedWorkspaceFile {
+    /// Delete the file now, as an external tool would.
+    pub(crate) fn delete_from_disk(&self) {
+        std::fs::remove_file(&self.0).expect("delete the published workspace file");
+    }
+}
+
+impl Drop for PublishedWorkspaceFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 

@@ -103,12 +103,10 @@ pub struct TypeProviderSyncCompleteParams {
 pub enum CarrierStoreChanged {}
 
 impl tower_lsp_server::ls_types::notification::Notification for CarrierStoreChanged {
-    type Params = CarrierStoreChangedParams;
+    /// Payload-free: the signal is the whole message.
+    type Params = ();
     const METHOD: &'static str = "$/verter/carrierStoreChanged";
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CarrierStoreChangedParams {}
 
 /// Server → client notification: MCP HTTP server is ready.
 /// Sent during `initialized()` with the actual bound port (may differ from requested

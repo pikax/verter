@@ -1054,18 +1054,6 @@ real_provider_test!(
 // A watched dependency deleted underneath an open, clean importer
 // ---------------------------------------------------------------------------
 
-/// Removes the files it wrote even when the body panics, so a failed run
-/// cannot leave strays in the shared fixture tree.
-struct WatchedDependencyFiles(Vec<std::path::PathBuf>);
-
-impl Drop for WatchedDependencyFiles {
-    fn drop(&mut self) {
-        for path in &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 real_provider_test!(
     diagnostics_watched_dependency_delete_reports_missing_module,
     fixture = "vue-parity",
@@ -1075,42 +1063,20 @@ real_provider_test!(
         };
         use tower_lsp_server::LanguageServer;
 
-        let root = std::path::PathBuf::from(RealProviderTestSession::uri_to_path(
-            &session.workspace_uri(""),
-        ));
         // Both provider variants of this test share one staged fixture tree.
         let provider = if session.is_tsgo() { "tsgo" } else { "tsserver" };
         let helper_stem = format!("__watched_dependency_helper_{provider}");
         let helper_rel = &format!("src/{helper_stem}.ts");
         let consumer_rel = &format!("src/__WatchedDependencyConsumer_{provider}.vue");
-        let files = WatchedDependencyFiles(vec![root.join(helper_rel), root.join(consumer_rel)]);
-        // Each file appears in the watched tree complete, in one rename. A
-        // create-then-write lets the provider's own directory watcher read the
-        // file between the two steps and keep the empty text.
-        let publish = |target: &std::path::Path, content: &str| {
-            let staged = root
-                .parent()
-                .expect("the staged fixture has a parent")
-                .join(format!(
-                    "{}.staged",
-                    target.file_name().unwrap().to_string_lossy()
-                ));
-            std::fs::write(&staged, content).unwrap();
-            std::fs::rename(&staged, target).unwrap();
-        };
-        publish(
-            &files.0[0],
-            "export function watchedPing(): string { return \"ok\"; }
-",
+        let helper = session.publish_workspace_file(
+            helper_rel,
+            "export function watchedPing(): string { return \"ok\"; }\n",
         );
-        publish(
-            &files.0[1],
-            &format!("<script setup lang=\"ts\">
-import {{ watchedPing }} from \"./{helper_stem}\";
-const msg = watchedPing();
-</script>
-<template><p>{{{{ msg }}}}</p></template>
-"),
+        let _consumer = session.publish_workspace_file(
+            consumer_rel,
+            &format!(
+                "<script setup lang=\"ts\">\nimport {{ watchedPing }} from \"./{helper_stem}\";\nconst msg = watchedPing();\n</script>\n<template><p>{{{{ msg }}}}</p></template>\n"
+            ),
         );
         let created = |relative: &str, typ| FileEvent {
             uri: session.workspace_uri(relative),
@@ -1155,7 +1121,7 @@ const msg = watchedPing();
             "the server never certified the importer's clean diagnostics"
         );
 
-        std::fs::remove_file(&files.0[0]).unwrap();
+        helper.delete_from_disk();
         session
             .server()
             .did_change_watched_files(DidChangeWatchedFilesParams {
