@@ -63,6 +63,11 @@ pub use catalog::{
     TypedCapabilityRegistration,
 };
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
+pub use projection_plan::origin::{
+    compose_source_chain, projected_class_for_emit_op, projected_class_for_emit_op_with,
+    CheckingTextRevision, CorrespondenceRevision, EditOrigin, EmissionRefusal, ObservationRole,
+    ProjectionEmission, ProjectionOrigin, RoleQualifiedObservation,
+};
 pub use projection_plan::{
     build_projection_plan, build_projection_plan_incremental, incomplete_missing_parse,
     incomplete_parse_snapshot_mismatch, plan_from_source, AdmittedExpressionId, BindingOrigin,

@@ -438,6 +438,382 @@ fn god_module_size_budget() {
     );
 }
 
+#[test]
+fn arh12_structural_helpers_cover_aliases_targets_and_comments() {
+    let manifest = r#"
+[dependencies]
+verter_span.workspace = true
+alias = { package = "verter_lsp", version = "1" }
+[target.'cfg(unix)'.dependencies]
+verter_parser = { workspace = true }
+"#;
+    assert_eq!(
+        production_dependency_names(manifest),
+        ["verter_lsp", "verter_parser", "verter_span"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let workspace_manifest = r#"
+[workspace.dependencies]
+transport = { package = "verter_lsp", path = "transport" }
+"#;
+    let inherited_member = r#"
+[dependencies]
+transport = { workspace = true }
+"#;
+    assert_eq!(
+        production_dependency_names_with_workspace(inherited_member, Some(workspace_manifest)),
+        ["verter_lsp"].into_iter().map(str::to_owned).collect()
+    );
+
+    let source =
+        syn::parse_file("use verter_lsp::Server;\nextern crate verter_parser as parser;\n")
+            .unwrap();
+    assert_eq!(
+        forbidden_imports(&source, &["verter_lsp", "verter_parser"]),
+        vec!["verter_lsp", "verter_parser"]
+    );
+    let local_identifier =
+        syn::parse_file("fn f() { let verter_lsp = 1; assert_eq!(verter_lsp, 1); }").unwrap();
+    assert!(forbidden_imports(&local_identifier, &["verter_lsp"]).is_empty());
+
+    let expected = syn::parse_str::<syn::ItemMod>("pub(crate) mod flow_return;").unwrap();
+    let commented = syn::parse_file("pub(crate) /* owner */ mod flow_return;").unwrap();
+    assert!(module_declaration_matches(&commented, &expected));
+    let equivalent = syn::parse_file("pub(in crate) mod flow_return;").unwrap();
+    assert!(module_declaration_matches(&equivalent, &expected));
+    let widened = syn::parse_file("pub mod flow_return; // pub(crate) mod flow_return;").unwrap();
+    assert!(!module_declaration_matches(&widened, &expected));
+    let conditionally_widened = syn::parse_file(
+        "#[cfg(any())] pub(crate) mod flow_return;\n#[cfg(not(any()))] pub mod flow_return;",
+    )
+    .unwrap();
+    assert!(!module_declaration_matches(
+        &conditionally_widened,
+        &expected
+    ));
+    let nested = syn::parse_file("pub(crate) mod other { pub(crate) mod flow_return; }").unwrap();
+    assert!(!module_declaration_matches(&nested, &expected));
+    let inline = syn::parse_file("pub(crate) mod flow_return {}").unwrap();
+    assert!(!module_declaration_matches(&inline, &expected));
+    let direct_path =
+        syn::parse_file("#[path = \"redirected.rs\"] pub(crate) mod flow_return;").unwrap();
+    assert!(!module_declaration_matches(&direct_path, &expected));
+    let cfg_attr_path =
+        syn::parse_file("#[cfg_attr(unix, path = \"redirected.rs\")] pub(crate) mod flow_return;")
+            .unwrap();
+    assert!(!module_declaration_matches(&cfg_attr_path, &expected));
+    let nested_cfg_attr_path = syn::parse_file(
+        "#[cfg_attr(unix, cfg_attr(feature = \"redirect\", path = \"redirected.rs\"))] pub(crate) mod flow_return;",
+    )
+    .unwrap();
+    assert!(!module_declaration_matches(
+        &nested_cfg_attr_path,
+        &expected
+    ));
+    let unrelated_cfg_attr =
+        syn::parse_file("#[cfg_attr(unix, derive(Clone))] pub(crate) mod flow_return;").unwrap();
+    assert!(module_declaration_matches(&unrelated_cfg_attr, &expected));
+
+    let nested_comment =
+        syn::parse_file("/* outer /* inner */ end */ use verter_lsp :: Server;").unwrap();
+    assert_eq!(
+        forbidden_imports(&nested_comment, &["verter_lsp"]),
+        vec!["verter_lsp"]
+    );
+}
+
+fn production_dependency_names(manifest: &str) -> std::collections::BTreeSet<String> {
+    production_dependency_names_with_workspace(manifest, None)
+}
+
+fn production_dependency_names_with_workspace(
+    manifest: &str,
+    workspace_manifest: Option<&str>,
+) -> std::collections::BTreeSet<String> {
+    let document = manifest
+        .parse::<toml::Table>()
+        .expect("Cargo manifest must be valid TOML");
+    let workspace_document = workspace_manifest.and_then(|manifest| manifest.parse().ok());
+    let workspace_dependencies = workspace_document
+        .as_ref()
+        .and_then(|document: &toml::Table| document.get("workspace"))
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
+    let mut names = std::collections::BTreeSet::new();
+
+    fn add_table(
+        table: Option<&toml::Value>,
+        workspace_dependencies: Option<&toml::map::Map<String, toml::Value>>,
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
+        let Some(table) = table.and_then(toml::Value::as_table) else {
+            return;
+        };
+        for (alias, spec) in table {
+            let inherited = spec
+                .as_table()
+                .and_then(|spec| spec.get("workspace"))
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
+            let package = if inherited {
+                workspace_dependencies
+                    .and_then(|deps| deps.get(alias))
+                    .and_then(|spec| spec.as_table())
+                    .and_then(|spec| spec.get("package"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(alias)
+            } else {
+                spec.as_table()
+                    .and_then(|spec| spec.get("package"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(alias)
+            };
+            if package.starts_with("verter_") {
+                names.insert(package.to_owned());
+            }
+        }
+    }
+
+    add_table(
+        document.get("dependencies"),
+        workspace_dependencies,
+        &mut names,
+    );
+    if let Some(targets) = document.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            add_table(
+                target
+                    .as_table()
+                    .and_then(|table| table.get("dependencies")),
+                workspace_dependencies,
+                &mut names,
+            );
+        }
+    }
+    names
+}
+
+fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
+    use syn::visit::Visit;
+
+    struct Visitor<'a> {
+        forbidden: &'a [&'a str],
+        found: Vec<String>,
+    }
+
+    impl Visitor<'_> {
+        fn record(&mut self, ident: &syn::Ident) {
+            let name = ident.to_string();
+            if self.forbidden.contains(&name.as_str()) && !self.found.contains(&name) {
+                self.found.push(name);
+            }
+        }
+
+        fn visit_use_root(&mut self, tree: &syn::UseTree) {
+            match tree {
+                syn::UseTree::Path(path) => self.record(&path.ident),
+                syn::UseTree::Name(name) => self.record(&name.ident),
+                syn::UseTree::Rename(rename) => self.record(&rename.ident),
+                syn::UseTree::Glob(_) => {}
+                syn::UseTree::Group(group) => {
+                    for tree in &group.items {
+                        self.visit_use_root(tree);
+                    }
+                }
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for Visitor<'_> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if path.segments.len() > 1 {
+                if let Some(root) = path.segments.first() {
+                    self.record(&root.ident);
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            self.visit_use_root(&item.tree);
+        }
+
+        fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+            self.record(&item.ident);
+            syn::visit::visit_item_extern_crate(self, item);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if let Some(root) = mac.path.segments.first() {
+                self.record(&root.ident);
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+
+    let mut visitor = Visitor {
+        forbidden,
+        found: Vec::new(),
+    };
+    visitor.visit_file(file);
+    visitor.found
+}
+
+fn module_declaration_matches(file: &syn::File, expected: &syn::ItemMod) -> bool {
+    fn cfg_attr_selects_path(list: &syn::MetaList) -> bool {
+        let Ok(args) = list.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            return false;
+        };
+        args.iter().skip(1).any(|meta| match meta {
+            syn::Meta::NameValue(value) => value.path.is_ident("path"),
+            syn::Meta::List(nested) if nested.path.is_ident("cfg_attr") => {
+                cfg_attr_selects_path(nested)
+            }
+            _ => false,
+        })
+    }
+
+    fn is_source_redirect(attr: &syn::Attribute) -> bool {
+        if attr.path().is_ident("path") {
+            return true;
+        }
+        if !attr.path().is_ident("cfg_attr") {
+            return false;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        cfg_attr_selects_path(list)
+    }
+
+    fn is_unconditionally_active(attrs: &[syn::Attribute]) -> bool {
+        !attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("cfg") || is_source_redirect(attr))
+    }
+
+    fn visibility_matches(actual: &syn::Visibility, expected: &syn::Visibility) -> bool {
+        match (actual, expected) {
+            (syn::Visibility::Public(_), syn::Visibility::Public(_))
+            | (syn::Visibility::Inherited, syn::Visibility::Inherited) => true,
+            (syn::Visibility::Restricted(actual), syn::Visibility::Restricted(expected)) => {
+                actual.path == expected.path
+            }
+            _ => false,
+        }
+    }
+
+    file.items.iter().any(|item| {
+        let syn::Item::Mod(module) = item else {
+            return false;
+        };
+        is_unconditionally_active(&module.attrs)
+            && module.ident == expected.ident
+            && module.content.is_none()
+            && visibility_matches(&module.vis, &expected.vis)
+    })
+}
+
+#[test]
+fn arh12_dependency_and_visibility_contracts_are_enforced() {
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+    use walkdir::WalkDir;
+
+    let contracts: Value = serde_json::from_str(&read_workspace_file(
+        "tests/architecture-health/ARH1/products/dependency-contracts.json",
+    ))
+    .expect("ARH1 dependency contracts must be valid JSON");
+
+    let workspace = workspace_root();
+    let workspace_manifest =
+        fs::read_to_string(workspace.join("Cargo.toml")).expect("read workspace Cargo.toml");
+    let rules = contracts["layerRules"]
+        .as_array()
+        .expect("ARH1 layerRules must be an array");
+    assert!(!rules.is_empty(), "ARH1 layerRules must not be empty");
+    for rule in rules {
+        let crate_rel = rule["crate"].as_str().expect("layer rule crate");
+        let manifest = workspace.join(crate_rel).join("Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+        let actual: BTreeSet<String> =
+            production_dependency_names_with_workspace(&manifest_text, Some(&workspace_manifest));
+        let declared: BTreeSet<String> = rule["mayImport"]
+            .as_array()
+            .expect("layer mayImport must be an array")
+            .iter()
+            .map(|name| name.as_str().expect("layer dependency name").to_owned())
+            .collect();
+        assert_eq!(actual, declared, "{} dependency contract drift", crate_rel);
+
+        let forbidden: Vec<&str> = rule["mustNotImport"]
+            .as_array()
+            .expect("layer mustNotImport must be an array")
+            .iter()
+            .map(|name| name.as_str().expect("forbidden dependency name"))
+            .collect();
+        let src_root = workspace.join(crate_rel).join("src");
+        for entry in WalkDir::new(&src_root) {
+            let entry = entry.unwrap_or_else(|e| panic!("walk {}: {e}", src_root.display()));
+            if !entry.file_type().is_file()
+                || entry.path().extension().and_then(|ext| ext.to_str()) != Some("rs")
+            {
+                continue;
+            }
+            let source = fs::read_to_string(entry.path())
+                .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
+            let syntax = syn::parse_file(&source).unwrap_or_else(|e| {
+                panic!(
+                    "{} contains unsupported Rust syntax; refusing to skip dependency enforcement: {e}",
+                    entry.path().display()
+                )
+            });
+            let found = forbidden_imports(&syntax, &forbidden);
+            assert!(
+                found.is_empty(),
+                "{} imports forbidden crates: {:?}",
+                entry.path().display(),
+                found
+            );
+        }
+    }
+
+    let hotspots = contracts["hotspots"]
+        .as_array()
+        .expect("ARH1 hotspots must be an array");
+    assert!(!hotspots.is_empty(), "ARH1 hotspots must not be empty");
+    for hotspot in hotspots {
+        let surfaces = hotspot["surfaceDeclarations"]
+            .as_array()
+            .expect("hotspot surfaceDeclarations must be an array");
+        assert!(
+            !surfaces.is_empty(),
+            "hotspot surfaceDeclarations must not be empty"
+        );
+        for surface in surfaces {
+            let file = surface["file"].as_str().expect("surface file");
+            let declaration = surface["declaration"]
+                .as_str()
+                .expect("surface declaration");
+            let source = read_workspace_file(file);
+            let parsed = syn::parse_file(&source)
+                .unwrap_or_else(|e| panic!("parse visibility surface {file}: {e}"));
+            let expected = syn::parse_str::<syn::ItemMod>(declaration)
+                .unwrap_or_else(|e| panic!("parse visibility declaration {declaration}: {e}"));
+            assert!(
+                module_declaration_matches(&parsed, &expected),
+                "visibility contract missing from {file}: {declaration}"
+            );
+        }
+    }
+}
+
 /// Count occurrences of any of the supplied needles in `src`.
 /// Returns the total number of byte-substring hits across all needles.
 fn count_callsites(src: &str, needles: &[&str]) -> usize {
