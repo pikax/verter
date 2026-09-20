@@ -439,28 +439,173 @@ fn god_module_size_budget() {
 }
 
 #[test]
-fn arh12_dependency_and_visibility_contracts_are_enforced() {
-    use serde_json::Value;
-    use std::collections::BTreeSet;
-    use syn::visit::Visit;
-    use walkdir::WalkDir;
+fn arh12_structural_helpers_cover_aliases_targets_and_comments() {
+    let manifest = r#"
+[dependencies]
+verter_span.workspace = true
+alias = { package = "verter_lsp", version = "1" }
+[target.'cfg(unix)'.dependencies]
+verter_parser = { workspace = true }
+"#;
+    assert_eq!(
+        production_dependency_names(manifest),
+        ["verter_lsp", "verter_parser", "verter_span"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
 
-    struct ForbiddenImportVisitor<'a> {
+    let source =
+        syn::parse_file("use verter_lsp::Server;\nextern crate verter_parser as parser;\n")
+            .unwrap();
+    assert_eq!(
+        forbidden_imports(&source, &["verter_lsp", "verter_parser"]),
+        vec!["verter_lsp", "verter_parser"]
+    );
+
+    let expected = syn::parse_str::<syn::ItemMod>("pub(crate) mod flow_return;").unwrap();
+    let commented = syn::parse_file("pub(crate) /* owner */ mod flow_return;").unwrap();
+    assert!(module_declaration_matches(&commented, &expected));
+    let widened = syn::parse_file("pub mod flow_return; // pub(crate) mod flow_return;").unwrap();
+    assert!(!module_declaration_matches(&widened, &expected));
+}
+
+fn production_dependency_names(manifest: &str) -> std::collections::BTreeSet<String> {
+    let document = manifest
+        .parse::<toml::Table>()
+        .expect("Cargo manifest must be valid TOML");
+    let mut names = std::collections::BTreeSet::new();
+
+    fn add_table(table: Option<&toml::Value>, names: &mut std::collections::BTreeSet<String>) {
+        let Some(table) = table.and_then(toml::Value::as_table) else {
+            return;
+        };
+        for (alias, spec) in table {
+            let package = spec
+                .as_table()
+                .and_then(|spec| spec.get("package"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or(alias);
+            if package.starts_with("verter_") {
+                names.insert(package.to_owned());
+            }
+        }
+    }
+
+    add_table(document.get("dependencies"), &mut names);
+    if let Some(targets) = document.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            add_table(
+                target
+                    .as_table()
+                    .and_then(|table| table.get("dependencies")),
+                &mut names,
+            );
+        }
+    }
+    names
+}
+
+fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
+    use syn::visit::Visit;
+
+    struct Visitor<'a> {
         forbidden: &'a [&'a str],
         found: Vec<String>,
     }
 
-    impl<'ast> Visit<'ast> for ForbiddenImportVisitor<'_> {
-        fn visit_path(&mut self, path: &'ast syn::Path) {
-            if let Some(first) = path.segments.first() {
-                let name = first.ident.to_string();
-                if self.forbidden.contains(&name.as_str()) {
-                    self.found.push(name);
+    impl Visitor<'_> {
+        fn record(&mut self, ident: &syn::Ident) {
+            let name = ident.to_string();
+            if self.forbidden.contains(&name.as_str()) && !self.found.contains(&name) {
+                self.found.push(name);
+            }
+        }
+
+        fn visit_use_tree(&mut self, tree: &syn::UseTree) {
+            match tree {
+                syn::UseTree::Path(path) => {
+                    self.record(&path.ident);
+                    self.visit_use_tree(&path.tree);
                 }
+                syn::UseTree::Name(name) => self.record(&name.ident),
+                syn::UseTree::Rename(rename) => self.record(&rename.ident),
+                syn::UseTree::Glob(_) => {}
+                syn::UseTree::Group(group) => {
+                    for tree in &group.items {
+                        self.visit_use_tree(tree);
+                    }
+                }
+            }
+        }
+
+        fn visit_tokens(&mut self, tokens: &proc_macro2::TokenStream) {
+            for token in tokens.clone() {
+                match token {
+                    proc_macro2::TokenTree::Ident(ident) => self.record(&ident),
+                    proc_macro2::TokenTree::Group(group) => self.visit_tokens(&group.stream()),
+                    proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+                }
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for Visitor<'_> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            for segment in &path.segments {
+                self.record(&segment.ident);
             }
             syn::visit::visit_path(self, path);
         }
+
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            self.visit_use_tree(&item.tree);
+        }
+
+        fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+            self.record(&item.ident);
+            syn::visit::visit_item_extern_crate(self, item);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            self.visit_tokens(&mac.tokens);
+            syn::visit::visit_macro(self, mac);
+        }
     }
+
+    let mut visitor = Visitor {
+        forbidden,
+        found: Vec::new(),
+    };
+    visitor.visit_file(file);
+    visitor.found
+}
+
+fn module_declaration_matches(file: &syn::File, expected: &syn::ItemMod) -> bool {
+    use quote::ToTokens;
+
+    fn matches(items: &[syn::Item], expected: &syn::ItemMod) -> bool {
+        items.iter().any(|item| match item {
+            syn::Item::Mod(module) if module.ident == expected.ident => {
+                module.vis.to_token_stream().to_string()
+                    == expected.vis.to_token_stream().to_string()
+            }
+            syn::Item::Mod(module) => module
+                .content
+                .as_ref()
+                .is_some_and(|(_, items)| matches(items, expected)),
+            _ => false,
+        })
+    }
+
+    matches(&file.items, expected)
+}
+
+#[test]
+fn arh12_dependency_and_visibility_contracts_are_enforced() {
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+    use walkdir::WalkDir;
 
     fn blank_string_literals(source: &str) -> String {
         let bytes = source.as_bytes();
@@ -502,28 +647,13 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
     let rules = contracts["layerRules"]
         .as_array()
         .expect("ARH1 layerRules must be an array");
+    assert!(!rules.is_empty(), "ARH1 layerRules must not be empty");
     for rule in rules {
         let crate_rel = rule["crate"].as_str().expect("layer rule crate");
         let manifest = workspace.join(crate_rel).join("Cargo.toml");
         let manifest_text = fs::read_to_string(&manifest)
             .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
-        let mut in_dependencies = false;
-        let actual: BTreeSet<String> = manifest_text
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with('[') {
-                    in_dependencies = trimmed == "[dependencies]";
-                    return None;
-                }
-                if !in_dependencies || trimmed.is_empty() || trimmed.starts_with('#') {
-                    return None;
-                }
-                let name = trimmed.split_once('=')?.0.trim();
-                let name = name.strip_suffix(".workspace").unwrap_or(name);
-                (name.starts_with("verter_")).then(|| name.to_owned())
-            })
-            .collect();
+        let actual: BTreeSet<String> = production_dependency_names(&manifest_text);
         let declared: BTreeSet<String> = rule["mayImport"]
             .as_array()
             .expect("layer mayImport must be an array")
@@ -549,16 +679,12 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
                 .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
             let source = cosmetic_reprinter_guard::strip_comments(&source);
             if let Ok(syntax) = syn::parse_file(&source) {
-                let mut visitor = ForbiddenImportVisitor {
-                    forbidden: &forbidden,
-                    found: Vec::new(),
-                };
-                visitor.visit_file(&syntax);
+                let found = forbidden_imports(&syntax, &forbidden);
                 assert!(
-                    visitor.found.is_empty(),
+                    found.is_empty(),
                     "{} imports forbidden crates: {:?}",
                     entry.path().display(),
-                    visitor.found
+                    found
                 );
             } else {
                 let source = blank_string_literals(&source);
@@ -573,21 +699,30 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
         }
     }
 
-    for hotspot in contracts["hotspots"]
+    let hotspots = contracts["hotspots"]
         .as_array()
-        .expect("ARH1 hotspots must be an array")
-    {
-        for surface in hotspot["surfaceDeclarations"]
+        .expect("ARH1 hotspots must be an array");
+    assert!(!hotspots.is_empty(), "ARH1 hotspots must not be empty");
+    for hotspot in hotspots {
+        let surfaces = hotspot["surfaceDeclarations"]
             .as_array()
-            .expect("hotspot surfaceDeclarations must be an array")
-        {
+            .expect("hotspot surfaceDeclarations must be an array");
+        assert!(
+            !surfaces.is_empty(),
+            "hotspot surfaceDeclarations must not be empty"
+        );
+        for surface in surfaces {
             let file = surface["file"].as_str().expect("surface file");
             let declaration = surface["declaration"]
                 .as_str()
                 .expect("surface declaration");
             let source = read_workspace_file(file);
+            let parsed = syn::parse_file(&source)
+                .unwrap_or_else(|e| panic!("parse visibility surface {file}: {e}"));
+            let expected = syn::parse_str::<syn::ItemMod>(declaration)
+                .unwrap_or_else(|e| panic!("parse visibility declaration {declaration}: {e}"));
             assert!(
-                source.contains(declaration),
+                module_declaration_matches(&parsed, &expected),
                 "visibility contract missing from {file}: {declaration}"
             );
         }
