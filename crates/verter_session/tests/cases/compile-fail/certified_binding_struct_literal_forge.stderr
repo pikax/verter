@@ -1,0 +1,11 @@
+error[E0451]: fields `project`, `observed_profile` and `input_basis` of struct `CertifiedTypeEngineBinding` are private
+  --> tests/cases/compile-fail/certified_binding_struct_literal_forge.rs:25:9
+   |
+24 |     CertifiedTypeEngineBinding {
+   |     -------------------------- in this type
+25 |         project: Arc::from("file:///forged/tsconfig.json"),
+   |         ^^^^^^^ private field
+26 |         observed_profile: ProviderContractId::from_canonical(&Nothing),
+   |         ^^^^^^^^^^^^^^^^ private field
+27 |         input_basis: InputBasisId::from_canonical(&Nothing),
+   |         ^^^^^^^^^^^ private field

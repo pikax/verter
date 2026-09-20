@@ -378,6 +378,10 @@ mod resolver_store;
 #[cfg(test)]
 mod resolver_store_tests;
 pub mod route_analysis_inputs;
+/// The TypeScript semantic capability closure (dormant until TCM4): the
+/// closed capability catalog and the certified engine binding that is the
+/// sole route a TypeScript engine's answer enters the semantic plane.
+pub mod semantic_capability;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
