@@ -123,8 +123,13 @@ pub struct BinderInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultInput {
-    Declared { return_type: SemanticNodeId },
-    Body { locator: u64 },
+    Declared {
+        return_type: SemanticNodeId,
+        predicate_or_assertion: Option<SemanticNodeId>,
+    },
+    Body {
+        locator: u64,
+    },
 }
 
 /// Neutral description of one authored signature.
@@ -253,15 +258,20 @@ pub fn publish_signature(
             binder_declarations: space,
             this_parameter,
             parameter_layout: layout,
-            declared_minimum: u16::try_from(declared_minimum).unwrap_or(u16::MAX),
+            declared_minimum,
             signature_semantic_flags: input.flags,
         },
         None,
     )?;
     let recipe = match input.result {
-        ResultInput::Declared { return_type } => SignatureResultRecipe::Declared {
+        ResultInput::Declared {
+            return_type,
+            predicate_or_assertion,
+        } => SignatureResultRecipe::Declared {
             return_type: store.intern_type_token(return_type, None)?,
-            predicate_or_assertion: None,
+            predicate_or_assertion: predicate_or_assertion
+                .map(|node| store.intern_type_token(node, None))
+                .transpose()?,
         },
         ResultInput::Body { locator } => SignatureResultRecipe::Body {
             return_obligation_key: ReturnObligationKey {
@@ -347,15 +357,17 @@ impl Loaded<'_> {
 
     /// Declared binder nodes in ordinal order (from the environment: each
     /// binder maps to `binder_token(space_key, ordinal)`).
-    fn binder_nodes(&self) -> Vec<(u32, SemanticNodeId)> {
+    fn binder_nodes(&self) -> Option<Vec<(u32, SemanticNodeId)>> {
         let mut out: Vec<(u32, SemanticNodeId)> = self
             .env
             .bindings()
             .iter()
-            .map(|(param, token)| (token.0 as u32, *param))
-            .collect();
+            .map(|(param, token)| {
+                SignatureStore::binder_token_ordinal(*token).map(|ordinal| (ordinal, *param))
+            })
+            .collect::<Option<_>>()?;
         out.sort_by_key(|(ordinal, _)| *ordinal);
-        out
+        Some(out)
     }
 }
 
@@ -457,10 +469,15 @@ fn binders_identical(
     if s.space.binders.len() != t.space.binders.len() {
         return Ok(None);
     }
-    let corr: Vec<(SemanticNodeId, SemanticNodeId)> = s
-        .binder_nodes()
+    let Some(source_binders) = s.binder_nodes() else {
+        return undecided();
+    };
+    let Some(target_binders) = t.binder_nodes() else {
+        return undecided();
+    };
+    let corr: Vec<(SemanticNodeId, SemanticNodeId)> = source_binders
         .iter()
-        .zip(t.binder_nodes().iter())
+        .zip(target_binders.iter())
         .map(|((_, a), (_, b))| (*a, *b))
         .collect();
     for (a, b) in s.space.binders.iter().zip(t.space.binders.iter()) {
@@ -512,10 +529,14 @@ pub fn signatures_identical(
         return Ok(false);
     };
     if !options.ignore_this_types {
-        if let (Some(a), Some(b)) = (s.receiver, t.receiver) {
-            if !ident(types, a.ty, b.ty, &corr)? {
-                return Ok(false);
+        match (s.receiver, t.receiver) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                if !ident(types, a.ty, b.ty, &corr)? {
+                    return Ok(false);
+                }
             }
+            _ => return Ok(false),
         }
     }
     for pos in 0..tp.parameter_count() {
@@ -621,8 +642,12 @@ fn residual_of(
     {
         return Ok(SignatureDescriptorIdOrSame::Same);
     }
-    let rb = rep.binder_nodes();
-    let cb = c.binder_nodes();
+    let Some(rb) = rep.binder_nodes() else {
+        return undecided();
+    };
+    let Some(cb) = c.binder_nodes() else {
+        return undecided();
+    };
     let _ = view;
     let mut to_rep = Vec::new();
     for ((ordinal, _), (rep_ordinal, _)) in cb.iter().zip(rb.iter()) {
@@ -1021,9 +1046,7 @@ fn combine_union_signatures(
         .union(r.shape.signature_semantic_flags);
     let mut declared_minimum =
         PositionalShape::new(&layout_record, receiver, flags, &NoFacts).declared_minimum();
-    declared_minimum = declared_minimum.max(usize::from(
-        l.shape.declared_minimum.max(r.shape.declared_minimum),
-    ));
+    declared_minimum = declared_minimum.max(l.shape.declared_minimum.max(r.shape.declared_minimum));
     let layout = store.intern_layout(layout_record, None)?;
     let this_parameter = match receiver {
         Some(rc) => Some(store.intern_slot(rc, None)?),
@@ -1040,7 +1063,7 @@ fn combine_union_signatures(
             binder_declarations: binder_space,
             this_parameter,
             parameter_layout: layout,
-            declared_minimum: u16::try_from(declared_minimum).unwrap_or(u16::MAX),
+            declared_minimum,
             signature_semantic_flags: flags,
         },
         None,

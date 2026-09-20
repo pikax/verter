@@ -293,7 +293,8 @@ pub struct SignatureInputShape {
     pub binder_declarations: BinderSpaceId,
     pub this_parameter: Option<ParameterSlotId>,
     pub parameter_layout: ParameterLayoutId,
-    pub declared_minimum: u16,
+    /// Exact required positional count; it is not saturating.
+    pub declared_minimum: usize,
     pub signature_semantic_flags: SignatureSemanticFlags,
 }
 

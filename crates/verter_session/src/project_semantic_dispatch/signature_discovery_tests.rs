@@ -421,7 +421,10 @@ fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
         CONTEXT_FREE_EVALUATION,
         SemanticContextId::production(),
     );
-    assert!(matches!(effects, QueryOutcome::Ready(_)));
+    assert!(matches!(
+        effects,
+        QueryOutcome::Incomplete(IncompleteReason::UnresolvedObligation)
+    ));
     assert_eq!(
         store.bodies_forced(),
         0,

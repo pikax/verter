@@ -310,7 +310,17 @@ impl SignatureStore {
             result.recipe.epoch(),
             result.recipe.index(),
             &inner.recipes,
-        )
+        )?;
+        for token in result.return_type.into_iter().chain(result.effects) {
+            let raw = token.as_u64();
+            Self::require_id(
+                inner,
+                super::records::handle_epoch(raw),
+                super::records::handle_index(raw),
+                &inner.type_tokens,
+            )?;
+        }
+        Ok(())
     }
 
     fn check_slot(inner: &EpochInner, slot: &ParameterSlot) -> Result<(), StoreError> {
@@ -1008,6 +1018,12 @@ impl SignatureStore {
     #[must_use]
     pub fn is_binder_token(node: SemanticNodeId) -> bool {
         node.0 & BINDER_TOKEN_NAMESPACE != 0
+    }
+
+    /// Decode an ordinal only through the binder-token namespace boundary.
+    #[must_use]
+    pub fn binder_token_ordinal(node: SemanticNodeId) -> Option<u32> {
+        Self::is_binder_token(node).then_some(node.0 as u32)
     }
 
     /// Logical binder token from a space key and ordinal. Independent of

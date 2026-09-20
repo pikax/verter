@@ -240,6 +240,46 @@ fn lookup_result_does_not_publish_on_miss() {
 }
 
 #[test]
+fn publish_result_rejects_type_tokens_from_a_retired_epoch() {
+    let store = SignatureStore::new();
+    let stale_token = store
+        .intern_type_token(crate::semantic_query::SemanticNodeId(77), None)
+        .unwrap();
+    store.replace_epoch().unwrap();
+    let set = intern_one_call(&store);
+    let SignatureSetRef::One(candidate) = set else {
+        panic!("one");
+    };
+    let space = store
+        .intern_binder_space(
+            BinderSpace {
+                key: 0,
+                binders: Box::from([]),
+            },
+            None,
+        )
+        .unwrap();
+    let substitution = store
+        .intern_substitution(CallSubstitution::identity(space), None)
+        .unwrap();
+    let recipe = intern_recipe_of(&store, candidate.signature);
+    let result = super::records::AppliedResult {
+        descriptor: candidate.signature,
+        substitution,
+        recipe,
+        evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+        semantic_context: super::test_support::intern_test_context([2; 16]),
+        evidence: crate::semantic_query::CONTEXT_FREE_EVIDENCE,
+        return_type: Some(stale_token),
+        effects: None,
+    };
+    assert_eq!(
+        store.publish_result(result, None),
+        Err(StoreError::StaleHandle)
+    );
+}
+
+#[test]
 fn concurrent_replace_epoch_publishes_in_order() {
     use std::sync::Arc;
     let store = Arc::new(SignatureStore::new());

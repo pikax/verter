@@ -592,6 +592,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             crate::semantic_query::SignatureReturnCarrier::Declared(return_type) => {
                 ResultInput::Declared {
                     return_type: *return_type,
+                    predicate_or_assertion: None,
                 }
             }
             crate::semantic_query::SignatureReturnCarrier::Function(source) => ResultInput::Body {
@@ -708,14 +709,18 @@ impl ProjectSemanticDispatch<'_> {
         evaluation: ResultEvaluationContextId,
         context: SemanticContextId,
     ) -> QueryOutcome<AppliedResultId> {
-        if !evaluation.is_context_free() {
-            return QueryOutcome::Incomplete(IncompleteReason::Unsupported);
-        }
         let types = GraphTypes {
             dispatch: self,
             store,
         };
-        match self.read_result_inner(&types, descriptor, call_substitution, demand, context) {
+        match self.read_result_inner(
+            &types,
+            descriptor,
+            call_substitution,
+            demand,
+            evaluation,
+            context,
+        ) {
             Ok(id) => QueryOutcome::Ready(Ready {
                 value: id,
                 evidence: CONTEXT_FREE_EVIDENCE,
@@ -730,6 +735,7 @@ impl ProjectSemanticDispatch<'_> {
         descriptor: SignatureDescriptorId,
         call_substitution: crate::signature_kernel::CallSubstitutionId,
         demand: ResultDemand,
+        evaluation: ResultEvaluationContextId,
         context: SemanticContextId,
     ) -> Result<AppliedResultId, DiscoveryError> {
         let store = types.store;
@@ -743,18 +749,55 @@ impl ProjectSemanticDispatch<'_> {
         } else {
             None
         };
+        let effects = if demand.reads_effects() {
+            self.recipe_effects(types, &view, descriptor, call_substitution, &recipe)?
+                .map(|node| store.intern_type_token(node, None))
+                .transpose()?
+        } else {
+            None
+        };
         let record = AppliedResult {
             descriptor,
             substitution: call_substitution,
             recipe: template.result_recipe,
-            evaluation: CONTEXT_FREE_EVALUATION,
+            evaluation,
             semantic_context: context,
             evidence: CONTEXT_FREE_EVIDENCE,
             return_type,
-            effects: None,
+            effects,
         };
         let raw = store.publish_result(record, None)?;
         Ok(AppliedResultId::from_raw(raw))
+    }
+
+    fn recipe_effects(
+        &self,
+        types: &GraphTypes<'_, '_>,
+        view: &SemanticReadView,
+        descriptor: SignatureDescriptorId,
+        call: crate::signature_kernel::CallSubstitutionId,
+        recipe: &SignatureResultRecipe,
+    ) -> Result<Option<SemanticNodeId>, DiscoveryError> {
+        match recipe {
+            SignatureResultRecipe::Declared {
+                predicate_or_assertion: Some(token),
+                ..
+            } => {
+                let base = view.type_token_node(*token)?;
+                let map = self.composed_map(types.store, view, descriptor, call)?;
+                Ok(Some(self.substitute_canonical(base, &map)))
+            }
+            SignatureResultRecipe::Declared {
+                predicate_or_assertion: None,
+                ..
+            } => Ok(None),
+            SignatureResultRecipe::Body { .. }
+            | SignatureResultRecipe::UnionCommon { .. }
+            | SignatureResultRecipe::UnionSynthesized { .. }
+            | SignatureResultRecipe::IntersectionConstruct { .. } => Err(
+                DiscoveryError::Incomplete(IncompleteReason::UnresolvedObligation),
+            ),
+        }
     }
 
     /// The single composed map for `descriptor` under `call`: declaration
@@ -846,7 +889,8 @@ impl ProjectSemanticDispatch<'_> {
                     env.bindings()
                         .iter()
                         .find(|(param, _)| param == p)
-                        .map_or(0, |(_, token)| token.0 as u32)
+                        .and_then(|(_, token)| SignatureStore::binder_token_ordinal(*token))
+                        .unwrap_or(u32::MAX)
                 });
                 let args: Vec<SemanticNodeId> = params
                     .iter()

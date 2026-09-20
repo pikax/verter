@@ -113,6 +113,7 @@ fn sig_with(
             flags: SignatureSemanticFlags::NONE,
             result: ResultInput::Declared {
                 return_type: SemanticNodeId(ret),
+                predicate_or_assertion: None,
             },
             provenance: SignatureProvenance::authored(
                 DeclarationGroupId::from_raw(u64::from(source as u32)),
@@ -221,6 +222,7 @@ fn colliding_space_keys_of_distinct_identities_are_rejected() {
             flags: SignatureSemanticFlags::NONE,
             result: ResultInput::Declared {
                 return_type: SemanticNodeId(200),
+                predicate_or_assertion: None,
             },
             provenance: SignatureProvenance::authored(
                 DeclarationGroupId::from_raw(3),
