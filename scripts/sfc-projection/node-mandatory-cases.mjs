@@ -83,6 +83,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP10-stale-map",
     "STP10-synthetic",
   ]),
+  STP11: Object.freeze([
+    "STP11-universal",
+    "STP11-scope",
+    "STP11-await",
+    "STP11-assertion",
+    "STP11-one-body",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -101,4 +108,5 @@ export const STP7_MANDATORY_CASES = NODE_MANDATORY_CASES.STP7;
 export const STP8_MANDATORY_CASES = NODE_MANDATORY_CASES.STP8;
 export const STP9_MANDATORY_CASES = NODE_MANDATORY_CASES.STP9;
 export const STP10_MANDATORY_CASES = NODE_MANDATORY_CASES.STP10;
+export const STP11_MANDATORY_CASES = NODE_MANDATORY_CASES.STP11;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

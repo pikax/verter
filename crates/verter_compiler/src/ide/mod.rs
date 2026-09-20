@@ -36,6 +36,7 @@ pub mod condition_narrowing;
 pub mod script;
 pub mod script_recover;
 pub mod template;
+pub mod vue_projection;
 
 /// Per-file JSX type authority for every generated Vue IDE carrier.
 ///
