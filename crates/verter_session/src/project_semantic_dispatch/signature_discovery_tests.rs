@@ -1136,3 +1136,43 @@ fn candidate_identity_is_independent_of_intern_order() {
     };
     assert_eq!(observe(false), observe(true));
 }
+
+/// An authored JavaScript signature with implicit-`any` parameters and an
+/// inferred result publishes the untyped-JS flag; the same shape in a
+/// TypeScript file, or with a typed parameter, does not.
+#[test]
+fn untyped_javascript_signatures_publish_the_untyped_flag() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let any = prim(&d, PrimitiveKind::Any);
+    let string = prim(&d, PrimitiveKind::String);
+    let flagged = |file: &str, param_ty: SemanticNodeId| {
+        let mut occ = occurrence("f", 0);
+        occ.function.anchor.canonical_id = Arc::from(file);
+        let identity = occ.function.clone();
+        let node = d.graph().intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(vec![param(param_ty)].into_boxed_slice()),
+            return_type: any,
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            occurrence: Some(occ),
+            return_carrier: SignatureReturnCarrier::Function(
+                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            ),
+            signature_span: None,
+            return_type_span: None,
+        });
+        let store = d.graph().signature_store();
+        let list = candidates(ready(discover(&d, node, SignatureKind::Call)), store);
+        let view = SemanticReadView::pin(store);
+        let descriptor = view.descriptor(list[0].signature).unwrap();
+        let template = view.template(descriptor.template).unwrap();
+        view.shape(template.input_shape)
+            .unwrap()
+            .signature_semantic_flags
+    };
+    use crate::signature_kernel::SignatureSemanticFlags as Flags;
+    assert_eq!(flagged("/ws/a.js", any), Flags::UNTYPED_JS);
+    assert_eq!(flagged("/ws/b.ts", any), Flags::NONE);
+    assert_eq!(flagged("/ws/c.js", string), Flags::NONE);
+}

@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use crate::semantic_query::{IncompleteReason, SemanticNodeId};
 
 use super::discovery::{
-    publish_signature, union_signatures, DiscoveryError, DiscoveryTypes, ParamInput, ResultInput,
-    SignatureInput,
+    publish_signature, signatures_identical, union_signatures, BinderInput, DiscoveryError,
+    DiscoveryTypes, MatchOptions, ParamInput, ResultInput, SignatureInput,
 };
 use super::lifetime::SignatureStore;
 use super::positional::SlotTypeFacts;
@@ -74,13 +74,34 @@ impl DiscoveryTypes for DelayedTypes<'_> {
 }
 
 fn sig(store: &SignatureStore, source: u64, param: u64, ret: u64) -> SignatureCandidate {
+    sig_with(
+        store,
+        source,
+        source,
+        u128::from(source),
+        vec![],
+        param,
+        ret,
+    )
+}
+
+fn sig_with(
+    store: &SignatureStore,
+    source: u64,
+    space_key: u64,
+    space_identity: u128,
+    binders: Vec<BinderInput>,
+    param: u64,
+    ret: u64,
+) -> SignatureCandidate {
     publish_signature(
         store,
         &SignatureInput {
             kind: SignatureKind::Call,
             source: SemanticNodeId(source),
-            space_key: source,
-            binders: vec![],
+            space_key,
+            space_identity,
+            binders,
             receiver: None,
             params: vec![ParamInput {
                 name: None,
@@ -94,7 +115,7 @@ fn sig(store: &SignatureStore, source: u64, param: u64, ret: u64) -> SignatureCa
                 return_type: SemanticNodeId(ret),
             },
             provenance: SignatureProvenance::authored(
-                DeclarationGroupId::from_raw(source as u32),
+                DeclarationGroupId::from_raw(u64::from(source as u32)),
                 DeclarationParentId::from_raw(0),
                 0,
                 0,
@@ -149,4 +170,86 @@ fn later_match_is_never_committed_while_an_earlier_candidate_is_unresolved() {
         union_signatures(&store, &return_delay, &lists).unwrap(),
         settled
     );
+}
+
+fn binder(default: Option<u64>) -> BinderInput {
+    BinderInput {
+        name: "T".into(),
+        param: SemanticNodeId(5_000),
+        constraint: None,
+        default: default.map(SemanticNodeId),
+    }
+}
+
+/// An omitted default is not an authored `unknown` default.
+#[test]
+fn absent_binder_default_is_not_identical_to_authored_unknown_default() {
+    let store = SignatureStore::new();
+    let types = DelayedTypes {
+        store: &store,
+        unsettled: RefCell::new(BTreeSet::new()),
+    };
+    let none_a = sig_with(&store, 1, 1, 1, vec![binder(None)], 100, 200);
+    let none_b = sig_with(&store, 2, 2, 2, vec![binder(None)], 100, 200);
+    let authored = sig_with(&store, 3, 3, 3, vec![binder(Some(9_000))], 100, 200);
+    let same = |a, b| {
+        signatures_identical(&store, &types, a, b, MatchOptions::EXACT_IGNORING_RETURNS).unwrap()
+    };
+    assert!(same(none_a, none_b));
+    assert!(!same(none_a, authored));
+    assert!(!same(authored, none_a));
+}
+
+/// Two logical identities that truncate to one binder-space key fail
+/// closed rather than sharing binder tokens.
+#[test]
+fn colliding_space_keys_of_distinct_identities_are_rejected() {
+    let store = SignatureStore::new();
+    sig_with(&store, 1, 7, 1, vec![binder(None)], 100, 200);
+    sig_with(&store, 2, 7, 1, vec![binder(None)], 100, 200);
+    let collided = publish_signature(
+        &store,
+        &SignatureInput {
+            kind: SignatureKind::Call,
+            source: SemanticNodeId(3),
+            space_key: 7,
+            space_identity: 2,
+            binders: vec![binder(None)],
+            receiver: None,
+            params: vec![],
+            rest: None,
+            flags: SignatureSemanticFlags::NONE,
+            result: ResultInput::Declared {
+                return_type: SemanticNodeId(200),
+            },
+            provenance: SignatureProvenance::authored(
+                DeclarationGroupId::from_raw(3),
+                DeclarationParentId::from_raw(0),
+                0,
+                0,
+                SourceLocatorId::from_raw(0),
+            ),
+        },
+    );
+    assert_eq!(
+        collided,
+        Err(DiscoveryError::Store(
+            super::lifetime::StoreError::BinderKeyCollision
+        ))
+    );
+}
+
+/// Two union arms settling to the same callable each keep their own edge,
+/// so the result is a composite candidate rather than the bare authored one.
+#[test]
+fn repeated_arm_contributors_are_retained() {
+    let store = SignatureStore::new();
+    let types = DelayedTypes {
+        store: &store,
+        unsettled: RefCell::new(BTreeSet::new()),
+    };
+    let a = sig(&store, 1, 100, 200);
+    let out = union_signatures(&store, &types, &[vec![a], vec![a]]).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_ne!(out[0], a);
 }

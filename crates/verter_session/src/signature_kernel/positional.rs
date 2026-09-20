@@ -77,7 +77,7 @@ pub enum TypeAt<'a> {
     /// position (`T[index]`).
     GenericRest {
         rest: TypeToken,
-        index: u16,
+        index: usize,
     },
 }
 
@@ -239,7 +239,7 @@ impl<'a> PositionalShape<'a> {
                 match rest.kind {
                     RestKind::GenericTuple => TypeAt::GenericRest {
                         rest: rest.slot.ty,
-                        index: u16::try_from(index).unwrap_or(u16::MAX),
+                        index,
                     },
                     RestKind::Array if rest.tail.is_empty() => TypeAt::One(rest.slot),
                     RestKind::Array => TypeAt::Run {

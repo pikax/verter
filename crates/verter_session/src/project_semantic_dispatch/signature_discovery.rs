@@ -47,15 +47,31 @@ fn hash_u64<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
-fn hash_u32<T: Hash>(value: &T) -> u32 {
-    let h = hash_u64(value);
-    (h ^ (h >> 32)) as u32
+/// Full-width logical identity: two independently seeded 64-bit hashes.
+fn identity_u128<T: Hash>(value: &T) -> u128 {
+    let mut second = FxHasher::default();
+    0x9E37_79B9_7F4A_7C15_u64.hash(&mut second);
+    value.hash(&mut second);
+    (u128::from(hash_u64(value)) << 64) | u128::from(second.finish())
 }
 
 /// `VerterStableV1`-independent, order-independent binder-space key: derived
 /// from logical identity, never from intern order.
 fn space_key_of<T: Hash>(value: &T) -> u64 {
     hash_u64(value) & 0x7FFF_FFFF
+}
+
+/// Whether a canonical file id names a JavaScript-family module.
+fn is_js_canonical(canonical_id: &str) -> bool {
+    std::path::Path::new(canonical_id)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "js" | "jsx" | "mjs" | "cjs"
+            )
+        })
 }
 
 /// The graph adapter the record-level discovery reads types through.
@@ -582,11 +598,12 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 locator: hash_u64(source),
             },
         };
-        let (space_key, group, parent, source_ordinal) = match &occurrence {
+        let (space_key, space_identity, group, parent, source_ordinal) = match &occurrence {
             Some(occ) => (
                 space_key_of(&(&occ.function, occ.signature_ordinal)),
-                hash_u32(&occ.function),
-                hash_u32(&occ.function.anchor.canonical_id),
+                identity_u128(&(&occ.function, occ.signature_ordinal)),
+                hash_u64(&occ.function),
+                hash_u64(&occ.function.anchor.canonical_id),
                 occ.signature_ordinal,
             ),
             None => {
@@ -594,22 +611,42 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 let fingerprint = key.fingerprint();
                 (
                     space_key_of(&fingerprint),
-                    hash_u32(&fingerprint),
+                    identity_u128(&fingerprint),
+                    hash_u64(&fingerprint),
                     0,
                     ordinal,
                 )
             }
         };
-        let locator = span.map_or(0, |s| hash_u32(&(s.start, s.end)));
+        // An authored JavaScript signature with no type information at all:
+        // every parameter is implicitly `any` and the result is inferred.
+        let untyped_js = occurrence.as_ref().is_some_and(|occ| {
+            is_js_canonical(&occ.function.anchor.canonical_id)
+                && matches!(
+                    carrier,
+                    crate::semantic_query::SignatureReturnCarrier::Function(_)
+                )
+        }) && params.iter().all(|p| {
+            matches!(
+                graph.node_data(p.ty).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            )
+        });
+        let locator = span.map_or(0, |s| hash_u64(&(s.start, s.end)));
         let input = SignatureInput {
             kind: kernel_kind(kind),
             source: node,
             space_key,
+            space_identity,
             binders,
             receiver: receiver.map(to_param),
             params: fixed,
             rest,
-            flags: SignatureSemanticFlags::NONE,
+            flags: if untyped_js {
+                SignatureSemanticFlags::UNTYPED_JS
+            } else {
+                SignatureSemanticFlags::NONE
+            },
             result,
             provenance: SignatureProvenance::authored(
                 DeclarationGroupId::from_raw(group),

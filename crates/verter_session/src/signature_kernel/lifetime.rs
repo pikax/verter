@@ -37,6 +37,8 @@ pub enum StoreError {
     EscapingInferenceVar,
     WrongBinderSpace,
     InvalidBinderToken,
+    /// Two logical signature identities reduced to one binder-space key.
+    BinderKeyCollision,
     UnresolvedCompose,
 }
 
@@ -80,6 +82,9 @@ pub(super) struct EpochInner {
     pub type_tokens: AppendInterner<SemanticNodeId>,
     /// Authored source node of a descriptor (graph `Signature` node token).
     /// Epoch-local, like every handle it is keyed by.
+    /// Logical identity that owns each binder-space key, so a truncated key
+    /// collision fails closed instead of merging unrelated binder regions.
+    pub space_key_owners: Mutex<rustc_hash::FxHashMap<u64, u128>>,
     pub descriptor_sources: Mutex<rustc_hash::FxHashMap<u32, super::records::TypeToken>>,
     pub live_readers: AtomicU64,
     /// Shared across replacement epochs so `live_reader_count` includes
@@ -109,6 +114,7 @@ impl EpochInner {
             environments: AppendInterner::new(epoch),
             locators: AppendInterner::new(epoch),
             type_tokens: AppendInterner::new(epoch),
+            space_key_owners: Mutex::new(rustc_hash::FxHashMap::default()),
             descriptor_sources: Mutex::new(rustc_hash::FxHashMap::default()),
             live_readers: AtomicU64::new(0),
             store_live_readers,
@@ -558,6 +564,17 @@ impl SignatureStore {
         }
         let raw = inner.spaces.intern(space, cancelled)?;
         Ok(BinderSpaceId::from_raw(raw))
+    }
+
+    /// Claim `key` for the logical signature identity `identity`. A second,
+    /// different identity under the same key is a collision.
+    pub fn claim_space_key(&self, key: u64, identity: u128) -> Result<(), StoreError> {
+        let inner = self.inner();
+        let mut owners = inner.space_key_owners.lock();
+        match *owners.entry(key).or_insert(identity) {
+            owner if owner == identity => Ok(()),
+            _ => Err(StoreError::BinderKeyCollision),
+        }
     }
 
     pub fn intern_environment(

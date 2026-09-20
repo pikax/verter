@@ -292,3 +292,17 @@ fn explicit_optionality_is_not_reconstructed_from_type() {
     assert_eq!(min_all_modes(&shape(&ls, SignatureSemanticFlags::NONE)), 0);
     assert_eq!(min_all_modes(&shape(&ll, SignatureSemanticFlags::NONE)), 0);
 }
+
+#[test]
+fn generic_rest_index_stays_exact_past_u16() {
+    let l = layout(
+        vec![],
+        Some(RestSlot {
+            slot: req(GENERIC),
+            kind: RestKind::GenericTuple,
+            tail: Box::from([]),
+        }),
+    );
+    let s = shape(&l, SignatureSemanticFlags::NONE);
+    assert_ne!(s.type_at(65_535), s.type_at(65_536));
+}

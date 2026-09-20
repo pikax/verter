@@ -133,6 +133,8 @@ pub struct SignatureInput {
     pub kind: SignatureKind,
     pub source: SemanticNodeId,
     pub space_key: u64,
+    /// Full logical identity behind `space_key`; the key is a truncation.
+    pub space_identity: u128,
     pub binders: Vec<BinderInput>,
     pub receiver: Option<ParamInput>,
     pub params: Vec<ParamInput>,
@@ -183,6 +185,7 @@ pub fn publish_signature(
             },
         });
     }
+    store.claim_space_key(input.space_key, input.space_identity)?;
     let space = store.intern_binder_space(
         BinderSpace {
             key: input.space_key,
@@ -460,14 +463,19 @@ fn binders_identical(
         .zip(t.binder_nodes().iter())
         .map(|((_, a), (_, b))| (*a, *b))
         .collect();
-    let unknown = types.unknown();
     for (a, b) in s.space.binders.iter().zip(t.space.binders.iter()) {
-        let ac = a.constraint.unwrap_or(unknown);
-        let bc = b.constraint.unwrap_or(unknown);
-        let ad = a.default.unwrap_or(unknown);
-        let bd = b.default.unwrap_or(unknown);
-        if !ident(types, ac, bc, &corr)? || !ident(types, ad, bd, &corr)? {
-            return Ok(None);
+        // Absence is not `unknown`: an omitted default and an authored
+        // `unknown` default behave differently for omitted type arguments.
+        for (x, y) in [(a.constraint, b.constraint), (a.default, b.default)] {
+            match (x, y) {
+                (None, None) => {}
+                (Some(x), Some(y)) => {
+                    if !ident(types, x, y, &corr)? {
+                        return Ok(None);
+                    }
+                }
+                _ => return Ok(None),
+            }
         }
     }
     Ok(Some(corr))
@@ -796,11 +804,9 @@ pub fn union_signatures(
                         }
                     };
                     match m {
-                        Some(m) => {
-                            if !ms.iter().any(|(_, x)| x.signature == m.signature) {
-                                ms.push((i as u32, m));
-                            }
-                        }
+                        // Every arm keeps its own edge, even when several arms
+                        // settle to the same callable.
+                        Some(m) => ms.push((i as u32, m)),
                         None => {
                             ok = false;
                             break;
