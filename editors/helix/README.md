@@ -26,6 +26,17 @@ once at startup and spawns one `verter-lsp` per workspace root.
 
 ## Install
 
+Starting with IDE 0.0.4, download `verter-helix.tar.gz` and the matching
+`verter-lsp-<platform>` binary from the same
+[IDE release](https://github.com/pikax/verter/releases). Extract the archive to
+obtain `verter-helix/languages.toml`, this guide, a license and `IDE_VERSION`.
+Helix uses its built-in LSP client; there is no compiled Helix plugin.
+
+Set `[language-server.verter].command` to the downloaded server's absolute path
+(including `.exe` on Windows; mark it executable on macOS/Linux). Keep your
+existing configuration and merge the entries below rather than replacing the
+entire file. TypeScript prerequisites above still apply.
+
 Merge [`languages.toml`](./languages.toml) into your Helix config. You have two
 equivalent options:
 

@@ -98,6 +98,27 @@ prepends it to the sanitized child PATH. Do not copy DLLs, filter proc-macro
 suites, or treat loader exits as warmed: missing metadata and every non-zero
 launch remain strict setup failures.
 
+## IDE editor archives
+
+The IDE release uses `.github/workflows/editor-packages.yml` to build Lapce and
+Zed WASM plugins and package them alongside the Neovim Lua and Helix configuration
+archives. The same reusable workflow runs on pull requests affecting these files.
+To reproduce it locally from the repository root:
+
+```bash
+node --test scripts/package-editor-integrations.test.mjs
+cargo build --locked --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release
+cargo build --locked --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release
+node scripts/package-editor-integrations.mjs --output .agent-run/editor-integrations
+```
+
+Install both WASI targets first (`rustup target add wasm32-wasip1 wasm32-wasip2`).
+Packaging requires `tar` and an output directory without existing archive names.
+The script checks the editor version against the VS Code manifest, validates
+WASM formats, and excludes development files. It does not bump versions or publish.
+See `docs/contributing/ci-cd.md` and each editor's README for the release/install
+contract. Native servers are separate, platform-specific release assets.
+
 ## Quick Rebuild (Native)
 
 ```bash

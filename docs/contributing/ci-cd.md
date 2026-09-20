@@ -182,10 +182,14 @@ editor":
    napi binding, packaged by the same `packages/vue-vscode/package.mjs` the
    monorepo release uses and published with `vsce publish --packagePath` under
    the `vscode-marketplace` environment (`verter.verter-vscode`).
-2. **Every other editor.** Helix, Zed, Lapce and nvim have no store between
-   them: they launch the engine directly. The GitHub Release for the tag carries
+2. **Other supported editors.** Helix, Zed, Lapce and Neovim launch the engine
+   directly. The GitHub Release for the tag carries
    `verter-lsp-<platform>` and `verter-mcp-<platform>` for all seven targets —
    including the two musl ones, which have no vsce target at all.
+   Starting with IDE 0.0.4, it also carries `verter-lapce.tar.gz` (WASI core
+   plugin), `verter-zed.tar.gz` (WASI component extension), `verter-nvim.tar.gz`
+   (Lua runtime) and `verter-helix.tar.gz` (configuration). Each archive includes
+   installation instructions, a license and the matching `IDE_VERSION`.
 
 **One version for all of them**, because every editor package is a launcher for
 the same `verter-lsp` build — the VSIX embeds it, the Zed extension and the
@@ -194,6 +198,20 @@ Lapce volt spawn it, Helix and nvim run it directly. `ide/vX.Y.Z` is what makes
 `scripts/set-ide-version.mjs` writes that version into all three editor
 manifests: `packages/vue-vscode/package.json`, `extensions/zed/extension.toml`
 and `extensions/lapce/volt.toml`.
+
+The reusable `editor-packages.yml` workflow builds the two WASM plugins using
+their locked standalone Cargo manifests, then runs
+`scripts/package-editor-integrations.mjs`. That script rejects mismatched editor
+versions, missing files, wrong WASM formats and existing output archives. It
+packages only explicit runtime files. Zed's installed manifest records the
+locked extension API version and loads `extension.wasm` at the archive root.
+Pull requests changing these packages run the same workflow and archive tests.
+Both publishers wait for this build; GitHub asset staging requires all four
+archives as well as all engine binaries and VSIXes.
+
+Neovim support requires 0.11+; there is no classic Vim package. The JetBrains
+plugin is currently a health-check skeleton without language support, so it is
+not part of the IDE release distribution.
 
 Registry publication for Zed (`zed-industries/extensions`) and Lapce
 (plugins.lapce.dev) is a roadmap item in their READMEs. When it lands it is a

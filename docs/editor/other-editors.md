@@ -21,15 +21,35 @@ of full UI parity: the exact tested boundaries are listed below.
 | **Helix**  | A pure `languages.toml` config (built-in native LSP client). | [`editors/helix/README.md`](https://github.com/pikax/verter/blob/main/editors/helix/README.md)       |
 | **Neovim** | A pure Lua config (built-in LSP client).                     | [`editors/nvim/README.md`](https://github.com/pikax/verter/blob/main/editors/nvim/README.md)         |
 
+Starting with **IDE 0.0.4**, [IDE releases](https://github.com/pikax/verter/releases)
+include these platform-independent archives in addition to the VS Code VSIXes:
+
+| Release asset | Contents |
+| --- | --- |
+| `verter-lapce.tar.gz` | Compiled WASM volt and `volt.toml` |
+| `verter-zed.tar.gz` | Compiled WASM extension and `extension.toml` |
+| `verter-nvim.tar.gz` | Lua integration for Neovim 0.11+ |
+| `verter-helix.tar.gz` | Helix `languages.toml` configuration |
+
+Each includes its README, license and `IDE_VERSION`. Install instructions are
+in the per-editor guides linked above. These are manual-install packages;
+Lapce/Zed registry publication is separate. Download the native LSP from the
+**same IDE release** and configure its path. The archives do not bundle the
+native server or TypeScript provider.
+
+There is no separate classic Vim integration. The repository's JetBrains plugin
+is currently a health-check skeleton without language support and is not included
+in this editor distribution.
+
 For each editor, its README covers the **prerequisites**, the **install** steps,
 and the **config override** (how to point it at `verter-lsp`):
 
-- **Lapce** — prerequisites (Rust + `wasm32-wasip1` target + a built
-  `verter-lsp`), install (the unpacked-volt layout or the `install:lapce-local`
+- **Lapce** — prerequisites (`verter-lsp`; Rust + `wasm32-wasip1` only for source
+  builds), install (the release archive, unpacked-volt layout or `install:lapce-local`
   helper), and the `lsp.serverPath` / `lsp.serverSource` config keys. See
   [`extensions/lapce/README.md`](https://github.com/pikax/verter/blob/main/extensions/lapce/README.md).
 - **Zed** — prerequisites (the official Vue/Svelte Zed extension + a built
-  `verter-lsp`), install (`zed: install dev extension`), and the
+  `verter-lsp`), install (the release archive or `zed: install dev extension`), and the
   `lsp.verter.binary.path` / `serverSource` settings. See
   [`extensions/zed/README.md`](https://github.com/pikax/verter/blob/main/extensions/zed/README.md).
 - **Helix** — prerequisites (`verter-lsp` on `PATH` or an absolute `command`),
@@ -42,8 +62,17 @@ and the **config override** (how to point it at `verter-lsp`):
 
 ## Install `verter-lsp`
 
-All four clients need the native `verter-lsp` binary. There are two ways to get
+All four clients need the native `verter-lsp` binary. There are three ways to get
 it; no editor auto-downloads it (managed download is a roadmap item).
+
+### From an IDE release
+
+Download `verter-lsp-<platform>` from the same `ide/vX.Y.Z` release as the editor
+archive. Choose macOS x64/arm64, Windows x64 (`.exe`), or Linux x64/arm64 with
+the matching GNU or musl libc. Mark the file executable on macOS/Linux and use
+its absolute path in the editor settings below. The release also includes
+`verter-mcp-<platform>` for standalone MCP clients; editors do not need it to
+start the LSP.
 
 ### From npm (recommended)
 

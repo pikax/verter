@@ -3,8 +3,8 @@ name: Release IDE
 # The editor distribution's release lane: every editor Verter supports, on one
 # version. It publishes the VS Code extension to the Marketplace, and the engine
 # every OTHER editor launches — the per-platform `verter-lsp` and `verter-mcp`
-# binaries — as GitHub Release assets. Helix, Zed, Lapce and nvim have no store
-# between them; a downloadable binary at a known tag IS their channel. (Registry
+# binaries — plus the Lapce/Zed plugins and Neovim/Helix configuration archives
+# as GitHub Release assets. (Registry
 # publication for Zed and Lapce is a roadmap item in their READMEs; when it
 # lands it is a job here, against the same tag, not a lane of its own.)
 #
@@ -50,7 +50,7 @@ on:
     inputs:
       dry_run:
         description: >-
-          Build every binary and package all five VSIXes, but skip the
+          Build every binary, all five VSIXes and four editor archives, but skip the
           Marketplace publish and the GitHub Release.
         type: boolean
         default: true
@@ -535,6 +535,11 @@ jobs:
           path: /tmp/verter-vscode-*.vsix
           if-no-files-found: error
 
+  build-editor-integrations:
+    name: Editor integrations
+    needs: [validate]
+    uses: ./.github/workflows/editor-packages.yml
+
   # ---------------------------------------------------------------------------
   # Publish VS Code Extension
   #
@@ -544,7 +549,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-vscode:
     name: Publish VS Code Extension
-    needs: [validate, build-vsix]
+    needs: [validate, build-vsix, build-editor-integrations]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -595,7 +600,7 @@ jobs:
   # The Marketplace serves VS Code. Every other editor installs the engine by
   # downloading it, so the release for this tag carries the per-platform
   # `verter-lsp` and `verter-mcp` binaries under explicit, platform-qualified
-  # names, plus the VSIXes for a manual install.
+  # names, plus the VSIXes and other editor integrations for a manual install.
   #
   # Gated on the BUILD jobs only, exactly as the monorepo release is: a failed
   # Marketplace publish must not withhold the binaries the other editors need.
@@ -603,7 +608,7 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-lsp, build-mcp, build-vsix]
+    needs: [validate, build-lsp, build-mcp, build-vsix, build-editor-integrations]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -625,6 +630,11 @@ jobs:
           pattern: mcp-*
           path: /tmp/release-assets/mcp
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: editor-integrations
+          path: /tmp/release-assets/editors
+
       # Stage every asset under an explicit, platform-qualified name, assert a
       # per-family count, and reject duplicates — a partial release is a failed
       # release, not a quiet one.
@@ -637,6 +647,7 @@ jobs:
           EXPECTED_LSP=7
           EXPECTED_MCP=7
           EXPECTED_VSIX=5
+          EXPECTED_EDITORS=4
           FAILURES=0
 
           stage() {
@@ -688,9 +699,17 @@ jobs:
             vsix_staged=$((vsix_staged + 1))
           done
 
+          # --- platform-independent plugins and configuration bundles ---
+          editors_staged=0
+          for editor in lapce zed nvim helix; do
+            stage "/tmp/release-assets/editors/verter-${editor}.tar.gz" "verter-${editor}.tar.gz"
+            editors_staged=$((editors_staged + 1))
+          done
+
           expect_count "LSP" "$EXPECTED_LSP" "$lsp_staged"
           expect_count "MCP" "$EXPECTED_MCP" "$mcp_staged"
           expect_count "VSIX" "$EXPECTED_VSIX" "$vsix_staged"
+          expect_count "editor integration" "$EXPECTED_EDITORS" "$editors_staged"
 
           echo ""
           ls -lh "$STAGED"
@@ -711,9 +730,18 @@ jobs:
           [Marketplace](https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode);
           the \`.vsix\` files here are the same builds for a manual install.
 
-          **Every other editor** (Helix, Zed, Lapce, nvim) launches the engine
-          directly: download \`verter-lsp-<platform>\` for your machine, mark it
-          executable and point your editor's server command at it.
+          **Lapce** — \`verter-lapce.tar.gz\` contains the compiled WASM volt.
+          **Zed** — \`verter-zed.tar.gz\` contains the compiled WASM extension.
+          **Neovim (0.11+)** — \`verter-nvim.tar.gz\` contains the Lua integration.
+          **Helix** — \`verter-helix.tar.gz\` contains the language-server configuration.
+          Each archive includes installation instructions and its IDE version.
+          These are manual-install packages; Zed/Lapce registry publication is separate.
+
+          All four also need \`verter-lsp-<platform>\` from this release for your
+          machine: mark it executable and point your editor's server command at it.
+          The archives contain no native server or TypeScript provider; follow their READMEs.
+          Classic Vim has no dedicated integration. The JetBrains plugin is an
+          experimental skeleton and is not included in this distribution.
           \`verter-mcp-<platform>\` is the standalone MCP server the same builds
           ship, for agents that want Vue analysis without the LSP.
 
