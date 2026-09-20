@@ -17,19 +17,28 @@ export function createActivationGate<T>(start: () => Promise<T>): ActivationGate
         return current;
       }
 
-      current = start().then(
+      const attempt = start().then(
         (value) => {
-          active = true;
+          if (current === attempt) {
+            active = true;
+          }
           return value;
         },
         (error) => {
-          active = false;
-          current = undefined;
+          // Only the attempt the gate still holds may retire the shared
+          // promise. A run superseded by reset() must not clear its
+          // replacement's promise, or a late stale rejection would unlock a
+          // third start while the replacement activation is still live.
+          if (current === attempt) {
+            active = false;
+            current = undefined;
+          }
           throw error;
         },
       );
+      current = attempt;
 
-      return current;
+      return attempt;
     },
 
     isActive(): boolean {

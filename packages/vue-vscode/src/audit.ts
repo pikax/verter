@@ -14,7 +14,7 @@
  * `recordsToQuickPickItems`, `formatRecordAsJson`) and their unit
  * tests live in `audit.transforms.ts` / `audit.spec.ts`.
  */
-import { commands, window, workspace, type ExtensionContext } from "vscode";
+import { commands, window, workspace } from "vscode";
 import type { LogOutputChannel, QuickPickItem } from "vscode";
 import {
   formatRecordAsJson,
@@ -32,21 +32,20 @@ export {
 } from "./audit.transforms";
 
 /**
- * Register the `verter.showRecentAuditRecords` command on `context`.
- *
- * `getClient` is a thunk-style accessor matching the rest of the
+ * Register the `verter.showRecentAuditRecords` command on the activation
+ * lifetime. `getClient` is a thunk-style accessor matching the rest of the
  * extension's command registrations — we resolve the language client
  * lazily so the command can be invoked before the LSP server has
  * finished starting (the command awaits `ensureLanguageServerStarted`
  * first).
  */
 export function addShowRecentAuditRecordsCommand(
-  context: ExtensionContext,
+  lifetime: { add(...items: { dispose(): void }[]): void },
   log: LogOutputChannel,
   ensureLanguageServerStarted: () => Promise<unknown>,
   getClient: () => unknown,
 ) {
-  context.subscriptions.push(
+  lifetime.add(
     commands.registerCommand("verter.showRecentAuditRecords", async () => {
       try {
         await ensureLanguageServerStarted();

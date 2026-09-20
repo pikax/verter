@@ -330,7 +330,10 @@
       {
         "id": "activation-gate",
         "behavior": "single-run activation gate: activate() runs the activation exactly once and deactivation resets it",
-        "evidence": ["packages/vue-vscode/src/activationGate.ts"]
+        "evidence": [
+          "packages/vue-vscode/src/activationGate.ts",
+          "packages/vue-vscode/src/activationSession.ts"
+        ]
       },
       {
         "id": "deferred-features",
@@ -340,7 +343,10 @@
       {
         "id": "start-attempt-scope",
         "behavior": "one StartAttemptScope per language-server start attempt: failure disposes its own registrations; a spent attempt cannot hand the workspace an ownerless server",
-        "evidence": ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts"]
+        "evidence": [
+          "packages/vue-vscode/src/startAttemptScope.ts",
+          "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts"
+        ]
       },
       {
         "id": "heartbeat-watchdog",
