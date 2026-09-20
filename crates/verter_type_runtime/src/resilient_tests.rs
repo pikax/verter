@@ -107,6 +107,8 @@ struct MockInner {
     /// crash quarantine covers). Hovers on other paths stay instant so the
     /// liveness probes (`await_down`/`await_live`) never park on the gate.
     hover_gate: parking_lot::Mutex<Option<(String, Arc<Semaphore>)>>,
+    configure_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    shutdowns: AtomicUsize,
 }
 
 /// A recording `TypeProvider` mock. Cloning shares the recorded state (so the
@@ -124,6 +126,8 @@ impl MockProvider {
                 calls: parking_lot::Mutex::new(Vec::new()),
                 tap: parking_lot::Mutex::new(None),
                 hover_gate: parking_lot::Mutex::new(None),
+                configure_gate: parking_lot::Mutex::new(None),
+                shutdowns: AtomicUsize::new(0),
             }),
         }
     }
@@ -317,6 +321,17 @@ impl TypeProvider for MockProvider {
             base_url: base_url.to_string(),
             paths,
         });
+        let gate = self.inner.configure_gate.lock().clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await;
+            }
+            Ok(())
+        })
+    }
+
+    fn shutdown(&self) -> ProviderFuture<'_, ()> {
+        self.inner.shutdowns.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     }
 
@@ -1412,6 +1427,70 @@ async fn retracted_carrier_is_absent_from_restart_replay() {
         )),
         "a carrier retracted before respawn must NOT be re-registered, got {replayed:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn crash_interrupts_a_stalled_mutation_and_replays_retained_state() {
+    let initial = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let gate = Arc::new(Semaphore::new(0));
+    *initial.inner.configure_gate.lock() = Some(Arc::clone(&gate));
+    let mut entered = initial.attach_tap();
+    let harness = make_harness(initial.clone(), replacement.clone());
+    let provider = Arc::clone(&harness.provider);
+    let mutation = tokio::spawn(async move {
+        provider
+            .configure_paths("/project", serde_json::json!({"@/*": ["src/*"]}))
+            .await
+    });
+    assert!(matches!(
+        entered.recv().await,
+        Some(MockCall::ConfigurePaths { .. })
+    ));
+    assert!(
+        !mutation.is_finished(),
+        "healthy pending work must not be abandoned"
+    );
+
+    // This mutation queues behind the stalled forward. Recovery must retain it
+    // without forwarding it to the failed provider or reordering the replay.
+    let queued = harness
+        .provider
+        .open_file("/project/Latest.ts", "export const latest = 42;");
+    tokio::pin!(queued);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    harness.crash_current_generation();
+    await_down(&harness.provider).await;
+    assert_eq!(initial.inner.shutdowns.load(Ordering::SeqCst), 1);
+    assert!(mutation.await.unwrap().is_err());
+    queued.await.unwrap();
+    harness.spawn_gate.add_permits(1);
+    await_live(&harness.provider).await;
+    assert_eq!(
+        gate.available_permits(),
+        0,
+        "the wedged operation was never released"
+    );
+    let calls = replacement.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(
+                |c| matches!(c, MockCall::ConfigurePaths { base_url, .. } if base_url == "/project")
+            )
+            .count(),
+        1
+    );
+    assert_eq!(calls.iter().filter(|c| matches!(c, MockCall::OpenFile { path, content } if path == "/project/Latest.ts" && content == "export const latest = 42;")).count(), 1);
+    assert!(!initial
+        .calls()
+        .iter()
+        .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == "/project/Latest.ts")));
 }
 
 #[tokio::test(start_paused = true)]

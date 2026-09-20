@@ -6,6 +6,33 @@ use crate::resolver_core::{
     ResolutionObservationSnapshot, ResolutionWorldBasis, ResolverAttemptView,
 };
 
+#[test]
+fn dotted_import_stems_resolve_script_and_declaration_files() {
+    for (stem, target) in [
+        ("/p/types.d", "/p/types.d.ts"),
+        ("/p/Button.types", "/p/Button.types.ts"),
+        ("/p/view.component", "/p/view.component.tsx"),
+    ] {
+        let view = known_world_view(&[(target, "")], &[(target, target)]);
+        assert!(
+            matches!(
+                probe_path_for_context(&view, basis(), stem, true, true),
+                AttemptOutcome::Complete(CompletedAttempt { value: Some(ref v), .. }) if v == target
+            ),
+            "import stem {stem} must resolve {target}"
+        );
+    }
+}
+
+#[test]
+fn literal_sfc_src_does_not_append_extensions_to_a_dotted_filename() {
+    let view = known_world_view(&[("/p/script.custom.ts", "")], &[]);
+    assert!(matches!(
+        probe_path_for_context(&view, basis(), "/p/script.custom", false, false),
+        AttemptOutcome::Complete(CompletedAttempt { value: None, .. })
+    ));
+}
+
 fn basis() -> ResolutionBasis {
     ResolutionBasis::new(
         ResolutionWorldBasis::new(

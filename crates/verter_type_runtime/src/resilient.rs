@@ -35,7 +35,7 @@
 //! awaited. The crate denies `clippy::await_holding_lock` to keep this enforced.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
@@ -613,8 +613,16 @@ async fn run_actor<P>(
     P: TypeProvider + Send + Sync + 'static,
 {
     let mut state = DesiredState::default();
+    let mut queued = VecDeque::new();
 
-    while let Some(command) = command_rx.recv().await {
+    loop {
+        let command = match queued.pop_front() {
+            Some(command) => command,
+            None => match command_rx.recv().await {
+                Some(command) => command,
+                None => return,
+            },
+        };
         match command {
             Command::Mutate {
                 mutation,
@@ -627,25 +635,42 @@ async fn run_actor<P>(
                     let guard = inner.read().await;
                     guard.clone()
                 };
-                let result = match live {
-                    Some(provider) => forward(provider.as_ref(), &mutation, lane).await,
+                let (result, crashed) = match live {
+                    Some(provider) => {
+                        let forwarding = forward(provider.as_ref(), &mutation, lane);
+                        tokio::pin!(forwarding);
+                        loop {
+                            tokio::select! {
+                                result = &mut forwarding => break (result, None),
+                                Some(command) = command_rx.recv() => {
+                                    match command {
+                                        Command::Crashed { ack } => break (
+                                            Err(TypeProviderError::new("provider crashed during state update")),
+                                            Some(ack),
+                                        ),
+                                        // Preserve mutation order while remaining receptive to
+                                        // lifecycle control. A wedged forward must not prevent
+                                        // the shutdown that releases the failed transport.
+                                        command => queued.push_back(command),
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // No live provider yet (mid-restart): the mutation is now in
                     // the desired-state set and will be replayed on go-live.
-                    None => Ok(()),
+                    None => (Ok(()), None),
                 };
+                if let Some(crashed) = crashed {
+                    // The forwarding future has been dropped, but its desired
+                    // state and all queued mutations survive for the new engine.
+                    retire_provider(&inner).await;
+                    let _ = crashed.send(());
+                }
                 let _ = ack.send(result);
             }
             Command::Crashed { ack } => {
-                let crashed = {
-                    let mut guard = inner.write().await;
-                    guard.take()
-                };
-                if let Some(provider) = crashed {
-                    // Clear the live cell before awaiting teardown so queries fail
-                    // closed. Owned providers then kill/reap their crashed child under
-                    // their bounded shutdown contract before respawn is admitted.
-                    let _ = provider.shutdown().await;
-                }
+                retire_provider(&inner).await;
                 let _ = ack.send(());
             }
             Command::GoLive { provider, ack } => {
@@ -660,6 +685,15 @@ async fn run_actor<P>(
                 let _ = ack.send(());
             }
         }
+    }
+}
+
+async fn retire_provider<P: TypeProvider>(inner: &RwLock<Option<Arc<P>>>) {
+    // Fail queries closed before bounded teardown, without holding the live
+    // cell's lock while killing and reaping the failed child.
+    let crashed = inner.write().await.take();
+    if let Some(provider) = crashed {
+        let _ = provider.shutdown().await;
     }
 }
 

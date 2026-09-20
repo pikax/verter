@@ -449,6 +449,8 @@ Provider diagnostics are published only when their generated range maps back to 
 
 ### Heartbeat Watchdog
 
+Confirmed provider failure interrupts an in-flight resilient-provider mutation before teardown. The actor retains that mutation's desired state and buffers later mutations in order, so crash recovery cannot queue behind the provider operation it needs to stop. This is lifecycle cancellation, not a feature latency timeout; healthy slow requests remain pending.
+
 The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats -- if none arrive for 30s, it auto-restarts the server. Last-resort safety net for runtime starvation.
 
 ### Async Workspace Scanning
