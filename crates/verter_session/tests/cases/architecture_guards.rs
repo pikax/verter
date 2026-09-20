@@ -454,6 +454,18 @@ verter_parser = { workspace = true }
             .map(str::to_owned)
             .collect()
     );
+    let workspace_manifest = r#"
+[workspace.dependencies]
+transport = { package = "verter_lsp", path = "transport" }
+"#;
+    let inherited_member = r#"
+[dependencies]
+transport = { workspace = true }
+"#;
+    assert_eq!(
+        production_dependency_names_with_workspace(inherited_member, Some(workspace_manifest)),
+        ["verter_lsp"].into_iter().map(str::to_owned).collect()
+    );
 
     let source =
         syn::parse_file("use verter_lsp::Server;\nextern crate verter_parser as parser;\n")
@@ -469,8 +481,18 @@ verter_parser = { workspace = true }
     let expected = syn::parse_str::<syn::ItemMod>("pub(crate) mod flow_return;").unwrap();
     let commented = syn::parse_file("pub(crate) /* owner */ mod flow_return;").unwrap();
     assert!(module_declaration_matches(&commented, &expected));
+    let equivalent = syn::parse_file("pub(in crate) mod flow_return;").unwrap();
+    assert!(module_declaration_matches(&equivalent, &expected));
     let widened = syn::parse_file("pub mod flow_return; // pub(crate) mod flow_return;").unwrap();
     assert!(!module_declaration_matches(&widened, &expected));
+    let conditionally_widened = syn::parse_file(
+        "#[cfg(any())] pub(crate) mod flow_return;\n#[cfg(not(any()))] pub mod flow_return;",
+    )
+    .unwrap();
+    assert!(!module_declaration_matches(
+        &conditionally_widened,
+        &expected
+    ));
     let nested = syn::parse_file("pub(crate) mod other { pub(crate) mod flow_return; }").unwrap();
     assert!(!module_declaration_matches(&nested, &expected));
     let inline = syn::parse_file("pub(crate) mod flow_return {}").unwrap();
@@ -485,34 +507,70 @@ verter_parser = { workspace = true }
 }
 
 fn production_dependency_names(manifest: &str) -> std::collections::BTreeSet<String> {
+    production_dependency_names_with_workspace(manifest, None)
+}
+
+fn production_dependency_names_with_workspace(
+    manifest: &str,
+    workspace_manifest: Option<&str>,
+) -> std::collections::BTreeSet<String> {
     let document = manifest
         .parse::<toml::Table>()
         .expect("Cargo manifest must be valid TOML");
+    let workspace_document = workspace_manifest.and_then(|manifest| manifest.parse().ok());
+    let workspace_dependencies = workspace_document
+        .as_ref()
+        .and_then(|document: &toml::Table| document.get("workspace"))
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table);
     let mut names = std::collections::BTreeSet::new();
 
-    fn add_table(table: Option<&toml::Value>, names: &mut std::collections::BTreeSet<String>) {
+    fn add_table(
+        table: Option<&toml::Value>,
+        workspace_dependencies: Option<&toml::map::Map<String, toml::Value>>,
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
         let Some(table) = table.and_then(toml::Value::as_table) else {
             return;
         };
         for (alias, spec) in table {
-            let package = spec
+            let inherited = spec
                 .as_table()
-                .and_then(|spec| spec.get("package"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or(alias);
+                .and_then(|spec| spec.get("workspace"))
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
+            let package = if inherited {
+                workspace_dependencies
+                    .and_then(|deps| deps.get(alias))
+                    .and_then(|spec| spec.as_table())
+                    .and_then(|spec| spec.get("package"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(alias)
+            } else {
+                spec.as_table()
+                    .and_then(|spec| spec.get("package"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(alias)
+            };
             if package.starts_with("verter_") {
                 names.insert(package.to_owned());
             }
         }
     }
 
-    add_table(document.get("dependencies"), &mut names);
+    add_table(
+        document.get("dependencies"),
+        workspace_dependencies,
+        &mut names,
+    );
     if let Some(targets) = document.get("target").and_then(toml::Value::as_table) {
         for target in targets.values() {
             add_table(
                 target
                     .as_table()
                     .and_then(|table| table.get("dependencies")),
+                workspace_dependencies,
                 &mut names,
             );
         }
@@ -587,16 +645,29 @@ fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
 }
 
 fn module_declaration_matches(file: &syn::File, expected: &syn::ItemMod) -> bool {
-    use quote::ToTokens;
+    fn is_unconditionally_active(attrs: &[syn::Attribute]) -> bool {
+        !attrs.iter().any(|attr| attr.path().is_ident("cfg"))
+    }
+
+    fn visibility_matches(actual: &syn::Visibility, expected: &syn::Visibility) -> bool {
+        match (actual, expected) {
+            (syn::Visibility::Public(_), syn::Visibility::Public(_))
+            | (syn::Visibility::Inherited, syn::Visibility::Inherited) => true,
+            (syn::Visibility::Restricted(actual), syn::Visibility::Restricted(expected)) => {
+                actual.path == expected.path
+            }
+            _ => false,
+        }
+    }
 
     file.items.iter().any(|item| {
         let syn::Item::Mod(module) = item else {
             return false;
         };
-        module.ident == expected.ident
+        is_unconditionally_active(&module.attrs)
+            && module.ident == expected.ident
             && module.content.is_none()
-            && module.vis.to_token_stream().to_string()
-                == expected.vis.to_token_stream().to_string()
+            && visibility_matches(&module.vis, &expected.vis)
     })
 }
 
@@ -612,6 +683,8 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
     .expect("ARH1 dependency contracts must be valid JSON");
 
     let workspace = workspace_root();
+    let workspace_manifest =
+        fs::read_to_string(workspace.join("Cargo.toml")).expect("read workspace Cargo.toml");
     let rules = contracts["layerRules"]
         .as_array()
         .expect("ARH1 layerRules must be an array");
@@ -621,7 +694,8 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
         let manifest = workspace.join(crate_rel).join("Cargo.toml");
         let manifest_text = fs::read_to_string(&manifest)
             .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
-        let actual: BTreeSet<String> = production_dependency_names(&manifest_text);
+        let actual: BTreeSet<String> =
+            production_dependency_names_with_workspace(&manifest_text, Some(&workspace_manifest));
         let declared: BTreeSet<String> = rule["mayImport"]
             .as_array()
             .expect("layer mayImport must be an array")
