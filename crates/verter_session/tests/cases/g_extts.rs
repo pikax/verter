@@ -22,5 +22,7 @@ mod component_bare_import_resolves_to_declaration_carrier;
 mod same_stem_svelte_component_rune_fails_closed;
 #[path = "../g_extts/sealed_carrier_store_mutators_allowlist.rs"]
 mod sealed_carrier_store_mutators_allowlist;
+#[path = "../g_extts/semantic_capability_closure.rs"]
+mod semantic_capability_closure;
 #[path = "../g_extts/shared_mode_failover_is_per_reference_closure.rs"]
 mod shared_mode_failover_is_per_reference_closure;
