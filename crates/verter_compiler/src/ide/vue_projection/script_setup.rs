@@ -334,9 +334,17 @@ pub fn project_script_pair(
 }
 
 fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupProjectionRefusal> {
-    let Some(text) = generic.map(str::trim).filter(|text| !text.is_empty()) else {
+    let Some(original) = generic else {
         return Ok(UniversalSetupBinder::default());
     };
+    let text = original.trim();
+    if text.is_empty() {
+        return Ok(UniversalSetupBinder::default());
+    }
+    // `parse_generic` returns spans relative to the trimmed `text`; carry the
+    // leading-whitespace byte offset so returned ranges stay relative to the
+    // authored `generic` attribute value.
+    let leading_offset = (text.as_ptr() as usize - original.as_ptr() as usize) as u32;
     let allocator = Allocator::default();
     let result = parse_generic(&allocator, text, 0);
     if !result.is_ok() {
@@ -344,8 +352,8 @@ fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupPr
     }
     let bytes = text.as_bytes();
     let span = |s: crate::common::RelativeSpan| SourceRange {
-        start: s.start,
-        end: s.end,
+        start: s.start + leading_offset,
+        end: s.end + leading_offset,
     };
     Ok(UniversalSetupBinder {
         params: result
@@ -538,7 +546,23 @@ impl<'a> Visit<'a> for ComputedKeyAwaitVisitor {
 
     fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
 
-    fn visit_class(&mut self, _it: &Class<'a>) {}
+    fn visit_class(&mut self, it: &Class<'a>) {
+        // A nested class's heritage and computed keys are themselves
+        // evaluated eagerly in the enclosing scope; only its method/property
+        // bodies are deferred, so recurse into those two eager parts without
+        // walking the rest of the nested class.
+        if self.found.is_some() {
+            return;
+        }
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
+        for element in &it.body.body {
+            if let Some(key) = computed_class_key(element) {
+                self.visit_property_key(key);
+            }
+        }
+    }
 }
 
 /// The element's key when authored with computed-key syntax (`[expr]`); such

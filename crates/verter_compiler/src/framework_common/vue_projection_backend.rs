@@ -113,11 +113,7 @@ impl VueProjectionBackend {
     ) -> ProjectionPlan {
         match VueCarrierCompiler.parsed_sfc(artifact) {
             Some(parsed) => {
-                let exact_source = artifact
-                    .inventory()
-                    .source_spaces()
-                    .first()
-                    .is_some_and(|space| space.bytes().as_ref() == source);
+                let exact_source = artifact.carrier_source().as_ref() == source;
                 if !exact_source {
                     return incomplete_parse_snapshot_mismatch(canonical_id, source);
                 }
@@ -144,11 +140,7 @@ impl VueProjectionBackend {
         let parsed = VueCarrierCompiler
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
-        let exact_source = artifact
-            .inventory()
-            .source_spaces()
-            .first()
-            .is_some_and(|space| space.bytes().as_ref() == source);
+        let exact_source = artifact.carrier_source().as_ref() == source;
         if !exact_source {
             return Err(SetupProjectionRefusal::MissingParse);
         }
@@ -214,11 +206,7 @@ impl ProjectionBackend for VueProjectionBackend {
             return Err(no_ide());
         };
         let requested_profile = requested_vue_syntax_profile(request)?;
-        let exact_source = artifact
-            .inventory()
-            .source_spaces()
-            .first()
-            .is_some_and(|space| space.bytes().as_ref() == source);
+        let exact_source = artifact.carrier_source().as_ref() == source;
         if !exact_source || artifact.syntax_profile() != &requested_profile {
             return Err(no_ide());
         }

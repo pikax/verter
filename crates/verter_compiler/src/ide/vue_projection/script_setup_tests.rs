@@ -46,6 +46,18 @@ fn stp11_universal_binder_keeps_constraints_and_carries_no_arguments() {
 }
 
 #[test]
+fn stp11_universal_binder_constraint_spans_stay_relative_to_leading_whitespace() {
+    let generic = "  T extends { id: number }";
+    let facts =
+        project_script_pair(None, Some(ts("const a = 1", 0)), Some(generic)).expect("projects");
+    let constraint = facts.binder.params[0].constraint.expect("constraint");
+    assert_eq!(
+        &generic[constraint.start as usize..constraint.end as usize],
+        "{ id: number }"
+    );
+}
+
+#[test]
 fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
     let normal =
         "import { a } from './a'\nexport const shared = 1\nexport default {}\nfunction helper() {}";
@@ -130,6 +142,25 @@ fn stp11_class_computed_key_await_is_top_level() {
 }
 
 #[test]
+fn stp11_await_in_nested_class_heritage_or_computed_key_is_top_level() {
+    // The outer class's heritage expression is itself a nested class whose
+    // OWN heritage is eager; its await must still be found.
+    let nested_heritage = setup_of("class Outer extends (class extends (await base()) {}) {}");
+    assert!(nested_heritage.checking_wrapper_is_async());
+
+    // Same, but the nested class's eager part is a computed key rather than
+    // heritage.
+    let nested_key = setup_of("class Outer extends (class { [await load()]() {} }) {}");
+    assert!(nested_key.checking_wrapper_is_async());
+
+    // A nested class's method BODY await stays nested (not eager) even
+    // though the nested class itself sits in an eager position.
+    let nested_body_only =
+        setup_of("class Outer extends (class { m() { return async () => { await g() } } }) {}");
+    assert!(!nested_body_only.checking_wrapper_is_async());
+}
+
+#[test]
 fn stp11_assertion_ts_angle_assertion_and_tsx_element_parse_once_under_own_grammar() {
     let result = project_script_pair(None, Some(ts("const n = <number>raw", 0)), None)
         .expect("angle assertion parses under the TypeScript grammar");
@@ -210,6 +241,49 @@ const b = 2",
     .unwrap();
     let setup = facts.setup.expect("setup");
     assert_eq!(setup.statements.len(), 2);
+}
+
+#[test]
+fn stp11_one_body_rejects_duplicate_setup_body_placement() {
+    // The public declaration surface (`module`) and the single checking unit
+    // (`setup`) are two distinct products backed by independent OXC parses of
+    // their own block; the setup body is placed in exactly one of them. This
+    // proves it never bleeds into both — the duplicate-whole-script-checking
+    // design the charter forbids.
+    let normal = "export const normalOnly = 1";
+    let setup_src = "const setupOnly = 2\ndefineProps<{ a: 1 }>()";
+    let facts =
+        project_script_pair(Some(ts(normal, 0)), Some(ts(setup_src, 100)), None).expect("projects");
+
+    // The checking unit holds the setup body exactly once.
+    let setup = facts.setup.expect("setup");
+    assert_eq!(setup.statements.len(), 2);
+    assert_eq!(setup.macros.len(), 1);
+
+    // The public surface never receives a copy of the setup body.
+    assert!(!facts
+        .module
+        .normal_script_bindings
+        .iter()
+        .any(|name| name == "setupOnly"));
+
+    // The checking unit never receives a copy of the public (normal-script)
+    // body: only the setup block's own declarations appear in its statements.
+    let declares_normal_only = setup.statements.iter().any(|statement| {
+        matches!(
+            &statement.kind,
+            SetupStatementKind::Declaration { names } if names.iter().any(|n| n == "normalOnly")
+        )
+    });
+    assert!(!declares_normal_only);
+
+    // The public surface does hold the normal body — it is placed in exactly
+    // one product, not zero.
+    assert!(facts
+        .module
+        .normal_script_bindings
+        .iter()
+        .any(|name| name == "normalOnly"));
 }
 
 #[test]
