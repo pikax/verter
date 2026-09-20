@@ -9,6 +9,10 @@ import { attestE2eTypeProviderLog, type E2eTypeProviderRoute } from "../src/e2eP
 import { parseArmedControlDir, verifySharedArmedHandshake } from "../src/sharedTsgoLaunch";
 import { waitForDiagnosticReceipt } from "./lib/diagnosticsReadiness";
 import { isVirtualCarrierPath } from "./lib/virtualCarrier";
+import {
+  typeProviderSyncCompleteSince,
+  type TypeProviderSyncProgress,
+} from "./lib/typeProviderSyncLog";
 import { pollBudget, REFERENCES_POLL_INTERVAL_MS, sequenceParent } from "./lib/timeouts";
 
 export { pollBudget, sequenceParent } from "./lib/timeouts";
@@ -788,51 +792,33 @@ export async function waitForTypeProviderSync(explicitBudgetMs?: number): Promis
   const timeoutMs = explicitBudgetMs ?? pollBudget("waitForTypeProviderSync");
   const start = Date.now();
 
-  // Find current init generation from the ready notification
-  let currentGen: number | undefined;
+  // Only the server running NOW counts: see `typeProviderSyncCompleteSince`.
+  let progress: TypeProviderSyncProgress = "awaiting-ready";
   while (Date.now() - start < timeoutMs) {
     const log = readTestLog();
-    const readyMatches = log.matchAll(/Verter ready \(init generation (\d+)\)/g);
-    for (const m of readyMatches) {
-      const gen = parseInt(m[1], 10);
-      if (currentGen === undefined || gen > currentGen) {
-        currentGen = gen;
+    progress = typeProviderSyncCompleteSince(log, _typeProviderSyncLogFloor);
+    if (progress === "complete") {
+      if (TYPE_PROVIDER) {
+        if (!isE2eTypeProviderRoute(TYPE_PROVIDER)) {
+          assert.fail(`Unsupported E2E type-provider route: ${TYPE_PROVIDER}`);
+        }
+        attestE2eTypeProviderLog(log, TYPE_PROVIDER);
+        if (TYPE_PROVIDER === "shared-tsgo") {
+          assertSharedTsgoHandshake(log);
+        }
       }
+      return;
     }
-    if (currentGen !== undefined) break;
     await sleep(200);
   }
 
   assert.ok(
-    currentGen !== undefined,
+    progress !== "awaiting-ready",
     `waitForTypeProviderSync: no "Verter ready" notification found in log within ${timeoutMs}ms`,
   );
 
-  // Poll for TypeProviderSyncComplete with gen >= currentGen
-  while (Date.now() - start < timeoutMs) {
-    const log = readTestLog();
-    const syncMatches = log.matchAll(/TypeProviderSyncComplete \(init generation (\d+)\)/g);
-    for (const m of syncMatches) {
-      const gen = parseInt(m[1], 10);
-      if (gen >= currentGen) {
-        if (TYPE_PROVIDER) {
-          if (!isE2eTypeProviderRoute(TYPE_PROVIDER)) {
-            assert.fail(`Unsupported E2E type-provider route: ${TYPE_PROVIDER}`);
-          }
-          attestE2eTypeProviderLog(log, TYPE_PROVIDER);
-          if (TYPE_PROVIDER === "shared-tsgo") {
-            assertSharedTsgoHandshake(log);
-          }
-        }
-        return;
-      }
-    }
-    await sleep(200);
-  }
-
   assert.fail(
-    `waitForTypeProviderSync: timed out waiting for TypeProviderSyncComplete ` +
-      `(gen >= ${currentGen}, ${timeoutMs}ms)`,
+    `waitForTypeProviderSync: timed out waiting for TypeProviderSyncComplete (${timeoutMs}ms)`,
   );
 }
 
@@ -1330,6 +1316,8 @@ export function findNthPosition(
 
 let _fixtureWarm = false;
 let _typeProviderSynced = false;
+/** Log offset before the most recent language-server restart; 0 when none. */
+let _typeProviderSyncLogFloor = 0;
 const _fileReadyCache = new Map<string, boolean>();
 
 /** Run once per fixture@provider. Idempotent. */
@@ -1350,9 +1338,15 @@ export async function ensureTypeProviderSynced(budgets?: {
   _typeProviderSynced = true;
 }
 
-/** Invalidate readiness facts after an explicit language-server restart. */
-export function invalidateTypeProviderSyncCache(): void {
+/**
+ * Invalidate readiness facts for an explicit language-server restart.
+ *
+ * `logFloor` is a {@link logMark} taken BEFORE the restart was requested, so
+ * nothing the previous server process logged can vouch for the new one.
+ */
+export function invalidateTypeProviderSyncCache(logFloor: number): void {
   _typeProviderSynced = false;
+  _typeProviderSyncLogFloor = logFloor;
   _fileReadyCache.clear();
 }
 
