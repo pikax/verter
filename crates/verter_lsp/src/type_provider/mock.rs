@@ -201,6 +201,7 @@ mod inner {
         /// unbounded provider pull cannot starve independently available
         /// framework diagnostics.
         hang_diagnostics: bool,
+        diagnostics_gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -409,6 +410,15 @@ mod inner {
         }
 
         /// Wedge `get_diagnostics` after recording the call.
+        /// Test seam: every later `get_diagnostics` is RECORDED and then waits
+        /// for one permit on the returned semaphore, so a test admits the
+        /// pulls one at a time and can observe how many are in flight.
+        pub fn gate_diagnostics(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+            let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            self.state.lock().unwrap().diagnostics_gate = Some(gate.clone());
+            gate
+        }
+
         pub fn hang_diagnostics(&self) {
             let mut state = self.state.lock().unwrap();
             state.hang_diagnostics = true;
@@ -1280,7 +1290,7 @@ mod inner {
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-            let (result, on_query, hang) = {
+            let (result, on_query, hang, gate) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDiagnostics {
                     path: path.to_string(),
@@ -1297,7 +1307,12 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query, state.hang_diagnostics)
+                (
+                    result,
+                    on_query,
+                    state.hang_diagnostics,
+                    state.diagnostics_gate.clone(),
+                )
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
@@ -1307,7 +1322,16 @@ mod inner {
             if hang {
                 return Box::pin(std::future::pending());
             }
-            Box::pin(async move { Ok(result) })
+            self.note_recorded();
+            Box::pin(async move {
+                if let Some(gate) = gate {
+                    gate.acquire()
+                        .await
+                        .expect("the diagnostics gate is never closed")
+                        .forget();
+                }
+                Ok(result)
+            })
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {

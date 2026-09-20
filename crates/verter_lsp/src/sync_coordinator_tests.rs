@@ -3607,6 +3607,127 @@ const msg = '{marker}'
     );
 }
 
+/// A restart (or the post-scan re-arm) owes every open document a fresh
+/// provider pull at once. They must not all be handed to the provider together:
+/// its queue cannot be reordered, so the document the user turns to next would
+/// wait behind every one of them. Only a bounded number are in flight, and each
+/// freed slot goes to whatever the user touched most recently.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_user() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let cap = crate::sync_coordinator::max_inflight_diagnostics(&deps.type_provider_kind);
+    let backlog_len = cap.min(64) + 3;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    // Every document is synced and certified once, ungated, so each has a
+    // committed provider surface and a later re-arm really does pull.
+    let docs: Vec<(String, Uri)> = (0..backlog_len)
+        .map(|index| {
+            let uri: Uri = format!("file:///workspace/src/Doc{index}.vue")
+                .parse()
+                .expect("test uri");
+            let _ = documents.did_open(&TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: source(&format!("doc{index}")),
+            });
+            let canonical_id = documents
+                .get_canonical_id(&uri)
+                .expect("the document must be open");
+            needs_provider_sync.insert(canonical_id.clone());
+            handle.signal(
+                canonical_id.clone(),
+                uri.as_str().to_string(),
+                Instant::now(),
+            );
+            (canonical_id, uri)
+        })
+        .collect();
+    handle
+        .await_until(
+            || {
+                docs.iter().all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the documents never reached their first certified state"),
+        )
+        .await;
+
+    let pulled_docs = |calls: &[MockCall]| -> Vec<String> {
+        calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::GetDiagnostics { path } => path
+                    .strip_prefix("/workspace/src/")
+                    .and_then(|rest| rest.split('.').next())
+                    .filter(|name| name.starts_with("Doc"))
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The re-arm: background receipts, oldest document first.
+    let gate = provider.gate_diagnostics();
+    provider.clear_calls();
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in docs.iter().enumerate() {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulled_docs(calls).len() >= cap.min(backlog_len)),
+    )
+    .await
+    .expect("the first pulls never reached the provider");
+
+    // The user turns to the OLDEST document, the one a newest-first backlog
+    // would serve last, and exactly one slot is freed.
+    handle.touch(&docs[0].0);
+    gate.add_permits(1);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulled_docs(calls).len() > cap),
+    )
+    .await
+    .expect("a freed slot must admit the next pull");
+
+    let pulled = pulled_docs(&provider.calls());
+    assert_eq!(
+        pulled.len(),
+        cap + 1,
+        "one freed slot admits exactly one more pull: {pulled:?}"
+    );
+    assert_eq!(
+        pulled[cap], "Doc0",
+        "the freed slot goes to the document the user touched: {pulled:?}"
+    );
+
+    gate.add_permits(backlog_len * 4);
+    handle
+        .await_until(
+            || {
+                docs.iter().all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the bounded backlog must still drain completely"),
+        )
+        .await;
+}
+
 /// LSP notification handlers are dispatched concurrently, so an OLDER change
 /// can deposit its signal after a newer one has already deposited its own. The
 /// quiet window must take the LATEST receipt, never simply the last deposit —

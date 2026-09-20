@@ -46,6 +46,8 @@ struct CanonicalChangeState {
 /// Shared "changes received but not yet processed" map, read by the coordinator
 /// loop and written by the `did_change` handlers.
 type ChangeTracker = Arc<parking_lot::Mutex<HashMap<String, CanonicalChangeState>>>;
+/// When the user last turned to each open document without editing it.
+type TouchTracker = Arc<parking_lot::Mutex<HashMap<String, Instant>>>;
 
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
@@ -58,6 +60,8 @@ pub struct SyncCoordinatorHandle {
     pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     /// Changes received but not yet processed. See [`CanonicalChangeState`].
     changes: ChangeTracker,
+    /// When the user last turned to each document WITHOUT editing it.
+    touches: TouchTracker,
     /// TEST-ONLY: the coordinator's own progress receipts.
     #[cfg(test)]
     pub(crate) receipts: CoordinatorReceipts,
@@ -219,6 +223,16 @@ impl SyncCoordinatorHandle {
         }
     }
 
+    /// The user turned to this document without editing it (an interactive
+    /// request against it). It queues no work; it only moves the document to
+    /// the front of whatever work is already owed to it.
+    pub fn touch(&self, canonical_id: &str) {
+        self.touches
+            .lock()
+            .insert(canonical_id.to_string(), Instant::now());
+        let _ = self.wake_tx.try_send(());
+    }
+
     /// Create an isolated handle/inbox pair for testing the coalescing contract.
     #[cfg(test)]
     pub fn new_for_test() -> (Self, mpsc::Receiver<()>) {
@@ -229,6 +243,7 @@ impl SyncCoordinatorHandle {
                 wake_tx,
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 receipts: CoordinatorReceipts::default(),
             },
             wake_rx,
@@ -444,12 +459,27 @@ pub struct SyncCoordinatorDeps {
 /// millisecond form of the one quiet-window policy.
 pub(crate) const DEBOUNCE_MS: u64 = crate::edit_quiet_window::EDIT_QUIET_WINDOW_MS;
 
+/// How many provider diagnostic pulls may be in flight at once.
+///
+/// A pull handed to the provider sits in a queue this side cannot reorder, so
+/// the depth of that queue is the floor on how long the document the user
+/// turns to NEXT must wait. tsserver answers strictly one request at a time, so
+/// anything beyond keeping its pipe fed is pure queueing; TSGO serves requests
+/// concurrently and takes a wider window.
+pub(crate) fn max_inflight_diagnostics(kind: &crate::TypeProviderKind) -> usize {
+    match kind {
+        crate::TypeProviderKind::Tsgo => 8,
+        _ => 2,
+    }
+}
+
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
     let documents = Arc::downgrade(&deps.documents);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let touches: TouchTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     let diagnostics_refresh_rx = deps.documents.subscribe_diagnostics_refresh();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
@@ -461,6 +491,7 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         diagnostics_refresh_rx,
         Arc::clone(&pending),
         Arc::clone(&changes),
+        Arc::clone(&touches),
         Arc::new(deps),
         #[cfg(test)]
         receipts.clone(),
@@ -470,8 +501,19 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         wake_tx,
         pending,
         changes,
+        touches,
         #[cfg(test)]
         receipts,
+    }
+}
+
+/// One in-flight provider pull. Dropping it — on completion OR cancellation —
+/// tells the coordinator a slot is free.
+struct PullSlot(mpsc::Sender<()>);
+
+impl Drop for PullSlot {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
     }
 }
 
@@ -518,6 +560,7 @@ async fn coordinator_loop(
     >,
     inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     changes: ChangeTracker,
+    touches: TouchTracker,
     deps: Arc<SyncCoordinatorDeps>,
     #[cfg(test)] receipts: CoordinatorReceipts,
 ) {
@@ -537,13 +580,26 @@ async fn coordinator_loop(
     // the file is re-examined the instant it becomes quiescent.
     let quiescent = |canonical_id: &str| !changes.lock().contains_key(canonical_id);
 
+    // A finished (or cancelled) pull frees its slot and wakes the loop. Capacity
+    // one: a full channel means a wake is already queued.
+    let max_inflight = max_inflight_diagnostics(&deps.type_provider_kind);
+    let (pull_done_tx, mut pull_done_rx) = mpsc::channel::<()>(1);
+
     loop {
-        // Calculate next deadline from pending files
-        let next_deadline = pending_files
-            .iter()
-            .filter(|(canonical_id, _)| quiescent(canonical_id))
-            .map(|(_, (t, _))| *t + debounce)
-            .min();
+        // Calculate next deadline from pending files. With every pull slot
+        // taken nothing is dispatchable, so no timer is armed at all: the loop
+        // parks until a slot frees or a signal arrives, instead of spinning on
+        // an already-elapsed deadline.
+        diagnostic_tasks.retain(|_, task| !task.is_finished());
+        let next_deadline = if diagnostic_tasks.len() >= max_inflight {
+            None
+        } else {
+            pending_files
+                .iter()
+                .filter(|(canonical_id, _)| quiescent(canonical_id))
+                .map(|(_, (t, _))| *t + debounce)
+                .min()
+        };
 
         tokio::select! {
             wake = wake_rx.recv() => {
@@ -683,6 +739,8 @@ async fn coordinator_loop(
                     }
                 }
             }
+            // A slot freed: fall through and recompute what is dispatchable.
+            Some(()) = pull_done_rx.recv() => {}
             _ = async {
                 match next_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -713,16 +771,21 @@ async fn coordinator_loop(
                 // ordered, and the newest receipt can only win a choice it is
                 // part of.
                 absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks);
+                let touch_tracker = &touches;
+                let touches = touch_tracker.lock().clone();
                 let now = Instant::now();
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
                     .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
                     .max_by(|(left_id, (left, left_signal)), (right_id, (right, right_signal))| {
                         // `None < Some(_)`: anything the user touched outranks
-                        // purely background work, newest touch first.
-                        left_signal
-                            .user_received_at
-                            .cmp(&right_signal.user_received_at)
+                        // purely background work, newest touch first. A touch
+                        // is read LIVE, so it re-ranks work queued before it.
+                        let touched = |id: &String, signal: &PendingSignal| {
+                            signal.user_received_at.max(touches.get(id).copied())
+                        };
+                        touched(left_id, left_signal)
+                            .cmp(&touched(right_id, right_signal))
                             .then_with(|| left.cmp(right))
                             .then_with(|| left_id.cmp(right_id))
                     })
@@ -740,6 +803,8 @@ async fn coordinator_loop(
 
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
+                    // The touch has done its job once its document is served.
+                    touch_tracker.lock().remove(&canonical_id);
                     let mut publish_diagnostics = signal.force_diagnostics;
                     let will_sync = signal.requires_sync
                         && deps.needs_provider_sync.remove(&canonical_id).is_some();
@@ -820,7 +885,9 @@ async fn coordinator_loop(
                                 let diag_tasks_live = Arc::clone(&receipts.diag_tasks_live);
                                 #[cfg(test)]
                                 let diags_published_count = Arc::clone(&receipts.diags_published_count);
+                                let slot = PullSlot(pull_done_tx.clone());
                                 async move {
+                                    let _slot = slot;
                                     {
                                         #[cfg(test)]
                                         let _live = DiagTaskLiveGuard::new(diag_tasks_live);
