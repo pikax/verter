@@ -143,7 +143,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "shared.js.references.script-and-markup": "ISSUE-js-references",
     "shared.js.rename.from-markup": "ISSUE-js-rename-markup",
     "shared.js.rename.from-script": "ISSUE-js-rename-script",
-    "shared.lifecycle.external-ts-create-delete": "ISSUE-lifecycle-external-ts",
     "shared.rename.from-markup.applies": "ISSUE-shared-rename-from-markup",
     "shared.rename.from-script.applies": "ISSUE-shared-rename-apply",
     "shared.rename.js.function": "ISSUE-rename-js-function",
