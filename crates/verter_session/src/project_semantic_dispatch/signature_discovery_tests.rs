@@ -1066,3 +1066,73 @@ fn apparent_primitives_read_the_resolved_global_population() {
         QueryOutcome::Incomplete(IncompleteReason::UnsettledInput)
     );
 }
+
+/// The logical identity of a candidate — binder-space key, provenance group,
+/// parent, ordinals and locator — is a function of the authored program, not
+/// of which nodes happened to be interned first.
+#[test]
+fn candidate_identity_is_independent_of_intern_order() {
+    let observe = |warm_first: bool| {
+        let host = host();
+        let d = ProjectSemanticDispatch::new(host.as_ref());
+        if warm_first {
+            // Unrelated nodes and signatures interned before the subject.
+            for kind in [
+                PrimitiveKind::Boolean,
+                PrimitiveKind::Symbol,
+                PrimitiveKind::BigInt,
+            ] {
+                let t = prim(&d, kind);
+                let _ = signature(
+                    &d,
+                    "noise",
+                    7,
+                    SignatureKind::Call,
+                    vec![param(t)],
+                    vec![],
+                    t,
+                );
+            }
+        }
+        let string = prim(&d, PrimitiveKind::String);
+        let number = prim(&d, PrimitiveKind::Number);
+        let a = signature(
+            &d,
+            "stable",
+            0,
+            SignatureKind::Call,
+            vec![param(string)],
+            vec![],
+            number,
+        );
+        let b = signature(
+            &d,
+            "stable",
+            1,
+            SignatureKind::Call,
+            vec![param(number)],
+            vec![],
+            string,
+        );
+        let object = callable(&d, vec![a, b], vec![]);
+        let store = d.graph().signature_store();
+        let list = candidates(ready(discover(&d, object, SignatureKind::Call)), store);
+        let view = SemanticReadView::pin(store);
+        list.iter()
+            .map(|c| {
+                let descriptor = view.descriptor(c.signature).unwrap();
+                let space = view.space(descriptor.residual_binders).unwrap();
+                let provenance = view.provenance(c.provenance).unwrap();
+                (
+                    space.key,
+                    provenance.declaration_group,
+                    provenance.declaration_parent,
+                    provenance.source_ordinal,
+                    provenance.overload_ordinal,
+                    provenance.source_locator,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(observe(false), observe(true));
+}
