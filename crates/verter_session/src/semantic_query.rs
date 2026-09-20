@@ -5518,6 +5518,13 @@ pub enum SemanticQueryValue {
     /// memo; a domain with any `Undecided` bucket flows to the caller
     /// suppressed.
     TruthinessDomain(TruthinessDomain),
+    /// The ordered signature candidate set — the LIVE value domain of
+    /// [`SemanticQueryKey::SignaturesOfType`]. Handles are epoch-qualified
+    /// records of the graph store's signature store.
+    SignatureSet(crate::signature_kernel::SignatureSetValue),
+    /// The forced signature result — the LIVE value domain of
+    /// [`SemanticQueryKey::ReadSignatureResult`].
+    SignatureResult(crate::signature_kernel::SignatureResultValue),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -5540,6 +5547,8 @@ pub enum SemanticQueryValueTag {
     FlowReturn,
     ResolveCall,
     TruthinessDomain,
+    SignatureSet,
+    SignatureResult,
     DiagnosticAnalysis,
 }
 
@@ -5559,6 +5568,8 @@ impl SemanticQueryValue {
             Self::FlowReturn(_) => SemanticQueryValueTag::FlowReturn,
             Self::ResolveCall(_) => SemanticQueryValueTag::ResolveCall,
             Self::TruthinessDomain(_) => SemanticQueryValueTag::TruthinessDomain,
+            Self::SignatureSet(_) => SemanticQueryValueTag::SignatureSet,
+            Self::SignatureResult(_) => SemanticQueryValueTag::SignatureResult,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -8147,6 +8158,30 @@ pub enum SemanticQueryKey {
     ClassifyTruthinessDomain {
         subject: SemanticNodeId,
     },
+    /// The ordered call or construct signature candidates of `subject`
+    /// under `context` — the ONE signature-discovery authority. Direct
+    /// signatures, object and interface surfaces (inherited and merged),
+    /// constrained type parameters, apparent primitives and collections
+    /// through the resolved globals, aliases, unions (common match, then
+    /// restricted synthesis) and intersections (signature-equivalence dedup,
+    /// mixin constructor composition) all enumerate here. An empty set is a
+    /// COMPLETE negative; every failure to settle the subject is an explicit
+    /// incomplete outcome. Enumeration never inspects a body: a body return
+    /// is a closed recipe until `ReadSignatureResult` forces it. Value
+    /// domain: [`SemanticQueryValueTag::SignatureSet`]. The key carries no
+    /// content hash (R6); version-rooting lives on the cached value's
+    /// observed self-roots.
+    SignaturesOfType {
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+        context: SemanticContextId,
+    },
+    /// Force the demanded half of one signature candidate's result under a
+    /// frozen call substitution: the return and/or effect recipe, through
+    /// the existing flow-return obligations for a body. The full demand
+    /// identity is the sealed [`ReadSignatureResultKey`]. Value domain:
+    /// [`SemanticQueryValueTag::SignatureResult`].
+    ReadSignatureResult(crate::signature_kernel::ReadSignatureResultKey),
     /// Normalize `operand` through the checker's RUNTIME AWAITED-TYPE
     /// relation — the relation `await x` applies to its operand and an async
     /// generator applies to its iteration parameters. An authored lib
@@ -8298,6 +8333,8 @@ pub enum SemanticQueryKeyTag {
     ClassifyTruthinessDomain,
     AwaitedNormalize,
     AsyncReturnPayload,
+    SignaturesOfType,
+    ReadSignatureResult,
 }
 
 impl SemanticQueryKeyTag {
@@ -8335,6 +8372,8 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ClassifyTruthinessDomain,
         SemanticQueryKeyTag::AwaitedNormalize,
         SemanticQueryKeyTag::AsyncReturnPayload,
+        SemanticQueryKeyTag::SignaturesOfType,
+        SemanticQueryKeyTag::ReadSignatureResult,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -8376,6 +8415,8 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ClassifyTruthinessDomain => "ClassifyTruthinessDomain",
             SemanticQueryKeyTag::AwaitedNormalize => "AwaitedNormalize",
             SemanticQueryKeyTag::AsyncReturnPayload => "AsyncReturnPayload",
+            SemanticQueryKeyTag::SignaturesOfType => "SignaturesOfType",
+            SemanticQueryKeyTag::ReadSignatureResult => "ReadSignatureResult",
         }
     }
 
@@ -8387,7 +8428,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 30 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 32 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -8481,6 +8522,8 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::AwaitedNormalize { .. } => SemanticQueryKeyTag::AwaitedNormalize,
             SemanticQueryKey::AsyncReturnPayload { .. } => SemanticQueryKeyTag::AsyncReturnPayload,
+            SemanticQueryKey::SignaturesOfType { .. } => SemanticQueryKeyTag::SignaturesOfType,
+            SemanticQueryKey::ReadSignatureResult(_) => SemanticQueryKeyTag::ReadSignatureResult,
         }
     }
 }

@@ -1111,6 +1111,40 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "async_return_payload_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
+        // SignaturesOfType { subject, kind, context } — the ONE signature
+        // discovery authority. The interned SemanticContextId owns the
+        // effective options, the R/T/L environment, J, and the policy set,
+        // so the key carries no env dims of its own beyond what settling the
+        // subject (carrier resolution, apparent globals) reads: `R T L J`.
+        // LIVE producer; value domain is `SignatureSet`. An empty set is a
+        // complete negative and admits; an incomplete outcome never does.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::SignaturesOfType,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "(subject, kind, SemanticContextId)",
+            value_domain: SemanticQueryValueTag::SignatureSet,
+            env_dims: EnvDimSpec::Static(env_resolve()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "signatures_of_type_do_not_warm_hit_across_semantic_contexts",
+            admission: AdmissionSpec::Singleflight,
+        },
+        // ReadSignatureResult(ReadSignatureResultKey) — forces the demanded
+        // half of one candidate's result under a frozen call substitution.
+        // A body recipe forces the whole-function return, the widest-env
+        // operation, so the full `P R T L J` env applies. The complete
+        // demand identity (descriptor, substitution, projection, evaluation
+        // context, semantic context) is the key; value domain is
+        // `SignatureResult`.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ReadSignatureResult,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ReadSignatureResultKey",
+            value_domain: SemanticQueryValueTag::SignatureResult,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "read_signature_result_distinct_demands_do_not_alias",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 
@@ -1150,6 +1184,8 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::FlowReturn => "FlowReturn",
         SemanticQueryValueTag::ResolveCall => "ResolveCall",
         SemanticQueryValueTag::TruthinessDomain => "TruthinessDomain",
+        SemanticQueryValueTag::SignatureSet => "SignatureSet",
+        SemanticQueryValueTag::SignatureResult => "SignatureResult",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

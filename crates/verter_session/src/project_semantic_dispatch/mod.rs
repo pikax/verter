@@ -100,6 +100,9 @@ mod locator_view_worklist;
 pub(crate) mod lower;
 pub(crate) mod output_materialization;
 pub(crate) mod query_error_disposition;
+pub(crate) mod signature_discovery;
+#[cfg(test)]
+mod signature_discovery_tests;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
@@ -2781,6 +2784,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::ResolveCall(key) = &key_for_build {
                 return self.build_resolve_call(key);
             }
+            if let SemanticQueryKey::SignaturesOfType {
+                subject,
+                kind,
+                context,
+            } = &key_for_build
+            {
+                return self.build_signatures_of_type(*subject, *kind, *context);
+            }
+            if let SemanticQueryKey::ReadSignatureResult(key) = &key_for_build {
+                return self.build_read_signature_result(key);
+            }
             if let SemanticQueryKey::ProjectObjectSpread {
                 program,
                 selector,
@@ -3027,6 +3041,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
                 SemanticQueryKey::ResolveCall(_) => unreachable!(
                     "ResolveCall builds through the early typed-producer arm"
+                ),
+                SemanticQueryKey::SignaturesOfType { .. }
+                | SemanticQueryKey::ReadSignatureResult(_) => unreachable!(
+                    "signature discovery builds through the early typed-producer arm"
                 ),
             }
             };

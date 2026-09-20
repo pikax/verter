@@ -31,3 +31,5 @@ ResolveCall | Live | ResolveCall | P R T L J | — | ResolveCallContext | resolv
 ClassifyTruthinessDomain | Live | TruthinessDomain | T L J | — | (subject) | — | Singleflight
 AwaitedNormalize | Live | TypeNode | R T L J | — | StructuralReduceContext | awaited_normalize_do_not_warm_hit | Singleflight
 AsyncReturnPayload | Live | TypeNode | R T L J | — | StructuralReduceContext | async_return_payload_do_not_warm_hit | Singleflight
+SignaturesOfType | Live | SignatureSet | R T L J | — | (subject, kind, SemanticContextId) | signatures_of_type_do_not_warm_hit_across_semantic_contexts | Singleflight
+ReadSignatureResult | Live | SignatureResult | P R T L J | — | ReadSignatureResultKey | read_signature_result_distinct_demands_do_not_alias | Singleflight

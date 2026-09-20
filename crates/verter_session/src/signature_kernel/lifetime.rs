@@ -77,6 +77,10 @@ pub(super) struct EpochInner {
     pub sequences: AppendInterner<ConstituentSequence>,
     pub environments: AppendInterner<CanonicalTypeSubstitution>,
     pub locators: AppendInterner<u64>,
+    pub type_tokens: AppendInterner<SemanticNodeId>,
+    /// Authored source node of a descriptor (graph `Signature` node token).
+    /// Epoch-local, like every handle it is keyed by.
+    pub descriptor_sources: Mutex<rustc_hash::FxHashMap<u32, super::records::TypeToken>>,
     pub live_readers: AtomicU64,
     /// Shared across replacement epochs so `live_reader_count` includes
     /// still-pinned retired views.
@@ -104,6 +108,8 @@ impl EpochInner {
             sequences: AppendInterner::new(epoch),
             environments: AppendInterner::new(epoch),
             locators: AppendInterner::new(epoch),
+            type_tokens: AppendInterner::new(epoch),
+            descriptor_sources: Mutex::new(rustc_hash::FxHashMap::default()),
             live_readers: AtomicU64::new(0),
             store_live_readers,
             descriptor_chain_walks: AtomicU64::new(0),
@@ -127,6 +133,7 @@ impl EpochInner {
             + self.sequences.shard_lock_acquires()
             + self.environments.shard_lock_acquires()
             + self.locators.shard_lock_acquires()
+            + self.type_tokens.shard_lock_acquires()
     }
 }
 
@@ -148,6 +155,7 @@ pub struct SignatureStore {
     retained_results: Mutex<Vec<RetainedRoot>>,
     next_epoch: AtomicU64,
     epoch_publish: Mutex<()>,
+    bodies_forced: AtomicU64,
 }
 
 impl SignatureStore {
@@ -162,12 +170,24 @@ impl SignatureStore {
             retained_results: Mutex::new(Vec::new()),
             next_epoch: AtomicU64::new(GraphEpoch::FIRST.as_u32() as u64 + 1),
             epoch_publish: Mutex::new(()),
+            bodies_forced: AtomicU64::new(0),
         }
     }
 
     #[must_use]
     pub fn epoch(&self) -> GraphEpoch {
         self.current.load().epoch
+    }
+
+    /// Record that a body recipe was forced. Enumeration never calls this.
+    pub fn note_body_forced(&self) {
+        self.bodies_forced.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many body recipes have been forced through this store.
+    #[must_use]
+    pub fn bodies_forced(&self) -> u64 {
+        self.bodies_forced.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -426,6 +446,71 @@ impl SignatureStore {
         let inner = self.inner();
         let raw = inner.locators.intern(locator, cancelled)?;
         Ok(BodyLocatorId::from_raw(raw))
+    }
+
+    /// Mint the kernel token standing for graph node `node`. Tokens live in
+    /// the kernel's own numbering space: the raw value is an epoch-qualified
+    /// intern handle, never a node ordinal.
+    pub fn intern_type_token(
+        &self,
+        node: SemanticNodeId,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<super::records::TypeToken, StoreError> {
+        let inner = self.inner();
+        let raw = inner.type_tokens.intern(node, cancelled)?;
+        Ok(super::records::TypeToken::from_raw(raw))
+    }
+
+    /// The graph node a token stands for. A token from another epoch is
+    /// stale.
+    pub fn type_token_node(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Result<SemanticNodeId, StoreError> {
+        let inner = self.inner();
+        let raw = token.as_u64();
+        check_epoch(inner.epoch, super::records::handle_epoch(raw))?;
+        inner
+            .type_tokens
+            .get(super::records::handle_index(raw))
+            .copied()
+            .ok_or(StoreError::Missing)
+    }
+
+    /// Record the graph node a descriptor was authored from. Idempotent:
+    /// the same descriptor always maps to the same node token.
+    pub fn record_descriptor_source(
+        &self,
+        descriptor: SignatureDescriptorId,
+        source: super::records::TypeToken,
+    ) -> Result<(), StoreError> {
+        let inner = self.inner();
+        Self::require_id(
+            &inner,
+            descriptor.epoch(),
+            descriptor.index(),
+            &inner.descriptors,
+        )?;
+        inner
+            .descriptor_sources
+            .lock()
+            .entry(descriptor.index())
+            .or_insert(source);
+        Ok(())
+    }
+
+    pub fn descriptor_source(
+        &self,
+        descriptor: SignatureDescriptorId,
+    ) -> Result<Option<super::records::TypeToken>, StoreError> {
+        let inner = self.inner();
+        check_epoch(inner.epoch, descriptor.epoch())?;
+        let found = inner
+            .descriptor_sources
+            .lock()
+            .get(&descriptor.index())
+            .copied();
+        Ok(found)
     }
 
     pub fn intern_slot(
@@ -823,6 +908,30 @@ impl SignatureStore {
         Ok(inner.results.lookup(result))
     }
 
+    /// The whole substitution as one canonical map (composes flatten).
+    pub fn flatten_substitution(
+        &self,
+        id: CallSubstitutionId,
+    ) -> Result<CanonicalTypeSubstitution, StoreError> {
+        let inner = self.inner();
+        let flat = self.flatten_to_map(&inner, id)?;
+        Ok(a_map(&flat).clone())
+    }
+
+    /// The published result record behind a handle.
+    pub fn applied_result(
+        &self,
+        id: super::records::AppliedResultId,
+    ) -> Result<AppliedResult, StoreError> {
+        let inner = self.inner();
+        check_epoch(inner.epoch, id.epoch())?;
+        inner
+            .results
+            .get(id.index())
+            .cloned()
+            .ok_or(StoreError::Missing)
+    }
+
     pub fn substitution(&self, id: CallSubstitutionId) -> Result<CallSubstitution, StoreError> {
         let inner = self.inner();
         Ok(self.subst(&inner, id)?.clone())
@@ -876,6 +985,12 @@ impl SignatureStore {
         Ok(SignatureSetRef::Many(
             self.intern_set(candidates, cancelled)?,
         ))
+    }
+
+    /// Whether `node` lives in the kernel's binder-token namespace.
+    #[must_use]
+    pub fn is_binder_token(node: SemanticNodeId) -> bool {
+        node.0 & BINDER_TOKEN_NAMESPACE != 0
     }
 
     /// Logical binder token from a space key and ordinal. Independent of

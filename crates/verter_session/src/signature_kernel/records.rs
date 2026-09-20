@@ -105,6 +105,7 @@ packed_id!(ParameterSlotId);
 packed_id!(BodyLocatorId);
 packed_id!(SpellingId);
 packed_id!(ConstituentSequenceId);
+packed_id!(AppliedResultId);
 
 /// Interned type-shape token. Not a source span, and not a
 /// `SemanticNodeId`: the raw value lives in the kernel's own token
@@ -361,6 +362,12 @@ pub struct AppliedResult {
     pub evaluation: ResultEvaluationContextId,
     pub semantic_context: SemanticContextId,
     pub evidence: OutcomeEvidenceId,
+    /// The forced return, already in call space. `None` when the demand
+    /// was effects-only (no return was read).
+    pub return_type: Option<TypeToken>,
+    /// Predicate/assertion effect payload, when the demand read effects and
+    /// the signature declares one.
+    pub effects: Option<TypeToken>,
 }
 
 impl AppliedResult {
@@ -382,6 +389,8 @@ impl AppliedResult {
             evaluation: CONTEXT_FREE_EVALUATION,
             semantic_context,
             evidence: CONTEXT_FREE_EVIDENCE,
+            return_type: None,
+            effects: None,
         }
     }
 }

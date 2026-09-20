@@ -7,14 +7,22 @@
 
 #![allow(dead_code)]
 
+mod discovery;
 mod lifetime;
 mod positional;
 mod provenance;
 mod read_view;
 mod records;
+mod result;
 mod storage;
 mod substitution;
 
+#[allow(unused_imports)]
+pub use discovery::{
+    append_signatures, intersection_signatures, publish_signature, set_from_candidates,
+    signatures_identical, union_signatures, BinderInput, DiscoveryError, DiscoveryTypes,
+    MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
+};
 #[allow(unused_imports)]
 pub use lifetime::{SignatureStore, StoreError};
 #[allow(unused_imports)]
@@ -31,8 +39,8 @@ pub use provenance::{
 pub use read_view::{BorrowedSet, ReadError, SemanticReadView};
 #[allow(unused_imports)]
 pub use records::{
-    BinderDeclaration, BinderSpace, BinderSpaceId, BodyLocatorId, CallSubstitutionId,
-    DeclarationInstantiationId, GraphEpoch, ParameterLayout, ParameterLayoutId,
+    AppliedResult, AppliedResultId, BinderDeclaration, BinderSpace, BinderSpaceId, BodyLocatorId,
+    CallSubstitutionId, DeclarationInstantiationId, GraphEpoch, ParameterLayout, ParameterLayoutId,
     ParameterOptionality, ParameterSlot, ParameterSlotId, RestKind, RestSlot, ReturnObligationKey,
     SignatureCandidate, SignatureDescriptor, SignatureDescriptorId, SignatureInputShape,
     SignatureInputShapeId, SignatureKind, SignatureProvenanceId, SignatureResultRecipe,
@@ -41,7 +49,11 @@ pub use records::{
     LAYOUT_READY_SET, LAYOUT_SIGNATURE_CANDIDATE, LAYOUT_SIGNATURE_SET_REF,
 };
 #[allow(unused_imports)]
-pub use substitution::{CallSubstitution, SubstError, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH};
+pub use result::{ReadSignatureResultKey, ResultDemand, SignatureResultValue, SignatureSetValue};
+#[allow(unused_imports)]
+pub use substitution::{
+    compose_canonical, CallSubstitution, SubstError, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

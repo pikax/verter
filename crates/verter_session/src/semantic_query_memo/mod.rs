@@ -238,6 +238,8 @@ pub struct SemanticGraphStore {
     #[allow(dead_code)]
     operand_identity: SemanticGraphIdentity,
     arena: NodeArena,
+    /// Epoch-safe signature records (candidates, descriptors, results).
+    signatures: crate::signature_kernel::SignatureStore,
     /// Family-keyed warm memo.
     ///
     /// Each entry's [`FamilyKey`] is mode-erased; the per-mode result lives
@@ -791,6 +793,12 @@ impl std::fmt::Debug for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    /// The store's epoch-safe signature records.
+    #[must_use]
+    pub(crate) fn signature_store(&self) -> &crate::signature_kernel::SignatureStore {
+        &self.signatures
+    }
+
     #[allow(dead_code)]
     pub(crate) fn operand_store_identity(&self) -> u64 {
         self.operand_identity.0

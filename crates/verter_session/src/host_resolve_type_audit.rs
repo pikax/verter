@@ -533,6 +533,10 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         // mode-free by design (no projection demand to consume a budget).
         | SemanticQueryKey::AwaitedNormalize { .. }
         | SemanticQueryKey::AsyncReturnPayload { .. }
+        // The signature kernel's discovery and result reads are fixed
+        // structural queries — mode-free by design.
+        | SemanticQueryKey::SignaturesOfType { .. }
+        | SemanticQueryKey::ReadSignatureResult(_)
         | SemanticQueryKey::ClassifyBroadRuntime { .. } => ProjectionMode::Identity,
     }
 }
