@@ -93,6 +93,23 @@ pub struct TypeProviderSyncCompleteParams {
     pub gen: u64,
 }
 
+/// Server → client notification: the on-disk carrier store changed.
+///
+/// An editor that runs its OWN TypeScript service over that store refreshes its
+/// view of it on this signal. It says nothing about readiness: it fires after
+/// every carrier publication, so it is deliberately NOT
+/// [`TypeProviderSyncComplete`] — a client (or a test gate) waiting for level 2
+/// of the readiness ladder must never be released by a store write.
+pub enum CarrierStoreChanged {}
+
+impl tower_lsp_server::ls_types::notification::Notification for CarrierStoreChanged {
+    type Params = CarrierStoreChangedParams;
+    const METHOD: &'static str = "$/verter/carrierStoreChanged";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CarrierStoreChangedParams {}
+
 /// Server → client notification: MCP HTTP server is ready.
 /// Sent during `initialized()` with the actual bound port (may differ from requested
 /// when port 0 is used for OS-assigned dynamic ports).

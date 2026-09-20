@@ -46,6 +46,12 @@ export enum NotificationType {
   TypeProviderStatus = "$/verter/typeProviderStatus",
   TypeProviderSyncComplete = "$/verter/typeProviderSyncComplete",
   /**
+   * The on-disk carrier store changed. An editor running its own TypeScript
+   * service over that store refreshes on this. It carries no readiness meaning
+   * and is deliberately distinct from `TypeProviderSyncComplete`.
+   */
+  CarrierStoreChanged = "$/verter/carrierStoreChanged",
+  /**
    * The LSP publishes the resolved per-workspace carrier-store directory it
    * writes compiled `.vue`/`.svelte` carriers into. The extension forwards this
    * dir to VS Code's OWN TypeScript server via `configurePlugin`, so a plain
@@ -147,6 +153,7 @@ export type NotificationParams = {
   [NotificationType.TypeProviderSyncComplete]: {
     gen: number;
   };
+  [NotificationType.CarrierStoreChanged]: Record<string, never>;
   [NotificationType.CarrierStoreReady]: {
     /**
      * The absolute, forward-slash-normalized per-workspace carrier-store dir the

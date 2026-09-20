@@ -29252,6 +29252,7 @@ struct WatchedDependencyFixture {
     published: Arc<parking_lot::Mutex<Vec<PublishDiagnosticsParams>>>,
     published_changed: Arc<tokio::sync::Notify>,
     sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
+    store_changed: Arc<std::sync::atomic::AtomicUsize>,
     drain: tokio::task::JoinHandle<()>,
 }
 
@@ -29306,8 +29307,13 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     let captured_changed = published_changed.clone();
     let sync_complete = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let captured_complete = sync_complete.clone();
+    let store_changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_store_changed = store_changed.clone();
     let drain = tokio::spawn(async move {
         while let Some(message) = socket.next().await {
+            if message.method() == "$/verter/carrierStoreChanged" {
+                captured_store_changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             if message.method() == "$/verter/typeProviderSyncComplete" {
                 let params = serde_json::to_value(message.params().unwrap()).unwrap();
                 captured_complete
@@ -29375,8 +29381,32 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
         published,
         published_changed,
         sync_complete,
+        store_changed,
         drain,
     }
+}
+
+/// Level 2 of the readiness ladder is announced by the post-scan completion
+/// alone. Publishing a carrier writes the on-disk store and tells the editor
+/// so, but a client (or a test gate) waiting for the provider to be synced must
+/// never be released by it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carrier_publication_never_announces_provider_sync_completion() {
+    // The fixture opens two carriers and waits for both to be published and
+    // certified; no scan and no post-scan completion ever runs.
+    let fixture = watched_dependency_fixture(true).await;
+    assert_eq!(
+        *fixture.sync_complete.lock(),
+        Vec::<u64>::new(),
+        "no provider-sync completion was reached, so none may be announced"
+    );
+    assert!(
+        fixture
+            .store_changed
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0,
+        "the carrier publications still tell the editor the store changed"
+    );
 }
 
 async fn drain_pending_provider_sync_for(server: &VerterLanguageServer) {

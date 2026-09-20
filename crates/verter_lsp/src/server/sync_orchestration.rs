@@ -969,12 +969,9 @@ impl VerterLanguageServer {
         if self.carrier_publish_coordinator.is_none() {
             return;
         }
-        let generation = self
-            .init_generation
-            .load(std::sync::atomic::Ordering::Acquire);
         self.client
-            .send_notification::<super::protocol_types::TypeProviderSyncComplete>(
-                super::protocol_types::TypeProviderSyncCompleteParams { gen: generation },
+            .send_notification::<super::protocol_types::CarrierStoreChanged>(
+                super::protocol_types::CarrierStoreChangedParams {},
             )
             .await;
     }

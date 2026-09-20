@@ -413,6 +413,9 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
       onTypeProviderSyncComplete: () => {
         typeScriptPluginRefreshScheduler.request();
       },
+      onCarrierStoreChanged: () => {
+        typeScriptPluginRefreshScheduler.request();
+      },
     })
       .then((runtime) => {
         // client.start() and the attempt's post-start disposal check both
@@ -752,6 +755,8 @@ interface LanguageServerActivationOptions {
   onEditorCarrierSourceFeatureOwnership?: (ownsSourceFeatures: boolean) => void;
   /** Refresh the editor plugin after a durable carrier-store publication pass. */
   onTypeProviderSyncComplete?: () => void;
+  /** The LSP wrote the carrier store; says nothing about readiness. */
+  onCarrierStoreChanged?: () => void;
   /**
    * Activation-owned lifetime. When omitted (direct tests of a start attempt),
    * the attempt is pushed onto `context.subscriptions` and spliced out on
@@ -1447,6 +1452,9 @@ async function startVueLanguageServer(
     lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
       log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
       options?.onTypeProviderSyncComplete?.();
+    });
+    lc.onNotification(NotificationType.CarrierStoreChanged, () => {
+      options?.onCarrierStoreChanged?.();
     });
     lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
       log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);

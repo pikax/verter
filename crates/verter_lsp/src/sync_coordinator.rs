@@ -1516,13 +1516,8 @@ async fn sync_file(
     }
     if deps.carrier_publish_coordinator.is_some() {
         deps.client
-            .send_notification::<crate::server::protocol_types::TypeProviderSyncComplete>(
-                crate::server::protocol_types::TypeProviderSyncCompleteParams {
-                    gen: deps
-                        .documents
-                        .host()
-                        .last_content_transition_generation(canonical_id),
-                },
+            .send_notification::<crate::server::protocol_types::CarrierStoreChanged>(
+                crate::server::protocol_types::CarrierStoreChangedParams {},
             )
             .await;
     }
