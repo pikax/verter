@@ -417,6 +417,34 @@ Template text expressions are classified from the canonical retained OXC AST. Su
 
 **Zero cost when off**: by `#[cfg]` gating plus a monomorphized no-op entity-decode observer that compiles away in the default path. Guarded by `crates/verter_compiler/tests/svelte_conformance_trace_zero_cost_guard.rs` (prod-IR trace-mention ban, feature-gated module declaration, closed `AttrIr`/match-sink field inventories, decoder-mention ban, manifest keeps the default build feature-off with no dev-dependency re-enable channel) and an isolated feature-off CI gate (`cargo build`/`cargo test -p verter_compiler --lib` with no conformance crate in the dependency graph, so workspace feature unification cannot mask the default build).
 
+## Generated IDE Imports And Authored Bindings
+
+Every authored import is hoisted to module scope beside the generated helper
+preamble, so a generated import must never rebind a name an authored import
+already binds. `unbound_builtin_components` drops a Vue built-in
+(`Teleport`, `Suspense`, `KeepAlive`, …) from the generated `vue` import when
+either script block already imports that local name; an authored ALIAS
+(`Suspense as Pending`) leaves the built-in's own name unbound, so it is still
+imported.
+
+A setup binding whose WHOLE initializer is a proven call to Vue's runtime
+`defineAsyncComponent` (a non-type-only named `vue` import under any local
+alias, or that member read off a runtime `vue` namespace import — see
+`proven_vue_async_component_bindings`) is read into the template through
+`asyncComponent(name)` instead of `name as unknown as typeof name`. Vue types
+the call as whatever the loader resolves to, so a loader resolving to a raw
+options object has no construct/call signature and direct JSX rejects a valid
+tag. `AsyncComponent<T>` returns constructors and functional components
+EXACTLY (generics included) and turns a raw options object into a constructor
+over the contract its own `props`/`emits` declare. The authored declaration,
+the destructured template local and the JSX tag identifier are unchanged. The
+helper import is emitted only by files that use it, so no other file's
+preamble moves. A same-name local function, a non-Vue import and a type-only
+import prove nothing and keep the ordinary entry. The declaration lives in all
+four shipped surfaces (`packages/types/src/components/components.ts`,
+`packages/types/index.d.ts`, `crates/verter_lsp/src/verter_types_stub.d.ts`,
+`packages/typescript-plugin/src/helpers/verterTypesStub.ts`).
+
 ## Strict Slot Children Type Checking (Experimental)
 
 Scoped slot inference captures a component instance in the parent's lexical scope
