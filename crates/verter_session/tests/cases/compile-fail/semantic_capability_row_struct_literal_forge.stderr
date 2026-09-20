@@ -1,0 +1,9 @@
+error[E0451]: fields `feature` and `query_kind_domain_tag` of struct `SemanticCapabilityRow` are private
+  --> tests/cases/compile-fail/semantic_capability_row_struct_literal_forge.rs:17:9
+   |
+16 |     SemanticCapabilityRow {
+   |     --------------------- in this type
+17 |         feature: canonical.feature(),
+   |         ^^^^^^^ private field
+18 |         query_kind_domain_tag: "verter.session.forged.query.hover.v1",
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field

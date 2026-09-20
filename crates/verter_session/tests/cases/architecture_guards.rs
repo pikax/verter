@@ -4745,6 +4745,17 @@ pub(crate) mod foundations_guards {
         "pub mod route_analysis_inputs",
         // tests/cases/g_misc0/host_tests.rs (semantic_query::* in integration tests)
         "pub mod semantic_query",
+        // The TypeScript semantic capability closure (dormant until TCM4) —
+        // the closed capability catalog plus the certified engine binding
+        // that is the sole route a TypeScript engine's answer enters the
+        // semantic plane. Public for the same reason `content_mapper` is: a
+        // named dual-plane boundary that must stay reachable, and provable,
+        // with no engine running and no production route inside this crate
+        // reaching it yet. Cited by
+        // tests/g_extts/semantic_capability_closure.rs and the
+        // tests/cases/compile-fail/certified_binding_struct_literal_forge.rs
+        // trybuild fixture.
+        "pub mod semantic_capability",
         // tests/cases/g_session/committed_input_basis.rs — session bind of
         // one committed InputBasis + SnapshotFence (crate-root re-exports
         // wrap, so the line-based extractor records the bare prefix).

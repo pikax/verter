@@ -17,7 +17,8 @@ Verter is an **opt-in alternative** to the official Vue / Svelte language
 servers. It ships **no grammar of its own** and attaches to Lapce's `vue` /
 `svelte` languages, so you need:
 
-1. **A Rust toolchain with the `wasm32-wasip1` target** — to build the volt:
+1. **A Rust toolchain with the `wasm32-wasip1` target** — only if building from
+   source; the release archive already contains the compiled volt:
 
    ```bash
    rustup target add wasm32-wasip1
@@ -49,6 +50,23 @@ servers. It ships **no grammar of its own** and attaches to Lapce's `vue` /
    project). Install it as a dev dependency in the workspace you open. (No
    TypeScript SDK is bundled with the volt.) Set `typeProvider = "off"` to run
    Verter without TypeScript type checking.
+
+## Install from an IDE release
+
+Starting with IDE 0.0.4, download `verter-lapce.tar.gz` and the matching
+`verter-lsp-<platform>` binary from the same
+[IDE release](https://github.com/pikax/verter/releases). The archive is platform
+independent; the native server must match your OS, architecture and libc.
+
+In Lapce, run **Open Plugins Directory** from the command palette. Close Lapce
+and extract the archive into that directory. It contains
+`verter-volt/volt.toml`, `verter-volt/bin/verter-lapce.wasm`, installation
+instructions, a license and `IDE_VERSION`. Restart Lapce, set `lsp.serverPath`
+to the absolute path of the downloaded server (mark it executable on macOS/Linux),
+and follow [Required config](#required-config). Rust is not needed for this path.
+
+The archive is a manual installation; it does not publish the volt to Lapce's
+registry. For development, build and install from a checkout as described below.
 
 ## Build
 
