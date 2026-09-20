@@ -315,7 +315,8 @@ impl ProjectionEmission {
     ///
     /// A previous plan binding is retained only when `current` is the same
     /// snapshot and input basis, and the current original bytes still mint
-    /// that snapshot. Reminting the previous identity against current bytes
+    /// that snapshot. Authored observations still have to be members of
+    /// `current`. Reminting the previous identity against current bytes
     /// cannot witness a different canonical or parse identity. Equal checking
     /// text and geometry cannot keep a stale source identity.
     pub fn reuse_mapping(
@@ -347,11 +348,16 @@ impl ProjectionEmission {
         if checking_text == previous.checking_text && mapping != previous.mapping {
             return Err(EmissionRefusal::StaleMap);
         }
+        // Current plan membership is the reuse origin check. Previous snapshot
+        // equality cannot admit an authored ID absent from this plan.
         assemble(
             checking_text,
             mapping,
             observations,
-            binding_from_previous(previous),
+            match current {
+                Some((plan, canonical_id)) => Some(binding_from_plan(plan, canonical_id)),
+                None => binding_from_previous(previous),
+            },
         )
     }
 
@@ -679,30 +685,24 @@ fn overlapping_virtual_spans(
     overlapping_virtual_spans_with_work(observations).0
 }
 
-/// Sweep already-sorted observations. Edits and non-edits are separate
-/// populations so a shared span may be both an edit and a hover/definition.
+/// Sweep already-sorted observations. Overlap is a generated-span property;
+/// role does not create a second population.
 fn overlapping_virtual_spans_with_work(
     observations: &[RoleQualifiedObservation],
 ) -> (Option<(MappingSpan, MappingSpan)>, usize) {
-    let mut last_edit: Option<&RoleQualifiedObservation> = None;
-    let mut last_other: Option<&RoleQualifiedObservation> = None;
+    let mut last: Option<&RoleQualifiedObservation> = None;
     let mut work = 0usize;
     for observation in observations {
-        let slot = if observation.role == ObservationRole::Edits {
-            &mut last_edit
-        } else {
-            &mut last_other
-        };
-        if let Some(previous) = *slot {
+        if let Some(previous) = last {
             work += 1;
             if spans_overlap(previous.generated, observation.generated) {
                 return (Some((previous.generated, observation.generated)), work);
             }
             if observation.generated.end > previous.generated.end {
-                *slot = Some(observation);
+                last = Some(observation);
             }
         } else {
-            *slot = Some(observation);
+            last = Some(observation);
         }
     }
     (None, work)
@@ -1159,13 +1159,9 @@ mod tests {
             origin.clone(),
         );
         let edits = RoleQualifiedObservation::new(binding_span, ObservationRole::Edits, origin);
-        let emission = ProjectionEmission::from_plan(
-            &ct,
-            &plan,
-            ROLE_CANONICAL,
-            vec![view.clone(), original, edits.clone()],
-        )
-        .expect("view property and original binding of one authored token");
+        let emission =
+            ProjectionEmission::from_plan(&ct, &plan, ROLE_CANONICAL, vec![view.clone(), original])
+                .expect("view property and original binding of one authored token");
         assert!(
             emission
                 .checking_text()
@@ -1229,7 +1225,10 @@ mod tests {
             ident_region.carrier, binding_region.carrier,
             "template ident and script binding are distinct carrier targets of one origin"
         );
-        let edit = emission
+        let edit_emission =
+            ProjectionEmission::from_plan(&ct, &plan, ROLE_CANONICAL, vec![edits.clone()])
+                .expect("edit participation is a separate observation set");
+        let edit = edit_emission
             .edit_origin(&edits)
             .expect("original binding edits");
         assert_eq!(edit.carrier(), binding_span);
@@ -1296,13 +1295,35 @@ mod tests {
                 RoleQualifiedObservation::new(
                     MappingSpan { start: 2, end: 6 },
                     ObservationRole::Definition,
-                    origin,
+                    origin.clone(),
                 ),
             ],
         );
         assert!(
             matches!(dirty, Err(EmissionRefusal::OverlappingVirtualSpans { .. })),
             "{dirty:?}"
+        );
+        let cross_role = ProjectionEmission::from_operation(
+            &ct,
+            vec![
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 0, end: 1 },
+                    ObservationRole::Hover,
+                    origin.clone(),
+                ),
+                RoleQualifiedObservation::new(
+                    MappingSpan { start: 0, end: 1 },
+                    ObservationRole::Edits,
+                    origin,
+                ),
+            ],
+        );
+        assert!(
+            matches!(
+                cross_role,
+                Err(EmissionRefusal::OverlappingVirtualSpans { .. })
+            ),
+            "Hover and Edits on the same generated span overlap: {cross_role:?}"
         );
     }
 
@@ -2355,6 +2376,76 @@ mod tests {
         assert_eq!(control.snapshot(), previous.snapshot());
     }
 
+    const FOREIGN_SFC: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const rows = [1];\n",
+        "</script>\n",
+        "<template>\n",
+        "  <div v-for=\"row in rows\">{{ row }}</div>\n",
+        "</template>\n",
+    );
+
+    #[test]
+    fn stp10_reuse_mapping_rejects_foreign_plan_origin_id() {
+        let allocator = Allocator::default();
+        let plan_a = role_plan();
+        let plan_b = plan_from_source("file:///stp10-foreign.vue", FOREIGN_SFC);
+        let foreign_row = plan_b
+            .origins
+            .iter()
+            .find(|origin| origin.name == "row")
+            .cloned()
+            .expect("v-for row");
+        assert_ne!(
+            binding_item_in(&plan_a),
+            foreign_row.id,
+            "plan B's binder is not a member of plan A"
+        );
+        let mut cloned = plan_a.clone();
+        cloned.origins.push(foreign_row.clone());
+        let foreign = ProjectionOrigin::bind(&cloned, Some(foreign_row.id.clone()), None, None)
+            .expect("cloned plan A admits the foreign id");
+        assert_eq!(foreign.snapshot(), Some(&plan_a.snapshot));
+        let ct = CodeTransform::new(ROLE_SFC, &allocator);
+        let span = vfor_alias_span(ROLE_SFC);
+        let foreign_obs = vec![RoleQualifiedObservation::new(
+            span,
+            ObservationRole::Hover,
+            foreign,
+        )];
+        let fresh =
+            ProjectionEmission::from_plan(&ct, &plan_a, ROLE_CANONICAL, foreign_obs.clone());
+        assert!(
+            matches!(fresh, Err(EmissionRefusal::UnboundOrigin)),
+            "fresh from_plan must refuse a plan-B id: {fresh:?}"
+        );
+        let previous = ProjectionEmission::from_plan(
+            &ct,
+            &plan_a,
+            ROLE_CANONICAL,
+            hover_on_alias(&plan_a, ROLE_SFC),
+        )
+        .expect("plan A binds");
+        let reused = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan_a, ROLE_CANONICAL)),
+            foreign_obs,
+        );
+        assert!(
+            matches!(reused, Err(EmissionRefusal::UnboundOrigin)),
+            "reuse must not admit a plan-B id under plan A's snapshot: {reused:?}"
+        );
+        let control = ProjectionEmission::reuse_mapping(
+            &previous,
+            &ct,
+            Some((&plan_a, ROLE_CANONICAL)),
+            hover_on_alias(&plan_a, ROLE_SFC),
+        )
+        .expect("same plan A id reuses");
+        assert_eq!(control.snapshot(), previous.snapshot());
+    }
+
     #[test]
     fn stp10_overlap_sweep_compares_linearly() {
         let allocator = Allocator::default();
@@ -2403,8 +2494,8 @@ mod tests {
             ],
         );
         assert!(
-            shared.is_ok(),
-            "edit and non-edit may share a span: {shared:?}"
+            matches!(shared, Err(EmissionRefusal::OverlappingVirtualSpans { .. })),
+            "Hover and Edits on [0,1) overlap: {shared:?}"
         );
 
         let nested_cover = ProjectionEmission::from_operation(
