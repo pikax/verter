@@ -13,7 +13,6 @@ import {
   measureProductionImports,
   selectedCaseIds,
   validate,
-  validateProvenance,
 } from "./verify.mjs";
 
 const clean = loadProducts();
@@ -837,7 +836,13 @@ test("ARH1-cutover dirty twin: a competing owner deciding the same ARH0 debt twi
 
 test("ARH1-verify CLI: the manifest verify command runs validate() and exits 0 on the clean tree", () => {
   const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
-  const stdout = execFileSync(process.execPath, [verifyPath], { encoding: "utf8" });
+  const stdout = execFileSync(process.execPath, [verifyPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_DIR: fileURLToPath(new URL("./missing-git-history", import.meta.url)),
+    },
+  });
   assert.match(stdout, /ARH1 verify: PASS/);
 });
 
@@ -1396,7 +1401,7 @@ test("ARH1-cutover dirty twin: satisfying an invented or foreign ARH0 debt is re
 
 // ---------------------------------------------------------------------------
 // The products bind one measurable source basis (F4/F14): snapshot counts
-// are live invariants and the pinned candidate cannot diverge or go bogus.
+// are live invariants, independent of historical source references.
 // ---------------------------------------------------------------------------
 
 test("ARH1-surface dirty twin: a stale or key-stripped snapshot is rejected", () => {
@@ -1429,55 +1434,20 @@ test("ARH1-surface dirty twin: a stale or key-stripped snapshot is rejected", ()
   );
 });
 
-test("ARH1-ratification dirty twin: diverging or malformed candidate bases are rejected", () => {
-  const diverged = cloneProducts();
-  const pinned = clean["dependency-contracts"].candidate;
-  diverged["cutover-register"].candidate = pinned.slice(0, 39) + (pinned[39] === "0" ? "1" : "0");
-  let result = validate(diverged, loadManifest(), arh0);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) => e.caseId === "ARH1-ratification" && e.code === "candidate-basis-drift",
-    ),
-    JSON.stringify(result.errors),
-  );
-
-  const malformed = cloneProducts();
-  malformed["dependency-contracts"].candidate = "deadbeef";
-  result = validate(malformed, loadManifest(), arh0);
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.errors.some(
-      (e) =>
-        e.caseId === "ARH1-ratification" &&
-        e.code === "candidate-basis-drift" &&
-        e.detail.includes("not a 40-hex git commit"),
-    ),
-    JSON.stringify(result.errors),
-  );
-});
-
-test("ARH1-ratification: --provenance proves the pinned candidate is a real ancestor commit", () => {
-  const bogus = validateProvenance("0".repeat(40));
-  assert.equal(bogus.ok, false, JSON.stringify(bogus));
-  assert.match(bogus.reason, /not a commit of this repository/);
-  const malformed = validateProvenance("not-a-hash");
-  assert.equal(malformed.ok, false);
-
-  // A checkout that carries the commit (any non-shallow clone, and the CI
-  // architecture-health lane with full history) must prove the pinned basis
-  // and exit 0 behind --provenance; a shallow checkout without the object
-  // cannot, so only the plain canonical command is asserted there.
-  const verifyPath = fileURLToPath(new URL("./verify.mjs", import.meta.url));
-  const pinned = clean["dependency-contracts"].candidate;
-  const real = validateProvenance(pinned);
-  const carriesCommit = real.ok || !/not a commit/.test(real.reason);
-  if (carriesCommit) {
-    assert.equal(real.ok, true, real.reason);
+test("source references are optional context, independent of commit identity", () => {
+  const products = cloneProducts();
+  for (const product of Object.values(products)) {
+    delete product.candidate;
+    delete product.sourceReference;
   }
-  const args = carriesCommit ? [verifyPath, "--provenance"] : [verifyPath];
-  const stdout = execFileSync(process.execPath, args, { encoding: "utf8" });
-  assert.match(stdout, /ARH1 verify: PASS/);
+  const withoutHistory = validate(products);
+  assert.equal(withoutHistory.ok, true, JSON.stringify(withoutHistory.errors));
+  // Different landing titles and dates describe history; they prove no invariant.
+  Object.values(products).forEach((product, index) => {
+    product.sourceReference = { title: "Historical landing " + index, date: "2026-09-19" };
+  });
+  const withContext = validate(products);
+  assert.equal(withContext.ok, true, JSON.stringify(withContext.errors));
 });
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
   "schema": "ARH0DebtRegister",
   "version": 1,
   "contractNode": "ARH0",
-  "candidate": "f69c7eee7aba2b1a260cc4d85a282bbedbbde349",
+  "sourceReference": {"title":"test(compiler): qualify content-mapper diagnostics and (#606)","date":"2026-09-18"},
   "emptyDeletionSetRationale": "ARH0 is a genuinely additive inventory boundary: it introduces no new API and supersedes no current route, so its own deletion set is empty; every other row binds an existing candidate (a repo tree path, or a TAMA-database DAG record via provenance \"tama-dag\") to its already-named disposition owner.",
   "rows": [
     {

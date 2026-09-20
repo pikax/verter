@@ -68,7 +68,8 @@ import {
   setupMcpForClaudeCode,
   updateMcpPort,
 } from "./claudeCodeDetection";
-import { createActivationGate } from "./activationGate";
+import { createActivationRoot, type ActivationSession } from "./activationSession";
+import { StartAttemptScope, type Lifetime } from "./startAttemptScope";
 import { readE2eEnv } from "./e2eEnv";
 import { installE2eLogMirror } from "./e2eLogMirror";
 import {
@@ -125,46 +126,27 @@ import {
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
 
-let getClient: GetClient | undefined;
-let stopHeartbeat: (() => void) | undefined;
-let activationContext: ExtensionContext | undefined;
-/**
- * The live standalone MCP endpoint, set on readiness and cleared whenever the
- * server stops serving. `verter.setupMcpForClaudeCode` reads it so a setup
- * click AFTER readiness writes the real port instead of a placeholder.
- */
-let currentMcpEndpoint: McpHttpReadyRecord | undefined;
-function setCurrentMcpEndpoint(record: McpHttpReadyRecord | undefined) {
-  currentMcpEndpoint = record;
-}
-/**
- * Re-syncs the LIVE start attempt's MCP lifecycle against the current
- * configuration. Set while an attempt owns an MCP lifecycle, cleared on
- * attempt disposal (same lifetime discipline as `currentMcpEndpoint`).
- * `verter.setupMcpForClaudeCode` calls it so an explicit Setup click can
- * retry a FAILED MCP child (missing binary, exhausted crash-respawn budget)
- * even though the LSP itself is already running.
- */
-let retryMcpLifecycleSync: (() => void) | undefined;
-const activationGate = createActivationGate<ActivationRuntime>(async () => {
-  if (!activationContext) {
+let hostContext: ExtensionContext | undefined;
+const activation = createActivationRoot<ActivationRuntime>(async (session) => {
+  if (!hostContext) {
     throw new Error("Verter activation context was not initialized");
   }
-
-  const runtime = await activateExtension(activationContext);
-  getClient = runtime.getClient;
-  stopHeartbeat = runtime.stopHeartbeatTimer;
-  return runtime;
+  return activateExtension(hostContext, session);
 });
 
 export async function activate(context: ExtensionContext) {
-  activationContext = context;
-  await activationGate.run();
+  hostContext = context;
+  const session = activation.ensureSession();
+  if (!context.subscriptions.includes(session)) {
+    context.subscriptions.push(session);
+  }
+  await activation.run();
 }
 
-async function activateExtension(context: ExtensionContext) {
+async function activateExtension(context: ExtensionContext, session: ActivationSession) {
+  const lifetime = session.scope;
   const log = window.createOutputChannel("Verter", { log: true });
-  context.subscriptions.push(log);
+  lifetime.add(log);
 
   // ── E2E test mode: dual-write logs to file + timing markers ──
   const testLogFile = process.env.VERTER_E2E_LOG_FILE;
@@ -187,7 +169,7 @@ async function activateExtension(context: ExtensionContext) {
   const startupProbeConfig = readStartupProbeConfig();
   const startupProbe = startupProbeConfig ? new StartupProbe(startupProbeConfig, log) : undefined;
   if (startupProbe) {
-    context.subscriptions.push(startupProbe);
+    lifetime.add(startupProbe);
   }
 
   let server:
@@ -246,7 +228,7 @@ async function activateExtension(context: ExtensionContext) {
     carrierStoreRefreshToken += 1;
     void ensureTypeScriptPluginConfigured(undefined, true);
   });
-  context.subscriptions.push(typeScriptPluginRefreshScheduler);
+  lifetime.add(typeScriptPluginRefreshScheduler);
 
   const getStartedClient = () => {
     if (!server) {
@@ -256,7 +238,7 @@ async function activateExtension(context: ExtensionContext) {
   };
 
   const compiledCodeContentProvider = new CompiledCodeContentProvider(getStartedClient);
-  context.subscriptions.push(
+  lifetime.add(
     workspace.registerTextDocumentContentProvider(
       CompiledCodeContentProvider.scheme,
       compiledCodeContentProvider,
@@ -337,6 +319,9 @@ async function activateExtension(context: ExtensionContext) {
   };
 
   const ensureTypeScriptPluginConfigured = (document?: TextDocument, force = false) => {
+    if (lifetime.isDisposed) {
+      return tsPluginPromise;
+    }
     if (tsPluginPromise) {
       if (force) tsPluginRefreshRequested = true;
       return tsPluginPromise;
@@ -370,6 +355,10 @@ async function activateExtension(context: ExtensionContext) {
           tsPluginConfigured ? "configured" : "retry",
         );
         tsPluginPromise = undefined;
+        if (lifetime.isDisposed) {
+          tsPluginRefreshRequested = false;
+          return;
+        }
         if (tsPluginRefreshRequested) {
           tsPluginRefreshRequested = false;
           tsPluginConfigured = false;
@@ -386,12 +375,20 @@ async function activateExtension(context: ExtensionContext) {
       return;
     }
     deferredFeaturesRegistered = true;
-    context.subscriptions.push(addNodeModulesChangedListener(getStartedClient));
-    context.subscriptions.push(addViteConfigChangedListener(getStartedClient));
-    addVerterAnalysis(getStartedClient, context);
-    setTimeout(() => {
+    lifetime.add(addNodeModulesChangedListener(getStartedClient));
+    lifetime.add(addViteConfigChangedListener(getStartedClient));
+    addVerterAnalysis(getStartedClient, lifetime);
+    const claudeNotifyTimer = setTimeout(() => {
+      if (lifetime.isDisposed) {
+        return;
+      }
       checkClaudeCodeAndNotify(context, log);
     }, 0);
+    lifetime.add({
+      dispose() {
+        clearTimeout(claudeNotifyTimer);
+      },
+    });
   };
 
   const ensureLanguageServerStarted = async () => {
@@ -403,6 +400,8 @@ async function activateExtension(context: ExtensionContext) {
     }
 
     serverPromise = activateVueLanguageServer(context, log, startupProbe, {
+      lifetime,
+      mcpHandles: session,
       onReady: ensureDeferredFeaturesRegistered,
       onCarrierStoreReady: applyCarrierStoreDir,
       onEditorCarrierSourceFeatureOwnership: (ownsSourceFeatures) => {
@@ -416,7 +415,26 @@ async function activateExtension(context: ExtensionContext) {
       },
     })
       .then((runtime) => {
+        // client.start() and the attempt's post-start disposal check both
+        // complete before this continuation. Deactivation in that window
+        // cannot see `server` yet, so refuse to publish into a dead session
+        // and stop the process here instead of leaving it ownerless.
+        if (lifetime.isDisposed) {
+          runtime.stopHeartbeatTimer();
+          void runtime.getClient().stop();
+          return runtime;
+        }
         server = runtime;
+        lifetime.add({
+          dispose() {
+            runtime.stopHeartbeatTimer();
+            try {
+              void runtime.getClient().stop();
+            } catch {
+              // Deactivate may already have stopped this client.
+            }
+          },
+        });
         return runtime;
       })
       .catch((error) => {
@@ -459,7 +477,7 @@ async function activateExtension(context: ExtensionContext) {
     });
   };
 
-  context.subscriptions.push(
+  lifetime.add(
     workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("verter.typeProvider")) {
         carrierUnsupportedNoticeShown = false;
@@ -510,12 +528,12 @@ async function activateExtension(context: ExtensionContext) {
     }),
   );
 
-  addCompilePreviewCommand(context, ensureLanguageServerStarted);
-  addWriteVirtualFilesCommand(context, ensureLanguageServerStarted);
-  addShowStatisticsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
-  addShowRecentAuditRecordsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
+  addCompilePreviewCommand(lifetime, ensureLanguageServerStarted);
+  addWriteVirtualFilesCommand(lifetime, ensureLanguageServerStarted);
+  addShowStatisticsCommand(lifetime, log, ensureLanguageServerStarted, getStartedClient);
+  addShowRecentAuditRecordsCommand(lifetime, log, ensureLanguageServerStarted, getStartedClient);
 
-  context.subscriptions.push(
+  lifetime.add(
     commands.registerCommand("verter.showOutputChannel", () => log.show()),
     commands.registerCommand("verter.restartLanguageServer", async () => {
       if (!server) {
@@ -590,9 +608,9 @@ async function activateExtension(context: ExtensionContext) {
       await runMcpSetupCommand({
         readMcpEnabled: () =>
           workspace.getConfiguration("verter").get<boolean>("mcp.enabled", true),
-        getEndpoint: () => currentMcpEndpoint,
+        getEndpoint: () => session.getMcpEndpoint() as McpHttpReadyRecord | undefined,
         ensureLanguageServerStarted,
-        retryMcpLifecycleSync: () => retryMcpLifecycleSync?.(),
+        retryMcpLifecycleSync: () => session.retryMcp(),
         writeSetup: (url) => setupMcpForClaudeCode(context, log, url),
         refuse: (message) => {
           log.warn(`MCP setup for Claude Code refused: ${message}`);
@@ -624,17 +642,17 @@ async function activateExtension(context: ExtensionContext) {
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  stopHeartbeat?.();
-  stopHeartbeat = undefined;
-  activationContext = undefined;
-  activationGate.reset();
+  const runtime = activation.getRuntime();
+  runtime?.stopHeartbeatTimer();
+  let stopping: Thenable<void> | undefined;
   try {
-    return getClient?.().stop();
+    stopping = runtime?.getClient().stop();
   } catch {
-    return undefined;
-  } finally {
-    getClient = undefined;
+    stopping = undefined;
   }
+  activation.deactivate();
+  hostContext = undefined;
+  return stopping;
 }
 
 /**
@@ -734,59 +752,14 @@ interface LanguageServerActivationOptions {
   onEditorCarrierSourceFeatureOwnership?: (ownsSourceFeatures: boolean) => void;
   /** Refresh the editor plugin after a durable carrier-store publication pass. */
   onTypeProviderSyncComplete?: () => void;
-}
-
-/**
- * Everything ONE language-server start attempt creates.
- *
- * A start attempt registers event subscriptions, a status bar item, external
- * process state and the heartbeat watchdog timer. All of it belongs to that
- * attempt: on success the scope stays registered with the extension context so
- * deactivation tears it down, and on failure the attempt disposes its own scope
- * so the next attempt starts from nothing. Registering this state directly on
- * `context.subscriptions` instead ties it to deactivation, which is why a server
- * that could not launch multiplied its status bar item and left an uncancellable
- * restart timer running on every retry.
- */
-class StartAttemptScope implements Disposable {
-  private items: Disposable[] = [];
-  private disposed = false;
-
   /**
-   * True once the attempt has been torn down.
-   *
-   * Work that was already in flight when disposal landed reads this to decide
-   * whether it still has an owner — a restart that finishes afterwards must not
-   * hand the workspace a server this attempt will never shut down.
+   * Activation-owned lifetime. When omitted (direct tests of a start attempt),
+   * the attempt is pushed onto `context.subscriptions` and spliced out on
+   * failure, matching the pre-cutover test contract.
    */
-  get isDisposed(): boolean {
-    return this.disposed;
-  }
-
-  add(...items: Disposable[]): void {
-    for (const item of items) {
-      if (this.disposed) {
-        item.dispose();
-        continue;
-      }
-      this.items.push(item);
-    }
-  }
-
-  dispose(): void {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    // Reverse order: later registrations may depend on earlier ones.
-    for (const item of this.items.splice(0).reverse()) {
-      try {
-        item.dispose();
-      } catch {
-        // One faulty disposer must not strand the rest of the attempt.
-      }
-    }
-  }
+  lifetime?: Lifetime;
+  /** Session-owned MCP endpoint/retry handles; absent in start-attempt unit tests. */
+  mcpHandles?: ActivationSession;
 }
 
 export async function activateVueLanguageServer(
@@ -796,7 +769,12 @@ export async function activateVueLanguageServer(
   options?: LanguageServerActivationOptions,
 ) {
   const attempt = new StartAttemptScope();
-  context.subscriptions.push(attempt);
+  const lifetime = options?.lifetime;
+  if (lifetime) {
+    lifetime.add(attempt);
+  } else {
+    context.subscriptions.push(attempt);
+  }
   try {
     return await startVueLanguageServer(attempt, context, log, startupProbe, options);
   } catch (error) {
@@ -804,9 +782,11 @@ export async function activateVueLanguageServer(
     // it for deactivation, and unregister the scope so a retry cannot stack a
     // spent entry onto the extension's subscription list.
     attempt.dispose();
-    const registered = context.subscriptions.indexOf(attempt);
-    if (registered !== -1) {
-      context.subscriptions.splice(registered, 1);
+    if (!lifetime) {
+      const registered = context.subscriptions.indexOf(attempt);
+      if (registered !== -1) {
+        context.subscriptions.splice(registered, 1);
+      }
     }
     throw error;
   }
@@ -1231,7 +1211,7 @@ async function startVueLanguageServer(
         } catch (e) {
           log.warn(`Failed to register MCP server with VS Code: ${e}`);
         }
-        setCurrentMcpEndpoint(record);
+        options?.mcpHandles?.setMcpEndpoint(record);
 
         // Update .mcp.json for Claude Code CLI
         const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -1242,7 +1222,7 @@ async function startVueLanguageServer(
       onStopped(reason) {
         // A dead URL must not stay registered with VS Code or advertised to
         // the setup command.
-        setCurrentMcpEndpoint(undefined);
+        options?.mcpHandles?.setMcpEndpoint(undefined);
         mcpProviderDisposable?.dispose();
         mcpProviderDisposable = undefined;
         if (reason === "crash") {
@@ -1255,13 +1235,13 @@ async function startVueLanguageServer(
     dispose: () => {
       mcpProviderDisposable?.dispose();
       mcpProviderDisposable = undefined;
-      setCurrentMcpEndpoint(undefined);
-      retryMcpLifecycleSync = undefined;
+      options?.mcpHandles?.setMcpEndpoint(undefined);
+      options?.mcpHandles?.setMcpRetry(undefined);
       mcpLifecycle.dispose();
     },
   });
   const syncMcpServer = () => mcpLifecycle.sync(desiredMcpLaunchConfig());
-  retryMcpLifecycleSync = syncMcpServer;
+  options?.mcpHandles?.setMcpRetry(syncMcpServer);
   syncMcpServer();
 
   // ── Vite config trust prompt ────────────────────────────────────
@@ -1663,6 +1643,18 @@ async function startVueLanguageServer(
   writeTimingMarker("client_start_begin", Date.now());
   await client.start();
   writeTimingMarker("client_start_end", Date.now());
+  if (attempt.isDisposed) {
+    // Deactivation landed during the initial start: the composition root
+    // disposed this attempt before the runtime was published, so nothing
+    // else will ever stop this client. Shut it down here instead of arming
+    // a watchdog nobody will disarm over a process no owner holds.
+    await client.stop();
+    return {
+      getClient,
+      stopHeartbeatTimer,
+      restart: restartLS,
+    };
+  }
   // Only a server that is actually up gets a freeze watchdog.
   armHeartbeatWatchdog();
 
@@ -2055,8 +2047,18 @@ function buildServerOptions(
   };
 }
 
+function bindClientStopOnce(client: LanguageClient): LanguageClient {
+  const originalStop = client.stop.bind(client);
+  let pending: Thenable<void> | undefined;
+  client.stop = ((timeout?: number) => {
+    pending ??= originalStop(timeout);
+    return pending;
+  }) as LanguageClient["stop"];
+  return client;
+}
+
 function createLanguageServer(serverOptions: ServerOptions, clientOptions: LanguageClientOptions) {
-  return new LanguageClient("verter", "Verter", serverOptions, clientOptions);
+  return bindClientStopOnce(new LanguageClient("verter", "Verter", serverOptions, clientOptions));
 }
 
 function getStatisticsInitialization(rootPath: string | undefined) {
@@ -2081,10 +2083,10 @@ function getStatisticsInitialization(rootPath: string | undefined) {
 }
 
 function addCompilePreviewCommand(
-  context: ExtensionContext,
+  lifetime: Lifetime,
   ensureLanguageServerStarted: () => Promise<unknown>,
 ) {
-  context.subscriptions.push(
+  lifetime.add(
     commands.registerTextEditorCommand("verter.showCompiledCodeToSide", async (editor) => {
       if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
         window.showInformationMessage("Not a component file");
@@ -2106,10 +2108,10 @@ function addCompilePreviewCommand(
   );
 }
 function addWriteVirtualFilesCommand(
-  context: ExtensionContext,
+  lifetime: Lifetime,
   ensureLanguageServerStarted: () => Promise<unknown>,
 ) {
-  context.subscriptions.push(
+  lifetime.add(
     commands.registerTextEditorCommand("verter.writeVirtualFiles", async (editor) => {
       if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
         window.showInformationMessage("Not a component file");
@@ -2132,14 +2134,14 @@ function addWriteVirtualFilesCommand(
 }
 
 function addShowStatisticsCommand(
-  context: ExtensionContext,
+  lifetime: Lifetime,
   log: LogOutputChannel,
   ensureLanguageServerStarted: () => Promise<unknown>,
   getClient: GetClient,
 ) {
   const channel = window.createOutputChannel("Verter Statistics");
 
-  context.subscriptions.push(
+  lifetime.add(
     channel,
     commands.registerCommand("verter.showStatistics", async () => {
       try {
@@ -2204,14 +2206,14 @@ function formatSummaryLine(key: string, summary: StatisticsSummary) {
   )}ms, min=${summary.minMs.toFixed(2)}ms, max=${summary.maxMs.toFixed(2)}ms`;
 }
 
-function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
+function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
   // Read config and set context for `when` clauses
   const updateAnalysisEnabled = () => {
     const enabled = workspace.getConfiguration("verter.analysis").get("enabled", false);
     commands.executeCommand("setContext", "verter.analysisEnabled", enabled);
   };
   updateAnalysisEnabled();
-  context.subscriptions.push(
+  lifetime.add(
     workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("verter.analysis.enabled")) {
         updateAnalysisEnabled();
@@ -2230,7 +2232,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     }
   };
   updateLastCarrierFile();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateLastCarrierFile));
+  lifetime.add(window.onDidChangeActiveTextEditor(updateLastCarrierFile));
 
   // Track whether the active editor is a framework-carrier file (.vue/.svelte).
   const updateHasActiveCarrierFile = () => {
@@ -2238,11 +2240,11 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     commands.executeCommand("setContext", "verter.hasActiveCarrierFile", isCarrier);
   };
   updateHasActiveCarrierFile();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateHasActiveCarrierFile));
+  lifetime.add(window.onDidChangeActiveTextEditor(updateHasActiveCarrierFile));
 
   // Create content provider for virtual files (no disk writes — uses verter-virtual:// scheme)
   const contentProvider = new VirtualFileContentProvider();
-  context.subscriptions.push(
+  lifetime.add(
     workspace.registerTextDocumentContentProvider(
       VirtualFileContentProvider.scheme,
       contentProvider,
@@ -2265,7 +2267,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
 
   // ── E2E test mode: expose decoration state command ──────────
   if (process.env.VERTER_E2E_TEST) {
-    context.subscriptions.push(
+    lifetime.add(
       commands.registerCommand("verter._getDecorationState", () => ({
         bindingColors: bindingColorProvider.getState(),
         vueApiCalls: decorationProvider.getState(),
@@ -2291,7 +2293,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   }
 
   // Register tree views
-  context.subscriptions.push(
+  lifetime.add(
     window.createTreeView("verterVirtualFiles", {
       treeDataProvider: virtualFilesProvider,
     }),
@@ -2307,7 +2309,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   );
 
   // Register commands
-  context.subscriptions.push(
+  lifetime.add(
     commands.registerCommand("verter.openVirtualFile", (item: UnifiedVirtualFileItem) => {
       virtualFilesProvider.openVirtualFile(item);
     }),
@@ -2384,7 +2386,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   );
 
   // Cleanup on deactivate
-  context.subscriptions.push({
+  lifetime.add({
     dispose() {
       virtualFilesProvider.dispose();
       componentTreeProvider.dispose();

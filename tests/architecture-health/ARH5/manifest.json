@@ -1,0 +1,86 @@
+{
+  "node": "ARH5",
+  "kind": "implementation",
+  "products": ["ARH5FacadeCutover"],
+  "cases": [
+    {
+      "id": "ARH5-cutover",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "predecessor-drift (shipped ARH2 validate() runs live inside this verifier)",
+        "boundary-path-missing",
+        "displaced-population-drift",
+        "retained-population-drift",
+        "retained-method-missing",
+        "retained-method-gated (parse/identity must stay production)",
+        "displaced-method-missing (the CMP1 conversion shim must remain test-support, not vanish)",
+        "displaced-method-still-production",
+        "parallel-combined-method",
+        "cutover-cardinality",
+        "owner-path-missing",
+        "owner-type-missing",
+        "owner-method-missing",
+        "orchestration-missing",
+        "retained-adapter-stolen",
+        "retained-adapter-cardinality",
+        "session-guard-token-missing"
+      ]
+    },
+    {
+      "id": "ARH5-authority",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ac2-defect-missing",
+        "ac2-evidence-population-drift",
+        "ac2-evidence-missing",
+        "ac2-evidence-unbound"
+      ]
+    },
+    {
+      "id": "ARH5-work",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ac3-concern-missing",
+        "ac3-concern-without-evidence",
+        "ac3-evidence-missing",
+        "ac3-evidence-not-a-test",
+        "ac3-na-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH5-delivery",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ac4-rationale-missing",
+        "public-example-still-names-displaced-route"
+      ]
+    },
+    {
+      "id": "ARH5-cost",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ac5-rationale-missing",
+        "dimension-commits-wall-clock"
+      ]
+    },
+    {
+      "id": "ARH5-ratification",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-case-drift",
+        "manifest-product-drift",
+        "manifest-command-drift"
+      ]
+    }
+  ],
+  "verify": "node tests/architecture-health/ARH5/verify.mjs",
+  "test": "node --test tests/architecture-health/ARH5/arh5.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Implementation node: production VueCarrierCompiler is parse/identity/downcast only, matching SvelteCarrierCompiler. compile_ide and compile_bundle are test-support shims; VueProjectionBackend.project_ide and VueHostIntegrationBackend.compile_host_products are the production owners. CMP1 still owns deleting the IdeCompileOptions/RuntimeCompileOptions conversion. CompileArtifactSet qualified maps are untouched. The verifier is the sole owning interface, wired into test:scripts and the architecture-health CI lane."
+}

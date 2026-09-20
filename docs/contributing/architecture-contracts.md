@@ -157,8 +157,9 @@ retained surface without a catalog id, or a mapped id absent from the
 catalog, fails `pnpm --filter docs check`.
 
 Population and snapshot counts (importers, retained surfaces, test-hook
-consumers) were ratified on contract `candidate`
-`30012d45df4e3369728a7cc09250c5e009bfd18d`. Each hotspot's
+consumers) were ratified with the landing
+"docs(arch): ratify responsibility, visibility and dependency contracts (#636)"
+on 2026-09-19. Each hotspot's
 `importDirection.measurementBasis` records the measurement *method*
 (production import tree, `cfg(test)` stripped, use-statements and inline
 paths). The original host/profile of that measurement is unrecorded in ARH1 contract products;
@@ -166,14 +167,11 @@ ARH2 records host/profile drift when it re-derives
 counts. Live re-derivation is the CI `architecture-health` job on
 `ubuntu-latest` with Node from `.nvmrc`, running
 `node tests/architecture-health/ARH1/verify.mjs`. A drifted count fails
-that command. Canonical ARH1 ratification does not require `--provenance`.
-
-`--provenance` is an extra ancestor check on the product-pinned candidate.
-After ARH1's squash onto main that pin is not an ancestor of this tree, so
-`--provenance` currently fails on main-side checkouts while canonical
-`verify.mjs` still passes. Re-pinning those JSON files is ARH1's job, not
-this page's. Any count claim that contradicts a live `verify.mjs` result
-is a bug in the doc.
+that command. Historical landing titles and dates are descriptive context only. Verification
+checks the current tree and does not depend on historical Git objects, commit
+ancestry or matching history text. Squash merging therefore cannot invalidate
+the proof. Any count claim that contradicts a live verifier result is a bug
+in the doc.
 
 ## Related pages
 

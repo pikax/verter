@@ -13,6 +13,7 @@
     "policy": "Spec and test-util files (*.spec.ts, *.test.ts, extensionTsService.testUtils.ts) are evidence for their module's rows, not product surface; they are counted, never classified.",
     "population": [
       "activationGate.spec.ts",
+      "activationSession.spec.ts",
       "analysis-response.spec.ts",
       "audit.spec.ts",
       "bindingTypeDisplay.spec.ts",
@@ -94,13 +95,13 @@
     }
   ],
   "counts": {
-    "productionModules": 47,
+    "productionModules": 49,
     "desktop": 20,
     "presentation": 6,
-    "pure": 21,
+    "pure": 23,
     "testSupportFiles": 1,
-    "specFiles": 46,
-    "totalSourceFiles": 94
+    "specFiles": 47,
+    "totalSourceFiles": 97
   },
   "modules": [
     {
@@ -201,6 +202,15 @@
     },
     {
       "path": "activationGate.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "activationSession.ts",
       "tier": "pure",
       "vscodeApi": false,
       "nodeImports": [],
@@ -514,6 +524,15 @@
     },
     {
       "path": "ssrReadiness.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "startAttemptScope.ts",
       "tier": "pure",
       "vscodeApi": false,
       "nodeImports": [],

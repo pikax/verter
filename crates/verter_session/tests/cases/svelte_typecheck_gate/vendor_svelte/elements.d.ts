@@ -127,6 +127,12 @@ export interface SvelteHTMLElements {
   ul: SvelteBaseAttributes<HTMLUListElement>;
   li: SvelteBaseAttributes<HTMLLIElement>;
   p: SvelteBaseAttributes<HTMLParagraphElement>;
+  // Sectioning content and the legacy `<slot>` outlet carrier: the STS0
+  // legacy-profile evidence projects `<header>`/`<slot name>` markup, and the
+  // official Svelte table carries both (the slot outlet keeps its `name`
+  // attribute in the carrier).
+  header: SvelteBaseAttributes<HTMLElement>;
+  slot: SvelteBaseAttributes<HTMLSlotElement> & { name?: string };
   // Media / dimension / details bindings (F4) need these intrinsic tags to be
   // valid JSX elements (the bindings themselves are checked via the prelude
   // `__verter_bind_*` helpers, not these attribute records).

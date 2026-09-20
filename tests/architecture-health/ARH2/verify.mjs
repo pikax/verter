@@ -38,12 +38,11 @@
  * No wall-clock, RSS or speedup number may be committed in any dimension.
  * ARH2-ratification fails when the manifest and the verifier disagree about
  * the case contract, so the manifest cannot claim checks that do not run.
- * `verify.mjs --provenance` additionally proves the pinned candidate commit
- * is a real ancestor of HEAD.
+ * Historical source titles and dates are optional context; validation
+ * depends on the current tree, never Git history.
  */
 
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1446,15 +1445,6 @@ function validateRatification(products, manifest, errors) {
       });
     }
   }
-
-  const candidates = PRODUCT_FILES.map((file) => products[file.replace(/\.json$/, "")]?.candidate);
-  if (new Set(candidates).size !== 1 || !/^[0-9a-f]{40}$/.test(candidates[0] ?? "")) {
-    errors.push({
-      caseId,
-      code: "candidate-basis-drift",
-      detail: "both products must pin the same 40-hex candidate basis",
-    });
-  }
 }
 
 export function validate(products, manifest = loadManifest()) {
@@ -1484,32 +1474,6 @@ export function selectedCaseIds(result) {
   return [...new Set(result.errors.map((e) => e.caseId))];
 }
 
-export function validateProvenance(candidate) {
-  if (!/^[0-9a-f]{40}$/.test(candidate ?? "")) {
-    return {
-      ok: false,
-      reason: `candidate ${JSON.stringify(candidate)} is not a 40-hex git commit`,
-    };
-  }
-  const git = (args) => {
-    try {
-      execFileSync("git", ["-C", REPO_ROOT, ...args], {
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (!git(["cat-file", "-e", `${candidate}^{commit}`])) {
-    return { ok: false, reason: `candidate ${candidate} is not a commit of this repository` };
-  }
-  if (!git(["merge-base", "--is-ancestor", candidate, "HEAD"])) {
-    return { ok: false, reason: `candidate ${candidate} is not an ancestor of HEAD` };
-  }
-  return { ok: true };
-}
-
 // The manifest documents `node tests/architecture-health/ARH2/verify.mjs` as
 // this node's verify command; it must validate the real products, not no-op.
 const isMain =
@@ -1517,17 +1481,6 @@ const isMain =
 if (isMain) {
   const products = loadProducts();
   const result = validate(products);
-  if (process.argv.includes("--provenance")) {
-    const provenance = validateProvenance(products["characterization"].candidate);
-    if (!provenance.ok) {
-      result.errors.push({
-        caseId: "ARH2-ratification",
-        code: "candidate-basis-drift",
-        detail: provenance.reason,
-      });
-      result.ok = false;
-    }
-  }
   if (!result.ok) {
     console.error(result.errors.map((e) => `${e.caseId}/${e.code}: ${e.detail}`).join("\n"));
     process.exit(1);

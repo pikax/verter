@@ -76,3 +76,19 @@ exactly what the required job covers, and a slice that was emptied, padded, reor
 structural, never a wall clock: a size expressed as a time budget drifts with the machine. It bounds each
 framework's slice; the one pull-request job runs every framework's, so the combined inventory it drives is
 bounded by `MAX_SMOKE_CASES` per framework.
+
+## Retained observations
+
+Observation artifacts retain the complete Vue and Svelte manifests in
+`corpus_manifests`. Retrieval validates those snapshots and their observation
+rows without looking up historical Git objects. Artifact identity uses the
+corpus digest, workflow run ID and attempt; the authenticated Actions run still
+provides the workflow, branch, result and attempt checks. Local captures use a
+timestamp-based capture ID.
+
+Corpus checkout pins and input digests identify the actual external test inputs;
+they do not prove that a Verter implementation landed. Optional historical
+context belongs in a landing title and ISO date, never a commit hash acceptance
+check. Older observation artifacts without retained manifests cannot satisfy
+this schema: capture a fresh observation rather than reconstructing proof from
+old commits or silently accepting missing validation inputs.

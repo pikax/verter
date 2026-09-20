@@ -1,17 +1,18 @@
 # ARH2 evidence cases
 
-The sole owning interface is `node tests/architecture-health/ARH2/verify.mjs` (verify) plus `node --test tests/architecture-health/ARH2/arh2.test.mjs` (dirty twins), wired into `test:scripts` and into the dedicated CI `architecture-health` lane (gated on `tests/architecture-health/**`, `crates/**`, `performance-gates.toml` and `scripts/validate-performance-gates.mjs`; that lane also runs `verify.mjs --provenance` on a full-history checkout to prove the pinned candidate is a real ancestor commit). The verifier joins the shipped ARH0/ARH1 predecessor products (`../ARH0/products/*`, `../ARH1/products/*`) and the live tree only, and RE-DERIVES the predecessor populations on every execution by running the shipped ARH0 and ARH1 `validate()` implementations (imported from their verifiers, never re-implemented here); the program DAG is database-owned by the TAMA controller, so owner/heir ids are checked structurally only and no DAG copy is read from this tree.
+The sole owning interface is `node tests/architecture-health/ARH2/verify.mjs` (verify) plus `node --test tests/architecture-health/ARH2/arh2.test.mjs` (dirty twins), wired into `test:scripts` and into the dedicated CI `architecture-health` lane (gated on `tests/architecture-health/**`, `crates/**`, `performance-gates.toml` and `scripts/validate-performance-gates.mjs`; no Git history is required). The verifier joins the shipped ARH0/ARH1 predecessor products (`../ARH0/products/*`, `../ARH1/products/*`) and the live tree only, and RE-DERIVES the predecessor populations on every execution by running the shipped ARH0 and ARH1 `validate()` implementations (imported from their verifiers, never re-implemented here); the program DAG is database-owned by the TAMA controller, so owner/heir ids are checked structurally only and no DAG copy is read from this tree.
 
 Behavioral evidence: every pinned lane is a real `cargo nextest run` command over a live workspace member crate, and every witness is a real `#[test]`/`#[tokio::test]` function of a real file whose compiled nextest id (the file's `mod` / `#[path]` path plus that function's enclosing inline module, never a filesystem `src::` fragment or a sibling-inline cross-product) contains the filter. The architecture-health CI lane is Node-only and does not spawn cargo; the lanes remain the targeted-domain gate commands. Their outcome is pass/fail only — cost belongs to the measurements product, never to a pin.
 
 ## ARH2-ratification (accept)
 
-Clean products validate: both products pin the same 40-hex candidate basis, the manifest records exactly the cases the verifier implements with disposition reject and the `clean products` accept twin, and the verify/test commands are the canonical strings derived from the verifier's own location.
+Clean products validate: the manifest records exactly the cases the verifier implements with disposition reject and the `clean products` accept twin, and the verify/test commands are the canonical strings derived from the verifier's own location.
+
+Historical source titles and ISO dates are optional descriptive context. Tests exercise the verifier without commit metadata and run its CLI with Git history unavailable. Code, manifest and behavioral obligations remain enforced.
 
 ## ARH2-ratification (reject)
 
 - `manifest-case-drift` / `manifest-product-drift` / `manifest-command-drift`: dirty twins add `ARH2-phantom`, drop `ARH2-separation`, and point verify at `scripts/affected-tests.mjs` (an existing script that is not this verifier).
-- `candidate-basis-drift`: both products must pin the same 40-hex commit (dirty twin pins `0000…`); the architecture-health lane's `--provenance` run (fetch-depth: 0) additionally proves the pinned commit is an ancestor of HEAD. The js-build-test `test:scripts` job is a shallow checkout: ARH2 tests skip `--provenance` when the pin object is absent, matching ARH1.
 - CI `arch` filter: `performance-gates.toml` and `scripts/validate-performance-gates.mjs` must select the architecture-health lane (ARH2 reads both as measurement-methodology inputs).
 
 ## ARH2-population (reject) — AC1 live re-derivation
