@@ -32,7 +32,8 @@ use super::{
     emit_global_component_fallbacks, emit_helper_imports, emit_minimal_wrapper,
     emit_type_constructs, instance_declaration, instance_probe_line, kebab_to_pascal_case,
     process_companion_for_tsx, process_macros, rewrite_ts_type_assertions,
-    script_content_insertion_anchor, should_infer_function_types, MacroSourceCtx, PREFIX,
+    script_content_insertion_anchor, should_infer_function_types, unbound_builtin_components,
+    MacroSourceCtx, PREFIX,
 };
 
 // ── Script Setup Processing ───────────────────────────────────────
@@ -1146,12 +1147,27 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     }
 
     // Emit helper imports (hoisted before wrapper)
+    let mut hoisted_import_names: FxHashSet<&str> = bindings
+        .iter()
+        .filter(|(_, binding)| matches!(binding, BindingType::SetupImport))
+        .map(|(name, _)| *name)
+        .collect();
+    for item in &parse_result.items {
+        if let ScriptItem::Import(imp) = item {
+            hoisted_import_names.extend(imp.bindings.iter().map(|binding| binding.name));
+        }
+    }
+    if let Some(plan) = &recovery_plan {
+        for imp in &plan.imports {
+            hoisted_import_names.extend(imp.binding_names.iter().map(|name| &**name));
+        }
+    }
     emit_helper_imports(
         out,
         hoist_pos,
         Some(script_content_insertion_anchor(source, content_start)),
         options,
-        builtin_components,
+        &unbound_builtin_components(builtin_components, &hoisted_import_names),
         template_ast,
     );
 

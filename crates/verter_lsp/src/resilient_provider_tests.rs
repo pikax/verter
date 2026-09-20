@@ -204,18 +204,25 @@ async fn update_workspace_folders_is_cached_while_restarting() {
 }
 
 #[tokio::test]
-async fn restart_replays_cached_state_without_downgrading_loaded_files() {
+async fn restart_replays_each_file_in_the_state_the_provider_last_held_it() {
     let initial = MockTypeProvider::new();
     let replacement = MockTypeProvider::new();
     let replacement_clone = replacement.clone();
     let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
 
+    // Background-only: the provider never held an overlay for it.
     provider
         .load_file("/project/src/loaded.vue.tsx", "const loaded = true;")
         .await
         .unwrap();
+    // Loaded, then edited: the real backends open an overlay on `update_file`,
+    // so the state to restore is OPEN with the edited content.
     provider
-        .update_file("/project/src/loaded.vue.tsx", "const loaded = 2;")
+        .load_file("/project/src/edited.vue.tsx", "const edited = 1;")
+        .await
+        .unwrap();
+    provider
+        .update_file("/project/src/edited.vue.tsx", "const edited = 2;")
         .await
         .unwrap();
     provider
@@ -241,13 +248,29 @@ async fn restart_replays_cached_state_without_downgrading_loaded_files() {
     // Allow the respawn to proceed once the monitor reaches `spawn`.
     spawn_gate.add_permits(1);
 
-    let calls = await_replayed_calls(&replacement_clone, 4).await;
+    let calls = await_replayed_calls(&replacement_clone, 5).await;
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::LoadFile { path, .. } if path == "/project/src/loaded.vue.tsx"
+            MockCall::LoadFile { path, content }
+                if path == "/project/src/loaded.vue.tsx" && content == "const loaded = true;"
         )),
         "loaded files should replay via load_file, calls={calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, content }
+                if path == "/project/src/edited.vue.tsx" && content == "const edited = 2;"
+        )),
+        "an edited file must come back open with its edited content, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::LoadFile { path, .. } if path == "/project/src/edited.vue.tsx"
+        )),
+        "an edited file must not be downgraded to a background load, calls={calls:?}"
     );
     assert!(
         !calls.iter().any(|call| matches!(

@@ -280,6 +280,23 @@ pub(super) fn collect_builtin_components(
     result
 }
 
+/// The built-in components the generated `vue` import still has to bind.
+///
+/// Every authored import is hoisted to module scope, beside the generated
+/// one. A built-in whose name an authored import already binds there must not
+/// be imported a second time: the duplicate module-scope binding is a
+/// redeclaration error reported against valid source.
+pub(super) fn unbound_builtin_components<'b>(
+    builtin_components: &[&'b str],
+    hoisted_import_names: &rustc_hash::FxHashSet<&str>,
+) -> Vec<&'b str> {
+    builtin_components
+        .iter()
+        .copied()
+        .filter(|name| !hoisted_import_names.contains(name))
+        .collect()
+}
+
 /// Emit helper imports hoisted before the wrapper function.
 pub(super) fn emit_helper_imports(
     out: &mut CodeGenOutput<'_>,

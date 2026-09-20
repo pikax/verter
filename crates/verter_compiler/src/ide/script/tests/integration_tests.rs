@@ -183,6 +183,74 @@ const x = 1
     );
 }
 
+/// The generated `vue` import line for built-in components, if any. It is
+/// emitted directly after the generated helper imports, which is what tells
+/// it apart from an authored `vue` import hoisted above them.
+fn generated_builtin_import(code: &str) -> Option<&str> {
+    code.lines()
+        .skip_while(|line| !line.contains("___VERTER___shallowUnwrapRef"))
+        .nth(1)
+        .filter(|line| line.starts_with("import { ") && line.ends_with("} from \"vue\";"))
+}
+
+#[test]
+fn builtin_already_bound_by_the_author_is_not_imported_again() {
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+import { defineAsyncComponent, Suspense } from "vue";
+const AsyncBit = defineAsyncComponent(async () => ({ template: "<span/>" }));
+</script>
+<template><Teleport to="body"><Suspense><AsyncBit /></Suspense></Teleport></template>"#,
+    );
+    assert_eq!(
+        generated_builtin_import(&code),
+        Some(r#"import { Teleport } from "vue";"#),
+        "only the unbound built-in is imported: {code}"
+    );
+}
+
+#[test]
+fn builtin_authored_under_an_alias_is_still_imported_by_its_own_name() {
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+import { Suspense as Pending } from "vue";
+void Pending;
+</script>
+<template><Suspense><div/></Suspense></template>"#,
+    );
+    assert_eq!(
+        generated_builtin_import(&code),
+        Some(r#"import { Suspense } from "vue";"#),
+        "an alias leaves the built-in's own name unbound: {code}"
+    );
+}
+
+#[test]
+fn builtin_bound_in_a_plain_script_is_not_imported_again() {
+    for source in [
+        r#"<script lang="ts">
+import { Suspense } from "vue";
+export default { components: { Suspense } };
+</script>
+<template><Suspense><div/></Suspense></template>"#,
+        r#"<script lang="ts">
+import { Suspense } from "vue";
+export const marker = Suspense;
+</script>
+<script setup lang="ts">
+const x = 1;
+</script>
+<template><Suspense><div>{{ x }}</div></Suspense></template>"#,
+    ] {
+        let (code, _) = gen_tsx_script(source);
+        assert_eq!(
+            generated_builtin_import(&code),
+            None,
+            "the authored import already binds the name: {code}"
+        );
+    }
+}
+
 #[test]
 fn no_builtin_import_when_not_used() {
     let (code, _) = gen_tsx_script(
