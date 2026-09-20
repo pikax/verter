@@ -4,14 +4,21 @@
 //! [`ModuleScopeProjection`] (imports, normal-script exports and bindings),
 //! [`TsSetupProjection`] (ordered setup statements, top-level `await`, macro
 //! calls) and [`UniversalSetupBinder`] (the authored `generic` binder, never
-//! specialized by a parent use). The grammar follows the block's `lang`, so a
-//! TypeScript angle assertion and an actual TSX element are each parsed once
-//! under their own grammar; no second TSX parse repairs TypeScript syntax.
+//! specialized by a parent use). The grammar follows the block's `lang`
+//! (absent `lang` is Vue's own JavaScript default and is refused, matching
+//! `sfc_script_dialect`), so a TypeScript angle assertion and an actual TSX
+//! element are each parsed once under their own grammar; no second TSX parse
+//! repairs TypeScript syntax. A script/script-setup pair with mismatched
+//! `lang` is refused rather than silently classified from one block alone.
 //!
-//! Macros are recognised by resolution, not spelling: a call to `defineProps`
-//! (and siblings) is a macro only when the callee is a free reference; an
-//! import, a normal-script binding or a setup-local lexical function of the
-//! same name is an ordinary call.
+//! Macros are recognised by resolution, not spelling: a root-level call to
+//! `defineProps` (and siblings) is a macro when the callee is a free
+//! reference, or when it resolves to a runtime (non-type-only) import of the
+//! same name from `'vue'` (Vue strips such an import with a warning and
+//! still treats the call as the macro); a normal-script VALUE binding or a
+//! setup-local lexical function of the same name is an ordinary call, and a
+//! nested call is never a macro (Vue requires macros at the root of
+//! `<script setup>`).
 //!
 //! The body of a generic component is checked once, universally. A projection
 //! that places the setup body in more than one product is refused by
@@ -19,12 +26,13 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrowFunctionExpression, AwaitExpression, CallExpression, Class, Declaration, Expression,
-    ForOfStatement, Function, Program, Statement,
+    ArrowFunctionExpression, AwaitExpression, BlockStatement, CallExpression, Class, ClassElement,
+    Declaration, Expression, ForOfStatement, Function, ImportDeclarationSpecifier, Program,
+    PropertyKey, Statement,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
-use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags};
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashSet;
@@ -77,7 +85,9 @@ pub struct ScriptBlockInput<'s> {
     pub content: &'s str,
     /// Carrier offset of the first content byte.
     pub content_start: u32,
-    /// Authored `lang`; `None` means TypeScript.
+    /// Authored `lang`; absent (`None`) is Vue's own JavaScript default, not
+    /// TypeScript, and is refused via
+    /// [`SetupProjectionRefusal::NotTypeScript`].
     pub lang: Option<ScriptLanguage>,
 }
 
@@ -86,6 +96,9 @@ pub struct ScriptBlockInput<'s> {
 pub enum SetupProjectionRefusal {
     /// The block is not TypeScript/TSX; JavaScript owns a separate projection.
     NotTypeScript,
+    /// The `<script>` and `<script setup>` blocks declared different `lang`s;
+    /// Vue's own `compileScript` throws on this pair rather than picking one.
+    ScriptLangConflict,
     /// The block has syntax errors; incomplete-source projection owns recovery.
     SyntaxErrors {
         /// True for the setup block, false for the normal script.
@@ -235,9 +248,11 @@ pub struct ScriptProjectionFacts {
 
 fn grammar_of(lang: Option<ScriptLanguage>) -> Result<ScriptGrammar, SetupProjectionRefusal> {
     match lang {
-        None | Some(ScriptLanguage::TypeScript) => Ok(ScriptGrammar::TypeScript),
+        Some(ScriptLanguage::TypeScript) => Ok(ScriptGrammar::TypeScript),
         Some(ScriptLanguage::TSX) => Ok(ScriptGrammar::Tsx),
-        Some(_) => Err(SetupProjectionRefusal::NotTypeScript),
+        // Absent `lang` is Vue's own JavaScript default (`sfc_script_dialect`),
+        // not TypeScript; JavaScript owns a separate projection.
+        None | Some(_) => Err(SetupProjectionRefusal::NotTypeScript),
     }
 }
 
@@ -258,18 +273,79 @@ fn root_bindings(scoping: &Scoping) -> Vec<String> {
     named.into_iter().map(|(_, name)| name).collect()
 }
 
+/// A symbol occupying only the type space (no runtime value), so it cannot
+/// shadow a runtime macro call. Classes/enums occupy both spaces and stay
+/// eligible to shadow.
+const PURE_TYPE_SPACE: SymbolFlags = SymbolFlags::Interface
+    .union(SymbolFlags::TypeAlias)
+    .union(SymbolFlags::TypeParameter)
+    .union(SymbolFlags::TypeImport);
+
+/// Root-scope names bound to a runtime value, for macro-shadow checks. A
+/// type-only declaration (`interface`, `type`, `import type`) of the same
+/// name as a macro must not suppress the macro.
+fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
+    scoping
+        .get_bindings(scoping.root_scope_id())
+        .iter()
+        .filter(|(_, &id)| {
+            let flags = scoping.symbol_flags(id);
+            !(flags.intersects(PURE_TYPE_SPACE)
+                && !flags.intersects(SymbolFlags::Value | SymbolFlags::Import))
+        })
+        .map(|(name, _)| name.as_str().to_string())
+        .collect()
+}
+
+/// Local names imported as a runtime (non-type-only) binding from `'vue'`
+/// that shadow a macro name. Vue's `compileScript` strips a
+/// `defineProps`/`defineEmits`/... specifier imported from `'vue'` and still
+/// processes the call as the macro.
+fn vue_runtime_macro_imports<'a>(program: &Program<'a>) -> FxHashSet<&'a str> {
+    let mut names = FxHashSet::default();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        if import.import_kind.is_type() || import.source.value != "vue" {
+            continue;
+        }
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            if let ImportDeclarationSpecifier::ImportSpecifier(spec) = specifier {
+                if spec.import_kind.is_type() {
+                    continue;
+                }
+                let local = spec.local.name.as_str();
+                if MACRO_NAMES.contains(&local) {
+                    names.insert(local);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Project one script pair. `generic` is the `generic` attribute value.
 pub fn project_script_pair(
     normal: Option<ScriptBlockInput<'_>>,
     setup: Option<ScriptBlockInput<'_>>,
     generic: Option<&str>,
 ) -> Result<ScriptProjectionFacts, SetupProjectionRefusal> {
-    let mut module = ModuleScopeProjection::default();
-    if let Some(block) = normal {
-        project_normal(block, &mut module)?;
+    if let (Some(n), Some(s)) = (&normal, &setup) {
+        if n.lang != s.lang {
+            return Err(SetupProjectionRefusal::ScriptLangConflict);
+        }
     }
+    let mut module = ModuleScopeProjection::default();
+    let normal_value_bindings = match normal {
+        Some(block) => project_normal(block, &mut module)?,
+        None => FxHashSet::default(),
+    };
     let setup = match setup {
-        Some(block) => Some(project_setup(block, &mut module)?),
+        Some(block) => Some(project_setup(block, &mut module, &normal_value_bindings)?),
         None => None,
     };
     Ok(ScriptProjectionFacts {
@@ -306,10 +382,17 @@ fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupPr
     })
 }
 
+fn is_type_only_declaration(declaration: &Declaration<'_>) -> bool {
+    matches!(
+        declaration,
+        Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_)
+    )
+}
+
 fn project_normal(
     block: ScriptBlockInput<'_>,
     module: &mut ModuleScopeProjection,
-) -> Result<(), SetupProjectionRefusal> {
+) -> Result<FxHashSet<String>, SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, block.content, grammar.source_type()).parse();
@@ -321,9 +404,14 @@ fn project_normal(
         match statement {
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(declaration) = &export.declaration {
-                    module.named_exports.extend(declaration_names(declaration));
+                    if !is_type_only_declaration(declaration) {
+                        module.named_exports.extend(declaration_names(declaration));
+                    }
                 }
                 for specifier in &export.specifiers {
+                    if export.export_kind.is_type() || specifier.export_kind.is_type() {
+                        continue;
+                    }
                     module
                         .named_exports
                         .push(specifier.exported.name().to_string());
@@ -332,12 +420,25 @@ fn project_normal(
             Statement::ExportDefaultDeclaration(_) => {
                 module.named_exports.push("default".to_string());
             }
+            Statement::ExportAllDeclaration(export) => {
+                // `export * from './z'` re-exports a name set unknown at
+                // this file's own scope; only the namespaced form
+                // (`export * as ns from './z'`) has a locally observable
+                // name.
+                if export.export_kind.is_type() {
+                    continue;
+                }
+                if let Some(exported) = &export.exported {
+                    module.named_exports.push(exported.name().to_string());
+                }
+            }
             _ => {}
         }
     }
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    module.normal_script_bindings = root_bindings(semantic.scoping());
-    Ok(())
+    let scoping = semantic.scoping();
+    module.normal_script_bindings = root_bindings(scoping);
+    Ok(value_bindings(scoping))
 }
 
 fn collect_imports(
@@ -360,6 +461,7 @@ fn collect_imports(
 fn project_setup(
     block: ScriptBlockInput<'_>,
     module: &mut ModuleScopeProjection,
+    normal_value_bindings: &FxHashSet<String>,
 ) -> Result<TsSetupProjection, SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let allocator = Allocator::default();
@@ -371,16 +473,15 @@ fn project_setup(
     collect_imports(program, block.content_start, true, module);
 
     let semantic = SemanticBuilder::new().build(program).semantic;
-    let module_bound: FxHashSet<&str> = module
-        .normal_script_bindings
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let module_bound: FxHashSet<&str> = normal_value_bindings.iter().map(String::as_str).collect();
+    let vue_macro_imports = vue_runtime_macro_imports(program);
     let mut collector = SetupCollector {
         scoping: semantic.scoping(),
         module_bound: &module_bound,
+        vue_macro_imports: &vue_macro_imports,
         base: block.content_start,
         depth: 0,
+        block_nesting: 0,
         top_level_await: None,
         macros: Vec::new(),
     };
@@ -423,8 +524,15 @@ fn classify(statement: &Statement<'_>) -> SetupStatementKind {
 struct SetupCollector<'s> {
     scoping: &'s Scoping,
     module_bound: &'s FxHashSet<&'s str>,
+    vue_macro_imports: &'s FxHashSet<&'s str>,
     base: u32,
     depth: u32,
+    /// Block-statement nesting (`if`/`for`/`while`/`try`/a bare `{ }`).
+    /// Distinct from `depth`: unlike `await`, a macro call is not root-level
+    /// merely for staying outside a function — `if (x) { defineEmits() }`
+    /// is not a legal macro position even though it crosses no function
+    /// boundary.
+    block_nesting: u32,
     top_level_await: Option<SourceRange>,
     macros: Vec<SetupMacroCall>,
 }
@@ -435,6 +543,40 @@ impl SetupCollector<'_> {
             self.top_level_await = Some(range(span, self.base));
         }
     }
+}
+
+/// Finds an `await` reachable from a class computed key without crossing
+/// into a nested function/arrow/class boundary — the key is evaluated
+/// eagerly in the enclosing scope, unlike a method or property body.
+struct ComputedKeyAwaitVisitor {
+    found: Option<oxc_span::Span>,
+}
+
+impl<'a> Visit<'a> for ComputedKeyAwaitVisitor {
+    fn visit_await_expression(&mut self, it: &AwaitExpression<'a>) {
+        if self.found.is_none() {
+            self.found = Some(it.span);
+        }
+        walk::walk_await_expression(self, it);
+    }
+
+    fn visit_function(&mut self, _it: &Function<'a>, _flags: ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
+
+    fn visit_class(&mut self, _it: &Class<'a>) {}
+}
+
+/// The element's key when authored with computed-key syntax (`[expr]`); such
+/// a key is evaluated eagerly, in the enclosing scope.
+fn computed_class_key<'e, 'a>(element: &'e ClassElement<'a>) -> Option<&'e PropertyKey<'a>> {
+    let (key, computed) = match element {
+        ClassElement::MethodDefinition(m) => (&m.key, m.computed),
+        ClassElement::PropertyDefinition(p) => (&p.key, p.computed),
+        ClassElement::AccessorProperty(a) => (&a.key, a.computed),
+        ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => return None,
+    };
+    computed.then_some(key)
 }
 
 impl<'a> Visit<'a> for SetupCollector<'_> {
@@ -451,6 +593,17 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
     }
 
     fn visit_class(&mut self, it: &Class<'a>) {
+        if self.depth == 0 {
+            for element in &it.body.body {
+                if let Some(key) = computed_class_key(element) {
+                    let mut probe = ComputedKeyAwaitVisitor { found: None };
+                    probe.visit_property_key(key);
+                    if let Some(span) = probe.found {
+                        self.note_await(span);
+                    }
+                }
+            }
+        }
         self.depth += 1;
         walk::walk_class(self, it);
         self.depth -= 1;
@@ -468,20 +621,28 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
         walk::walk_for_of_statement(self, it);
     }
 
+    fn visit_block_statement(&mut self, it: &BlockStatement<'a>) {
+        self.block_nesting += 1;
+        walk::walk_block_statement(self, it);
+        self.block_nesting -= 1;
+    }
+
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if let Expression::Identifier(callee) = &it.callee {
             let name = callee.name.as_str();
-            let free = self
-                .scoping
-                .get_reference(callee.reference_id())
-                .symbol_id()
-                .is_none();
-            if let Some(&macro_name) = MACRO_NAMES.iter().find(|m| **m == name) {
-                if free && !self.module_bound.contains(name) {
-                    self.macros.push(SetupMacroCall {
-                        name: macro_name,
-                        span: range(it.span, self.base),
-                    });
+            if self.depth == 0 && self.block_nesting == 0 && !self.module_bound.contains(name) {
+                if let Some(&macro_name) = MACRO_NAMES.iter().find(|m| **m == name) {
+                    let free = self
+                        .scoping
+                        .get_reference(callee.reference_id())
+                        .symbol_id()
+                        .is_none();
+                    if free || self.vue_macro_imports.contains(name) {
+                        self.macros.push(SetupMacroCall {
+                            name: macro_name,
+                            span: range(it.span, self.base),
+                        });
+                    }
                 }
             }
         }

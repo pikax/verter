@@ -9,8 +9,12 @@ fn block(content: &str, start: u32, lang: Option<ScriptLanguage>) -> ScriptBlock
     }
 }
 
+fn ts(content: &str, start: u32) -> ScriptBlockInput<'_> {
+    block(content, start, Some(ScriptLanguage::TypeScript))
+}
+
 fn setup_of(content: &str) -> TsSetupProjection {
-    project_script_pair(None, Some(block(content, 0, None)), None)
+    project_script_pair(None, Some(ts(content, 0)), None)
         .expect("projects")
         .setup
         .expect("setup")
@@ -19,8 +23,8 @@ fn setup_of(content: &str) -> TsSetupProjection {
 #[test]
 fn stp11_universal_binder_keeps_constraints_and_carries_no_arguments() {
     let generic = "T extends { id: number }, U = string";
-    let facts = project_script_pair(None, Some(block("const a = 1", 0, None)), Some(generic))
-        .expect("projects");
+    let facts =
+        project_script_pair(None, Some(ts("const a = 1", 0)), Some(generic)).expect("projects");
     let params = &facts.binder.params;
     assert_eq!(params.len(), 2);
     assert_eq!(params[0].name, "T");
@@ -46,12 +50,8 @@ fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
     let normal =
         "import { a } from './a'\nexport const shared = 1\nexport default {}\nfunction helper() {}";
     let setup = "import type { B } from './b'\ninterface Local { x: B }\nconst { p, q } = a\nlet n = shared\nfoo()";
-    let facts = project_script_pair(
-        Some(block(normal, 10, None)),
-        Some(block(setup, 500, None)),
-        None,
-    )
-    .expect("projects");
+    let facts =
+        project_script_pair(Some(ts(normal, 10)), Some(ts(setup, 500)), None).expect("projects");
     assert_eq!(facts.module.named_exports, ["shared", "default"]);
     assert_eq!(
         facts.module.normal_script_bindings,
@@ -92,6 +92,18 @@ fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
 }
 
 #[test]
+fn stp11_normal_script_exports_distinguish_type_only_and_wildcard_re_exports() {
+    let normal = concat!(
+        "export type A = 1\n",
+        "export const shared = 1\n",
+        "export * from './z'\n",
+        "export * as ns from './w'\n",
+    );
+    let facts = project_script_pair(Some(ts(normal, 0)), None, None).expect("projects");
+    assert_eq!(facts.module.named_exports, ["shared", "ns"]);
+}
+
+#[test]
 fn stp11_await_top_level_only_and_nested_functions_excluded() {
     let top = setup_of("const data = await load()");
     assert!(top.checking_wrapper_is_async());
@@ -108,10 +120,23 @@ fn stp11_await_top_level_only_and_nested_functions_excluded() {
 }
 
 #[test]
+fn stp11_class_computed_key_await_is_top_level() {
+    let computed = setup_of("class C { [await k]() {} }");
+    assert!(computed.checking_wrapper_is_async());
+
+    // A method BODY await stays nested even when the key is computed.
+    let body_only = setup_of("class C { [k]() { return async () => { await g() } } }");
+    assert!(!body_only.checking_wrapper_is_async());
+}
+
+#[test]
 fn stp11_assertion_ts_angle_assertion_and_tsx_element_parse_once_under_own_grammar() {
-    let ts = project_script_pair(None, Some(block("const n = <number>raw", 0, None)), None)
+    let result = project_script_pair(None, Some(ts("const n = <number>raw", 0)), None)
         .expect("angle assertion parses under the TypeScript grammar");
-    assert_eq!(ts.setup.expect("setup").grammar, ScriptGrammar::TypeScript);
+    assert_eq!(
+        result.setup.expect("setup").grammar,
+        ScriptGrammar::TypeScript
+    );
 
     let tsx = project_script_pair(
         None,
@@ -128,12 +153,7 @@ fn stp11_assertion_ts_angle_assertion_and_tsx_element_parse_once_under_own_gramm
     // The same bytes are not valid under the other grammar: nothing repairs
     // one dialect by re-parsing it as the other.
     assert_eq!(
-        project_script_pair(
-            None,
-            Some(block("const el = <div>{a}</div>", 0, None)),
-            None
-        )
-        .unwrap_err(),
+        project_script_pair(None, Some(ts("const el = <div>{a}</div>", 0)), None).unwrap_err(),
         SetupProjectionRefusal::SyntaxErrors { setup: true }
     );
     assert_eq!(
@@ -157,6 +177,26 @@ fn stp11_assertion_ts_angle_assertion_and_tsx_element_parse_once_under_own_gramm
 }
 
 #[test]
+fn stp11_absent_lang_is_javascript_not_typescript() {
+    // Vue's own default for an unlabeled `<script setup>` is JavaScript
+    // (`sfc_script_dialect`); this projection only owns TypeScript/TSX.
+    assert_eq!(
+        project_script_pair(None, Some(block("const n = 1", 0, None)), None).unwrap_err(),
+        SetupProjectionRefusal::NotTypeScript
+    );
+}
+
+#[test]
+fn stp11_mismatched_script_lang_pair_is_refused() {
+    let normal = ts("export const shared = 1", 0);
+    let setup = block("const n = 1", 0, Some(ScriptLanguage::TSX));
+    assert_eq!(
+        project_script_pair(Some(normal), Some(setup), None).unwrap_err(),
+        SetupProjectionRefusal::ScriptLangConflict
+    );
+}
+
+#[test]
 fn stp11_one_body_rejects_duplicate_setup_body_placement() {
     assert_eq!(require_single_body(&[BodyProduct::Checking]), Ok(()));
     assert_eq!(require_single_body(&[]), Ok(()));
@@ -171,18 +211,14 @@ fn stp11_one_body_rejects_duplicate_setup_body_placement() {
 #[test]
 fn stp11_macro_syntax_is_distinct_from_same_named_lexical_functions() {
     let macros = |normal: Option<&str>, setup: &str| -> Vec<&'static str> {
-        project_script_pair(
-            normal.map(|n| block(n, 0, None)),
-            Some(block(setup, 0, None)),
-            None,
-        )
-        .expect("projects")
-        .setup
-        .expect("setup")
-        .macros
-        .iter()
-        .map(|m| m.name)
-        .collect()
+        project_script_pair(normal.map(|n| ts(n, 0)), Some(ts(setup, 0)), None)
+            .expect("projects")
+            .setup
+            .expect("setup")
+            .macros
+            .iter()
+            .map(|m| m.name)
+            .collect()
     };
     assert_eq!(
         macros(
@@ -195,4 +231,45 @@ fn stp11_macro_syntax_is_distinct_from_same_named_lexical_functions() {
     assert!(macros(None, "import { defineProps } from './mine'\ndefineProps()").is_empty());
     assert!(macros(Some("export function defineProps() {}"), "defineProps()").is_empty());
     assert!(macros(None, "const f = (defineProps: () => void) => defineProps()").is_empty());
+}
+
+#[test]
+fn stp11_vue_imported_macro_is_still_recognised() {
+    let macros = |normal: Option<&str>, setup: &str| -> Vec<&'static str> {
+        project_script_pair(normal.map(|n| ts(n, 0)), Some(ts(setup, 0)), None)
+            .expect("projects")
+            .setup
+            .expect("setup")
+            .macros
+            .iter()
+            .map(|m| m.name)
+            .collect()
+    };
+    // Vue's `compileScript` strips a macro specifier imported from `'vue'`
+    // with a warning and still processes the call as the macro.
+    assert_eq!(
+        macros(
+            None,
+            "import { defineProps } from 'vue'\nconst p = defineProps<{ a: number }>()"
+        ),
+        ["defineProps"]
+    );
+    // A type-only normal-script declaration of the same name occupies only
+    // the type space and must not suppress the macro.
+    assert_eq!(
+        macros(Some("type defineProps = 1"), "defineProps()"),
+        ["defineProps"]
+    );
+    // A macro name imported from elsewhere is still an ordinary call.
+    assert!(macros(
+        None,
+        "import { defineProps } from 'vue-router'\ndefineProps()"
+    )
+    .is_empty());
+}
+
+#[test]
+fn stp11_nested_macro_call_is_not_reported() {
+    let macros = setup_of("function f() { defineProps() }\nif (x) { defineEmits() }").macros;
+    assert!(macros.is_empty());
 }
