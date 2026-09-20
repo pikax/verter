@@ -449,11 +449,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // Spawn waiter task: after the scanner completes, publish fresh diagnostics
     // for all open files and send $/verter/typeProviderSyncComplete.
     {
-        let client = client.clone();
         let documents = documents.clone();
-        let cached_verter_diags = Arc::clone(&cached_verter_diags);
-        let type_provider = type_provider.clone();
-        let position_encoding = position_encoding.clone();
         let init_generation = Arc::clone(&init_generation);
         let vfs_workspace = Arc::clone(&vfs_workspace);
         let provider_sync_states = Arc::clone(&provider_sync_states);
@@ -462,6 +458,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let mru_canonical_ids = Arc::clone(&mru_canonical_ids);
         let carrier_publish_coordinator = carrier_publish_coordinator.clone();
         let carrier_transaction_coordinator = Arc::clone(&carrier_transaction_coordinator);
+        let server = server.clone();
         tokio::spawn(async move {
             // Level 2 of the readiness ladder is emitted only after level 1: a fast
             // scan on a small workspace finishes before this init reaches its ready
@@ -505,80 +502,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 return;
             }
 
-            if !pending_snapshot_provider_sync.is_empty() {
-                tracing::warn!(
-                    pending = pending_snapshot_provider_sync.len(),
-                    "post-scan provider retries remain pending (gen={my_gen}); suppressing typeProviderSyncComplete"
-                );
-                return;
-            }
-
-            tracing::info!(
-                "workspace scanner complete (gen={my_gen}), publishing post-scan diagnostics"
-            );
-
-            // Publish fresh diagnostics for all open files
-            let open_uris = documents.open_uris();
-            for uri_str in &open_uris {
-                let uri: Uri = match uri_str.parse() {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-                let Some(publication) = documents.begin_diagnostics_publication(&uri) else {
-                    continue;
-                };
-
-                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-                // The SAME complete Verter-owned set the debounced coordinator
-                // publishes. This sweep REPLACES the client's whole list for the
-                // document, so a narrower set here would erase categories the
-                // coordinator had already surfaced.
-                let verter_diags = {
-                    let vfs_ws = vfs_workspace.read();
-                    crate::server::verter_owned_diagnostics(
-                        &documents,
-                        &uri,
-                        &canonical_id,
-                        &cached_verter_diags,
-                        vfs_ws.as_deref(),
-                        project_sync.as_ref(),
-                    )
-                };
-
-                let diagnostics = if let Some(tp) = &type_provider {
-                    let encoding = position_encoding.read().clone();
-                    crate::sync_coordinator::provider_diagnostics_batch(
-                        &documents,
-                        &provider_sync_states,
-                        tp.as_ref(),
-                        encoding,
-                        &canonical_id,
-                        verter_diags,
-                    )
-                    .await
-                } else {
-                    crate::sync_coordinator::ProviderDiagnosticBatch::complete(verter_diags)
-                };
-
-                documents
-                    .publish_diagnostics(
-                        &client,
-                        &uri,
-                        &publication,
-                        diagnostics.diagnostics,
-                        diagnostics.complete,
-                        diagnostics.surface,
-                    )
-                    .await;
-            }
-
-            client
-                .send_notification::<TypeProviderSyncComplete>(TypeProviderSyncCompleteParams {
-                    gen: my_gen,
-                })
-                .await;
-
-            tracing::info!("typeProviderSyncComplete sent (gen={my_gen})");
+            server.complete_post_scan(my_gen).await;
         });
     }
 
@@ -692,6 +616,112 @@ async fn await_scan_complete_after_ready(
         return false;
     }
     ready_announced.await.is_ok()
+}
+
+impl super::VerterLanguageServer {
+    /// The post-scan completion tail: publish fresh diagnostics for the open
+    /// documents, then announce level 2 of the readiness ladder.
+    ///
+    /// Returns whether `typeProviderSyncComplete` was announced.
+    ///
+    /// The drain that precedes this advances the diagnostics generation of
+    /// every carrier it settles, AFTER their earlier publications completed,
+    /// so each settled open document is owed a fresh publication here even
+    /// when an unrelated carrier is still queued. Only the announcement is
+    /// global: it stays suppressed while any provider work remains pending,
+    /// and a document that is itself pending is never certified.
+    pub(crate) async fn complete_post_scan(&self, my_gen: u64) -> bool {
+        let superseded = || {
+            self.init_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                != my_gen
+        };
+        if superseded() {
+            tracing::info!("init gen={my_gen} superseded before post-scan diagnostics, discarding");
+            return false;
+        }
+
+        tracing::info!(
+            "workspace scanner complete (gen={my_gen}), publishing post-scan diagnostics"
+        );
+
+        for uri_str in &self.documents.open_uris() {
+            let uri: Uri = match uri_str.parse() {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+            if self.pending_snapshot_provider_sync.contains(&canonical_id) {
+                continue;
+            }
+            let Some(publication) = self.documents.begin_diagnostics_publication(&uri) else {
+                continue;
+            };
+
+            // The SAME complete Verter-owned set the debounced coordinator
+            // publishes. This sweep REPLACES the client's whole list for the
+            // document, so a narrower set here would erase categories the
+            // coordinator had already surfaced.
+            let verter_diags = {
+                let vfs_ws = self.vfs_workspace.read();
+                crate::server::verter_owned_diagnostics(
+                    &self.documents,
+                    &uri,
+                    &canonical_id,
+                    &self.cached_verter_diags,
+                    vfs_ws.as_deref(),
+                    self.project_sync.as_ref(),
+                )
+            };
+
+            let diagnostics = if let Some(tp) = &self.type_provider {
+                let encoding = self.position_encoding.read().clone();
+                crate::sync_coordinator::provider_diagnostics_batch(
+                    &self.documents,
+                    &self.provider_sync_states,
+                    tp.as_ref(),
+                    encoding,
+                    &canonical_id,
+                    verter_diags,
+                )
+                .await
+            } else {
+                crate::sync_coordinator::ProviderDiagnosticBatch::complete(verter_diags)
+            };
+
+            self.documents
+                .publish_diagnostics(
+                    &self.client,
+                    &uri,
+                    &publication,
+                    diagnostics.diagnostics,
+                    diagnostics.complete,
+                    diagnostics.surface,
+                )
+                .await;
+        }
+
+        if superseded() {
+            tracing::info!("init gen={my_gen} superseded during post-scan diagnostics, discarding");
+            return false;
+        }
+        if !self.pending_snapshot_provider_sync.is_empty() {
+            tracing::warn!(
+                pending = self.pending_snapshot_provider_sync.len(),
+                "post-scan provider retries remain pending (gen={my_gen}); suppressing typeProviderSyncComplete"
+            );
+            return false;
+        }
+
+        self.client
+            .send_notification::<TypeProviderSyncComplete>(TypeProviderSyncCompleteParams {
+                gen: my_gen,
+            })
+            .await;
+
+        tracing::info!("typeProviderSyncComplete sent (gen={my_gen})");
+        true
+    }
 }
 
 #[cfg(test)]

@@ -29251,6 +29251,7 @@ struct WatchedDependencyFixture {
     root: String,
     published: Arc<parking_lot::Mutex<Vec<PublishDiagnosticsParams>>>,
     published_changed: Arc<tokio::sync::Notify>,
+    sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
     drain: tokio::task::JoinHandle<()>,
 }
 
@@ -29303,8 +29304,16 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     let captured = published.clone();
     let published_changed = Arc::new(tokio::sync::Notify::new());
     let captured_changed = published_changed.clone();
+    let sync_complete = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_complete = sync_complete.clone();
     let drain = tokio::spawn(async move {
         while let Some(message) = socket.next().await {
+            if message.method() == "$/verter/typeProviderSyncComplete" {
+                let params = serde_json::to_value(message.params().unwrap()).unwrap();
+                captured_complete
+                    .lock()
+                    .push(params["gen"].as_u64().unwrap());
+            }
             if message.method() == "textDocument/publishDiagnostics" {
                 let params = serde_json::from_value(
                     serde_json::to_value(message.params().unwrap()).unwrap(),
@@ -29365,8 +29374,151 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
         root,
         published,
         published_changed,
+        sync_complete,
         drain,
     }
+}
+
+async fn drain_pending_provider_sync_for(server: &VerterLanguageServer) {
+    crate::server::drain_pending_snapshot_provider_sync(
+        server.project_sync.as_ref(),
+        &server.documents,
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+        &server.pending_snapshot_provider_sync,
+        false,
+        None,
+        server.carrier_publish_coordinator.as_ref(),
+        &server.carrier_transaction_coordinator,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_is_pending() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let healthy = format!("{}/src/Consumer.vue", fixture.root);
+    let healthy_uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let healthy_provider_path = server
+        .capture_provider_request_surface(&healthy_uri)
+        .unwrap()
+        .stamp
+        .provider_path
+        .to_string();
+
+    // An unrelated closed carrier whose provider delivery keeps failing.
+    let broken = format!("{}/src/Broken.vue", fixture.root);
+    std::fs::write(
+        fixture._temp.path().join("src/Broken.vue"),
+        "<template><p>broken</p></template>",
+    )
+    .unwrap();
+    fixture.provider.set_fail_carrier_metadata_source(&broken);
+    server
+        .vfs_workspace
+        .read()
+        .as_ref()
+        .unwrap()
+        .apply_changes(vec![verter_workspace::WorkspaceChange::FileChanged {
+            canonical_id: broken.clone(),
+            source: None,
+        }]);
+
+    assert!(server.documents.diagnostics_ready(&healthy_uri));
+    server.queue_snapshot_provider_sync(healthy.clone());
+    server.queue_snapshot_provider_sync(broken.clone());
+    drain_pending_provider_sync_for(server).await;
+    assert!(
+        server.pending_snapshot_provider_sync.contains(&broken),
+        "precondition: the failing carrier stays queued"
+    );
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&healthy),
+        "precondition: the healthy carrier settles"
+    );
+    assert!(
+        !server.documents.diagnostics_ready(&healthy_uri),
+        "precondition: the drain advanced the healthy document past its completed receipt"
+    );
+
+    fixture.provider.clear_calls();
+    let announced_before = fixture.sync_complete.lock().len();
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        !server.complete_post_scan(generation).await,
+        "level 2 must stay unannounced while provider work is pending"
+    );
+    assert!(
+        server.documents.diagnostics_ready(&healthy_uri),
+        "a healthy open document is owed a current receipt even while an unrelated carrier is pending"
+    );
+    assert!(
+        fixture.provider.calls().iter().any(
+            |call| matches!(call, MockCall::GetDiagnostics { path } if path == &healthy_provider_path)
+        ),
+        "the receipt must come from a fresh provider pull: {:?}",
+        fixture.provider.calls()
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(&broken));
+    assert_eq!(fixture.sync_complete.lock().len(), announced_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let pending = format!("{}/src/Consumer.vue", fixture.root);
+    let pending_uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let settled_uri = workspace_uri(&fixture.root, "src/Unrelated.vue");
+
+    server
+        .documents
+        .host()
+        .bump_diagnostics_generation(&pending);
+    server.queue_snapshot_provider_sync(pending.clone());
+    let announced_before = fixture.sync_complete.lock().len();
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(!server.complete_post_scan(generation).await);
+    assert!(
+        !server.documents.diagnostics_ready(&pending_uri),
+        "a document whose provider sync is still pending must not be certified"
+    );
+    assert!(server.documents.diagnostics_ready(&settled_uri));
+    assert_eq!(fixture.sync_complete.lock().len(), announced_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_announces_only_the_current_settled_generation() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    assert!(
+        !server.complete_post_scan(generation + 1).await,
+        "a generation that is not the live one must not announce or publish"
+    );
+
+    assert!(server.complete_post_scan(generation).await);
+    assert!(server.documents.diagnostics_ready(&uri));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fixture.sync_complete.lock().last() != Some(&generation) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("an empty pending set announces level 2");
+    assert!(
+        !fixture.sync_complete.lock().contains(&(generation + 1)),
+        "the superseded generation must never be announced"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

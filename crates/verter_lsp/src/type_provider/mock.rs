@@ -171,6 +171,7 @@ mod inner {
         /// that fail a kind's sync still want to observe whether a stale path of
         /// that kind was (wrongly) closed.
         fail_sync_paths: std::collections::HashSet<String>,
+        fail_carrier_metadata_sources: std::collections::HashSet<String>,
         hover_responses: Vec<(String, u32, Option<HoverInfo>)>,
         /// Scripted transient hover failures: while > 0, each `get_hover`
         /// RECORDS its call and returns `Err` (simulating a provider/transport
@@ -604,6 +605,16 @@ mod inner {
         /// while the API `.ts` succeeds) so tests can prove a kind's stale path
         /// is retained when only that kind's replacement sync fails. `close_file`
         /// is NOT gated, so a wrongful close of the stale path is still observed.
+        /// Test seam: every carrier-metadata registration for `source_path`
+        /// is recorded and then rejected.
+        pub fn set_fail_carrier_metadata_source(&self, source_path: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .fail_carrier_metadata_sources
+                .insert(source_path.to_string());
+        }
+
         pub fn set_fail_sync_path(&self, path: &str) {
             self.state
                 .lock()
@@ -1107,17 +1118,23 @@ mod inner {
             content: &str,
             project_file_name: &str,
         ) -> ProviderFuture<'_, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::RegisterCarrierMetadata {
+            let fail = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::RegisterCarrierMetadata {
                     source_path: source_path.to_string(),
                     companion_path: companion_path.to_string(),
                     content: content.to_string(),
                     project_file_name: project_file_name.to_string(),
                 });
-            Box::pin(async { Ok(()) })
+                state.fail_carrier_metadata_sources.contains(source_path)
+            };
+            Box::pin(async move {
+                if fail {
+                    Err(TypeProviderError::new("mock carrier metadata failure"))
+                } else {
+                    Ok(())
+                }
+            })
         }
 
         fn activate_carrier_member(
