@@ -489,9 +489,11 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         wake_rx,
         semantic_ready_rx,
         diagnostics_refresh_rx,
-        Arc::clone(&pending),
-        Arc::clone(&changes),
-        Arc::clone(&touches),
+        CoordinatorShared {
+            inbox: Arc::clone(&pending),
+            changes: Arc::clone(&changes),
+            touches: Arc::clone(&touches),
+        },
         Arc::new(deps),
         #[cfg(test)]
         receipts.clone(),
@@ -505,6 +507,13 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         #[cfg(test)]
         receipts,
     }
+}
+
+/// The state a [`SyncCoordinatorHandle`] shares with the coordinator loop.
+struct CoordinatorShared {
+    inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    changes: ChangeTracker,
+    touches: TouchTracker,
 }
 
 /// One in-flight provider pull. Dropping it — on completion OR cancellation —
@@ -558,12 +567,15 @@ async fn coordinator_loop(
     mut diagnostics_refresh_rx: tokio::sync::broadcast::Receiver<
         crate::documents::DiagnosticsRefresh,
     >,
-    inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
-    changes: ChangeTracker,
-    touches: TouchTracker,
+    shared: CoordinatorShared,
     deps: Arc<SyncCoordinatorDeps>,
     #[cfg(test)] receipts: CoordinatorReceipts,
 ) {
+    let CoordinatorShared {
+        inbox,
+        changes,
+        touches,
+    } = shared;
     let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
     // Map from canonical_id → (last_change_time, uri_str)
     let mut pending_files: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
