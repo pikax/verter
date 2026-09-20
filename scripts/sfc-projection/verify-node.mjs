@@ -40,6 +40,7 @@ import {
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
   STP10_MANDATORY_CASES,
+  STP11_MANDATORY_CASES,
   STP12_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
@@ -55,6 +56,7 @@ export {
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
   STP10_MANDATORY_CASES,
+  STP11_MANDATORY_CASES,
   STP12_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 };
@@ -1881,6 +1883,11 @@ export async function verifyNode(options) {
     errors.push(...stp10.errors);
   }
 
+  if (nodeId === "STP11") {
+    const stp11 = await evaluateStp11Node({ repoRoot });
+    errors.push(...stp11.errors);
+  }
+
   if (nodeId === "STP12") {
     const stp12 = await evaluateStp12Node({ repoRoot });
     errors.push(...stp12.errors);
@@ -2022,6 +2029,15 @@ async function evaluateStp10Node({ repoRoot }) {
   const protocol = await import(protocolHref);
   const stp10 = await protocol.evaluateStp10({ repoRoot });
   return { errors: stp10.errors };
+}
+
+async function evaluateStp11Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP11/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp11 = await protocol.evaluateStp11({ repoRoot });
+  return { errors: stp11.errors };
 }
 
 async function evaluateStp12Node({ repoRoot }) {
@@ -2227,10 +2243,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STS0 Svelte profile lock)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STS0 Svelte profile lock)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted

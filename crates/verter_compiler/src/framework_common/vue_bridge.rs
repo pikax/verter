@@ -3767,7 +3767,8 @@ mod tests {
 
         assert!(out.is_jsx, "a JavaScript SFC must yield JSX");
         assert!(
-            out.code.starts_with("// @ts-check\n/** @jsxImportSource vue */\n"),
+            out.code
+                .starts_with("// @ts-check\n/** @jsxImportSource vue */\n"),
             "the authored check directive must remain a leading pragma:\n{}",
             out.code
         );
@@ -3834,7 +3835,8 @@ mod tests {
 
         assert!(out.is_jsx, "a JavaScript SFC must yield JSX");
         assert!(
-            out.code.contains("@template T @param {T} value @returns {T}"),
+            out.code
+                .contains("@template T @param {T} value @returns {T}"),
             "the authored JSDoc generic must remain in the JavaScript projection:\n{}",
             out.code
         );

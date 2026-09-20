@@ -33,6 +33,10 @@ use crate::framework_common::projection_plan::{
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
+use crate::ide::vue_projection::script_setup::{
+    project_script_pair, ScriptBlockInput, ScriptProjectionFacts, SetupProjectionRefusal,
+};
+use crate::parser::types::RootNodeScript;
 use crate::standalone::{DirectCompileError, StandaloneCompiler};
 
 /// Vue IDE projection backend.
@@ -109,11 +113,7 @@ impl VueProjectionBackend {
     ) -> ProjectionPlan {
         match VueCarrierCompiler.parsed_sfc(artifact) {
             Some(parsed) => {
-                let exact_source = artifact
-                    .inventory()
-                    .source_spaces()
-                    .first()
-                    .is_some_and(|space| space.bytes().as_ref() == source);
+                let exact_source = artifact.carrier_source().as_ref() == source;
                 if !exact_source {
                     return incomplete_parse_snapshot_mismatch(canonical_id, source);
                 }
@@ -127,6 +127,40 @@ impl VueProjectionBackend {
             }
             None => incomplete_missing_parse(canonical_id, source),
         }
+    }
+
+    /// Statement-oriented script facts (module scope, setup statements,
+    /// universal generic binder) from the admitted parse. Dormant relative to
+    /// [`Self::project_ide`]; STP58 owns Vue atomic activation.
+    pub fn script_projection(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<ScriptProjectionFacts, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        let exact_source = artifact.carrier_source().as_ref() == source;
+        if !exact_source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let block = |script: &RootNodeScript| {
+            let span = script.content?;
+            Some(ScriptBlockInput {
+                content: source.get(span.start as usize..span.end as usize)?,
+                content_start: span.start,
+                lang: script.lang,
+            })
+        };
+        let setup = parsed.script_setup();
+        let generic = setup
+            .and_then(|s| s.generic)
+            .and_then(|span| source.get(span.start as usize..span.end as usize));
+        project_script_pair(
+            parsed.script().and_then(block),
+            setup.and_then(block),
+            generic,
+        )
     }
 
     /// Checking text and correspondence from one CodeTransform record, bound
@@ -172,11 +206,7 @@ impl ProjectionBackend for VueProjectionBackend {
             return Err(no_ide());
         };
         let requested_profile = requested_vue_syntax_profile(request)?;
-        let exact_source = artifact
-            .inventory()
-            .source_spaces()
-            .first()
-            .is_some_and(|space| space.bytes().as_ref() == source);
+        let exact_source = artifact.carrier_source().as_ref() == source;
         if !exact_source || artifact.syntax_profile() != &requested_profile {
             return Err(no_ide());
         }

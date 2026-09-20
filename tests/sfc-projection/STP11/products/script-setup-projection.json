@@ -1,0 +1,44 @@
+{
+  "schema": "ScriptSetupProjection",
+  "version": 1,
+  "product": "TsSetupProjection",
+  "node": "STP11",
+  "kind": "implementation",
+  "products": ["TsSetupProjection", "ModuleScopeProjection", "UniversalSetupBinder"],
+  "owner": "compiler.sfc-ts-projection:script",
+  "implementationHome": "crates/verter_compiler/src/ide/vue_projection/script_setup.rs",
+  "backendSurface": "VueProjectionBackend::script_projection (dormant vs project_ide; STP58 owns activation)",
+  "predecessors": {
+    "STP9": { "consumes": ["ProjectionPlan", "GenericBinderRef"] },
+    "STP10": { "consumes": ["ProjectionEmission", "MappingProduct"] }
+  },
+  "grammar": {
+    "parsesPerBlock": 1,
+    "secondTsxParseForTypeScriptGrammar": false,
+    "grammarFollowsAuthoredLang": true
+  },
+  "binder": {
+    "universal": true,
+    "specializedFromParentUse": false,
+    "bodyCheckedOnce": true
+  },
+  "body": {
+    "duplicateBodyInPublicAndChecking": false
+  },
+  "await": {
+    "topLevelAwaitExcludesNestedFunctions": true,
+    "instanceTypePromiseWrapped": false,
+    "templateCallbackReturnDomainChanged": false
+  },
+  "macros": {
+    "recognisedByResolution": true,
+    "sameNamedLexicalFunctionIsMacro": false
+  },
+  "deletionPopulationThisNode": [],
+  "retirementAtActivation": [
+    "TS-to-TSX angle-assertion repair (rewrite_ts_type_assertions)",
+    "duplicate setup-string wrappers"
+  ],
+  "svelteRoute": "preserved; STS1/STS15 own Svelte",
+  "runtimeActivationAuthorized": false
+}
