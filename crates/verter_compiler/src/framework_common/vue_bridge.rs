@@ -3842,7 +3842,7 @@ mod tests {
         );
         assert!(
             out.code
-                .contains("InstanceType<typeof import('./App.vue.verter')['default']>"),
+                .contains("InstanceType<typeof import('./App.vue.verter.js')['default']>"),
             "the JavaScript self-instance must use the public constructor bridge:\n{}",
             out.code
         );

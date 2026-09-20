@@ -69,7 +69,7 @@ export function validateProduct(product = loadProduct()) {
 export function runRustCases(repoRoot = REPO_ROOT) {
   const result = spawnSync(
     "cargo",
-    ["test", "-p", "verter_compiler", "--lib", "vue_compiler_js_", "--", "--test-threads=1"],
+    ["test", "-p", "verter_compiler", "--lib", "vue_compiler_js", "--", "--test-threads=1"],
     { cwd: repoRoot, encoding: "utf8", windowsHide: true, timeout: 300000, env: process.env },
   );
   return {
