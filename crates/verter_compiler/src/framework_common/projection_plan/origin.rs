@@ -325,13 +325,15 @@ impl ProjectionEmission {
         current: Option<(&ProjectionPlan, &str)>,
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<Self, EmissionRefusal> {
-        if previous.snapshot.is_some() || previous.mint.is_some() {
-            let Some((plan, canonical_id)) = current else {
-                return Err(EmissionRefusal::StaleMap);
-            };
+        if let Some((plan, canonical_id)) = current {
             if !plan_matches_transform(plan, canonical_id, transform.original()) {
                 return Err(EmissionRefusal::StaleMap);
             }
+        }
+        if previous.snapshot.is_some() || previous.mint.is_some() {
+            let Some((plan, _)) = current else {
+                return Err(EmissionRefusal::StaleMap);
+            };
             if previous.snapshot.as_ref() != Some(&plan.snapshot)
                 || previous.input_basis.as_ref() != Some(&plan.input_basis)
             {
@@ -498,15 +500,13 @@ pub fn projected_class_for_emit_op(
                 end: source.end.0,
             },
         ),
-        EmitOp::MoveOriginal { source, .. } => {
-            vec![(
-                MappingSpan {
-                    start: 0,
-                    end: source.len(),
-                },
-                ProjectedClass::Relocated,
-            )]
-        }
+        EmitOp::MoveOriginal { source, .. } => moved_classes_from_mapping(
+            &MappingProduct::of(transform),
+            MappingSpan {
+                start: source.start.0,
+                end: source.end.0,
+            },
+        ),
         EmitOp::InsertMapped {
             text,
             content_offset,
@@ -698,7 +698,7 @@ fn overlapping_virtual_spans_with_work(
             if spans_overlap(previous.generated, observation.generated) {
                 return (Some((previous.generated, observation.generated)), work);
             }
-            if observation.generated.end > previous.generated.end {
+            if observation.generated.end >= previous.generated.end {
                 last = Some(observation);
             }
         } else {
@@ -795,8 +795,60 @@ fn preserved_classes_from_mapping(
     out
 }
 
+fn moved_classes_from_mapping(
+    mapping: &MappingProduct,
+    carrier: MappingSpan,
+) -> Vec<(MappingSpan, ProjectedClass)> {
+    if carrier.start >= carrier.end {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut local_offset = 0u32;
+    for region in mapping.projected() {
+        let Some(region_carrier) = region.carrier else {
+            continue;
+        };
+        let overlap_start = carrier.start.max(region_carrier.start);
+        let overlap_end = carrier.end.min(region_carrier.end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let (len, class) = if matches!(
+            region.class,
+            ProjectedClass::Identity | ProjectedClass::Relocated
+        ) && region.generated.len() == region_carrier.len()
+        {
+            let len = overlap_end - overlap_start;
+            (len, ProjectedClass::Relocated)
+        } else if overlap_start == region_carrier.start && overlap_end == region_carrier.end {
+            (region.generated.len(), region.class)
+        } else {
+            continue;
+        };
+        if len > 0 {
+            out.push((
+                MappingSpan {
+                    start: local_offset,
+                    end: local_offset + len,
+                },
+                class,
+            ));
+            local_offset += len;
+        }
+    }
+    out
+}
+
 fn spans_overlap(a: MappingSpan, b: MappingSpan) -> bool {
-    a.start < b.end && b.start < a.end
+    if a.is_empty() && b.is_empty() {
+        a.start == b.start
+    } else if a.is_empty() {
+        a.start >= b.start && a.start < b.end
+    } else if b.is_empty() {
+        b.start >= a.start && b.start < a.end
+    } else {
+        a.start < b.end && b.start < a.end
+    }
 }
 
 fn slice_bytes(text: &str, span: MappingSpan) -> &str {
@@ -2520,5 +2572,166 @@ mod tests {
             ),
             "covering non-edit intervals still overlap: {nested_cover:?}"
         );
+    }
+
+    #[test]
+    fn stp10_overlap_rejects_point_observations_at_same_point() {
+        let allocator = Allocator::default();
+        let ct = CodeTransform::new("abcdef", &allocator);
+        let origin = ProjectionOrigin::empty();
+
+        // Two points at the exact same point [2, 2)
+        let same_points = vec![
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 2, end: 2 },
+                ObservationRole::Hover,
+                origin.clone(),
+            ),
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 2, end: 2 },
+                ObservationRole::Definition,
+                origin.clone(),
+            ),
+        ];
+        let rejected = ProjectionEmission::from_operation(&ct, same_points);
+        assert!(
+            matches!(
+                rejected,
+                Err(EmissionRefusal::OverlappingVirtualSpans { .. })
+            ),
+            "two points at identical offset must overlap: {rejected:?}"
+        );
+
+        // Point at start of non-empty interval [2, 2) and [2, 5)
+        let point_at_start = vec![
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 2, end: 2 },
+                ObservationRole::Hover,
+                origin.clone(),
+            ),
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 2, end: 5 },
+                ObservationRole::Definition,
+                origin.clone(),
+            ),
+        ];
+        let rejected_start = ProjectionEmission::from_operation(&ct, point_at_start);
+        assert!(
+            matches!(
+                rejected_start,
+                Err(EmissionRefusal::OverlappingVirtualSpans { .. })
+            ),
+            "point at start of range must overlap: {rejected_start:?}"
+        );
+
+        // Point at end of non-empty interval [5, 5) and [2, 5) is non-overlapping (half-open)
+        let point_at_end = vec![
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 2, end: 5 },
+                ObservationRole::Hover,
+                origin.clone(),
+            ),
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 5, end: 5 },
+                ObservationRole::Definition,
+                origin.clone(),
+            ),
+        ];
+        let control_end = ProjectionEmission::from_operation(&ct, point_at_end);
+        assert!(
+            control_end.is_ok(),
+            "point at end boundary must not overlap: {control_end:?}"
+        );
+
+        // Distinct points [2, 2) and [4, 4) do not overlap
+        let distinct_points = vec![
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 2, end: 2 },
+                ObservationRole::Hover,
+                origin.clone(),
+            ),
+            RoleQualifiedObservation::new(
+                MappingSpan { start: 4, end: 4 },
+                ObservationRole::Definition,
+                origin,
+            ),
+        ];
+        let control_points = ProjectionEmission::from_operation(&ct, distinct_points);
+        assert!(
+            control_points.is_ok(),
+            "distinct points must not overlap: {control_points:?}"
+        );
+    }
+
+    #[test]
+    fn move_original_class_follows_mapping_with_overwritten_replacement() {
+        let allocator = Allocator::default();
+        let mut ct = CodeTransform::new("abcdef", &allocator);
+        ct.overwrite(0, 3, "XY");
+        ct.move_slice(0, 3, 6);
+        assert_eq!(ct.build_string(), "defXY");
+
+        let r#move = EmitOp::MoveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(3),
+            },
+            at: SourceByteOffset(6),
+        };
+        assert_eq!(
+            projected_class_for_emit_op(&r#move, &ct),
+            vec![(MappingSpan { start: 0, end: 2 }, ProjectedClass::Rewritten)],
+            "moved overwritten content must report Rewritten with replacement length"
+        );
+
+        let mut control = CodeTransform::new("abcdef", &allocator);
+        control.move_slice(0, 3, 6);
+        assert_eq!(control.build_string(), "defabc");
+        assert_eq!(
+            projected_class_for_emit_op(&r#move, &control),
+            vec![(MappingSpan { start: 0, end: 3 }, ProjectedClass::Relocated)],
+            "untouched moved content must report Relocated with original length"
+        );
+    }
+
+    #[test]
+    fn stp10_reuse_mapping_unbound_rejects_mismatched_plan_source_or_canonical() {
+        let allocator = Allocator::default();
+        let ct_foo = CodeTransform::new("foo", &allocator);
+        let unbound = ProjectionEmission::from_operation(&ct_foo, Vec::new()).expect("unbound");
+        assert!(unbound.snapshot().is_none());
+
+        let foreign_plan = plan_from_source("file:///different.vue", FOREIGN_SFC);
+        // Supplying a plan for different source must be rejected as StaleMap
+        let mismatched_source = ProjectionEmission::reuse_mapping(
+            &unbound,
+            &ct_foo,
+            Some((&foreign_plan, "file:///different.vue")),
+            Vec::new(),
+        );
+        assert!(
+            matches!(mismatched_source, Err(EmissionRefusal::StaleMap)),
+            "reuse with mismatched plan source must fail: {mismatched_source:?}"
+        );
+
+        let plan_foo = plan_from_source("file:///foo.vue", "foo");
+        let mismatched_canonical = ProjectionEmission::reuse_mapping(
+            &unbound,
+            &ct_foo,
+            Some((&plan_foo, "file:///other.vue")),
+            Vec::new(),
+        );
+        assert!(
+            matches!(mismatched_canonical, Err(EmissionRefusal::StaleMap)),
+            "reuse with mismatched canonical must fail: {mismatched_canonical:?}"
+        );
+
+        let control = ProjectionEmission::reuse_mapping(
+            &unbound,
+            &ct_foo,
+            Some((&plan_foo, "file:///foo.vue")),
+            Vec::new(),
+        );
+        assert!(control.is_ok(), "matching plan succeeds: {control:?}");
     }
 }
