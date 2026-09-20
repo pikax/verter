@@ -699,7 +699,7 @@ impl ProjectSemanticDispatch<'_> {
         let view = SemanticReadView::pin(store);
         let desc = *view.descriptor(descriptor)?;
         let template = *view.template(desc.template)?;
-        let recipe = view.recipe(template.result_recipe)?.clone();
+        let recipe = *view.recipe(template.result_recipe)?;
         let return_type = if demand.reads_return() {
             let node = self.recipe_return(types, &view, descriptor, call_substitution, &recipe)?;
             Some(store.intern_type_token(node, None)?)
@@ -849,7 +849,7 @@ impl ProjectSemanticDispatch<'_> {
                 for edge in sequence.edges.iter() {
                     let desc = view.descriptor(edge.residual)?;
                     let template = view.template(desc.template)?;
-                    let recipe = view.recipe(template.result_recipe)?.clone();
+                    let recipe = *view.recipe(template.result_recipe)?;
                     returns.push(self.recipe_return(types, view, edge.residual, call, &recipe)?);
                 }
                 let is_union =
@@ -913,7 +913,7 @@ impl ProjectSemanticDispatch<'_> {
                     .ok()
                     .and_then(|record| record.return_type)
                     .and_then(|token| store.type_token_node(token).ok());
-                let roots = self.observed_self_roots_from_nodes(return_node.into_iter());
+                let roots = self.observed_self_roots_from_nodes(return_node);
                 super::walk::QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::SignatureResult(
                         crate::signature_kernel::SignatureResultValue { result: value },

@@ -443,6 +443,36 @@ fn slot_type_identical(
     }
 }
 
+/// Binder-space equality: the same count, and every constraint and default
+/// identical under the positional correspondence. Returns the correspondence
+/// (source binder node, target binder node) when the spaces match.
+fn binders_identical(
+    types: &dyn DiscoveryTypes,
+    s: &Loaded<'_>,
+    t: &Loaded<'_>,
+) -> Res<Option<Vec<(SemanticNodeId, SemanticNodeId)>>> {
+    if s.space.binders.len() != t.space.binders.len() {
+        return Ok(None);
+    }
+    let corr: Vec<(SemanticNodeId, SemanticNodeId)> = s
+        .binder_nodes()
+        .iter()
+        .zip(t.binder_nodes().iter())
+        .map(|((_, a), (_, b))| (*a, *b))
+        .collect();
+    let unknown = types.unknown();
+    for (a, b) in s.space.binders.iter().zip(t.space.binders.iter()) {
+        let ac = a.constraint.unwrap_or(unknown);
+        let bc = b.constraint.unwrap_or(unknown);
+        let ad = a.default.unwrap_or(unknown);
+        let bd = b.default.unwrap_or(unknown);
+        if !ident(types, ac, bc, &corr)? || !ident(types, ad, bd, &corr)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(corr))
+}
+
 /// `compareSignaturesIdentical`: arity match (or partial), binder
 /// constraint/default equality under a positional binder correspondence,
 /// receiver, every target position, and (unless ignored) the result.
@@ -470,26 +500,9 @@ pub fn signatures_identical(
     {
         return Ok(false);
     }
-    if s.space.binders.len() != t.space.binders.len() {
+    let Some(corr) = binders_identical(types, &s, &t)? else {
         return Ok(false);
-    }
-    let sb = s.binder_nodes();
-    let tb = t.binder_nodes();
-    let corr: Vec<(SemanticNodeId, SemanticNodeId)> = sb
-        .iter()
-        .zip(tb.iter())
-        .map(|((_, a), (_, b))| (*a, *b))
-        .collect();
-    for (a, b) in s.space.binders.iter().zip(t.space.binders.iter()) {
-        let unknown = types.unknown();
-        let ac = a.constraint.unwrap_or(unknown);
-        let bc = b.constraint.unwrap_or(unknown);
-        let ad = a.default.unwrap_or(unknown);
-        let bd = b.default.unwrap_or(unknown);
-        if !ident(types, ac, bc, &corr)? || !ident(types, ad, bd, &corr)? {
-            return Ok(false);
-        }
-    }
+    };
     if !options.ignore_this_types {
         if let (Some(a), Some(b)) = (s.receiver, t.receiver) {
             if !ident(types, a.ty, b.ty, &corr)? {
@@ -886,32 +899,14 @@ fn combine_union_signatures(
     let view = SemanticReadView::pin(store);
     let l = load(&view, left)?;
     let r = load(&view, right)?;
-    if !l.space.binders.is_empty() && !r.space.binders.is_empty() {
-        if !signatures_identical(
-            store,
-            types,
-            left,
-            right,
-            MatchOptions {
-                partial_match: true,
-                ignore_this_types: true,
-                ignore_return_types: true,
-            },
-        )? && l.space.binders.len() != r.space.binders.len()
-        {
-            return Ok(None);
-        }
-        if l.space.binders.len() != r.space.binders.len() {
-            return Ok(None);
-        }
-    }
     let map_right: Vec<(SemanticNodeId, SemanticNodeId)> =
         if !l.space.binders.is_empty() && !r.space.binders.is_empty() {
-            r.binder_nodes()
-                .iter()
-                .zip(l.binder_nodes().iter())
-                .map(|((_, b), (_, a))| (*b, *a))
-                .collect()
+            // Both generic: the binder spaces must be identical, and the
+            // right side's binders map onto the left's.
+            match binders_identical(types, &l, &r)? {
+                Some(corr) => corr.into_iter().map(|(a, b)| (b, a)).collect(),
+                None => return Ok(None),
+            }
         } else {
             Vec::new()
         };
@@ -1045,7 +1040,7 @@ fn combine_union_signatures(
         None,
     )?;
     let base = if l.space.binders.is_empty() { &r } else { &l };
-    let recipe = store.intern_recipe(l.recipe.clone(), None)?;
+    let recipe = store.intern_recipe(*l.recipe, None)?;
     let template = store.intern_template(
         SignatureTemplate {
             input_shape: shape,

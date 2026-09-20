@@ -109,7 +109,7 @@ fn recipe_of(
     let view = SemanticReadView::pin(store);
     let descriptor = view.descriptor(candidate.signature).unwrap();
     let template = view.template(descriptor.template).unwrap();
-    view.recipe(template.result_recipe).unwrap().clone()
+    *view.recipe(template.result_recipe).unwrap()
 }
 
 fn identity_substitution(
@@ -738,5 +738,331 @@ fn mixin_constructor_intersection_composes_instance_types() {
     assert_eq!(
         node, expected,
         "own instance first, then the mixin instance"
+    );
+}
+
+fn signature_set_of(
+    d: &ProjectSemanticDispatch<'_>,
+    subject: SemanticNodeId,
+    context: SemanticContextId,
+) -> SignatureSetRef {
+    use crate::semantic_query::{
+        QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+    };
+    match d.execute(SemanticQueryKey::SignaturesOfType {
+        subject,
+        kind: SignatureKind::Call,
+        context,
+    }) {
+        QueryResult::Value(output) => match output.value {
+            SemanticQueryValue::SignatureSet(value) => value.set,
+            other => panic!("expected a signature set, got {other:?}"),
+        },
+        other => panic!("expected a value, got {other:?}"),
+    }
+}
+
+/// The query rides the family memo: an identical demand is warm, and two
+/// semantic contexts (here differing only in `strictNullChecks`) are two
+/// families that never serve one another.
+#[test]
+fn signatures_of_type_do_not_warm_hit_across_semantic_contexts() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let string = prim(&d, PrimitiveKind::String);
+    let sig = signature(
+        &d,
+        "warm",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, true, false)],
+        vec![],
+        string,
+    );
+    let store = d.graph().signature_store();
+    let production = SemanticContextId::production();
+    let mut options = SemanticContext::production();
+    options.effective_semantic_options.strict_null_checks = false;
+    let loose = options.intern();
+
+    let before = d.graph().stats_snapshot();
+    let first = signature_set_of(&d, sig, production);
+    let after_cold = d.graph().stats_snapshot();
+    assert_eq!(after_cold.misses, before.misses + 1);
+    let second = signature_set_of(&d, sig, production);
+    let after_warm = d.graph().stats_snapshot();
+    assert_eq!(
+        first, second,
+        "an identical demand reuses the published set"
+    );
+    assert_eq!(
+        after_warm.hits,
+        after_cold.hits + 1,
+        "identical demand is a warm hit"
+    );
+    assert_eq!(after_warm.misses, after_cold.misses);
+
+    let other = signature_set_of(&d, sig, loose);
+    let after_other = d.graph().stats_snapshot();
+    assert_eq!(
+        after_other.misses,
+        after_warm.misses + 1,
+        "a different semantic context is a cold build, never a warm hit"
+    );
+    assert_ne!(
+        first, other,
+        "the effective options are part of the candidate's shape"
+    );
+    let strict_first = candidates(first, store).remove(0);
+    let loose_first = candidates(other, store).remove(0);
+    assert_ne!(strict_first.signature, loose_first.signature);
+}
+
+/// Two demands on one descriptor that differ only in projection are two
+/// keys and two cold builds; an identical demand is warm.
+#[test]
+fn read_signature_result_distinct_demands_do_not_alias() {
+    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let string = prim(&d, PrimitiveKind::String);
+    let sig = signature(
+        &d,
+        "demand",
+        0,
+        SignatureKind::Call,
+        vec![param(string)],
+        vec![],
+        string,
+    );
+    let store = d.graph().signature_store();
+    let candidate = candidates(ready(discover(&d, sig, SignatureKind::Call)), store).remove(0);
+    let call = identity_substitution(store, candidate);
+    let key = |projection| crate::signature_kernel::ReadSignatureResultKey {
+        descriptor: candidate.signature,
+        call_substitution: call,
+        projection,
+        evaluation: CONTEXT_FREE_EVALUATION,
+        semantic_context: SemanticContextId::production(),
+    };
+    assert_ne!(key(ResultDemand::Return), key(ResultDemand::Both));
+    let run = |projection| {
+        let result = d.execute(SemanticQueryKey::ReadSignatureResult(key(projection)));
+        assert!(matches!(result, QueryResult::Value(_)), "got {result:?}");
+    };
+    let before = d.graph().stats_snapshot();
+    run(ResultDemand::Return);
+    run(ResultDemand::Both);
+    let cold = d.graph().stats_snapshot();
+    assert_eq!(cold.misses, before.misses + 2);
+    run(ResultDemand::Return);
+    let warm = d.graph().stats_snapshot();
+    assert_eq!(warm.hits, cold.hits + 1);
+    assert_eq!(warm.misses, cold.misses);
+}
+
+fn generic_identity(
+    d: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    constraint: Option<SemanticNodeId>,
+) -> SemanticNodeId {
+    let t = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic(name),
+        param_index: 0,
+        constraint,
+        default: None,
+        display_name: Arc::from(name),
+    });
+    signature(
+        d,
+        name,
+        0,
+        SignatureKind::Call,
+        vec![param(t)],
+        vec![TypeParamDecl {
+            name: Arc::from(name),
+            param: t,
+            constraint,
+            default: None,
+            is_const: false,
+        }],
+        t,
+    )
+}
+
+/// Generic signatures union only on an EXACT match under the positional
+/// binder correspondence: `<T>(x: T) => T` and `<U>(x: U) => U` are one
+/// candidate; a differently constrained binder is not the same signature.
+#[test]
+fn generic_union_members_match_exactly_under_binder_correspondence() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let string = prim(&d, PrimitiveKind::String);
+    let store = d.graph().signature_store();
+
+    let t = generic_identity(&d, "T", None);
+    let u = generic_identity(&d, "U", None);
+    let same = d.intern_normalized_union_or_intersection(
+        &[callable(&d, vec![t], vec![]), callable(&d, vec![u], vec![])],
+        true,
+    );
+    let list = candidates(ready(discover(&d, same, SignatureKind::Call)), store);
+    assert_eq!(list.len(), 1);
+    assert!(matches!(
+        recipe_of(store, list[0]),
+        SignatureResultRecipe::UnionCommon { .. }
+    ));
+
+    let constrained = generic_identity(&d, "S", Some(string));
+    let differ = d.intern_normalized_union_or_intersection(
+        &[
+            callable(&d, vec![t], vec![]),
+            callable(&d, vec![constrained], vec![]),
+        ],
+        true,
+    );
+    assert_eq!(
+        ready(discover(&d, differ, SignatureKind::Call)),
+        SignatureSetRef::Empty,
+        "non-identical generic binders neither match nor synthesize"
+    );
+}
+
+const AMBIENT_LIB: &str = r#"
+interface String {
+  (radix: number): boolean;
+  readonly length: number;
+}
+interface Number {
+  toFixed(): string;
+}
+"#;
+
+fn project_config(root: &str) -> verter_workspace::VfsProjectConfig {
+    verter_workspace::VfsProjectConfig {
+        root: root.to_string(),
+        rank: verter_workspace::ProjectRank::Explicit,
+        tsconfig_path: Some(format!("{root}/tsconfig.json")),
+        root_files: vec![],
+        extensions: vec![".ts".into(), ".d.ts".into()],
+        workspace_root: root.to_string(),
+        workspace_aliases: vec![],
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: verter_workspace::configured_membership_match_all_under_root(
+            &verter_workspace::CanonicalPath::new(root),
+        ),
+    }
+}
+
+fn upsert_ts(host: &VerterHost, canonical: &str, source: &str, ambient: bool) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: if ambient {
+                None
+            } else {
+                Some(canonical.to_string())
+            },
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("the fixture serves");
+}
+
+fn project_host(ambient_lib: Option<&str>) -> Arc<VerterHost> {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.set_project_graph(verter_workspace::ProjectGraph::from_configs(vec![
+        project_config("/ws"),
+    ]));
+    let mut virtual_id = None;
+    if let Some(lib) = ambient_lib {
+        verter_workspace::WorkspaceAccess::register_ambient_lib(
+            workspace.as_ref(),
+            verter_workspace::AmbientLibSpec {
+                project_id: Some(verter_workspace::workspace_snapshot::ProjectId(0)),
+                canonical_id: Arc::from("lib.d.ts"),
+                source: Arc::from(lib),
+            },
+        )
+        .expect("the ambient corpus registers");
+        let key = verter_workspace::WorkspaceRead::project_stable_key(
+            workspace.as_ref(),
+            verter_workspace::workspace_snapshot::ProjectId(0),
+        )
+        .expect("project key");
+        virtual_id = Some(verter_workspace::ambient_virtual_canonical_id(
+            key, "lib.d.ts",
+        ));
+    }
+    let access: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
+    let host = Arc::new(VerterHost::new(HostConfig::default(), access));
+    if let (Some(id), Some(lib)) = (virtual_id, ambient_lib) {
+        upsert_ts(&host, &id, lib, true);
+    }
+    upsert_ts(&host, "/ws/main.ts", "export const w = 1;\n", false);
+    host
+}
+
+/// Apparent primitives read the resolved global population: a call
+/// signature merged into the global `String` is a `string` candidate, a
+/// wrapper that declares none is a complete negative, and an absent
+/// population (`noLib`) is the checker's empty apparent type — never a
+/// fabricated signature and never an incomplete outcome.
+#[test]
+fn apparent_primitives_read_the_resolved_global_population() {
+    let with_lib = project_host(Some(AMBIENT_LIB));
+    let store_view = with_lib.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&with_lib, &store_view, overlay);
+    let d = ProjectSemanticDispatch::new(&ctx);
+    let _scope =
+        super::LexicalDemandScopeGuard::push(&d.lexical_demand_scope, Arc::from("/ws/main.ts"));
+    let store = d.graph().signature_store();
+    let string = prim(&d, PrimitiveKind::String);
+    let number = prim(&d, PrimitiveKind::Number);
+    let literal = d.graph().intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("x".into()),
+    ));
+
+    assert_eq!(
+        count(ready(discover(&d, string, SignatureKind::Call)), store),
+        1
+    );
+    assert_eq!(
+        count(ready(discover(&d, literal, SignatureKind::Call)), store),
+        1
+    );
+    assert_eq!(
+        ready(discover(&d, string, SignatureKind::Construct)),
+        SignatureSetRef::Empty
+    );
+    assert_eq!(
+        ready(discover(&d, number, SignatureKind::Call)),
+        SignatureSetRef::Empty
+    );
+
+    let without_lib = project_host(None);
+    let store_view = without_lib.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&without_lib, &store_view, overlay);
+    let d = ProjectSemanticDispatch::new(&ctx);
+    let _scope =
+        super::LexicalDemandScopeGuard::push(&d.lexical_demand_scope, Arc::from("/ws/main.ts"));
+    let string = prim(&d, PrimitiveKind::String);
+    assert_eq!(
+        ready(discover(&d, string, SignatureKind::Call)),
+        SignatureSetRef::Empty
+    );
+
+    // No request or demand scope at all: the population cannot be consulted,
+    // which is an incomplete outcome and never an Empty.
+    drop(_scope);
+    assert_eq!(
+        discover(&d, string, SignatureKind::Call),
+        QueryOutcome::Incomplete(IncompleteReason::UnsettledInput)
     );
 }

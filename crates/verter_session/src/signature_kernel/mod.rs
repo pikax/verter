@@ -59,6 +59,8 @@ pub use substitution::{
 pub mod test_support;
 
 #[cfg(test)]
+mod discovery_tests;
+#[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]
 mod positional_tests;
