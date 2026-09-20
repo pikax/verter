@@ -5998,6 +5998,144 @@ fn mixed_broken_and_valid_interpolations() {
 // ── Fix 3: v-slot scoped parameter typing ─────────────────────────
 
 #[test]
+fn empty_scoped_slot_retains_its_inferred_instance() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp :value="value" v-slot="{ item }"></MyComp></template>"#,
+        &[("value", BindingType::SetupConst)],
+    );
+    assert!(
+        result.contains("const ___VERTER___slotInstance"),
+        "{result}"
+    );
+    assert!(
+        result.contains("const { item } = ___VERTER___extractArgumentsFromRenderSlot"),
+        "{result}"
+    );
+    assert_valid_tsx(&result, "empty-scoped-slot");
+}
+
+#[test]
+fn incomplete_scoped_slot_does_not_reference_an_undeclared_instance() {
+    for source in [
+        r#"<template><MyComp :value="value" v-slot="{ item }" /></template>"#,
+        r#"<template><MyComp :value="value" v-slot="{ item }"></template>"#,
+    ] {
+        let result = gen_tsx_template_with_bindings(source, &[("value", BindingType::SetupConst)]);
+        assert!(
+            !result.contains("extractArgumentsFromRenderSlot(___VERTER___slotInstance"),
+            "{result}"
+        );
+    }
+}
+
+#[test]
+fn component_props_use_parent_scope_before_own_slot_bindings() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp :value="value" v-slot="{ value }">{{ value }}</MyComp></template>"#,
+        &[("value", BindingType::Props)],
+    );
+    assert!(
+        result.contains("value={__props.value}"),
+        "parent prop must retain its binding: {result}"
+    );
+    assert!(
+        result.contains("\"value\": (__props.value)"),
+        "slot inference must read the parent prop: {result}"
+    );
+    assert!(
+        result.contains("{ const { value } = ___VERTER___extractArgumentsFromRenderSlot"),
+        "the slot binding must be scoped after its initializer: {result}"
+    );
+    assert!(
+        result.contains("<>{ value }</>"),
+        "the child still reads its slot local: {result}"
+    );
+}
+
+#[test]
+fn named_slot_loop_cannot_shadow_the_parent_inference_input() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp :value="item"><template v-for="item in rows" #default="{ value }">{{ value }}</template></MyComp></template>"#,
+        &[
+            ("item", BindingType::SetupConst),
+            ("rows", BindingType::SetupConst),
+        ],
+    );
+    let capture = result
+        .find("componentConstructor(MyComp)")
+        .expect("parent inference");
+    let child_loop = result.find(".map(").expect("named slot loop");
+    assert!(
+        capture < child_loop,
+        "the parent input must be captured before the shadowing loop: {result}"
+    );
+    assert!(result.contains("\"value\": (item)"), "{result}");
+}
+
+#[test]
+fn slot_inference_matches_dot_bind_shorthand() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp .value="value" .model-value v-slot="{ item }">{{ item }}</MyComp></template>"#,
+        &[
+            ("value", BindingType::SetupConst),
+            ("modelValue", BindingType::SetupConst),
+        ],
+    );
+    assert!(result.contains("\"value\": (value)"), "{result}");
+    assert!(result.contains("\"modelValue\": (modelValue)"), "{result}");
+    assert!(
+        !result.contains("...(value)"),
+        "dot binds are properties, not spreads: {result}"
+    );
+}
+
+#[test]
+fn scoped_slots_infer_from_named_parent_props_in_the_loop_scope() {
+    let result = gen_tsx_template(
+        r#"<template><div v-for="row in rows"><MyComp :options="row.options" v-model="row.selected"><template #selected="{ value }">{{ value }}</template></MyComp></div><Other /></template>"#,
+    );
+    assert!(
+        result.contains("new (___VERTER___componentConstructor(MyComp))({\"options\": (row.options), \"modelValue\": (row.selected)})"),
+        "slot inference must retain the named-slot parent's actual props and loop locals: {result}"
+    );
+    assert!(!result.contains("instantiateComponent(MyComp, {})"));
+}
+
+#[test]
+fn scoped_slot_inference_retains_bound_spreads_shorthand_and_camelized_keys() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp v-bind="props" :options :model-value label="pick" v-slot="{ item }">{{ item }}</MyComp></template>"#,
+        &[
+            ("props", BindingType::SetupConst),
+            ("options", BindingType::SetupConst),
+            ("modelValue", BindingType::SetupConst),
+        ],
+    );
+    assert!(result.contains("componentConstructor(MyComp)"), "{result}");
+    assert!(result.contains("...(props)"), "{result}");
+    assert!(result.contains("\"options\": (options)"), "{result}");
+    assert!(result.contains("\"modelValue\": (modelValue)"), "{result}");
+    assert!(result.contains("\"label\": \"pick\""), "{result}");
+}
+
+#[test]
+fn named_slot_inference_uses_dynamic_prop_keys_and_named_models() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><MyComp :[propName]="value" v-model:selected="selected" :model-value><template #default="{ item }">{{ item }}</template></MyComp></template>"#,
+        &[
+            ("propName", BindingType::SetupConst),
+            ("value", BindingType::SetupConst),
+            ("selected", BindingType::SetupConst),
+            ("modelValue", BindingType::SetupConst),
+        ],
+    );
+    assert!(result.contains("[propName]: (value)"), "{result}");
+    assert!(!result.contains("[[propName]]"), "{result}");
+    assert!(result.contains("\"selected\": (selected)"), "{result}");
+    assert!(result.contains("\"modelValue\": (modelValue)"), "{result}");
+}
+
+#[test]
 fn v_slot_params_arrow_wrapper() {
     // Component v-slot with params: should generate IIFE with extractArgumentsFromRenderSlot
     let result = gen_tsx_template(
@@ -6014,8 +6152,8 @@ fn v_slot_params_arrow_wrapper() {
         "should use extractArgumentsFromRenderSlot for slot typing: {result}"
     );
     assert!(
-        result.contains("instantiateComponent"),
-        "should use instantiateComponent for component instance: {result}"
+        result.contains("componentConstructor"),
+        "should retain the constructor for component instance: {result}"
     );
     assert!(
         result.contains(r#""default""#),

@@ -3163,34 +3163,8 @@ impl TypeProvider for TsgoTypeProvider {
     }
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-        let path_owned = path.to_string();
-        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
-        Box::pin(async move {
-            // Use pull diagnostics (textDocument/diagnostic) — TSGO supports this
-            // model rather than push (publishDiagnostics). Pull is synchronous:
-            // we send a request and get the diagnostics back directly.
-            match self.get_diagnostics_strict(&path_owned).await {
-                Ok(diags) => {
-                    tracing::debug!(
-                        "get_diagnostics: pull returned {} diagnostics for {}",
-                        diags.len(),
-                        path_owned
-                    );
-                    Ok(diags)
-                }
-                Err(e) => {
-                    // Pull diagnostics failed — fall back to push diagnostics cache.
-                    tracing::debug!(
-                        "get_diagnostics: pull failed ({e}), falling back to cache for {}",
-                        path_owned
-                    );
-                    let cache_key = normalize_file_uri(&Self::path_to_uri(&path_owned));
-                    let cache = diagnostics_cache.lock().await;
-                    let result = cache.get(&cache_key).cloned().unwrap_or_default();
-                    Ok(result)
-                }
-            }
-        })
+        let path = path.to_string();
+        Box::pin(async move { self.get_diagnostics_strict(&path).await })
     }
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
@@ -3912,7 +3886,6 @@ impl TypeProvider for TsgoTypeProvider {
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             let result = transport
                 .request_with_priority(
@@ -3943,11 +3916,7 @@ impl TypeProvider for TsgoTypeProvider {
                         })
                         .collect())
                 }
-                Err(_) => {
-                    let cache = diagnostics_cache.lock().await;
-                    let normalized = normalize_file_uri(&Self::path_to_uri(&path_owned));
-                    Ok(cache.get(&normalized).cloned().unwrap_or_default())
-                }
+                Err(error) => Err(error),
             }
         })
     }

@@ -524,7 +524,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     Ok(u) => u,
                     Err(_) => continue,
                 };
-                let Some(snapshot) = documents.snapshot_identity(&uri) else {
+                let Some(publication) = documents.begin_diagnostics_publication(&uri) else {
                     continue;
                 };
 
@@ -547,7 +547,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
                 let diagnostics = if let Some(tp) = &type_provider {
                     let encoding = position_encoding.read().clone();
-                    crate::sync_coordinator::carrier_provider_diagnostics(
+                    crate::sync_coordinator::provider_diagnostics_batch(
                         &documents,
                         &provider_sync_states,
                         tp.as_ref(),
@@ -557,14 +557,19 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     )
                     .await
                 } else {
-                    verter_diags
+                    crate::sync_coordinator::ProviderDiagnosticBatch::complete(verter_diags)
                 };
 
-                if documents.snapshot_identity_is_current(&uri, &snapshot) {
-                    client
-                        .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
-                        .await;
-                }
+                documents
+                    .publish_diagnostics(
+                        &client,
+                        &uri,
+                        &publication,
+                        diagnostics.diagnostics,
+                        diagnostics.complete,
+                        diagnostics.surface,
+                    )
+                    .await;
             }
 
             client
@@ -592,7 +597,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 Ok(u) => u,
                 Err(_) => continue,
             };
-            let Some(snapshot) = documents.snapshot_identity(&uri) else {
+            let Some(publication) = documents.begin_diagnostics_publication(&uri) else {
                 continue;
             };
 
@@ -615,7 +620,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
             let diagnostics = if let Some(tp) = &type_provider {
                 let encoding = position_encoding.read().clone();
-                crate::sync_coordinator::carrier_provider_diagnostics(
+                crate::sync_coordinator::provider_diagnostics_batch(
                     &documents,
                     &provider_sync_states,
                     tp.as_ref(),
@@ -625,14 +630,19 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 )
                 .await
             } else {
-                verter_diags
+                crate::sync_coordinator::ProviderDiagnosticBatch::complete(verter_diags)
             };
 
-            if documents.snapshot_identity_is_current(&uri, &snapshot) {
-                client
-                    .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
-                    .await;
-            }
+            documents
+                .publish_diagnostics(
+                    &client,
+                    &uri,
+                    &publication,
+                    diagnostics.diagnostics,
+                    diagnostics.complete,
+                    diagnostics.surface,
+                )
+                .await;
         }
     }
 

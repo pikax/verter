@@ -77,6 +77,9 @@ export type ExtractComponentProps<T> = T extends { new (): infer I }
         ? P
         : {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
+export declare function componentConstructor<T extends new (...args: any[]) => any>(comp: T): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(comp: (props: P, ...args: A) => R): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
 export declare function instantiateComponent<T, P>(
   comp: T,
   props: P,

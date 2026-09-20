@@ -161,6 +161,8 @@ pub trait TypeProvider: Send + Sync {
     /// states says so explicitly by forwarding to [`TypeProvider::open_file`] here.
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
 
+    /// Publish current editor content, opening an overlay if none exists.
+    /// Deferred activation and restart replay must retain this open state.
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()>;
@@ -207,6 +209,9 @@ pub trait TypeProvider: Send + Sync {
         DisplaySignatureWireWitness::mint()
     }
 
+    /// Pull a complete current diagnostic result. Transport failures and failed
+    /// diagnostic categories must return an error, never cached or empty success:
+    /// local source equality does not prove imported dependencies are unchanged.
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>>;
 
     /// Diagnostics for `path` in the exact configured project named by

@@ -21,6 +21,7 @@
 pub mod directives;
 pub mod emit;
 pub mod props;
+mod slot_inference;
 pub mod vmodel;
 pub mod von;
 
@@ -723,7 +724,32 @@ fn walk_element<'a, 'alloc>(
     // prevents an ambient React `ElementChildrenAttribute` from injecting a
     // synthetic `children` attribute into Vue's JSX contract under
     // `jsx: preserve` while retaining every authored child expression.
-    let has_isolated_slot_body = isolate_vue_slot_body(el, emitted_tag_name, ctx.out);
+    // Capture inference before entering child slot/loop scopes, whose aliases
+    // can shadow values supplied by the parent.
+    let has_slot_params = |element: &ElementNode| {
+        element.v_slot.as_ref().is_some_and(|slot| {
+        matches!((slot.value_start, slot.value_end), (Some(start), Some(end)) if start < end)
+    })
+    };
+    let has_scoped_slots = el.tag_type == TagType::Component
+        && (has_slot_params(el)
+            || el.content.as_ref().is_some_and(|content| {
+                content.children.iter().any(|child| {
+                    matches!(&ctx.ast.nodes[child.0].kind, AstNodeKind::Element(child)
+                        if child.tag_type == TagType::Template && has_slot_params(child))
+                })
+            }));
+    let slot_instance = has_scoped_slots.then(|| {
+        let props = slot_inference::component_props(el, oxc_el, ctx.source, ctx.resolver);
+        format!("const ___VERTER___slotInstance{} = new (___VERTER___componentConstructor({emitted_tag_name}))({props});", el.tag_open.start)
+    });
+    let has_isolated_slot_body = isolate_vue_slot_body(
+        el,
+        emitted_tag_name,
+        ctx.out,
+        slot_instance.as_deref(),
+        emit_ctx,
+    );
 
     // ── v-slot scoped parameter IIFE wrapping ────────────────────────
     // When v-slot has parameters (e.g., `v-slot="{ slotItem }"`), wrap children
@@ -806,7 +832,15 @@ fn walk_element<'a, 'alloc>(
             ctx.out,
             &EmitOp::InsertUnmapped {
                 at: SourceByteOffset(tag_close.start),
-                text: EmitText::Static("</>"),
+                text: EmitText::Static(if slot_instance.is_some() {
+                    if emit_ctx == EmitContext::Expression {
+                        "</>); })()"
+                    } else {
+                        "</>); })()}"
+                    }
+                } else {
+                    "</>"
+                }),
             },
         );
     }
@@ -886,12 +920,15 @@ fn isolate_vue_slot_body(
     el: &ElementNode,
     emitted_tag_name: &str,
     out: &mut CodeGenOutput<'_>,
+    slot_instance: Option<&str>,
+    emit_ctx: EmitContext,
 ) -> bool {
     if matches!(el.tag_type, TagType::Template | TagType::SlotOutlet)
-        || el
-            .content
-            .as_ref()
-            .is_none_or(|content| content.children.is_empty())
+        || (slot_instance.is_none()
+            && el
+                .content
+                .as_ref()
+                .is_none_or(|content| content.children.is_empty()))
     {
         return false;
     }
@@ -920,7 +957,13 @@ fn isolate_vue_slot_body(
         out,
         &EmitOp::InsertUnmapped {
             at: SourceByteOffset(el.tag_open.start + 1),
-            text: EmitText::Static("<><"),
+            text: EmitText::Borrowed(&match slot_instance {
+                Some(instance) if emit_ctx == EmitContext::Expression => {
+                    format!("(() => {{ {instance} return (<><")
+                }
+                Some(instance) => format!("{{(() => {{ {instance} return (<><"),
+                None => "<><".to_string(),
+            }),
         },
     );
 
@@ -1007,19 +1050,25 @@ fn build_slot_iife_info(
         "default"
     };
 
-    // Determine the component tag name for instantiateComponent
-    let comp_tag = if el.tag_type == TagType::Template {
-        // For <template v-slot>, look up the parent component
-        find_parent_component_tag(id, source, ast)?
+    // Infer in the template's lexical scope, with the same authored props as
+    // the JSX check. An extracted generic return type has already lost T.
+    let component_id = if el.tag_type == TagType::Template {
+        ast.nodes[id.0].parent?
     } else {
-        // For component v-slot (e.g., <MyComp v-slot="...">)
-        source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize].to_string()
+        id
     };
-
+    let AstNodeKind::Element(component) = &ast.nodes[component_id.0].kind else {
+        return None;
+    };
+    if component.tag_type != TagType::Component
+        || component.tag_close.is_none()
+        || el.tag_close.is_none()
+    {
+        return None;
+    }
+    let offset = component.tag_open.start;
     let open_prefix = "{(() => { const ".to_string();
-    let open_suffix = format!(
-        " = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"); return (<>"
-    );
+    let open_suffix = format!(" = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___slotInstance{offset}, \"{slot_name}\"); return (<>");
     let close_text = "</>); })()}".to_string();
 
     Some(SlotIifeInfo {
@@ -1029,25 +1078,6 @@ fn build_slot_iife_info(
         open_suffix,
         close_text,
     })
-}
-
-/// Find the parent component tag name for a <template v-slot> element.
-fn find_parent_component_tag(
-    id: NodeId,
-    source: &str,
-    ast: &crate::ast::types::TemplateAst,
-) -> Option<String> {
-    let node = &ast.nodes[id.0];
-    let parent_id = node.parent?;
-    let parent_node = &ast.nodes[parent_id.0];
-    if let AstNodeKind::Element(ref parent_el) = parent_node.kind {
-        if parent_el.tag_type == TagType::Component {
-            let tag = &source
-                [(parent_el.tag_open.start + 1) as usize..parent_el.tag_open.name_end as usize];
-            return Some(tag.to_string());
-        }
-    }
-    None
 }
 
 /// Walk a list of child nodes, using chain metadata for v-if/v-else chains.

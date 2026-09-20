@@ -44,6 +44,53 @@ fn project_bound_diagnostics_quarantine_is_scoped_to_the_configured_project() {
     assert_ne!(first, second);
 }
 
+#[tokio::test]
+async fn quarantined_diagnostics_are_unavailable_until_content_changes() {
+    let harness = make_harness(MockProvider::new("tsgo"), MockProvider::new("tsgo"));
+    let provider = &harness.provider;
+    let path = "/workspace/App.vue.tsx";
+    let project = "/workspace/tsconfig.json";
+    assert!(provider.get_diagnostics(path).await.unwrap().is_empty());
+    {
+        let mut watch = provider.state.query_watch.lock().unwrap();
+        for fingerprint in [
+            QueryFingerprint::new("diagnostics", path, 0, 0),
+            QueryFingerprint::new("diagnostics-in-project", path, 0, 0).in_scope(project),
+        ] {
+            watch.begin(&fingerprint);
+            for _ in 0..super::QUARANTINE_STRIKE_THRESHOLD {
+                watch.record_crash_implications();
+            }
+            watch.end(&fingerprint, false);
+        }
+    }
+    let foreground = provider.get_diagnostics(path).await;
+    let background = provider.get_diagnostics_background(path).await;
+    let configured = provider.get_diagnostics_in_project(path, project).await;
+    assert!(
+        foreground.is_err() && background.is_err() && configured.is_err(),
+        "quarantine cannot attest a successful diagnostic pull: {foreground:?}, {background:?}, {configured:?}"
+    );
+    assert!(provider
+        .get_diagnostics("/workspace/Other.vue.tsx")
+        .await
+        .is_ok());
+    provider
+        .update_file(path, "const changed = true")
+        .await
+        .unwrap();
+    assert!(provider.get_diagnostics(path).await.unwrap().is_empty());
+    assert!(provider
+        .get_diagnostics_background(path)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(provider
+        .get_diagnostics_in_project(path, project)
+        .await
+        .is_ok());
+}
+
 /// A recorded provider call.
 #[derive(Debug, Clone, PartialEq)]
 enum MockCall {
@@ -1494,9 +1541,9 @@ async fn crash_interrupts_a_stalled_mutation_and_replays_retained_state() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn restart_replays_state_without_downgrading_loaded_files() {
-    // PRESERVED behavior: load/open mode fidelity, path configs, and workspace
-    // folders all survive a respawn.
+async fn restart_replays_updates_as_open_and_retains_background_only_files() {
+    // Replay must match the real backends: update_file opens an editor overlay,
+    // while discovery-only files remain background loads.
     let initial = MockProvider::new("tsserver");
     let replacement = MockProvider::new("tsserver");
     let mut replay_rx = replacement.attach_tap();
@@ -1504,6 +1551,11 @@ async fn restart_replays_state_without_downgrading_loaded_files() {
 
     let loaded = "/project/src/loaded.vue.tsx";
     let opened = "/project/src/open.vue.tsx";
+    let background = "/project/src/background.vue.tsx";
+    provider
+        .load_file(background, "const background = 1;")
+        .await
+        .unwrap();
     provider
         .load_file(loaded, "const loaded = 1;")
         .await
@@ -1533,14 +1585,14 @@ async fn restart_replays_state_without_downgrading_loaded_files() {
     assert!(
         replayed
             .iter()
-            .any(|c| matches!(c, MockCall::LoadFile { path, content } if path == loaded && content == "const loaded = 2;")),
-        "a loaded file replays via load_file with its latest content, got {replayed:?}"
+            .any(|c| matches!(c, MockCall::OpenFile { path, content } if path == loaded && content == "const loaded = 2;")),
+        "an editor update promotes a loaded file to an open overlay, got {replayed:?}"
     );
     assert!(
         !replayed
             .iter()
-            .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == loaded)),
-        "a loaded file must NOT be downgraded to open on replay, got {replayed:?}"
+            .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == background)),
+        "discovery-only files must not become open overlays, got {replayed:?}"
     );
     assert!(
         replayed

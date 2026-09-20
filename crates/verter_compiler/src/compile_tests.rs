@@ -3961,7 +3961,7 @@ fn empty_slot_with_v_if_dynamic() {
     );
 }
 
-// @ai-generated - TDD: empty slot mixed with non-empty (real-world pattern)
+// Empty named slots can coexist with non-empty default content.
 #[test]
 fn empty_slot_mixed_with_content_slots() {
     let code = compile_and_validate_template(
@@ -18118,7 +18118,7 @@ return (_openBlock(), _createElementBlock("p", { title: $setup.msg }, _toDisplay
 const TS_OVERLAY_GOLDEN_TSX: &str = concat!(
     r#"/** @jsxImportSource vue */
 import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType, GlobalComponentKebabType as ___VERTER___GlobalComponentKebabType } from "@verter/types";
-import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
+import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, componentConstructor as ___VERTER___componentConstructor, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
 
 const msg = 'hi'

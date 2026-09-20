@@ -419,6 +419,15 @@ Template text expressions are classified from the canonical retained OXC AST. Su
 
 ## Strict Slot Children Type Checking (Experimental)
 
+Scoped slot inference captures a component instance in the parent's lexical scope
+using `new (componentConstructor(Component))(props)`. Preserve generic constructor
+identity until the authored props are applied; extracting a generic return type
+first erases its type parameters. `ide/template/slot_inference.rs` emits the
+unmapped inference inputs using the same bindings as JSX props. Capture before
+slot parameters and named-slot loops can shadow those inputs, including paired
+components with an empty slot body. Incomplete/self-closing recovery must not
+reference an instance whose capture wrapper was never emitted.
+
 When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree, enforcing that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
 
 **Generated pattern** (inside the block scope, after JSX):

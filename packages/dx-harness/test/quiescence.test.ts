@@ -179,6 +179,36 @@ describe("pollUntilQuiesced (hermetic, injected clock)", () => {
     };
   }
 
+  it("does not mistake unchanged counters for completed document ingress", async () => {
+    let polls = 0;
+    const result = await pollUntilQuiesced(
+      async () => {
+        polls++;
+        return C(0, 0, 0);
+      },
+      () => [],
+      {
+        intervalMs: 1,
+        sleep: immediateSleep,
+        now: manualClock(1),
+        timeoutMs: 1000,
+        prerequisitesReady: () => polls >= 4,
+      },
+    );
+    expect(result.quiesced).toBe(true);
+    expect(polls).toBe(6);
+  });
+
+  it("fails its existing deadline when document ingress never completes", async () => {
+    const result = await pollUntilQuiesced(
+      async () => C(0, 0, 0),
+      () => [],
+      { sleep: immediateSleep, now: manualClock(1), timeoutMs: 5, prerequisitesReady: () => false },
+    );
+    expect(result.quiesced).toBe(false);
+    expect(result.timedOut).toBe(true);
+  });
+
   it("polls until the counters hold for the required intervals, then resolves quiesced", async () => {
     const counters = C(10, 4, 2);
     let polls = 0;

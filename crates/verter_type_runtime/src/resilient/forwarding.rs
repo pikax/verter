@@ -224,9 +224,15 @@ where
         let path_owned = path.to_string();
         let fp = QueryFingerprint::new("diagnostics", path, 0, 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_diagnostics(&path_owned).await
-            })
+            self.run_guarded_with_fallback(
+                fp,
+                || {
+                    Err(TypeProviderError::new(
+                        "diagnostics quarantined after repeated provider crashes",
+                    ))
+                },
+                move |provider| async move { provider.get_diagnostics(&path_owned).await },
+            )
             .await
         })
     }
@@ -494,7 +500,7 @@ where
         let path_owned = path.to_string();
         let fp = QueryFingerprint::new("diagnostics", path, 0, 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
+            self.run_guarded_with_fallback(fp, || Err(TypeProviderError::new("diagnostics quarantined after repeated provider crashes")), move |provider| async move {
                 provider.get_diagnostics_background(&path_owned).await
             })
             .await
@@ -511,9 +517,13 @@ where
         let fp = QueryFingerprint::new("diagnostics-in-project", path, 0, 0)
             .in_scope(&configured_project);
         Box::pin(async move {
-            self.run_guarded(
+            self.run_guarded_with_fallback(
                 fp,
-                || None,
+                || {
+                    Err(TypeProviderError::new(
+                        "diagnostics quarantined after repeated provider crashes",
+                    ))
+                },
                 move |provider| async move {
                     provider
                         .get_diagnostics_in_project(&path_owned, &configured_project)

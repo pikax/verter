@@ -790,7 +790,16 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         }],
     );
 
-    let merged = self_file_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    let merged = provider_diagnostics_batch(
+        &deps.documents,
+        &deps.provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        canonical_id,
+        Vec::new(),
+    )
+    .await
+    .diagnostics;
 
     // The type provider must have been queried at the module's OWN canonical
     // path (the Shadow buffer), never a derived `.tsx`.
@@ -1950,6 +1959,191 @@ async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface
 /// coordinator has synchronized the current carrier. Valid diagnostics for that
 /// same LSP version must still run.
 #[tokio::test(flavor = "multi_thread")]
+async fn diagnostic_completion_waits_for_enabled_native_semantics() {
+    let (documents, _, _, canonical_id, _, deps) = make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    documents.set_semantic_analysis_enabled(true);
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "provider completion cannot certify pending native analysis"
+    );
+    let mut semantic_ready = documents.subscribe_semantic_ready();
+    documents.schedule_semantic_analysis(&uri);
+    tokio::time::timeout(Duration::from_secs(20), semantic_ready.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "semantic commit still needs merged republication"
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalidated_inflight_diagnostics_cannot_restore_completion() {
+    let (documents, _, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    let query_documents = Arc::clone(&documents);
+    let query_uri = uri.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            query_documents.invalidate_diagnostics(query_uri.as_str());
+        }),
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(!documents.diagnostics_ready(&uri));
+    assert!(
+        refreshes.try_recv().is_err(),
+        "newer queued work owns epoch-only invalidation"
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(
+        documents.diagnostics_ready(&uri),
+        "a fresh successful pass completes without an edit"
+    );
+
+    // A subsequent native fallback from any publisher must withdraw the
+    // previous provider completion, even at the same authored version.
+    let publication = documents.begin_diagnostics_publication(&uri).unwrap();
+    documents
+        .publish_diagnostics(&deps.client, &uri, &publication, Vec::new(), false, None)
+        .await;
+    assert!(!documents.diagnostics_ready(&uri));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_generation_advance_during_query_eventually_publishes_without_another_signal() {
+    let (documents, _, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let query_documents = Arc::clone(&documents);
+    let query_canonical = canonical_id.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // Workspace compilation can advance diagnostics while the authored
+            // buffer and provider bytes stay identical. No editor signal follows.
+            query_documents
+                .host()
+                .bump_diagnostics_generation(&query_canonical);
+        }),
+    );
+    provider.clear_calls();
+    let handle = spawn_sync_coordinator(deps);
+    handle.signal_diagnostics_only(canonical_id, uri.to_string(), Instant::now());
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&uri),
+            || {
+                panic!(
+                    "superseded diagnostics were dropped without publishing the current generation"
+                )
+            },
+        )
+        .await;
+    let queries = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(call,
+        MockCall::GetDiagnostics { path } if path == &ide_path)
+        })
+        .count();
+    assert_eq!(
+        queries, 2,
+        "only the superseded generation needs replacement"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_generation_refresh_cannot_displace_a_newer_complete_publication() {
+    let (documents, _, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    let query_documents = Arc::clone(&documents);
+    let query_canonical = canonical_id.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            query_documents
+                .host()
+                .bump_diagnostics_generation(&query_canonical);
+        }),
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    let refresh = refreshes
+        .try_recv()
+        .expect("generation drift must owe a refresh");
+    assert!(!documents.diagnostics_ready(&uri));
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    assert!(!documents.claim_diagnostics_refresh(&refresh));
+    assert!(
+        documents.diagnostics_ready(&uri),
+        "delayed old work cannot invalidate new completion"
+    );
+    assert!(
+        refreshes.try_recv().is_err(),
+        "a stable generation does not schedule polling"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_diagnostics_invalidate_completion_before_debounce() {
+    let (_, _, _, canonical_id, _, deps) = make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(deps.documents.diagnostics_ready(&uri));
+    let handle = spawn_sync_coordinator(deps.clone());
+    handle.signal_diagnostics_only(canonical_id, uri.to_string(), Instant::now());
+    assert!(
+        !deps.documents.diagnostics_ready(&uri),
+        "pending work is not complete"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_provider_surface_invalidates_diagnostics_completion() {
+    let (_, _, _, canonical_id, ide_path, deps) = make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(deps.documents.diagnostics_ready(&uri));
+    let surface = deps
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .unwrap();
+    let mut replacement = crate::provider_surface_store::RecordSurface::carrier_legacy(
+        surface.kind,
+        ide_path.clone(),
+        canonical_id,
+        Arc::clone(&surface.provider_content),
+        surface.source_map.as_ref().map(|map| (**map).clone()),
+        Arc::clone(&surface.carrier_source),
+    );
+    replacement.map_hash = surface.stamp.map_hash;
+    deps.documents.provider_surfaces().record(replacement);
+    assert!(
+        deps.documents.diagnostics_ready(&uri),
+        "byte-identical repair preserves valid diagnostics"
+    );
+    let _close = deps.documents.provider_surfaces().forget(&ide_path);
+    assert!(
+        !deps.documents.diagnostics_ready(&uri),
+        "a retired surface cannot certify diagnostics"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
     let (_documents, _states, provider, canonical_id, ide_path, deps) =
         make_carrier_diagnostics_fixture().await;
@@ -1964,6 +2158,18 @@ async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
             .iter()
             .any(|call| matches!(call, MockCall::GetDiagnostics { path } if path == &ide_path)),
         "same-version deferred API work must not suppress provider diagnostics"
+    );
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    assert!(
+        deps.documents.diagnostics_ready(&uri),
+        "a successful provider publication must be observable as complete"
+    );
+    deps.documents
+        .host()
+        .bump_diagnostics_generation(&canonical_id);
+    assert!(
+        !deps.documents.diagnostics_ready(&uri),
+        "a dependency change invalidates completion without an editor edit"
     );
 }
 
@@ -2114,8 +2320,9 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
         "test client must initialize: {response:?}"
     );
 
+    let publish_uri = uri.clone();
     let publish = tokio::spawn(async move {
-        publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await
+        publish_merged_diagnostics(&deps, &canonical_id, publish_uri.as_str()).await
     });
     let request = tokio::time::timeout(Duration::from_secs(1), socket.next())
         .await
@@ -2128,6 +2335,10 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
     )
     .expect("publish params deserialize");
     assert_eq!(params.version, Some(2));
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "a native batch is not proof that TypeScript finished"
+    );
     assert!(
         params.diagnostics.iter().any(|diagnostic| {
             matches!(
@@ -2349,7 +2560,16 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         }),
     );
 
-    let merged = self_file_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    let merged = provider_diagnostics_batch(
+        &deps.documents,
+        &deps.provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        canonical_id,
+        Vec::new(),
+    )
+    .await
+    .diagnostics;
     assert!(
         !merged
             .iter()

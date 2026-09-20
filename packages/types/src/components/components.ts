@@ -389,6 +389,15 @@ export declare function enhanceElementWithProps<T, P>(
  * // R is VNode (ReturnType<typeof FnComp>)
  * ```
  */
+/** Preserve a generic constructor until its actual template props are supplied. */
+export declare function componentConstructor<T extends new (...args: any[]) => any>(
+  comp: T,
+): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(
+  comp: (props: P, ...args: A) => R,
+): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
+
 export declare function instantiateComponent<T, P>(
   comp: T,
   props: P,

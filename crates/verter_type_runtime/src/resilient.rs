@@ -574,6 +574,21 @@ where
         F: FnOnce(Arc<P>) -> Fut,
         Fut: Future<Output = Result<T, TypeProviderError>>,
     {
+        self.run_guarded_with_fallback(fp, || Ok(fail_closed()), run)
+            .await
+    }
+
+    /// Diagnostics cannot equate quarantine with a completed, clean check.
+    async fn run_guarded_with_fallback<T, F, Fut>(
+        &self,
+        fp: QueryFingerprint,
+        fail_closed: impl FnOnce() -> Result<T, TypeProviderError>,
+        run: F,
+    ) -> Result<T, TypeProviderError>
+    where
+        F: FnOnce(Arc<P>) -> Fut,
+        Fut: Future<Output = Result<T, TypeProviderError>>,
+    {
         let provider = self.get_inner().await?;
         let quarantined = {
             let watch = self
@@ -592,7 +607,7 @@ where
                 fp.path,
                 fp.offset,
             );
-            return Ok(fail_closed());
+            return fail_closed();
         }
         let guard = InFlightGuard::begin(Arc::clone(&self.state.query_watch), fp);
         let result = run(provider).await;
@@ -716,7 +731,9 @@ impl DesiredState {
             DesiredMutation::Load { path, content } => {
                 self.cache_file(path, content, Some(CachedFileMode::Load))
             }
-            DesiredMutation::Update { path, content } => self.cache_file(path, content, None),
+            DesiredMutation::Update { path, content } => {
+                self.cache_file(path, content, Some(CachedFileMode::Open))
+            }
             DesiredMutation::Close { path } => {
                 self.files.remove(path);
                 // A closed companion must not be replayed as a carrier after a
@@ -794,7 +811,7 @@ impl DesiredState {
     }
 
     /// Insert/refresh a file, preserving `open` > `load` priority: an opened file
-    /// is never downgraded to load-only, and an update keeps the existing mode.
+    /// is never downgraded to load-only. Editor updates promote loads to open.
     fn cache_file(&mut self, path: &str, content: &str, mode: Option<CachedFileMode>) {
         match self.files.entry(path.to_string()) {
             Entry::Occupied(mut entry) => {

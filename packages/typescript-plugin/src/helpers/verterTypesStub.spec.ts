@@ -410,6 +410,35 @@ describe("VERTER_TYPES_STUB", () => {
 // between the copies are invisible and a semantic divergence in ANY of them
 // fails.
 describe("declaration-surface parity", () => {
+  it("infers generic slot props through every shipped constructor helper", () => {
+    const perCopy = typecheckStubCopies(
+      [
+        ["plugin", VERTER_TYPES_STUB],
+        ["lsp", readFileSync(LSP_STUB_PATH, "utf8")],
+        ["standalone", readFileSync(GENERATED_STANDALONE_DTS_PATH, "utf8")],
+      ],
+      `
+      import { componentConstructor, extractArgumentsFromRenderSlot } from "@verter/types";
+      declare const Select: { name: string } & {
+        new<T>(props?: { options: T[]; modelValue: T }): {
+          $slots: { selected(props: { value: T }): unknown }
+        }
+      };
+      const stringInstance = new (componentConstructor(Select))({ options: ["one"], modelValue: "one" });
+      const numberInstance = new (componentConstructor(Select))({ options: [1], modelValue: 1 });
+      const text = extractArgumentsFromRenderSlot(stringInstance, "selected");
+      const number = extractArgumentsFromRenderSlot(numberInstance, "selected");
+      const stringValue: string = text.value;
+      const numberValue: number = number.value;
+      // @ts-expect-error the slot must not degrade to any
+      const wrongString: number = text.value;
+      // @ts-expect-error each instance retains its own inferred type
+      const wrongNumber: string = number.value;
+    `,
+    );
+    for (const [copy, diagnostics] of perCopy) expect(diagnostics, copy).toEqual([]);
+  });
+
   it("every copy carries the directive Arg type parameter, and a pre-fix copy is caught", () => {
     const pluginStub = VERTER_TYPES_STUB;
     const lspStub = readFileSync(LSP_STUB_PATH, "utf8");

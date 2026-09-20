@@ -228,7 +228,10 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
         let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
         rest[..end].to_string()
     };
-    for helper in ["carrier_provider_diagnostics", "self_file_diagnostics"] {
+    for helper in [
+        "carrier_provider_diagnostics_batch",
+        "self_file_diagnostics",
+    ] {
         let body = top_level_fn_slice(&sync_coordinator, helper);
         for forbidden in [
             "get_ide(",
@@ -249,7 +252,7 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
     let background_init = read_server_source("background_init.rs");
     assert!(
         background_init
-            .matches("carrier_provider_diagnostics(")
+            .matches("provider_diagnostics_batch(")
             .count()
             >= 2,
         "background_init must route both diagnostics publishers through the shared \

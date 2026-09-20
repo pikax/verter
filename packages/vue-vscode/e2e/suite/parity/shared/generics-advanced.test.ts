@@ -161,6 +161,12 @@ suite(`Advanced generics [${FIXTURE_NAME}]`, function () {
     }
   });
 
+  registerFrameworkTest("vue", "generic.slot.parent-scope-survives-shadowing", async function () {
+    const file = "src/generics/GenericSlotScopes.vue";
+    await assertCleanErrors(file);
+    await assertHoverNeedles({ file, token: "parentValue", occurrence: 1 }, ['"parent"']);
+  });
+
   test("generic.infer.bad-mismatched-props-events", async function () {
     const fw = parityFramework();
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
@@ -437,10 +443,10 @@ suite(`Advanced generics [${FIXTURE_NAME}]`, function () {
     try {
       // Slot/snippet locals from string options select
       await assertInferredHoverType({ file, token: "selStr", occurrence: 0 }, "string");
-      await assertInferredHoverType({ file, token: "selStr", occurrence: 1 }, "string");
+      await assertInferredHoverType({ file, token: "selStr.toUpperCase" }, "string");
       await assertInferredHoverType({ file, token: "optStr", occurrence: 0 }, "string");
       // Method use proves string (toUpperCase) — hover should not be number
-      const selHover = await hoverTextAt({ file, token: "selStr", occurrence: 1 });
+      const selHover = await hoverTextAt({ file, token: "selStr.toUpperCase" });
       if (/\bnumber\b/.test(selHover) && !/\bstring\b/.test(selHover)) {
         throw new Error(`selStr hover looks like number, expected string: ${selHover}`);
       }

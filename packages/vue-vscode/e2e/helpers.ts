@@ -7,6 +7,7 @@ import { readE2eEnv } from "../src/e2eEnv";
 import { computeStartupSegments } from "../src/startupOptimizations";
 import { attestE2eTypeProviderLog, type E2eTypeProviderRoute } from "../src/e2eProviderAttestation";
 import { parseArmedControlDir, verifySharedArmedHandshake } from "../src/sharedTsgoLaunch";
+import { waitForDiagnosticReceipt } from "./lib/diagnosticsReadiness";
 import { isVirtualCarrierPath } from "./lib/virtualCarrier";
 import { pollBudget, REFERENCES_POLL_INTERVAL_MS, sequenceParent } from "./lib/timeouts";
 
@@ -524,8 +525,8 @@ export async function waitForNoDiagnosticsMatching(
 }
 
 /**
- * Wait until diagnostics are stable (no changes for stableMs).
- * Returns whatever diagnostics exist at that point (may be empty).
+ * Wait for a current merged-publication receipt and a stable editor collection.
+ * A native-only batch or a deadline cannot prove that a document is clean.
  * Use for "I want to see what diagnostics look like after processing"
  * without requiring any specific predicate.
  */
@@ -551,35 +552,32 @@ export async function waitForDiagnosticsSettled(
     return diags;
   };
 
-  return new Promise<vscode.Diagnostic[]>((resolve) => {
-    let stableTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const finish = () => {
-      if (stableTimer) clearTimeout(stableTimer);
-      clearTimeout(deadlineTimer);
-      sub.dispose();
-      resolve(getFiltered());
-    };
-
-    // Start the quiescence timer — if no events fire for stableMs, resolve
-    const resetStableTimer = () => {
-      if (stableTimer) clearTimeout(stableTimer);
-      stableTimer = setTimeout(finish, stableMs);
-    };
-
-    // Absolute deadline
-    const deadlineTimer = setTimeout(finish, timeoutMs);
-
-    const sub = vscode.languages.onDidChangeDiagnostics((e) => {
-      const matched = e.uris.some((u) => u.toString() === uri.toString());
-      if (!matched) return;
-      // Reset the quiescence timer on each relevant change
-      resetStableTimer();
-    });
-
-    // Start the initial quiescence timer
-    resetStableTimer();
+  let lastChanged = Date.now();
+  const sub = vscode.languages.onDidChangeDiagnostics((event) => {
+    if (event.uris.some((changed) => changed.toString() === uri.toString()))
+      lastChanged = Date.now();
   });
+  try {
+    return await waitForDiagnosticReceipt(
+      () =>
+        vscode.commands
+          .executeCommand<{ version: number; ready: boolean }>(
+            "verter._getDiagnosticStatus",
+            uri.toString(),
+          )
+          .then((status) => status),
+      () =>
+        vscode.workspace.textDocuments.find(
+          (document) => document.uri.toString() === uri.toString(),
+        )?.version,
+      () => lastChanged,
+      getFiltered,
+      timeoutMs,
+      stableMs,
+    );
+  } finally {
+    sub.dispose();
+  }
 }
 
 /**

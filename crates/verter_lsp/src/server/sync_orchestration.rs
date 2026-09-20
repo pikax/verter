@@ -489,14 +489,11 @@ impl VerterLanguageServer {
     }
 
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
-        let Some(snapshot) = self.documents.snapshot_identity(uri) else {
+        let Some(publication) = self.documents.begin_diagnostics_publication(uri) else {
             return;
         };
         let diagnostics = self.compute_full_diagnostics(uri).await;
-        if !self.documents.snapshot_identity_is_current(uri, &snapshot) {
-            return;
-        }
-        self.publish_diagnostics_raw(uri, diagnostics, snapshot.version)
+        self.publish_diagnostics_raw(uri, diagnostics, &publication)
             .await;
     }
 
@@ -625,7 +622,7 @@ impl VerterLanguageServer {
         &self,
         uri: &Uri,
         diagnostics: Vec<Diagnostic>,
-        version: i32,
+        publication: &crate::documents::DiagnosticPublication,
     ) {
         let _timer = self
             .statistics
@@ -637,8 +634,10 @@ impl VerterLanguageServer {
             diagnostics.len()
         );
 
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
+        // This legacy compute path returns a Vec and cannot attest provider
+        // completeness. The coordinator owns the subsequent complete receipt.
+        self.documents
+            .publish_diagnostics(&self.client, uri, publication, diagnostics, false, None)
             .await;
 
         tracing::info!("publish_diagnostics EXIT {}", uri.as_str());

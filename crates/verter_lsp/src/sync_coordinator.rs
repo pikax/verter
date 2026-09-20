@@ -50,6 +50,7 @@ type ChangeTracker = Arc<parking_lot::Mutex<HashMap<String, CanonicalChangeState
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
 pub struct SyncCoordinatorHandle {
+    documents: std::sync::Weak<DocumentRegistry>,
     /// Capacity-one edge trigger. Repeated edits do not allocate queued messages.
     wake_tx: mpsc::Sender<()>,
     /// Latest URI per canonical document. Replacements coalesce while the actor
@@ -120,6 +121,9 @@ impl SyncCoordinatorHandle {
     /// entry instant, never `Instant::now()` taken at some later point on the
     /// path. The debounce window is measured from it.
     pub fn signal(&self, canonical_id: String, uri_str: String, received_at: Instant) {
+        if let Some(documents) = self.documents.upgrade() {
+            documents.invalidate_diagnostics(&uri_str);
+        }
         self.pending
             .lock()
             .entry(canonical_id)
@@ -163,6 +167,9 @@ impl SyncCoordinatorHandle {
         uri_str: String,
         received_at: Instant,
     ) {
+        if let Some(documents) = self.documents.upgrade() {
+            documents.invalidate_diagnostics(&uri_str);
+        }
         self.pending
             .lock()
             .entry(canonical_id)
@@ -206,6 +213,7 @@ impl SyncCoordinatorHandle {
         let (wake_tx, wake_rx) = mpsc::channel(1);
         (
             Self {
+                documents: std::sync::Weak::new(),
                 wake_tx,
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -426,16 +434,19 @@ pub(crate) const DEBOUNCE_MS: u64 = crate::edit_quiet_window::EDIT_QUIET_WINDOW_
 
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
+    let documents = Arc::downgrade(&deps.documents);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
+    let diagnostics_refresh_rx = deps.documents.subscribe_diagnostics_refresh();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
     #[cfg(test)]
     let receipts = CoordinatorReceipts::default();
     tokio::spawn(coordinator_loop(
         wake_rx,
         semantic_ready_rx,
+        diagnostics_refresh_rx,
         Arc::clone(&pending),
         Arc::clone(&changes),
         Arc::new(deps),
@@ -443,6 +454,7 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         receipts.clone(),
     ));
     SyncCoordinatorHandle {
+        documents,
         wake_tx,
         pending,
         changes,
@@ -454,6 +466,9 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
 async fn coordinator_loop(
     mut wake_rx: mpsc::Receiver<()>,
     mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
+    mut diagnostics_refresh_rx: tokio::sync::broadcast::Receiver<
+        crate::documents::DiagnosticsRefresh,
+    >,
     inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     changes: ChangeTracker,
     deps: Arc<SyncCoordinatorDeps>,
@@ -525,6 +540,43 @@ async fn coordinator_loop(
                     }
                 }
             }
+            refresh = diagnostics_refresh_rx.recv() => {
+                let uris = match refresh {
+                    Ok(refresh) => {
+                        if !deps.documents.claim_diagnostics_refresh(&refresh) {
+                            continue;
+                        }
+                        vec![refresh.uri.to_string()]
+                    }
+                    // A burst still owes every open document a current batch.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let uris = deps.documents.open_uris();
+                        for uri in &uris {
+                            deps.documents.invalidate_diagnostics(uri);
+                        }
+                        uris
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+                for uri in uris {
+                    let Ok(parsed) = uri.parse::<Uri>() else { continue; };
+                    let Some(canonical_id) = deps.documents.get_canonical_id(&parsed) else { continue; };
+                    deps.cached_verter_diags.remove(&uri);
+                    if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
+                        stale.abort();
+                    }
+                    let received_at = Instant::now();
+                    pending_files.entry(canonical_id)
+                        .and_modify(|(changed_at, pending)| {
+                            *changed_at = (*changed_at).max(received_at);
+                            pending.force_diagnostics = true;
+                        })
+                        .or_insert((received_at, PendingSignal {
+                            uri, requires_sync: false, force_diagnostics: true,
+                            sync_retries_remaining: 0, received_at,
+                        }));
+                }
+            }
             semantic_ready = semantic_ready_rx.recv() => {
                 match semantic_ready {
                     Ok(ready) => {
@@ -543,6 +595,7 @@ async fn coordinator_loop(
                             // An earlier pre-semantic pass may have cached an empty
                             // result under this same document/host generation.
                             deps.cached_verter_diags.remove(&ready.uri);
+                            deps.documents.invalidate_diagnostics(&ready.uri);
                             if let Some(stale) = diagnostic_tasks.remove(&ready.canonical_id) {
                                 stale.abort();
                             }
@@ -581,6 +634,7 @@ async fn coordinator_loop(
                             let Ok(parsed) = uri.parse::<Uri>() else { continue; };
                             let Some(canonical_id) = deps.documents.get_canonical_id(&parsed) else { continue; };
                             deps.cached_verter_diags.remove(&uri);
+                            deps.documents.invalidate_diagnostics(&uri);
                             pending_files.insert(
                                 canonical_id,
                                 (
@@ -1502,28 +1556,59 @@ async fn clear_provider_sync_state(
 /// DROPPED and the Verter-only set publishes (fail closed). Falls back to the
 /// verter diagnostics alone when no capturable Shadow surface exists or the
 /// provider errors.
+pub(crate) struct ProviderDiagnosticBatch {
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) complete: bool,
+    pub(crate) surface: Option<Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>>,
+}
+
+impl ProviderDiagnosticBatch {
+    fn incomplete(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            complete: false,
+            surface: None,
+        }
+    }
+    pub(crate) fn complete(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            complete: true,
+            surface: None,
+        }
+    }
+    fn with_surface(
+        mut self,
+        snapshot: &Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+    ) -> Self {
+        self.surface = Some(Arc::clone(snapshot));
+        self
+    }
+}
+
 async fn self_file_diagnostics(
-    deps: &SyncCoordinatorDeps,
+    documents: &DocumentRegistry,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    encoding: PositionEncodingKind,
     tp: &dyn TypeProvider,
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
-) -> Vec<Diagnostic> {
-    let store = deps.documents.provider_surfaces();
+) -> ProviderDiagnosticBatch {
+    let store = documents.provider_surfaces();
     let Some(snapshot) = crate::provider_surface_store::capture_committed_shadow_surface(
         store,
-        &deps.provider_sync_states,
-        &deps.documents,
+        provider_sync_states,
+        documents,
         canonical_id,
     ) else {
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
     // No usable mapper ⇒ the provider's offsets could not be mapped back onto
     // the module source ⇒ fail closed to Verter-only.
     let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
 
-    let encoding = deps.position_encoding.read().clone();
     let provider_li = LineIndex::new(&snapshot.provider_content, encoding.clone());
     let source_li = LineIndex::new(&snapshot.carrier_source, encoding.clone());
     let encoding_for_related = encoding;
@@ -1534,7 +1619,7 @@ async fn self_file_diagnostics(
             // no longer matches must be DROPPED (fail closed).
             if !crate::provider_surface_store::captured_surface_still_valid_for_canonical(
                 store,
-                &deps.documents,
+                documents,
                 canonical_id,
                 &snapshot,
             ) {
@@ -1542,15 +1627,15 @@ async fn self_file_diagnostics(
                     "sync_coordinator: dropping self-file provider diagnostics for \
                      {canonical_id} — captured surface no longer valid"
                 );
-                return verter_diags;
+                return ProviderDiagnosticBatch::incomplete(verter_diags);
             }
             // Related-span map-back: a same-file related span maps through the
             // in-context mapper; a real `.ts` related span reads its own source via
             // the VFS reader. A FOREIGN carrier `.tsx` related span needs the
             // server-side external resolver (unavailable on this background path)
             // and drops fail-closed (`external_resolver: None`).
-            let carrier_source_exists = |p: &str| deps.documents.host().get_source(p).is_some();
-            merge::merge_diagnostics(
+            let carrier_source_exists = |p: &str| documents.host().get_source(p).is_some();
+            ProviderDiagnosticBatch::complete(merge::merge_diagnostics(
                 verter_diags,
                 type_diags,
                 canonical_id,
@@ -1562,16 +1647,17 @@ async fn self_file_diagnostics(
                 encoding_for_related,
                 &|p: &str| {
                     crate::server::block_in_place_guarded(|| {
-                        deps.documents.host().workspace_read().read_file(p)
+                        documents.host().workspace_read().read_file(p)
                     })
                 },
-            )
+            ))
+            .with_surface(&snapshot)
         }
         Err(error) => {
             tracing::warn!(
                 "sync_coordinator: type provider error for self-file document {canonical_id}: {error}"
             );
-            verter_diags
+            ProviderDiagnosticBatch::incomplete(verter_diags)
         }
     }
 }
@@ -1586,7 +1672,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         Ok(u) => u,
         Err(_) => return,
     };
-    let Some(snapshot) = deps.documents.snapshot_identity(&uri) else {
+    let Some(publication) = deps.documents.begin_diagnostics_publication(&uri) else {
         return;
     };
     let verter_diagnostics = compute_verter_diagnostics(deps, canonical_id, &uri);
@@ -1603,33 +1689,33 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
             .collect::<Vec<_>>()
             .join("|")
     );
-    if !deps.documents.snapshot_identity_is_current(&uri, &snapshot) {
-        return;
-    }
     // Framework/native diagnostics are an independent snapshot lane. Publish
     // them as soon as the current revision is available; a cold TypeScript
     // configured-project build must not starve lint, ownership, or framework
     // declaration hints. The provider result replaces this staged batch below.
-    deps.client
+    deps.documents
         .publish_diagnostics(
-            uri.clone(),
+            &deps.client,
+            &uri,
+            &publication,
             verter_diagnostics.clone(),
-            Some(snapshot.version),
+            deps.type_provider.is_none(),
+            None,
         )
         .await;
-
     if deps.type_provider.is_none() {
         return;
     }
-    let diagnostics = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
-    // Revalidate after every provider await. Provider synchronization and API
-    // reconciliation deliberately share a work bit, so only the editor's LSP
-    // version is a valid freshness authority for diagnostics publication.
-    if !deps.documents.snapshot_identity_is_current(&uri, &snapshot) {
-        return;
-    }
-    deps.client
-        .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
+    let batch = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
+    deps.documents
+        .publish_diagnostics(
+            &deps.client,
+            &uri,
+            &publication,
+            batch.diagnostics,
+            batch.complete,
+            batch.surface,
+        )
         .await;
 }
 
@@ -1646,7 +1732,9 @@ async fn compute_merged_diagnostics(
     uri: &Uri,
 ) -> Vec<Diagnostic> {
     let verter_diags = compute_verter_diagnostics(deps, canonical_id, uri);
-    merge_provider_diagnostics(deps, canonical_id, verter_diags).await
+    merge_provider_diagnostics(deps, canonical_id, verter_diags)
+        .await
+        .diagnostics
 }
 
 /// Compute diagnostics owned by Verter without entering the TypeScript
@@ -1696,25 +1784,12 @@ async fn merge_provider_diagnostics(
     deps: &SyncCoordinatorDeps,
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
-) -> Vec<Diagnostic> {
-    // A self-file document (rune module or plain TS-family script) has NO IDE
-    // TSX — its provider buffer is served from its OWN canonical path. Route
-    // its debounced diagnostics through the generalized self-file projection
-    // (the document's rewrite-aware mapper + own-path provider buffer), so
-    // type diagnostics land at the correctly offset source position — NOT
-    // through the carrier IDE-source-map path below (which requires an
-    // `ide_path` a self-file document never has).
-    if let Some(tp) = &deps.type_provider {
-        if crate::server::self_file_language_for(canonical_id).is_some() {
-            return self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
-        }
-    }
-
+) -> ProviderDiagnosticBatch {
     let Some(tp) = &deps.type_provider else {
-        return verter_diags;
+        return ProviderDiagnosticBatch::complete(verter_diags);
     };
     let encoding = deps.position_encoding.read().clone();
-    carrier_provider_diagnostics(
+    provider_diagnostics_batch(
         &deps.documents,
         &deps.provider_sync_states,
         tp.as_ref(),
@@ -1723,6 +1798,31 @@ async fn merge_provider_diagnostics(
         verter_diags,
     )
     .await
+}
+
+/// Shared routing for both startup sweeps and debounced publications. Plain
+/// scripts and rune modules query their own shadow surface, carriers their IDE.
+pub(crate) async fn provider_diagnostics_batch(
+    documents: &DocumentRegistry,
+    states: &DashMap<String, ProviderSyncState>,
+    provider: &dyn TypeProvider,
+    encoding: PositionEncodingKind,
+    canonical_id: &str,
+    native: Vec<Diagnostic>,
+) -> ProviderDiagnosticBatch {
+    if crate::server::self_file_language_for(canonical_id).is_some() {
+        self_file_diagnostics(documents, states, encoding, provider, canonical_id, native).await
+    } else {
+        carrier_provider_diagnostics_batch(
+            documents,
+            states,
+            provider,
+            encoding,
+            canonical_id,
+            native,
+        )
+        .await
+    }
 }
 
 /// Merge a carrier's provider type diagnostics into `verter_diags` for a
@@ -1739,14 +1839,35 @@ async fn merge_provider_diagnostics(
 /// Verter-only set publishes (fail closed) — the debounced coordinator
 /// republishes after the next sync lands. Returns `verter_diags` unchanged
 /// when the query context is unavailable.
+#[cfg(test)]
 pub(crate) async fn carrier_provider_diagnostics(
+    documents: &DocumentRegistry,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    tp: &dyn TypeProvider,
+    encoding: PositionEncodingKind,
+    canonical_id: &str,
+    verter_diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    carrier_provider_diagnostics_batch(
+        documents,
+        provider_sync_states,
+        tp,
+        encoding,
+        canonical_id,
+        verter_diags,
+    )
+    .await
+    .diagnostics
+}
+
+pub(crate) async fn carrier_provider_diagnostics_batch(
     documents: &DocumentRegistry,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     tp: &dyn crate::type_provider::traits::TypeProvider,
     encoding: PositionEncodingKind,
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
-) -> Vec<Diagnostic> {
+) -> ProviderDiagnosticBatch {
     let store = documents.provider_surfaces();
     let Some(snapshot) = crate::provider_surface_store::capture_committed_carrier_ide_surface(
         store,
@@ -1757,7 +1878,7 @@ pub(crate) async fn carrier_provider_diagnostics(
         tracing::debug!(
             "carrier_provider_diagnostics: no committed current IDE surface for {canonical_id}"
         );
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
     // No usable source map ⇒ the provider's offsets could not be mapped back
     // onto the carrier ⇒ fail closed to Verter-only.
@@ -1765,7 +1886,7 @@ pub(crate) async fn carrier_provider_diagnostics(
         tracing::debug!(
             "carrier_provider_diagnostics: current IDE surface has no source map for {canonical_id}"
         );
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
     let tsx_path = snapshot.stamp.provider_path.to_string();
     let tsx_li = LineIndex::new(&snapshot.provider_content, encoding.clone());
@@ -1786,7 +1907,7 @@ pub(crate) async fn carrier_provider_diagnostics(
                      captured surface no longer valid",
                     canonical_id
                 );
-                return verter_diags;
+                return ProviderDiagnosticBatch::incomplete(verter_diags);
             }
             tracing::debug!(
                 "carrier_provider_diagnostics: merge {} verter + {} type diags for {}",
@@ -1800,7 +1921,7 @@ pub(crate) async fn carrier_provider_diagnostics(
             // span needs the server-side external resolver (unavailable on
             // this background path) → drops fail-closed (`None`).
             let carrier_source_exists = |p: &str| documents.host().get_source(p).is_some();
-            merge::merge_diagnostics(
+            ProviderDiagnosticBatch::complete(merge::merge_diagnostics(
                 verter_diags,
                 type_diags,
                 &tsx_path,
@@ -1815,14 +1936,15 @@ pub(crate) async fn carrier_provider_diagnostics(
                         documents.host().workspace_read().read_file(p)
                     })
                 },
-            )
+            ))
+            .with_surface(&snapshot)
         }
         Err(e) => {
             tracing::warn!(
                 "carrier_provider_diagnostics: type provider error for {}: {e}",
                 canonical_id
             );
-            verter_diags
+            ProviderDiagnosticBatch::incomplete(verter_diags)
         }
     }
 }

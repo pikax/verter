@@ -371,6 +371,7 @@ pub struct StatisticsRequestParams {
 #[derive(Debug, Serialize)]
 pub struct StatisticsSnapshot {
     pub enabled: bool,
+    pub diagnostics: serde_json::Map<String, serde_json::Value>,
     pub session: StatisticsSession,
     /// Present only when `interactionTrace.enabled` was set at initialize.
     #[serde(rename = "interactionTrace", skip_serializing_if = "Option::is_none")]

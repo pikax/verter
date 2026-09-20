@@ -120,7 +120,10 @@ declare module "@verter/types" {
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
-  export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
+  export declare function componentConstructor<T extends new (...args: any[]) => any>(comp: T): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(comp: (props: P, ...args: A) => R): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
+export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export declare function extractArgumentsFromRenderSlot<
     TSlots extends Record<string, any>,
     N extends keyof TSlots & string,
@@ -181,6 +184,9 @@ export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer 
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
+export declare function componentConstructor<T extends new (...args: any[]) => any>(comp: T): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(comp: (props: P, ...args: A) => R): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
 export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
 export declare function extractArgumentsFromRenderSlot<
   TSlots extends Record<string, any>,
@@ -355,7 +361,7 @@ fn emit_helper_imports_inner(
     // top-level `vue` import that would perturb the providers' import fixer.
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives, strictRenderSlot as {P}strictRenderSlot, checkRequiredSlots as {P}checkRequiredSlots, globalComponentsNav as {P}globalComponentsNav }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, componentConstructor as {P}componentConstructor, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives, strictRenderSlot as {P}strictRenderSlot, checkRequiredSlots as {P}checkRequiredSlots, globalComponentsNav as {P}globalComponentsNav }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )
