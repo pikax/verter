@@ -197,15 +197,47 @@ fn stp11_mismatched_script_lang_pair_is_refused() {
 }
 
 #[test]
-fn stp11_one_body_rejects_duplicate_setup_body_placement() {
-    assert_eq!(require_single_body(&[BodyProduct::Checking]), Ok(()));
-    assert_eq!(require_single_body(&[]), Ok(()));
+fn stp11_one_body_setup_statements_appear_once() {
+    let facts = project_script_pair(
+        None,
+        Some(ts(
+            "const a = 1
+const b = 2",
+            0,
+        )),
+        None,
+    )
+    .unwrap();
+    let setup = facts.setup.expect("setup");
+    assert_eq!(setup.statements.len(), 2);
+}
+
+#[test]
+fn stp11_macro_requires_macro_position() {
+    let macros = |setup: &str| -> Vec<&'static str> {
+        project_script_pair(None, Some(ts(setup, 0)), None)
+            .unwrap()
+            .setup
+            .unwrap()
+            .macros
+            .iter()
+            .map(|m| m.name)
+            .collect()
+    };
+    assert_eq!(macros("const p = defineProps<{a: 1}>()"), ["defineProps"]);
     assert_eq!(
-        require_single_body(&[BodyProduct::Public, BodyProduct::Checking]),
-        Err(SetupProjectionRefusal::DuplicateBody {
-            products: vec![BodyProduct::Public, BodyProduct::Checking]
-        })
+        macros("const p = withDefaults(defineProps<{a: 1}>(), {})"),
+        ["withDefaults", "defineProps"]
     );
+    assert!(macros("foo(defineProps())").is_empty());
+    assert!(macros("const p = cond ? defineProps() : 1").is_empty());
+}
+
+#[test]
+fn stp11_await_in_class_heritage_is_top_level() {
+    let facts =
+        project_script_pair(None, Some(ts("class A extends (await base()) {}", 0)), None).unwrap();
+    assert!(facts.setup.unwrap().checking_wrapper_is_async());
 }
 
 #[test]

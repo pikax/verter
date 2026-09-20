@@ -17,18 +17,20 @@
 //! same name from `'vue'` (Vue strips such an import with a warning and
 //! still treats the call as the macro); a normal-script VALUE binding or a
 //! setup-local lexical function of the same name is an ordinary call, and a
-//! nested call is never a macro (Vue requires macros at the root of
-//! `<script setup>`).
+//! call not in a macro position is never a macro. Vue's macro positions are a
+//! root expression statement, a root variable declarator initializer, and the
+//! first argument of a root `withDefaults(...)` (each optionally wrapped in
+//! parentheses / `as` / `satisfies`).
 //!
-//! The body of a generic component is checked once, universally. A projection
-//! that places the setup body in more than one product is refused by
-//! [`require_single_body`].
+//! The body of a generic component is checked once, universally: the facts
+//! carry exactly one optional [`TsSetupProjection`], so a second copy of the
+//! setup body has no place to live.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrowFunctionExpression, AwaitExpression, BlockStatement, CallExpression, Class, ClassElement,
-    Declaration, Expression, ForOfStatement, Function, ImportDeclarationSpecifier, Program,
-    PropertyKey, Statement,
+    ArrowFunctionExpression, AwaitExpression, CallExpression, Class, ClassElement, Declaration,
+    Expression, ForOfStatement, Function, ImportDeclarationSpecifier, Program, PropertyKey,
+    Statement,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -108,30 +110,6 @@ pub enum SetupProjectionRefusal {
     InvalidGeneric,
     /// No admitted parse (or a parse of different source) backs the request.
     MissingParse,
-    /// The setup body was placed in more than one product.
-    DuplicateBody {
-        /// Products holding a copy of the body.
-        products: Vec<BodyProduct>,
-    },
-}
-
-/// Product that may hold the setup body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BodyProduct {
-    /// Public declaration surface.
-    Public,
-    /// The single checking unit.
-    Checking,
-}
-
-/// Accept a body placement only when at most one product holds the body.
-pub fn require_single_body(placements: &[BodyProduct]) -> Result<(), SetupProjectionRefusal> {
-    if placements.len() > 1 {
-        return Err(SetupProjectionRefusal::DuplicateBody {
-            products: placements.to_vec(),
-        });
-    }
-    Ok(())
 }
 
 /// Vue macro call resolved as a macro.
@@ -481,7 +459,7 @@ fn project_setup(
         vue_macro_imports: &vue_macro_imports,
         base: block.content_start,
         depth: 0,
-        block_nesting: 0,
+        macro_positions: macro_positions(program),
         top_level_await: None,
         macros: Vec::new(),
     };
@@ -527,12 +505,8 @@ struct SetupCollector<'s> {
     vue_macro_imports: &'s FxHashSet<&'s str>,
     base: u32,
     depth: u32,
-    /// Block-statement nesting (`if`/`for`/`while`/`try`/a bare `{ }`).
-    /// Distinct from `depth`: unlike `await`, a macro call is not root-level
-    /// merely for staying outside a function — `if (x) { defineEmits() }`
-    /// is not a legal macro position even though it crosses no function
-    /// boundary.
-    block_nesting: u32,
+    /// Start offsets of calls in a legal macro position.
+    macro_positions: FxHashSet<u32>,
     top_level_await: Option<SourceRange>,
     macros: Vec<SetupMacroCall>,
 }
@@ -594,6 +568,14 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
 
     fn visit_class(&mut self, it: &Class<'a>) {
         if self.depth == 0 {
+            // Heritage is evaluated eagerly in the enclosing scope.
+            if let Some(super_class) = &it.super_class {
+                let mut probe = ComputedKeyAwaitVisitor { found: None };
+                probe.visit_expression(super_class);
+                if let Some(span) = probe.found {
+                    self.note_await(span);
+                }
+            }
             for element in &it.body.body {
                 if let Some(key) = computed_class_key(element) {
                     let mut probe = ComputedKeyAwaitVisitor { found: None };
@@ -621,16 +603,13 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
         walk::walk_for_of_statement(self, it);
     }
 
-    fn visit_block_statement(&mut self, it: &BlockStatement<'a>) {
-        self.block_nesting += 1;
-        walk::walk_block_statement(self, it);
-        self.block_nesting -= 1;
-    }
-
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if let Expression::Identifier(callee) = &it.callee {
             let name = callee.name.as_str();
-            if self.depth == 0 && self.block_nesting == 0 && !self.module_bound.contains(name) {
+            if self.depth == 0
+                && self.macro_positions.contains(&it.span.start)
+                && !self.module_bound.contains(name)
+            {
                 if let Some(&macro_name) = MACRO_NAMES.iter().find(|m| **m == name) {
                     let free = self
                         .scoping
@@ -648,6 +627,50 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
         }
         walk::walk_call_expression(self, it);
     }
+}
+
+fn unwrap_expression<'e, 'a>(mut expr: &'e Expression<'a>) -> &'e Expression<'a> {
+    loop {
+        expr = match expr {
+            Expression::ParenthesizedExpression(e) => &e.expression,
+            Expression::TSAsExpression(e) => &e.expression,
+            Expression::TSSatisfiesExpression(e) => &e.expression,
+            _ => return expr,
+        };
+    }
+}
+
+fn note_macro_position(expr: &Expression<'_>, out: &mut FxHashSet<u32>) {
+    if let Expression::CallExpression(call) = unwrap_expression(expr) {
+        out.insert(call.span.start);
+        if let Expression::Identifier(callee) = &call.callee {
+            if callee.name == "withDefaults" {
+                if let Some(first) = call.arguments.first().and_then(|a| a.as_expression()) {
+                    note_macro_position(first, out);
+                }
+            }
+        }
+    }
+}
+
+/// Calls in a position Vue processes as a macro: root expression statements,
+/// root declarator initializers, and `withDefaults`' first argument.
+fn macro_positions(program: &Program<'_>) -> FxHashSet<u32> {
+    let mut out = FxHashSet::default();
+    for statement in &program.body {
+        match statement {
+            Statement::ExpressionStatement(s) => note_macro_position(&s.expression, &mut out),
+            Statement::VariableDeclaration(vars) => {
+                for declarator in &vars.declarations {
+                    if let Some(init) = &declarator.init {
+                        note_macro_position(init, &mut out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn declaration_names(declaration: &Declaration<'_>) -> Vec<String> {
