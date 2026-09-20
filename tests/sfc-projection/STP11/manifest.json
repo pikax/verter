@@ -1,0 +1,36 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP11",
+  "kind": "implementation",
+  "products": ["TsSetupProjection", "ModuleScopeProjection", "UniversalSetupBinder"],
+  "mandatoryCases": [
+    "STP11-universal",
+    "STP11-scope",
+    "STP11-await",
+    "STP11-assertion",
+    "STP11-one-body"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP11/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP11/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP11/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP11/probes/tsconfig.json",
+    "hoverNeedle": "stp11HoverTarget",
+    "definitionNeedle": "stp11DefinitionTarget",
+    "expectedNegativeCode": 2339,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp<{ id: number; }>"
+  },
+  "cases": [
+    { "id": "STP11-universal", "disposition": "reject", "twins": ["constraint-bounded-body"] },
+    { "id": "STP11-scope", "disposition": "accept", "twins": ["module-and-setup-scope"] },
+    { "id": "STP11-await", "disposition": "accept", "twins": ["async-setup-instance"] },
+    { "id": "STP11-assertion", "disposition": "accept", "twins": ["ts-angle-and-tsx"] },
+    { "id": "STP11-one-body", "disposition": "reject", "twins": ["duplicate-body-placement"] }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP11 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP11/script-setup.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Statement-oriented TypeScript setup and module lowering. One parse per authored block under its own grammar; generic bodies are checked once against the authored binder. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::script_projection. STP58 owns atomic Vue activation and retirement of the angle-assertion repair and duplicate setup-string wrappers."
+}

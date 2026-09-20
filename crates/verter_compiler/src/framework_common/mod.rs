@@ -44,6 +44,10 @@ mod registered_carrier_projection_tests;
 #[cfg(test)]
 pub mod sourcemap_e2e_helpers;
 
+pub use crate::ide::vue_projection::script_setup::{
+    require_single_body, BodyProduct, ModuleScopeProjection, ScriptProjectionFacts,
+    SetupProjectionRefusal, SetupStatementKind, TsSetupProjection, UniversalSetupBinder,
+};
 pub use crate::svelte::{svelte_semantic_authority_registration, SvelteSemanticAuthority};
 pub use capability::{
     CarrierFrontend, FrameworkEpoch, FrameworkEpochId, FrameworkHostIntegrationBackend,

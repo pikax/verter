@@ -1,0 +1,507 @@
+//! Statement-oriented TypeScript setup and module lowering facts.
+//!
+//! One OXC parse per authored script block yields three products:
+//! [`ModuleScopeProjection`] (imports, normal-script exports and bindings),
+//! [`TsSetupProjection`] (ordered setup statements, top-level `await`, macro
+//! calls) and [`UniversalSetupBinder`] (the authored `generic` binder, never
+//! specialized by a parent use). The grammar follows the block's `lang`, so a
+//! TypeScript angle assertion and an actual TSX element are each parsed once
+//! under their own grammar; no second TSX parse repairs TypeScript syntax.
+//!
+//! Macros are recognised by resolution, not spelling: a call to `defineProps`
+//! (and siblings) is a macro only when the callee is a free reference; an
+//! import, a normal-script binding or a setup-local lexical function of the
+//! same name is an ordinary call.
+//!
+//! The body of a generic component is checked once, universally. A projection
+//! that places the setup body in more than one product is refused by
+//! [`require_single_body`].
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    ArrowFunctionExpression, AwaitExpression, CallExpression, Class, Declaration, Expression,
+    ForOfStatement, Function, Program, Statement,
+};
+use oxc_ast_visit::{walk, Visit};
+use oxc_parser::Parser;
+use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_span::{GetSpan, SourceType};
+use oxc_syntax::scope::ScopeFlags;
+use rustc_hash::FxHashSet;
+
+use crate::cursor::ScriptLanguage;
+use crate::utils::oxc::vue::parse_generic;
+
+/// Vue macros recognised at setup scope.
+const MACRO_NAMES: [&str; 7] = [
+    "defineProps",
+    "defineEmits",
+    "defineExpose",
+    "defineOptions",
+    "defineSlots",
+    "defineModel",
+    "withDefaults",
+];
+
+/// Half-open byte range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceRange {
+    /// Start byte.
+    pub start: u32,
+    /// End byte (exclusive).
+    pub end: u32,
+}
+
+/// Grammar one script block is parsed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptGrammar {
+    /// `lang="ts"`: `<T>x` is a type assertion.
+    TypeScript,
+    /// `lang="tsx"`: `<div/>` is JSX.
+    Tsx,
+}
+
+impl ScriptGrammar {
+    fn source_type(self) -> SourceType {
+        match self {
+            Self::TypeScript => SourceType::ts().with_module(true),
+            Self::Tsx => SourceType::tsx().with_module(true),
+        }
+    }
+}
+
+/// Script block input; `content_start` is the carrier offset of `content`.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptBlockInput<'s> {
+    /// Block content.
+    pub content: &'s str,
+    /// Carrier offset of the first content byte.
+    pub content_start: u32,
+    /// Authored `lang`; `None` means TypeScript.
+    pub lang: Option<ScriptLanguage>,
+}
+
+/// Refusals raised before any projection is produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupProjectionRefusal {
+    /// The block is not TypeScript/TSX; JavaScript owns a separate projection.
+    NotTypeScript,
+    /// The block has syntax errors; incomplete-source projection owns recovery.
+    SyntaxErrors {
+        /// True for the setup block, false for the normal script.
+        setup: bool,
+    },
+    /// The `generic` attribute does not parse as type parameters.
+    InvalidGeneric,
+    /// No admitted parse (or a parse of different source) backs the request.
+    MissingParse,
+    /// The setup body was placed in more than one product.
+    DuplicateBody {
+        /// Products holding a copy of the body.
+        products: Vec<BodyProduct>,
+    },
+}
+
+/// Product that may hold the setup body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyProduct {
+    /// Public declaration surface.
+    Public,
+    /// The single checking unit.
+    Checking,
+}
+
+/// Accept a body placement only when at most one product holds the body.
+pub fn require_single_body(placements: &[BodyProduct]) -> Result<(), SetupProjectionRefusal> {
+    if placements.len() > 1 {
+        return Err(SetupProjectionRefusal::DuplicateBody {
+            products: placements.to_vec(),
+        });
+    }
+    Ok(())
+}
+
+/// Vue macro call resolved as a macro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupMacroCall {
+    /// Macro name.
+    pub name: &'static str,
+    /// Call span in the carrier.
+    pub span: SourceRange,
+}
+
+/// Classification of one top-level setup statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupStatementKind {
+    /// `import ...`; hoists to module scope.
+    Import,
+    /// Type-only declaration (`type`, `interface`); hoists to module scope.
+    TypeDeclaration {
+        /// Declared type name.
+        name: String,
+    },
+    /// Value declaration; stays inside the setup body.
+    Declaration {
+        /// Bound names, in source order.
+        names: Vec<String>,
+    },
+    /// Any other statement.
+    Other,
+}
+
+/// One top-level setup statement in source order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupStatement {
+    /// Statement span in the carrier.
+    pub span: SourceRange,
+    /// Classification.
+    pub kind: SetupStatementKind,
+}
+
+/// Import declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImport {
+    /// Statement span in the carrier.
+    pub span: SourceRange,
+    /// Module specifier.
+    pub source: String,
+    /// True when the import came from `<script setup>`.
+    pub from_setup: bool,
+}
+
+/// Module-scope facts shared by both blocks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleScopeProjection {
+    /// Imports from both blocks, normal script first.
+    pub imports: Vec<ModuleImport>,
+    /// Normal-script export names (`default` included).
+    pub named_exports: Vec<String>,
+    /// Normal-script top-level bindings in source order.
+    pub normal_script_bindings: Vec<String>,
+}
+
+/// One authored generic parameter; ranges index the `generic` attribute value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniversalBinderParam {
+    /// Parameter name.
+    pub name: String,
+    /// Constraint range.
+    pub constraint: Option<SourceRange>,
+    /// Default range.
+    pub default: Option<SourceRange>,
+}
+
+/// The authored generic binder. It carries no type arguments: the body is
+/// checked against the declared constraints, never a parent use's arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UniversalSetupBinder {
+    /// Parameters in authored order.
+    pub params: Vec<UniversalBinderParam>,
+}
+
+/// Statement-oriented setup facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TsSetupProjection {
+    /// Grammar the setup block was parsed under.
+    pub grammar: ScriptGrammar,
+    /// Top-level statements in source order.
+    pub statements: Vec<SetupStatement>,
+    /// First top-level `await`; nested functions are excluded.
+    pub top_level_await: Option<SourceRange>,
+    /// Calls resolved as Vue macros.
+    pub macros: Vec<SetupMacroCall>,
+}
+
+impl TsSetupProjection {
+    /// The checking wrapper is async exactly when setup awaits at top level.
+    /// This is a checking-body property only; the exported component
+    /// instance type and template callback return domains are unaffected.
+    #[must_use]
+    pub fn checking_wrapper_is_async(&self) -> bool {
+        self.top_level_await.is_some()
+    }
+}
+
+/// All statement-oriented facts for one SFC script pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptProjectionFacts {
+    /// Module scope.
+    pub module: ModuleScopeProjection,
+    /// Setup statements, when a setup block exists.
+    pub setup: Option<TsSetupProjection>,
+    /// Authored generic binder.
+    pub binder: UniversalSetupBinder,
+}
+
+fn grammar_of(lang: Option<ScriptLanguage>) -> Result<ScriptGrammar, SetupProjectionRefusal> {
+    match lang {
+        None | Some(ScriptLanguage::TypeScript) => Ok(ScriptGrammar::TypeScript),
+        Some(ScriptLanguage::TSX) => Ok(ScriptGrammar::Tsx),
+        Some(_) => Err(SetupProjectionRefusal::NotTypeScript),
+    }
+}
+
+fn range(span: oxc_span::Span, base: u32) -> SourceRange {
+    SourceRange {
+        start: base + span.start,
+        end: base + span.end,
+    }
+}
+
+fn root_bindings(scoping: &Scoping) -> Vec<String> {
+    let mut named: Vec<(u32, String)> = scoping
+        .get_bindings(scoping.root_scope_id())
+        .iter()
+        .map(|(name, &id)| (scoping.symbol_span(id).start, name.as_str().to_string()))
+        .collect();
+    named.sort();
+    named.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Project one script pair. `generic` is the `generic` attribute value.
+pub fn project_script_pair(
+    normal: Option<ScriptBlockInput<'_>>,
+    setup: Option<ScriptBlockInput<'_>>,
+    generic: Option<&str>,
+) -> Result<ScriptProjectionFacts, SetupProjectionRefusal> {
+    let mut module = ModuleScopeProjection::default();
+    if let Some(block) = normal {
+        project_normal(block, &mut module)?;
+    }
+    let setup = match setup {
+        Some(block) => Some(project_setup(block, &mut module)?),
+        None => None,
+    };
+    Ok(ScriptProjectionFacts {
+        module,
+        setup,
+        binder: project_binder(generic)?,
+    })
+}
+
+fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupProjectionRefusal> {
+    let Some(text) = generic.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(UniversalSetupBinder::default());
+    };
+    let allocator = Allocator::default();
+    let result = parse_generic(&allocator, text, 0);
+    if !result.is_ok() {
+        return Err(SetupProjectionRefusal::InvalidGeneric);
+    }
+    let bytes = text.as_bytes();
+    let span = |s: crate::common::RelativeSpan| SourceRange {
+        start: s.start,
+        end: s.end,
+    };
+    Ok(UniversalSetupBinder {
+        params: result
+            .params
+            .iter()
+            .map(|param| UniversalBinderParam {
+                name: String::from_utf8_lossy(param.name(bytes)).into_owned(),
+                constraint: param.constraint_span.map(span),
+                default: param.default_span.map(span),
+            })
+            .collect(),
+    })
+}
+
+fn project_normal(
+    block: ScriptBlockInput<'_>,
+    module: &mut ModuleScopeProjection,
+) -> Result<(), SetupProjectionRefusal> {
+    let grammar = grammar_of(block.lang)?;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, block.content, grammar.source_type()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Err(SetupProjectionRefusal::SyntaxErrors { setup: false });
+    }
+    collect_imports(&parsed.program, block.content_start, false, module);
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(declaration) = &export.declaration {
+                    module.named_exports.extend(declaration_names(declaration));
+                }
+                for specifier in &export.specifiers {
+                    module
+                        .named_exports
+                        .push(specifier.exported.name().to_string());
+                }
+            }
+            Statement::ExportDefaultDeclaration(_) => {
+                module.named_exports.push("default".to_string());
+            }
+            _ => {}
+        }
+    }
+    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+    module.normal_script_bindings = root_bindings(semantic.scoping());
+    Ok(())
+}
+
+fn collect_imports(
+    program: &Program<'_>,
+    base: u32,
+    from_setup: bool,
+    module: &mut ModuleScopeProjection,
+) {
+    for statement in &program.body {
+        if let Statement::ImportDeclaration(import) = statement {
+            module.imports.push(ModuleImport {
+                span: range(import.span, base),
+                source: import.source.value.to_string(),
+                from_setup,
+            });
+        }
+    }
+}
+
+fn project_setup(
+    block: ScriptBlockInput<'_>,
+    module: &mut ModuleScopeProjection,
+) -> Result<TsSetupProjection, SetupProjectionRefusal> {
+    let grammar = grammar_of(block.lang)?;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, block.content, grammar.source_type()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
+    }
+    let program = &parsed.program;
+    collect_imports(program, block.content_start, true, module);
+
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let module_bound: FxHashSet<&str> = module
+        .normal_script_bindings
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut collector = SetupCollector {
+        scoping: semantic.scoping(),
+        module_bound: &module_bound,
+        base: block.content_start,
+        depth: 0,
+        top_level_await: None,
+        macros: Vec::new(),
+    };
+    collector.visit_program(program);
+
+    let statements = program
+        .body
+        .iter()
+        .map(|statement| SetupStatement {
+            span: range(statement.span(), block.content_start),
+            kind: classify(statement),
+        })
+        .collect();
+    Ok(TsSetupProjection {
+        grammar,
+        statements,
+        top_level_await: collector.top_level_await,
+        macros: collector.macros,
+    })
+}
+
+fn classify(statement: &Statement<'_>) -> SetupStatementKind {
+    match statement {
+        Statement::ImportDeclaration(_) => SetupStatementKind::Import,
+        Statement::TSTypeAliasDeclaration(decl) => SetupStatementKind::TypeDeclaration {
+            name: decl.id.name.to_string(),
+        },
+        Statement::TSInterfaceDeclaration(decl) => SetupStatementKind::TypeDeclaration {
+            name: decl.id.name.to_string(),
+        },
+        _ => match statement.as_declaration() {
+            Some(declaration) => SetupStatementKind::Declaration {
+                names: declaration_names(declaration),
+            },
+            None => SetupStatementKind::Other,
+        },
+    }
+}
+
+struct SetupCollector<'s> {
+    scoping: &'s Scoping,
+    module_bound: &'s FxHashSet<&'s str>,
+    base: u32,
+    depth: u32,
+    top_level_await: Option<SourceRange>,
+    macros: Vec<SetupMacroCall>,
+}
+
+impl SetupCollector<'_> {
+    fn note_await(&mut self, span: oxc_span::Span) {
+        if self.depth == 0 && self.top_level_await.is_none() {
+            self.top_level_await = Some(range(span, self.base));
+        }
+    }
+}
+
+impl<'a> Visit<'a> for SetupCollector<'_> {
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        self.depth += 1;
+        walk::walk_function(self, it, flags);
+        self.depth -= 1;
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        self.depth += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.depth -= 1;
+    }
+
+    fn visit_class(&mut self, it: &Class<'a>) {
+        self.depth += 1;
+        walk::walk_class(self, it);
+        self.depth -= 1;
+    }
+
+    fn visit_await_expression(&mut self, it: &AwaitExpression<'a>) {
+        self.note_await(it.span);
+        walk::walk_await_expression(self, it);
+    }
+
+    fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
+        if it.r#await {
+            self.note_await(it.span);
+        }
+        walk::walk_for_of_statement(self, it);
+    }
+
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if let Expression::Identifier(callee) = &it.callee {
+            let name = callee.name.as_str();
+            let free = self
+                .scoping
+                .get_reference(callee.reference_id())
+                .symbol_id()
+                .is_none();
+            if let Some(&macro_name) = MACRO_NAMES.iter().find(|m| **m == name) {
+                if free && !self.module_bound.contains(name) {
+                    self.macros.push(SetupMacroCall {
+                        name: macro_name,
+                        span: range(it.span, self.base),
+                    });
+                }
+            }
+        }
+        walk::walk_call_expression(self, it);
+    }
+}
+
+fn declaration_names(declaration: &Declaration<'_>) -> Vec<String> {
+    match declaration {
+        Declaration::VariableDeclaration(vars) => vars
+            .declarations
+            .iter()
+            .flat_map(|d| d.id.get_binding_identifiers())
+            .map(|id| id.name.to_string())
+            .collect(),
+        Declaration::FunctionDeclaration(f) => f.id.iter().map(|id| id.name.to_string()).collect(),
+        Declaration::ClassDeclaration(c) => c.id.iter().map(|id| id.name.to_string()).collect(),
+        Declaration::TSEnumDeclaration(e) => vec![e.id.name.to_string()],
+        Declaration::TSTypeAliasDeclaration(t) => vec![t.id.name.to_string()],
+        Declaration::TSInterfaceDeclaration(t) => vec![t.id.name.to_string()],
+        _ => Vec::new(),
+    }
+}

@@ -993,3 +993,38 @@ fn projection_emission_binds_registered_plan() {
         .expect("same source still matches a different parse identity");
     assert_eq!(profiled_emission.snapshot(), Some(&profiled.snapshot));
 }
+
+#[test]
+fn script_projection_reads_admitted_blocks_and_refuses_foreign_source() {
+    use verter_compiler::framework_common::{SetupProjectionRefusal, SetupStatementKind};
+
+    const SFC: &str = concat!(
+        "<script lang=\"ts\">\n",
+        "export const shared = 1\n",
+        "</script>\n",
+        "<script setup lang=\"ts\" generic=\"T extends { id: number }\">\n",
+        "const row = <T>{ id: 1 }\n",
+        "const data = await load()\n",
+        "</script>\n",
+    );
+    let artifact = registered_artifact("file:///script.vue", SFC);
+    let facts = VueProjectionBackend
+        .script_projection(SFC, &artifact)
+        .expect("projects");
+    assert_eq!(facts.module.named_exports, ["shared"]);
+    assert_eq!(facts.binder.params[0].name, "T");
+    let setup = facts.setup.expect("setup");
+    assert!(setup.checking_wrapper_is_async());
+    let await_start = setup.top_level_await.expect("await").start as usize;
+    assert!(SFC[await_start..].starts_with("await load()"));
+    assert!(matches!(
+        setup.statements[0].kind,
+        SetupStatementKind::Declaration { .. }
+    ));
+    assert_eq!(
+        VueProjectionBackend
+            .script_projection("<script setup></script>", &artifact)
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}

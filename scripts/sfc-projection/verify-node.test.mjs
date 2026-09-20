@@ -16,6 +16,7 @@ import {
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
   STP10_MANDATORY_CASES,
+  STP11_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
@@ -1112,6 +1113,38 @@ test("STP10 node manifest is runnable without STP1 mandatory cases", () => {
     assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
   }
   assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP11 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP11/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP11_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP11 verify: script setup on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP11",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP11_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP11_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2339));
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+  }
+  assert.equal(result.incremental, "fresh");
 });
 
 test("STS0 node manifest is runnable without STP1 mandatory cases", () => {
