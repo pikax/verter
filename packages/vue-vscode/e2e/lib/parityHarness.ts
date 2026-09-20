@@ -89,7 +89,10 @@ export async function restartParityReady(entry: string): Promise<vscode.TextDocu
   const logFloor = logMark();
   await vscode.commands.executeCommand("verter.restartLanguageServer");
   invalidateTypeProviderSyncCache(logFloor);
-  return ensureParityReady(entry);
+  // A restart repeats the root provider handshake, so it takes that budget
+  // explicitly rather than the ordinary per-wait default.
+  await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+  return openRelative(entry);
 }
 
 export function tokenOffset(doc: vscode.TextDocument, anchor: TokenAnchor): number {
