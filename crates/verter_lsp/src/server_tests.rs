@@ -29244,6 +29244,316 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
     );
 }
 
+struct WatchedDependencyFixture {
+    _temp: tempfile::TempDir,
+    service: tower_lsp_server::LspService<VerterLanguageServer>,
+    provider: Arc<MockTypeProvider>,
+    root: String,
+    published: Arc<parking_lot::Mutex<Vec<PublishDiagnosticsParams>>>,
+    published_changed: Arc<tokio::sync::Notify>,
+    drain: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for WatchedDependencyFixture {
+    fn drop(&mut self) {
+        self.drain.abort();
+    }
+}
+
+async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::test_utils::canonical_test_path(temp.path());
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("tsconfig.json"), "{}").unwrap();
+    if helper_exists {
+        std::fs::write(temp.path().join("src/helper.ts"), "export const value = 1;").unwrap();
+    }
+    let provider = Arc::new(MockTypeProvider::new());
+    let provider_for_server = provider.clone();
+    let (mut service, mut socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::new(VerterHost::new_standalone(HostConfig::default())),
+                type_provider: Some(provider_for_server.clone()),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::Tsserver,
+                ),
+                mcp_port: None,
+                type_provider_reason: None,
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({ "processId": null, "rootUri": null, "capabilities": {} }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    let published = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = published.clone();
+    let published_changed = Arc::new(tokio::sync::Notify::new());
+    let captured_changed = published_changed.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(message) = socket.next().await {
+            if message.method() == "textDocument/publishDiagnostics" {
+                let params = serde_json::from_value(
+                    serde_json::to_value(message.params().unwrap()).unwrap(),
+                )
+                .unwrap();
+                captured.lock().push(params);
+                captured_changed.notify_one();
+            }
+        }
+    });
+    let server = service.inner();
+    install_test_resolver_for_root(server, &root, Some(&format!("{root}/tsconfig.json")));
+    for (name, source) in [
+        ("Consumer.vue", "<script setup lang=\"ts\">\nimport { value } from './helper';\n</script>\n<template>{{ value }}</template>"),
+        ("Unrelated.vue", "<template><p>unrelated</p></template>"),
+    ] {
+        let id = format!("{root}/src/{name}");
+        let uri = crate::uri::path_to_file_uri(&id).unwrap();
+        std::fs::write(temp.path().join("src").join(name), source).unwrap();
+        server.documents.did_open(&TextDocumentItem {
+            uri: uri.clone(), language_id: "vue".into(), version: 1, text: source.into(),
+        });
+        server.refresh_carrier_dependency_tracking(&id);
+        server.ensure_current_file_synced(&uri).await;
+        server.sync_coordinator.signal_diagnostics_only(id, uri.to_string(), tokio::time::Instant::now());
+    }
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                ["Consumer.vue", "Unrelated.vue"].iter().all(|name| {
+                    server
+                        .documents
+                        .diagnostics_ready(&workspace_uri(&root, &format!("src/{name}")))
+                }) && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("initial watched-file fixture diagnostics did not complete"),
+        )
+        .await;
+    WatchedDependencyFixture {
+        _temp: temp,
+        service,
+        provider,
+        root,
+        published,
+        published_changed,
+        drain,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_ts_delete_republishes_only_open_importers() {
+    use verter_workspace::WorkspaceRead;
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let helper = format!("{}/src/helper.ts", fixture.root);
+    let consumer = format!("{}/src/Consumer.vue", fixture.root);
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let workspace = server.vfs_workspace.read().clone().unwrap();
+    assert!(workspace.file_exists(&helper));
+    crate::workspace_scanner::resync_non_carrier_file(
+        &helper,
+        &server.documents.host_arc(),
+        server.project_sync.as_ref().unwrap(),
+        server.documents.provider_surfaces(),
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+    )
+    .await;
+    // A closed importer remains in the graph but is not owed editor diagnostics.
+    let closed = format!("{}/src/Closed.vue", fixture.root);
+    server.documents.host().upsert(UpsertRequest {
+        canonical_id: Some(closed.clone()), input_id: closed.clone(),
+        source: Arc::from("<script setup lang=\"ts\">import { value } from './helper';</script><template>{{ value }}</template>"),
+        file_language: FileLanguage::vue(), aliases: Vec::new(),
+    }).unwrap();
+    server.refresh_carrier_dependency_tracking(&closed);
+    let affected = workspace.affected_canonicals(&helper);
+    assert!(affected.contains(&consumer) && affected.contains(&closed));
+    let surface = server.capture_provider_request_surface(&uri).unwrap();
+    let provider_path = surface.stamp.provider_path.to_string();
+    let start = surface.provider_content.find("./helper").unwrap() as u32;
+    fixture.provider.set_diagnostics(
+        &provider_path,
+        vec![TypeDiagnostic {
+            message: "Cannot find module './helper'".into(),
+            severity: crate::type_provider::protocol::TypeDiagnosticSeverity::Error,
+            start,
+            end: start + 8,
+            code: Some("2307".into()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+    fixture.provider.clear_calls();
+    std::fs::remove_file(fixture._temp.path().join("src/helper.ts")).unwrap();
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: workspace_uri(&fixture.root, "src/helper.ts"),
+                typ: FileChangeType::DELETED,
+            }],
+        },
+    )
+    .await;
+    assert!(
+        !server.documents.diagnostics_ready(&uri),
+        "dependency deletion must retire the clean receipt before returning"
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("watched dependency deletion never republished the consumer"),
+        )
+        .await;
+    assert!(!workspace.file_exists(&helper));
+    let calls = fixture.provider.calls();
+    let close = calls
+        .iter()
+        .position(|call| matches!(call, MockCall::CloseFile { path } if path == &helper))
+        .unwrap();
+    let pulls: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| match call {
+            MockCall::GetDiagnostics { path } => Some((index, path)),
+            _ => None,
+        })
+        .collect();
+    assert!(!pulls.is_empty());
+    assert!(
+        pulls
+            .iter()
+            .all(|(index, path)| *index > close && *path == &provider_path),
+        "only the open consumer must be checked, after helper close: {calls:?}"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let changed = fixture.published_changed.notified();
+            if fixture.published.lock().iter().any(|batch| {
+                batch.uri == uri
+                    && batch.version == Some(1)
+                    && batch.diagnostics.iter().any(|diagnostic| {
+                        diagnostic.code == Some(NumberOrString::String("2307".into()))
+                    })
+            }) {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("the unchanged consumer must receive the new missing-module diagnostic");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_ts_create_refreshes_missing_lookup_before_open_importers() {
+    use verter_workspace::WorkspaceRead;
+    let fixture = watched_dependency_fixture(false).await;
+    let server = fixture.service.inner();
+    let helper = format!("{}/src/helper.ts", fixture.root);
+    let consumer = format!("{}/src/Consumer.vue", fixture.root);
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let workspace = server.vfs_workspace.read().clone().unwrap();
+    assert!(
+        !workspace.file_exists(&helper),
+        "seed the cached missing-file lookup"
+    );
+    assert!(
+        workspace.affected_canonicals(&helper).contains(&consumer),
+        "an unresolved relative import must identify its consumer"
+    );
+    let provider_path = server
+        .capture_provider_request_surface(&uri)
+        .unwrap()
+        .stamp
+        .provider_path
+        .to_string();
+    fixture.provider.clear_calls();
+    std::fs::write(
+        fixture._temp.path().join("src/helper.ts"),
+        "export const value = 2;",
+    )
+    .unwrap();
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: workspace_uri(&fixture.root, "src/helper.ts"),
+                typ: FileChangeType::CREATED,
+            }],
+        },
+    )
+    .await;
+    assert!(
+        workspace.file_exists(&helper),
+        "standard watcher events must invalidate cached absence even for a never-loaded helper"
+    );
+    server.sync_coordinator.await_until(
+        || fixture.provider.calls().iter().any(|call| matches!(call, MockCall::GetDiagnostics { path } if path == &provider_path))
+            && server.documents.diagnostics_ready(&uri) && server.sync_coordinator.diag_tasks_live() == 0,
+        || panic!("created dependency never reached the open consumer"),
+    ).await;
+    let calls = fixture.provider.calls();
+    let load = calls
+        .iter()
+        .position(|call| matches!(call, MockCall::LoadFile { path, .. } if path == &helper))
+        .unwrap();
+    assert!(calls.iter().enumerate().all(|(index, call)| !matches!(call, MockCall::GetDiagnostics { path } if index <= load || path != &provider_path)), "consumer queries must follow dependency publication: {calls:?}");
+
+    let helper_uri = workspace_uri(&fixture.root, "src/helper.ts");
+    let unsaved = "export const value = 'unsaved';";
+    server.documents.did_open(&TextDocumentItem {
+        uri: helper_uri,
+        language_id: "typescript".into(),
+        version: 1,
+        text: unsaved.into(),
+    });
+    fixture.provider.clear_calls();
+    std::fs::write(
+        fixture._temp.path().join("src/helper.ts"),
+        "export const value = 'disk';",
+    )
+    .unwrap();
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: workspace_uri(&fixture.root, "src/helper.ts"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(
+        server.documents.host().get_source(&helper).as_deref(),
+        Some(unsaved)
+    );
+    assert!(
+        fixture.provider.calls().is_empty(),
+        "a disk event must not replace an open editor buffer"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace_root() {
     use verter_workspace::WorkspaceRead;
