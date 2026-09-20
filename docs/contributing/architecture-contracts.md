@@ -173,6 +173,24 @@ ancestry or matching history text. Squash merging therefore cannot invalidate
 the proof. Any count claim that contradicts a live verifier result is a bug
 in the doc.
 
+## Architecture-health PR checklist
+
+For changes touching a contract hotspot or its crate dependencies, reviewers
+should verify:
+
+- the owning module and one surviving authority are unchanged or explicitly
+  migrated;
+- Cargo dependencies still match the ARH1 layer rule and forbidden imports are
+  absent;
+- `pub`/`pub(crate)` boundaries and every affected consumer are covered by the
+  contract; and
+- the targeted architecture guard and the relevant behavioral lane were run.
+
+The executable boundary is
+`arh12_dependency_and_visibility_contracts_are_enforced` in
+`crates/verter_session/tests/cases/architecture_guards.rs`; it derives the
+current manifests and source tree rather than matching historical filenames.
+
 ## Related pages
 
 - [Source and map identity](./source-identity.md) — span types, position

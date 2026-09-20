@@ -438,6 +438,162 @@ fn god_module_size_budget() {
     );
 }
 
+#[test]
+fn arh12_dependency_and_visibility_contracts_are_enforced() {
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+    use syn::visit::Visit;
+    use walkdir::WalkDir;
+
+    struct ForbiddenImportVisitor<'a> {
+        forbidden: &'a [&'a str],
+        found: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for ForbiddenImportVisitor<'_> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if let Some(first) = path.segments.first() {
+                let name = first.ident.to_string();
+                if self.forbidden.contains(&name.as_str()) {
+                    self.found.push(name);
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+    }
+
+    fn blank_string_literals(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut out = bytes.to_vec();
+        let mut i = 0;
+        while i < bytes.len() {
+            let (start, end) = if bytes[i] == b'"' {
+                let mut j = i + 1;
+                while j < bytes.len() {
+                    if bytes[j] == b'\\' {
+                        j += 2;
+                    } else if bytes[j] == b'"' {
+                        break;
+                    } else {
+                        j += 1;
+                    }
+                }
+                (i, (j + 1).min(bytes.len()))
+            } else {
+                i += 1;
+                continue;
+            };
+            for byte in &mut out[start..end] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+            i = end;
+        }
+        String::from_utf8(out).expect("source is UTF-8")
+    }
+
+    let contracts: Value = serde_json::from_str(&read_workspace_file(
+        "tests/architecture-health/ARH1/products/dependency-contracts.json",
+    ))
+    .expect("ARH1 dependency contracts must be valid JSON");
+
+    let workspace = workspace_root();
+    let rules = contracts["layerRules"]
+        .as_array()
+        .expect("ARH1 layerRules must be an array");
+    for rule in rules {
+        let crate_rel = rule["crate"].as_str().expect("layer rule crate");
+        let manifest = workspace.join(crate_rel).join("Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+        let mut in_dependencies = false;
+        let actual: BTreeSet<String> = manifest_text
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') {
+                    in_dependencies = trimmed == "[dependencies]";
+                    return None;
+                }
+                if !in_dependencies || trimmed.is_empty() || trimmed.starts_with('#') {
+                    return None;
+                }
+                let name = trimmed.split_once('=')?.0.trim();
+                let name = name.strip_suffix(".workspace").unwrap_or(name);
+                (name.starts_with("verter_")).then(|| name.to_owned())
+            })
+            .collect();
+        let declared: BTreeSet<String> = rule["mayImport"]
+            .as_array()
+            .expect("layer mayImport must be an array")
+            .iter()
+            .map(|name| name.as_str().expect("layer dependency name").to_owned())
+            .collect();
+        assert_eq!(actual, declared, "{} dependency contract drift", crate_rel);
+
+        let forbidden: Vec<&str> = rule["mustNotImport"]
+            .as_array()
+            .expect("layer mustNotImport must be an array")
+            .iter()
+            .map(|name| name.as_str().expect("forbidden dependency name"))
+            .collect();
+        let src_root = workspace.join(crate_rel).join("src");
+        for entry in WalkDir::new(&src_root).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file()
+                || entry.path().extension().and_then(|ext| ext.to_str()) != Some("rs")
+            {
+                continue;
+            }
+            let source = fs::read_to_string(entry.path())
+                .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
+            let source = cosmetic_reprinter_guard::strip_comments(&source);
+            if let Ok(syntax) = syn::parse_file(&source) {
+                let mut visitor = ForbiddenImportVisitor {
+                    forbidden: &forbidden,
+                    found: Vec::new(),
+                };
+                visitor.visit_file(&syntax);
+                assert!(
+                    visitor.found.is_empty(),
+                    "{} imports forbidden crates: {:?}",
+                    entry.path().display(),
+                    visitor.found
+                );
+            } else {
+                let source = blank_string_literals(&source);
+                for dependency in &forbidden {
+                    assert!(
+                        !source.contains(&format!("{dependency}::")),
+                        "{} imports forbidden crate {dependency}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
+    }
+
+    for hotspot in contracts["hotspots"]
+        .as_array()
+        .expect("ARH1 hotspots must be an array")
+    {
+        for surface in hotspot["surfaceDeclarations"]
+            .as_array()
+            .expect("hotspot surfaceDeclarations must be an array")
+        {
+            let file = surface["file"].as_str().expect("surface file");
+            let declaration = surface["declaration"]
+                .as_str()
+                .expect("surface declaration");
+            let source = read_workspace_file(file);
+            assert!(
+                source.contains(declaration),
+                "visibility contract missing from {file}: {declaration}"
+            );
+        }
+    }
+}
+
 /// Count occurrences of any of the supplied needles in `src`.
 /// Returns the total number of byte-substring hits across all needles.
 fn count_callsites(src: &str, needles: &[&str]) -> usize {
