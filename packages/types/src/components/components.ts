@@ -398,6 +398,38 @@ export declare function componentConstructor<P, A extends any[], R>(
 ): new (props: P) => R;
 export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
 
+/**
+ * The props a raw component-options object accepts in a template: its declared
+ * `props` (array or object form) plus the `on*` listeners of its `emits`.
+ */
+export type AsyncComponentOptionsProps<T> = (T extends { props: infer P }
+  ? P extends readonly (infer K)[]
+    ? { [Q in K & string]?: any }
+    : import("vue").ExtractPublicPropTypes<P>
+  : {}) &
+  (T extends { emits: infer E }
+    ? E extends readonly string[] | Record<string, any>
+      ? import("vue").EmitsToProps<E>
+      : {}
+    : {});
+
+/**
+ * The template-facing type of a `defineAsyncComponent` result.
+ *
+ * Vue types `defineAsyncComponent` as returning whatever the loader resolves
+ * to. A constructor or a functional component is already renderable and is
+ * returned EXACTLY (generic signatures included). A raw options object is
+ * valid at runtime but has no construct or call signature, so it becomes a
+ * component constructor over the contract its own `props`/`emits` declare.
+ */
+export type AsyncComponent<T> = T extends abstract new (...args: any) => any
+  ? T
+  : T extends (...args: any) => any
+    ? T
+    : new (...args: any[]) => import("vue").ComponentPublicInstance<AsyncComponentOptionsProps<T>>;
+
+export declare function asyncComponent<T>(comp: T): AsyncComponent<T>;
+
 export declare function instantiateComponent<T, P>(
   comp: T,
   props: P,

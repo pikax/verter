@@ -29,9 +29,10 @@ use super::{
     build_binding_source_info, collect_binding_names, collect_global_component_fallbacks,
     detect_get_current_instance, detect_use_attrs_calls, directive_accessor_declaration,
     emit_attrs_type_aliases, emit_comp_functions_to_string, emit_get_root_component_to_string,
-    emit_global_component_fallbacks, emit_helper_imports, emit_minimal_wrapper,
-    emit_type_constructs, instance_declaration, instance_probe_line, kebab_to_pascal_case,
-    process_companion_for_tsx, process_macros, rewrite_ts_type_assertions,
+    emit_global_component_fallbacks, emit_helper_imports, emit_helper_imports_with_async_component,
+    emit_minimal_wrapper, emit_type_constructs, instance_declaration, instance_probe_line,
+    kebab_to_pascal_case, process_companion_for_tsx, process_macros,
+    proven_vue_async_component_bindings, rewrite_ts_type_assertions,
     script_content_insertion_anchor, should_infer_function_types, unbound_builtin_components,
     MacroSourceCtx, PREFIX,
 };
@@ -538,6 +539,10 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         }
     }
 
+    let async_component_bindings =
+        proven_vue_async_component_bindings(&effective_program.body, &parse_result.items);
+    let mut uses_async_component_helper = false;
+
     // Replace </script> tag with block scope opening; close deferred to template end
     if let Some(tag_close) = &setup.tag_close {
         let mut wrapper_end = String::with_capacity(512);
@@ -841,7 +846,21 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                     let jsdoc = binding_source_info
                         .get(name)
                         .and_then(|info| info.jsdoc.as_deref());
-                    if options.is_jsx {
+                    if async_component_bindings.contains(name) {
+                        // A value-read like every live entry, carrying the
+                        // renderable component type instead of the raw
+                        // loader result. A plain call, so it is valid in
+                        // both the TS and the JS carrier.
+                        uses_async_component_helper = true;
+                        let entry = format!("{name}: {P}asyncComponent({name})", P = PREFIX);
+                        match jsdoc {
+                            Some(jsdoc) => format!(
+                                "{jsdoc}
+    {entry}"
+                            ),
+                            None => entry,
+                        }
+                    } else if options.is_jsx {
                         // JSX mode: no TS casts — a live binding reads the value.
                         if let Some(jsdoc) = jsdoc {
                             format!("{}\n    {}: {}", jsdoc, name, name)
@@ -1162,7 +1181,12 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             hoisted_import_names.extend(imp.binding_names.iter().map(|name| &**name));
         }
     }
-    emit_helper_imports(
+    let emit_imports = if uses_async_component_helper {
+        emit_helper_imports_with_async_component
+    } else {
+        emit_helper_imports
+    };
+    emit_imports(
         out,
         hoist_pos,
         Some(script_content_insertion_anchor(source, content_start)),
