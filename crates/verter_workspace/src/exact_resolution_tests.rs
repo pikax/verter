@@ -742,19 +742,47 @@ fn remove_file_surgical_stem_axis_via_active_stems() {
 
 // ── Test #27 ──
 #[test]
-fn remove_file_clears_owner_as_target_in_both_axes() {
-    // Removing /foo.ts clears reverse_deps_*[/foo.ts].
+fn remove_file_keeps_the_importers_that_still_name_it() {
+    // The reverse axis mirrors the importers' FORWARD state. Removing
+    // /foo.ts as an OWNER (a delete, or the remove-then-reload of a disk
+    // change) leaves /src/A.vue still naming it, so A must stay reachable
+    // from it: an identical re-record of A is an idempotent no-op and could
+    // never put the edge back.
     let mut store = EdgeStore::new();
     store.replace_parsed_edges("/src/A.vue", btree(&["/foo.ts"]), vec![], vec![]);
-    assert!(!store.reverse_deps_for_target("/foo.ts", None).is_empty());
-    store.remove_file("/foo.ts");
-    assert!(
-        store.reverse_deps_for_target("/foo.ts", None).is_empty(),
-        "removed file's reverse buckets must be cleared"
+    store.replace_parsed_edges(
+        "/src/B.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./foo".to_string(), ResolveRequestKind::EsmImport),
+            "/foo".to_string(),
+        )],
+        vec![],
     );
-    // But /src/A.vue's per-owner state is untouched.
-    let snap = store.snapshot("/src/A.vue").unwrap();
-    assert!(snap.parsed_resolved.contains("/foo.ts"));
+    store.replace_parsed_edges("/foo.ts", btree(&["/dep.ts"]), vec![], vec![]);
+
+    store.remove_file("/foo.ts");
+    let mut importers = store.reverse_deps_for_target("/foo.ts", Some("/foo"));
+    importers.sort();
+    assert_eq!(importers, vec!["/src/A.vue", "/src/B.vue"]);
+    assert!(
+        store.reverse_deps_for_target("/dep.ts", None).is_empty(),
+        "the removed owner's OWN forward edges are retracted"
+    );
+
+    // Reloading the file and re-recording the unchanged importer keeps it.
+    store.replace_parsed_edges("/foo.ts", btree(&["/dep.ts"]), vec![], vec![]);
+    store.replace_parsed_edges("/src/A.vue", btree(&["/foo.ts"]), vec![], vec![]);
+    assert!(store
+        .reverse_deps_for_target("/foo.ts", None)
+        .contains(&"/src/A.vue".to_string()));
+
+    // The bucket is retracted by the importer, the only party that owns it.
+    store.replace_parsed_edges("/src/A.vue", BTreeSet::new(), vec![], vec![]);
+    store.remove_file("/src/B.vue");
+    assert!(store
+        .reverse_deps_for_target("/foo.ts", Some("/foo"))
+        .is_empty());
 }
 
 // ── Test #28 ──

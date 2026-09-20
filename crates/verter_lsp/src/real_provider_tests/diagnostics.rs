@@ -1049,3 +1049,130 @@ real_provider_test!(
         );
     }
 );
+
+// ---------------------------------------------------------------------------
+// A watched dependency deleted underneath an open, clean importer
+// ---------------------------------------------------------------------------
+
+/// Removes the files it wrote even when the body panics, so a failed run
+/// cannot leave strays in the shared fixture tree.
+struct WatchedDependencyFiles(Vec<std::path::PathBuf>);
+
+impl Drop for WatchedDependencyFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+real_provider_test!(
+    diagnostics_watched_dependency_delete_reports_missing_module,
+    fixture = "vue-parity",
+    async fn run(session) {
+        use tower_lsp_server::ls_types::{
+            DidChangeWatchedFilesParams, FileChangeType, FileEvent,
+        };
+        use tower_lsp_server::LanguageServer;
+
+        let root = std::path::PathBuf::from(RealProviderTestSession::uri_to_path(
+            &session.workspace_uri(""),
+        ));
+        // Both provider variants of this test share one staged fixture tree.
+        let provider = if session.is_tsgo() { "tsgo" } else { "tsserver" };
+        let helper_stem = format!("__watched_dependency_helper_{provider}");
+        let helper_rel = &format!("src/{helper_stem}.ts");
+        let consumer_rel = &format!("src/__WatchedDependencyConsumer_{provider}.vue");
+        let files = WatchedDependencyFiles(vec![root.join(helper_rel), root.join(consumer_rel)]);
+        // Each file appears in the watched tree complete, in one rename. A
+        // create-then-write lets the provider's own directory watcher read the
+        // file between the two steps and keep the empty text.
+        let publish = |target: &std::path::Path, content: &str| {
+            let staged = root
+                .parent()
+                .expect("the staged fixture has a parent")
+                .join(format!(
+                    "{}.staged",
+                    target.file_name().unwrap().to_string_lossy()
+                ));
+            std::fs::write(&staged, content).unwrap();
+            std::fs::rename(&staged, target).unwrap();
+        };
+        publish(
+            &files.0[0],
+            "export function watchedPing(): string { return \"ok\"; }
+",
+        );
+        publish(
+            &files.0[1],
+            &format!("<script setup lang=\"ts\">
+import {{ watchedPing }} from \"./{helper_stem}\";
+const msg = watchedPing();
+</script>
+<template><p>{{{{ msg }}}}</p></template>
+"),
+        );
+        let created = |relative: &str, typ| FileEvent {
+            uri: session.workspace_uri(relative),
+            typ,
+        };
+        session
+            .server()
+            .did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![
+                    created(helper_rel, FileChangeType::CREATED),
+                    created(consumer_rel, FileChangeType::CREATED),
+                ],
+            })
+            .await;
+
+        let uri = session.open_fixture_file(consumer_rel).await;
+        assert!(
+            session.wait_until_ready(&uri, "{{ msg }}", 4, "msg").await,
+            "the importer must type-check against the present dependency first"
+        );
+        let is_missing_module = |diagnostic: &Diagnostic| {
+            lsp_diagnostic_code(diagnostic).as_deref() == Some("2307")
+        };
+        let clean = session
+            .merged_diagnostics_until(&uri, |diagnostics| {
+                !diagnostics.iter().any(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            })
+            .await;
+        assert_framework_file_has_no_error_diagnostics("importer of a present dependency", &clean);
+
+        // The server's own publication must have certified the clean state:
+        // the deletion is only observable as that certificate being retired.
+        let documents = session.server().test_documents();
+        let certified = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !documents.diagnostics_ready(&uri) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            certified.is_ok(),
+            "the server never certified the importer's clean diagnostics"
+        );
+
+        std::fs::remove_file(&files.0[0]).unwrap();
+        session
+            .server()
+            .did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![created(helper_rel, FileChangeType::DELETED)],
+            })
+            .await;
+        assert!(
+            !documents.diagnostics_ready(&uri),
+            "deleting a dependency must retire the open importer's clean certificate,              even though the dependency was created (and reloaded) after the importer              recorded its edges"
+        );
+
+        let after = session
+            .merged_diagnostics_until(&uri, |diagnostics| diagnostics.iter().any(is_missing_module))
+            .await;
+        assert!(
+            after.iter().any(is_missing_module),
+            "the unchanged importer must report the deleted dependency; got {after:?}"
+        );
+    }
+);
