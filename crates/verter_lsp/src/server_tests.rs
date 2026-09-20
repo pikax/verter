@@ -6763,117 +6763,130 @@ async fn rename_after_did_change_repairs_latest_provider_surface_for_vue_and_sve
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_update() {
-    let blocker_v1 = "<script setup lang=\"ts\">const blocker = 1</script>\n";
-    let blocker_v2 = "<script setup lang=\"ts\">const blocker = 2</script>\n";
-    let target_v1 = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
-    let target_v2 = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
-    let warm_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild /></template>\n";
-    let (_temp, service, drain_handle, provider, workspace_id) =
-        make_definition_test_server_with_kind(
-            &[
-                ("src/Blocker.vue", "vue", blocker_v1),
-                (
-                    "src/OldChild.vue",
-                    "vue",
-                    "<script setup lang=\"ts\">defineProps<{ staleProp: string }>()</script>",
-                ),
-                (
-                    "src/NewChild.vue",
-                    "vue",
-                    "<script setup lang=\"ts\">defineProps<{ currentProp: string }>()</script>",
-                ),
-                ("src/Target.vue", "vue", target_v1),
-                ("src/Warm.vue", "vue", warm_source),
-            ],
-            crate::TypeProviderKind::Tsgo,
-        )
-        .await;
-    let server = service.inner();
-    let blocker_uri = workspace_uri(&workspace_id, "src/Blocker.vue");
-    let target_uri = workspace_uri(&workspace_id, "src/Target.vue");
-    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
-    settle_child_contracts(server, &warm_uri, &workspace_id, &["src/NewChild.vue"]).await;
-    server.ensure_current_file_synced(&blocker_uri).await;
-    let blocker_ide_path = server
-        .active_ide_path_for_uri(&blocker_uri)
-        .expect("blocker provider path");
-    let (update_arrived, update_release) = provider.block_update_file(&blocker_ide_path);
+/// Runs on the serve thread, as every handler does in the shipped binary: this
+/// body polls a `did_change`, a second `did_change` and a `completion` handler
+/// future INLINE and nested, which is exactly the shape
+/// [`crate::SERVE_THREAD_STACK_BYTES`] is sized for. On libtest's default
+/// thread an unoptimized build overflows the stack before any assertion runs.
+#[test]
+fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_update() {
+    crate::run_on_serve_thread(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime must build")
+            .block_on(async {
+            let blocker_v1 = "<script setup lang=\"ts\">const blocker = 1</script>\n";
+            let blocker_v2 = "<script setup lang=\"ts\">const blocker = 2</script>\n";
+            let target_v1 = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
+            let target_v2 = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
+            let warm_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild /></template>\n";
+            let (_temp, service, drain_handle, provider, workspace_id) =
+                make_definition_test_server_with_kind(
+                    &[
+                        ("src/Blocker.vue", "vue", blocker_v1),
+                        (
+                            "src/OldChild.vue",
+                            "vue",
+                            "<script setup lang=\"ts\">defineProps<{ staleProp: string }>()</script>",
+                        ),
+                        (
+                            "src/NewChild.vue",
+                            "vue",
+                            "<script setup lang=\"ts\">defineProps<{ currentProp: string }>()</script>",
+                        ),
+                        ("src/Target.vue", "vue", target_v1),
+                        ("src/Warm.vue", "vue", warm_source),
+                    ],
+                    crate::TypeProviderKind::Tsgo,
+                )
+                .await;
+            let server = service.inner();
+            let blocker_uri = workspace_uri(&workspace_id, "src/Blocker.vue");
+            let target_uri = workspace_uri(&workspace_id, "src/Target.vue");
+            let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+            settle_child_contracts(server, &warm_uri, &workspace_id, &["src/NewChild.vue"]).await;
+            server.ensure_current_file_synced(&blocker_uri).await;
+            let blocker_ide_path = server
+                .active_ide_path_for_uri(&blocker_uri)
+                .expect("blocker provider path");
+            let (update_arrived, update_release) = provider.block_update_file(&blocker_ide_path);
 
-    let blocked_update = super::lifecycle::handle_did_change(
-        server,
-        DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri: blocker_uri,
-                version: 2,
-            },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: blocker_v2.to_string(),
-            }],
-        },
-    );
-    let probe = async {
-        update_arrived.notified().await;
-        let target_edit = super::lifecycle::handle_did_change(
-            server,
-            DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: target_uri.clone(),
-                    version: 2,
+            let blocked_update = super::lifecycle::handle_did_change(
+                server,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: blocker_uri,
+                        version: 2,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: blocker_v2.to_string(),
+                    }],
                 },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: target_v2.to_string(),
-                }],
-            },
-        );
-        let observe = async {
-            tokio::time::timeout(BLOCKED_PROVIDER_PROBE_LIVENESS, async {
-                loop {
-                    if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("unrelated target commit must not wait for blocker provider publication");
-
-            settle_child_contracts(server, &target_uri, &workspace_id, &["src/NewChild.vue"]).await;
-
-            let cursor = target_v2.find("<NewChild ").unwrap() + "<NewChild ".len();
-            let position = LineIndex::new_utf16(target_v2)
-                .offset_to_position(cursor as u32)
-                .expect("current completion position");
-            let response = tokio::time::timeout(
-                BLOCKED_PROVIDER_PROBE_LIVENESS,
-                server.completion(completion_params(&target_uri, position, None)),
-            )
-            .await
-            .expect("completion must use the independently committed target edit")
-            .expect("completion succeeds");
-            let labels = completion_labels(response);
-            assert!(
-                labels.contains(&"current-prop".to_string()),
-                "completion must answer current target props: {labels:?}"
             );
-            assert!(
-                !labels.contains(&"stale-prop".to_string()),
-                "completion must not answer pre-edit target props: {labels:?}"
-            );
+            let probe = async {
+                update_arrived.notified().await;
+                let target_edit = super::lifecycle::handle_did_change(
+                    server,
+                    DidChangeTextDocumentParams {
+                        text_document: VersionedTextDocumentIdentifier {
+                            uri: target_uri.clone(),
+                            version: 2,
+                        },
+                        content_changes: vec![TextDocumentContentChangeEvent {
+                            range: None,
+                            range_length: None,
+                            text: target_v2.to_string(),
+                        }],
+                    },
+                );
+                let observe = async {
+                    tokio::time::timeout(BLOCKED_PROVIDER_PROBE_LIVENESS, async {
+                        loop {
+                            if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("unrelated target commit must not wait for blocker provider publication");
 
-            update_release.notify_one();
-        };
-        futures_util::future::join(target_edit, observe).await;
-    };
-    futures_util::future::join(blocked_update, probe).await;
+                    settle_child_contracts(server, &target_uri, &workspace_id, &["src/NewChild.vue"]).await;
 
-    drain_handle.abort();
-    drop(service);
+                    let cursor = target_v2.find("<NewChild ").unwrap() + "<NewChild ".len();
+                    let position = LineIndex::new_utf16(target_v2)
+                        .offset_to_position(cursor as u32)
+                        .expect("current completion position");
+                    let response = tokio::time::timeout(
+                        BLOCKED_PROVIDER_PROBE_LIVENESS,
+                        server.completion(completion_params(&target_uri, position, None)),
+                    )
+                    .await
+                    .expect("completion must use the independently committed target edit")
+                    .expect("completion succeeds");
+                    let labels = completion_labels(response);
+                    assert!(
+                        labels.contains(&"current-prop".to_string()),
+                        "completion must answer current target props: {labels:?}"
+                    );
+                    assert!(
+                        !labels.contains(&"stale-prop".to_string()),
+                        "completion must not answer pre-edit target props: {labels:?}"
+                    );
+
+                    update_release.notify_one();
+                };
+                futures_util::future::join(target_edit, observe).await;
+            };
+            futures_util::future::join(blocked_update, probe).await;
+
+            drain_handle.abort();
+            drop(service);
+            });
+    });
 }
 
 #[tokio::test(flavor = "multi_thread")]
