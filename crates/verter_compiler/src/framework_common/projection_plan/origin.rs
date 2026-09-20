@@ -352,14 +352,13 @@ impl ProjectionEmission {
         }
         // Current plan membership is the reuse origin check. Previous snapshot
         // equality cannot admit an authored ID absent from this plan.
+        // A None `current` is reachable only for an unbound `previous`; an unbound
+        // emission carries no snapshot, input basis, or mint to preserve.
         assemble(
             checking_text,
             mapping,
             observations,
-            match current {
-                Some((plan, canonical_id)) => Some(binding_from_plan(plan, canonical_id)),
-                None => binding_from_previous(previous),
-            },
+            current.map(|(plan, canonical_id)| binding_from_plan(plan, canonical_id)),
         )
     }
 
@@ -410,9 +409,9 @@ impl ProjectionEmission {
                             carrier: MappingSpan { start: 0, end: 0 },
                         });
                     };
-                    let generated = slice_bytes(&self.checking_text, region.generated);
-                    let authored = slice_bytes(source, carrier);
-                    if generated != authored {
+                    let generated = try_slice_bytes(&self.checking_text, region.generated);
+                    let authored = try_slice_bytes(source, carrier);
+                    if generated.is_none() || authored.is_none() || generated != authored {
                         return Err(EmissionRefusal::RoundtripMismatch {
                             generated: region.generated,
                             carrier,
@@ -492,16 +491,25 @@ pub fn projected_class_for_emit_op(
     op: &EmitOp<'_>,
     transform: &CodeTransform<'_>,
 ) -> Vec<(MappingSpan, ProjectedClass)> {
+    projected_class_for_emit_op_with(op, &MappingProduct::of(transform))
+}
+
+/// Same lowering against a mapping the caller already built once per transform.
+#[must_use]
+pub fn projected_class_for_emit_op_with(
+    op: &EmitOp<'_>,
+    mapping: &MappingProduct,
+) -> Vec<(MappingSpan, ProjectedClass)> {
     match op {
         EmitOp::PreserveOriginal { source } => preserved_classes_from_mapping(
-            &MappingProduct::of(transform),
+            mapping,
             MappingSpan {
                 start: source.start.0,
                 end: source.end.0,
             },
         ),
         EmitOp::MoveOriginal { source, .. } => moved_classes_from_mapping(
-            &MappingProduct::of(transform),
+            mapping,
             MappingSpan {
                 start: source.start.0,
                 end: source.end.0,
@@ -595,7 +603,7 @@ impl SnapshotMint {
 struct EmissionBinding<'a> {
     snapshot: &'a PlanSnapshotId,
     input_basis: &'a InputBasisId,
-    plan: Option<&'a ProjectionPlan>,
+    plan: &'a ProjectionPlan,
     mint: SnapshotMint,
 }
 
@@ -603,18 +611,9 @@ fn binding_from_plan<'a>(plan: &'a ProjectionPlan, canonical_id: &str) -> Emissi
     EmissionBinding {
         snapshot: &plan.snapshot,
         input_basis: &plan.input_basis,
-        plan: Some(plan),
+        plan,
         mint: SnapshotMint::from_plan(plan, canonical_id),
     }
-}
-
-fn binding_from_previous(previous: &ProjectionEmission) -> Option<EmissionBinding<'_>> {
-    Some(EmissionBinding {
-        snapshot: previous.snapshot.as_ref()?,
-        input_basis: previous.input_basis.as_ref()?,
-        plan: None,
-        mint: previous.mint.clone()?,
-    })
 }
 
 fn assemble(
@@ -734,11 +733,7 @@ fn origin_matches_plan(plan: &ProjectionPlan, origin: &ProjectionOrigin) -> bool
 }
 
 fn origin_matches_binding(binding: &EmissionBinding<'_>, origin: &ProjectionOrigin) -> bool {
-    if let Some(plan) = binding.plan {
-        return origin_matches_plan(plan, origin);
-    }
-    origin.snapshot.as_ref() == Some(binding.snapshot)
-        && origin.input_basis.as_ref() == Some(binding.input_basis)
+    origin_matches_plan(binding.plan, origin)
 }
 
 fn plan_matches_transform(plan: &ProjectionPlan, canonical_id: &str, source: &str) -> bool {
@@ -851,6 +846,7 @@ fn spans_overlap(a: MappingSpan, b: MappingSpan) -> bool {
     }
 }
 
+#[cfg(test)]
 fn slice_bytes(text: &str, span: MappingSpan) -> &str {
     let start = (span.start as usize).min(text.len());
     let end = (span.end as usize).min(text.len());
@@ -859,6 +855,19 @@ fn slice_bytes(text: &str, span: MappingSpan) -> &str {
     } else {
         ""
     }
+}
+
+fn try_slice_bytes(text: &str, span: MappingSpan) -> Option<&str> {
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start > end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return None;
+    }
+    Some(&text[start..end])
 }
 
 fn span_on_char_boundaries(text: &str, span: MappingSpan) -> bool {
@@ -2733,5 +2742,95 @@ mod tests {
             Vec::new(),
         );
         assert!(control.is_ok(), "matching plan succeeds: {control:?}");
+    }
+
+    #[test]
+    fn roundtrip_verbatim_refuses_unslicable_or_out_of_bounds_spans() {
+        let allocator = Allocator::default();
+        let ct = CodeTransform::new("hello", &allocator);
+        let emission = ProjectionEmission::from_operation(&ct, Vec::new()).expect("emission");
+
+        // Normal roundtrip matches "hello"
+        assert!(emission.roundtrip_verbatim("hello").is_ok());
+
+        // Source too short: carrier [0, 5) exceeds source length 3
+        let short_source = emission.roundtrip_verbatim("hel");
+        assert!(
+            matches!(short_source, Err(EmissionRefusal::RoundtripMismatch { .. })),
+            "short source carrier out of bounds must fail: {short_source:?}"
+        );
+
+        // Source with different byte length on multi-byte emoji
+        let emoji_ct = CodeTransform::new("🦀", &allocator);
+        let emoji_emission =
+            ProjectionEmission::from_operation(&emoji_ct, Vec::new()).expect("emission");
+        let bad_boundary = emoji_emission.roundtrip_verbatim("\u{FFFD}");
+        assert!(
+            matches!(bad_boundary, Err(EmissionRefusal::RoundtripMismatch { .. })),
+            "invalid boundary must fail: {bad_boundary:?}"
+        );
+    }
+
+    #[test]
+    fn projected_class_for_emit_op_with_matches_convenience_wrapper() {
+        let allocator = Allocator::default();
+        let mut ct = CodeTransform::new("abcdef", &allocator);
+        ct.overwrite(0, 3, "XY");
+        ct.move_slice(0, 3, 6);
+        let mapping = MappingProduct::of(&ct);
+
+        let r#move = EmitOp::MoveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(0),
+                end: SourceByteOffset(3),
+            },
+            at: SourceByteOffset(6),
+        };
+        let preserve = EmitOp::PreserveOriginal {
+            source: SourceByteRange {
+                start: SourceByteOffset(3),
+                end: SourceByteOffset(6),
+            },
+        };
+
+        assert_eq!(
+            projected_class_for_emit_op_with(&r#move, &mapping),
+            projected_class_for_emit_op(&r#move, &ct)
+        );
+        assert_eq!(
+            projected_class_for_emit_op_with(&preserve, &mapping),
+            projected_class_for_emit_op(&preserve, &ct)
+        );
+    }
+
+    #[test]
+    fn unbound_reuse_mapping_with_none_binding_rejects_authored_observations() {
+        let allocator = Allocator::default();
+        let ct = CodeTransform::new("hello", &allocator);
+        let unbound = ProjectionEmission::from_operation(&ct, Vec::new()).expect("unbound");
+        assert!(unbound.snapshot().is_none());
+
+        // Reusing without current plan succeeds for empty observations
+        let reused_empty = ProjectionEmission::reuse_mapping(&unbound, &ct, None, Vec::new());
+        assert!(reused_empty.is_ok());
+        let reused = reused_empty.unwrap();
+        assert!(reused.snapshot().is_none());
+
+        // But refusing authored observations because no plan is bound
+        let plan = role_plan();
+        let expression = plan.expressions().iter().next().expect("expression");
+        let authored_origin =
+            ProjectionOrigin::bind(&plan, None, None, Some(expression.id.clone()))
+                .expect("bound origin");
+        let authored = vec![RoleQualifiedObservation::new(
+            MappingSpan { start: 0, end: 5 },
+            ObservationRole::Hover,
+            authored_origin,
+        )];
+        let rejected = ProjectionEmission::reuse_mapping(&unbound, &ct, None, authored);
+        assert!(
+            matches!(rejected, Err(EmissionRefusal::UnboundOrigin)),
+            "unbound reuse must refuse authored origin: {rejected:?}"
+        );
     }
 }
