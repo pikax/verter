@@ -1,7 +1,7 @@
 id = "verter"
 name = "Verter (Vue / Svelte)"
 description = "Vue & Svelte language support powered by the Verter LSP"
-version = "0.0.2"
+version = "0.0.3"
 schema_version = 1
 authors = ["pikax"]
 repository = "https://github.com/pikax/verter"
