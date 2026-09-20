@@ -348,6 +348,14 @@ impl BoundProject {
         &self.project
     }
 
+    /// The owning project URI as the shared handle, for witnesses that retain
+    /// the project's identity past this witness's own lifetime (the certified
+    /// engine binding). Shares the same allocation; mints no copy.
+    #[must_use]
+    pub fn project_arc(&self) -> Arc<str> {
+        Arc::clone(&self.project)
+    }
+
     /// The backend's negotiated capabilities for this project.
     #[must_use]
     pub fn capabilities(&self) -> &EngineCapabilities {
