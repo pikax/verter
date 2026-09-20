@@ -29317,6 +29317,20 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     });
     let server = service.inner();
     install_test_resolver_for_root(server, &root, Some(&format!("{root}/tsconfig.json")));
+    if helper_exists {
+        // The dependency reaches the provider before its importers record
+        // their edges: loading it afterwards replaces the host entry and
+        // drops the importers' reverse-dependency bucket.
+        crate::workspace_scanner::resync_non_carrier_file(
+            &format!("{root}/src/helper.ts"),
+            &server.documents.host_arc(),
+            server.project_sync.as_ref().unwrap(),
+            server.documents.provider_surfaces(),
+            &server.vfs_workspace,
+            &server.provider_sync_states,
+        )
+        .await;
+    }
     for (name, source) in [
         ("Consumer.vue", "<script setup lang=\"ts\">\nimport { value } from './helper';\n</script>\n<template>{{ value }}</template>"),
         ("Unrelated.vue", "<template><p>unrelated</p></template>"),
@@ -29365,15 +29379,6 @@ async fn watched_ts_delete_republishes_only_open_importers() {
     let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
     let workspace = server.vfs_workspace.read().clone().unwrap();
     assert!(workspace.file_exists(&helper));
-    crate::workspace_scanner::resync_non_carrier_file(
-        &helper,
-        &server.documents.host_arc(),
-        server.project_sync.as_ref().unwrap(),
-        server.documents.provider_surfaces(),
-        &server.vfs_workspace,
-        &server.provider_sync_states,
-    )
-    .await;
     // A closed importer remains in the graph but is not owed editor diagnostics.
     let closed = format!("{}/src/Closed.vue", fixture.root);
     server.documents.host().upsert(UpsertRequest {

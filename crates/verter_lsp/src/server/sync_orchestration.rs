@@ -1068,6 +1068,30 @@ impl VerterLanguageServer {
         );
     }
 
+    /// A dependency changed on disk underneath these importers. Every one of
+    /// them re-records its import edges against the new filesystem facts;
+    /// only the OPEN ones are owed diagnostics, so only they have their
+    /// receipt retired and a fresh publication armed.
+    pub(super) fn refresh_open_importers_after_disk_change(&self, importers: &[String]) {
+        let received_at = tokio::time::Instant::now();
+        for importer in importers {
+            self.refresh_carrier_dependency_tracking(importer);
+            let Some(uri) = self.documents.canonical_id_to_uri(importer) else {
+                continue;
+            };
+            if self.documents.get(&uri).is_none() {
+                continue;
+            }
+            self.documents.host().bump_diagnostics_generation(importer);
+            self.cached_verter_diags.remove(uri.as_str());
+            self.sync_coordinator.signal_diagnostics_only(
+                importer.clone(),
+                uri.as_str().to_string(),
+                received_at,
+            );
+        }
+    }
+
     pub(super) async fn sync_non_carrier_file_to_provider(
         &self,
         snapshot: &PublishedResolverSnapshot,
