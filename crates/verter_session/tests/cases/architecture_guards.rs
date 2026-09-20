@@ -462,12 +462,26 @@ verter_parser = { workspace = true }
         forbidden_imports(&source, &["verter_lsp", "verter_parser"]),
         vec!["verter_lsp", "verter_parser"]
     );
+    let local_identifier =
+        syn::parse_file("fn f() { let verter_lsp = 1; assert_eq!(verter_lsp, 1); }").unwrap();
+    assert!(forbidden_imports(&local_identifier, &["verter_lsp"]).is_empty());
 
     let expected = syn::parse_str::<syn::ItemMod>("pub(crate) mod flow_return;").unwrap();
     let commented = syn::parse_file("pub(crate) /* owner */ mod flow_return;").unwrap();
     assert!(module_declaration_matches(&commented, &expected));
     let widened = syn::parse_file("pub mod flow_return; // pub(crate) mod flow_return;").unwrap();
     assert!(!module_declaration_matches(&widened, &expected));
+    let nested = syn::parse_file("pub(crate) mod other { pub(crate) mod flow_return; }").unwrap();
+    assert!(!module_declaration_matches(&nested, &expected));
+    let inline = syn::parse_file("pub(crate) mod flow_return {}").unwrap();
+    assert!(!module_declaration_matches(&inline, &expected));
+
+    let nested_comment =
+        syn::parse_file("/* outer /* inner */ end */ use verter_lsp :: Server;").unwrap();
+    assert_eq!(
+        forbidden_imports(&nested_comment, &["verter_lsp"]),
+        vec!["verter_lsp"]
+    );
 }
 
 fn production_dependency_names(manifest: &str) -> std::collections::BTreeSet<String> {
@@ -522,29 +536,16 @@ fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
             }
         }
 
-        fn visit_use_tree(&mut self, tree: &syn::UseTree) {
+        fn visit_use_root(&mut self, tree: &syn::UseTree) {
             match tree {
-                syn::UseTree::Path(path) => {
-                    self.record(&path.ident);
-                    self.visit_use_tree(&path.tree);
-                }
+                syn::UseTree::Path(path) => self.record(&path.ident),
                 syn::UseTree::Name(name) => self.record(&name.ident),
                 syn::UseTree::Rename(rename) => self.record(&rename.ident),
                 syn::UseTree::Glob(_) => {}
                 syn::UseTree::Group(group) => {
                     for tree in &group.items {
-                        self.visit_use_tree(tree);
+                        self.visit_use_root(tree);
                     }
-                }
-            }
-        }
-
-        fn visit_tokens(&mut self, tokens: &proc_macro2::TokenStream) {
-            for token in tokens.clone() {
-                match token {
-                    proc_macro2::TokenTree::Ident(ident) => self.record(&ident),
-                    proc_macro2::TokenTree::Group(group) => self.visit_tokens(&group.stream()),
-                    proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
                 }
             }
         }
@@ -552,14 +553,16 @@ fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
 
     impl<'ast> Visit<'ast> for Visitor<'_> {
         fn visit_path(&mut self, path: &'ast syn::Path) {
-            for segment in &path.segments {
-                self.record(&segment.ident);
+            if path.segments.len() > 1 {
+                if let Some(root) = path.segments.first() {
+                    self.record(&root.ident);
+                }
             }
             syn::visit::visit_path(self, path);
         }
 
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-            self.visit_use_tree(&item.tree);
+            self.visit_use_root(&item.tree);
         }
 
         fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
@@ -568,7 +571,9 @@ fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-            self.visit_tokens(&mac.tokens);
+            if let Some(root) = mac.path.segments.first() {
+                self.record(&root.ident);
+            }
             syn::visit::visit_macro(self, mac);
         }
     }
@@ -584,21 +589,15 @@ fn forbidden_imports(file: &syn::File, forbidden: &[&str]) -> Vec<String> {
 fn module_declaration_matches(file: &syn::File, expected: &syn::ItemMod) -> bool {
     use quote::ToTokens;
 
-    fn matches(items: &[syn::Item], expected: &syn::ItemMod) -> bool {
-        items.iter().any(|item| match item {
-            syn::Item::Mod(module) if module.ident == expected.ident => {
-                module.vis.to_token_stream().to_string()
-                    == expected.vis.to_token_stream().to_string()
-            }
-            syn::Item::Mod(module) => module
-                .content
-                .as_ref()
-                .is_some_and(|(_, items)| matches(items, expected)),
-            _ => false,
-        })
-    }
-
-    matches(&file.items, expected)
+    file.items.iter().any(|item| {
+        let syn::Item::Mod(module) = item else {
+            return false;
+        };
+        module.ident == expected.ident
+            && module.content.is_none()
+            && module.vis.to_token_stream().to_string()
+                == expected.vis.to_token_stream().to_string()
+    })
 }
 
 #[test]
@@ -606,37 +605,6 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
     use serde_json::Value;
     use std::collections::BTreeSet;
     use walkdir::WalkDir;
-
-    fn blank_string_literals(source: &str) -> String {
-        let bytes = source.as_bytes();
-        let mut out = bytes.to_vec();
-        let mut i = 0;
-        while i < bytes.len() {
-            let (start, end) = if bytes[i] == b'"' {
-                let mut j = i + 1;
-                while j < bytes.len() {
-                    if bytes[j] == b'\\' {
-                        j += 2;
-                    } else if bytes[j] == b'"' {
-                        break;
-                    } else {
-                        j += 1;
-                    }
-                }
-                (i, (j + 1).min(bytes.len()))
-            } else {
-                i += 1;
-                continue;
-            };
-            for byte in &mut out[start..end] {
-                if *byte != b'\n' {
-                    *byte = b' ';
-                }
-            }
-            i = end;
-        }
-        String::from_utf8(out).expect("source is UTF-8")
-    }
 
     let contracts: Value = serde_json::from_str(&read_workspace_file(
         "tests/architecture-health/ARH1/products/dependency-contracts.json",
@@ -677,25 +645,19 @@ fn arh12_dependency_and_visibility_contracts_are_enforced() {
             }
             let source = fs::read_to_string(entry.path())
                 .unwrap_or_else(|e| panic!("read {}: {e}", entry.path().display()));
-            let source = cosmetic_reprinter_guard::strip_comments(&source);
-            if let Ok(syntax) = syn::parse_file(&source) {
-                let found = forbidden_imports(&syntax, &forbidden);
-                assert!(
-                    found.is_empty(),
-                    "{} imports forbidden crates: {:?}",
-                    entry.path().display(),
-                    found
-                );
-            } else {
-                let source = blank_string_literals(&source);
-                for dependency in &forbidden {
-                    assert!(
-                        !source.contains(&format!("{dependency}::")),
-                        "{} imports forbidden crate {dependency}",
-                        entry.path().display()
-                    );
-                }
-            }
+            let syntax = syn::parse_file(&source).unwrap_or_else(|e| {
+                panic!(
+                    "{} contains unsupported Rust syntax; refusing to skip dependency enforcement: {e}",
+                    entry.path().display()
+                )
+            });
+            let found = forbidden_imports(&syntax, &forbidden);
+            assert!(
+                found.is_empty(),
+                "{} imports forbidden crates: {:?}",
+                entry.path().display(),
+                found
+            );
         }
     }
 
