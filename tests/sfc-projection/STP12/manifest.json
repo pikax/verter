@@ -1,0 +1,40 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP12",
+  "kind": "implementation",
+  "products": [
+    "JsSetupProjection",
+    "JsDiagnosticParticipation",
+    "JsPublicContractBridge"
+  ],
+  "mandatoryCases": [
+    "STP12-checkjs-off",
+    "STP12-checkjs-on",
+    "STP12-jsdoc-generic",
+    "STP12-jsx",
+    "STP12-suppression"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP12/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP12/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP12/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP12/probes/tsconfig.json",
+    "hoverNeedle": "stp12HoverTarget",
+    "definitionNeedle": "stp12DefinitionTarget",
+    "expectedNegativeCode": 2345,
+    "expectedHoverType": "string",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    { "id": "STP12-checkjs-off", "disposition": "accept", "twins": ["unchecked-script", "checked-template"] },
+    { "id": "STP12-checkjs-on", "disposition": "accept", "twins": ["checked-script", "checked-template"] },
+    { "id": "STP12-jsdoc-generic", "disposition": "accept", "twins": ["JSDoc-generic", "public-instance"] },
+    { "id": "STP12-jsx", "disposition": "accept", "twins": ["authored-JSX", "JSX-dialect"] },
+    { "id": "STP12-suppression", "disposition": "reject", "twins": ["implicit-nocheck", "customer-diagnostics"] }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP12 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP12/projection.spec.mjs",
+  "runtimeCorrectness": true,
+  "notes": "JavaScript projection preserves authored check directives, JSDoc, JSX, and the public constructor instance bridge without generated diagnostic suppression."
+}

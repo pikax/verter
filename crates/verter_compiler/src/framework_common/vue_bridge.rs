@@ -3744,6 +3744,164 @@ mod tests {
     }
 
     #[test]
+    fn vue_compiler_js_check_directive_is_a_leading_pragma() {
+        let compiler = VueCarrierCompiler;
+        let source = concat!(
+            "<script setup>\n",
+            "// @ts-check\n",
+            "const label = 'label'\n",
+            "</script>\n",
+            "<template><div>{{ label }}</div></template>",
+        );
+        let artifact = artifact_for(source);
+        let out = compiler
+            .compile_ide(
+                source,
+                &artifact,
+                &IdeCompileOptions {
+                    filename: Some("App.vue".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("a JavaScript SFC compiles to a JSX IDE artifact");
+
+        assert!(out.is_jsx, "a JavaScript SFC must yield JSX");
+        assert!(
+            out.code.starts_with("// @ts-check\n/** @jsxImportSource vue */\n"),
+            "the authored check directive must remain a leading pragma:\n{}",
+            out.code
+        );
+    }
+
+    #[test]
+    fn vue_compiler_js_unchecked_script_keeps_template_projection() {
+        let compiler = VueCarrierCompiler;
+        let source = concat!(
+            "<script setup>\n",
+            "// @ts-nocheck\n",
+            "const label = 'label'\n",
+            "</script>\n",
+            "<template><div>{{ label }}</div></template>",
+        );
+        let artifact = artifact_for(source);
+        let out = compiler
+            .compile_ide(
+                source,
+                &artifact,
+                &IdeCompileOptions {
+                    filename: Some("App.vue".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("an unchecked JavaScript SFC still projects its template");
+
+        assert!(out.is_jsx, "a JavaScript SFC must yield JSX");
+        assert!(
+            out.code
+                .starts_with("// @ts-nocheck\n/** @jsxImportSource vue */\n"),
+            "the authored unchecked policy must remain a leading pragma:\n{}",
+            out.code
+        );
+        assert!(
+            out.code.contains("{ label }"),
+            "the template must remain independently projected:\n{}",
+            out.code
+        );
+    }
+
+    #[test]
+    fn vue_compiler_jsdoc_generic_uses_public_instance_contract() {
+        let compiler = VueCarrierCompiler;
+        let source = concat!(
+            "<script setup>\n",
+            "/** @template T @param {T} value @returns {T} */\n",
+            "const identity = (value) => value\n",
+            "const label = identity('label')\n",
+            "</script>\n",
+            "<template><div>{{ label }}</div></template>",
+        );
+        let artifact = artifact_for(source);
+        let out = compiler
+            .compile_ide(
+                source,
+                &artifact,
+                &IdeCompileOptions {
+                    filename: Some("App.vue".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("a JavaScript SFC compiles to a JSX IDE artifact");
+
+        assert!(out.is_jsx, "a JavaScript SFC must yield JSX");
+        assert!(
+            out.code.contains("@template T @param {T} value @returns {T}"),
+            "the authored JSDoc generic must remain in the JavaScript projection:\n{}",
+            out.code
+        );
+        assert!(
+            out.code
+                .contains("InstanceType<typeof import('./App.vue.verter')['default']>"),
+            "the JavaScript self-instance must use the public constructor bridge:\n{}",
+            out.code
+        );
+    }
+
+    #[test]
+    fn vue_compiler_jsx_keeps_authored_jsx_expression() {
+        let compiler = VueCarrierCompiler;
+        let source = concat!(
+            "<script setup lang=\"jsx\">\n",
+            "const authored = <span>authored</span>\n",
+            "</script>\n",
+            "<template><div>{{ authored }}</div></template>",
+        );
+        let artifact = artifact_for(source);
+        let out = compiler
+            .compile_ide(
+                source,
+                &artifact,
+                &IdeCompileOptions {
+                    filename: Some("App.vue".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("a JSX SFC compiles to a JSX IDE artifact");
+
+        assert!(out.is_jsx, "a JSX SFC must yield JSX");
+        assert!(
+            out.code.contains("<span>authored</span>"),
+            "the authored JSX expression must not be rewritten as TypeScript:\n{}",
+            out.code
+        );
+    }
+
+    #[test]
+    fn vue_compiler_js_projection_never_injects_nocheck() {
+        let compiler = VueCarrierCompiler;
+        let source = concat!(
+            "<script setup>const label = 'label'</script>",
+            "<template><div>{{ label }}</div></template>",
+        );
+        let artifact = artifact_for(source);
+        let out = compiler
+            .compile_ide(
+                source,
+                &artifact,
+                &IdeCompileOptions {
+                    filename: Some("App.vue".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("a JavaScript SFC compiles to a JSX IDE artifact");
+
+        assert!(
+            !out.code.contains("@ts-nocheck"),
+            "the projection must not suppress customer diagnostics:\n{}",
+            out.code
+        );
+    }
+
+    #[test]
     fn vue_compiler_compile_ide_rejects_a_foreign_artifact_with_typed_unsupported() {
         let compiler = VueCarrierCompiler;
         // An artifact stamped for another adapter cannot be opened by the

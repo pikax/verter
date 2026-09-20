@@ -398,8 +398,10 @@ pub(super) fn instance_declaration(filename: &str, is_jsx: bool, override_attrs:
     let api_specifier_suffix = carrier_api_module_specifier_suffix();
     if is_jsx {
         format!(
-            "\n/** @type {{any}} */\nvar {P}instance = /** @type {{any}} */ (null);\nvoid {P}instance;\n",
+            "\n/** @type {{InstanceType<typeof import('./{basename}{API}')['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\nvoid {P}instance;\n",
             P = PREFIX,
+            basename = basename,
+            API = api_specifier_suffix,
         )
     } else if override_attrs {
         // With Comp functions + attrs type aliases: override $attrs with composed type

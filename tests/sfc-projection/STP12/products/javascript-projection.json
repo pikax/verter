@@ -1,0 +1,17 @@
+{
+  "schema": "JavaScriptProjection",
+  "version": 1,
+  "products": [
+    "JsSetupProjection",
+    "JsDiagnosticParticipation",
+    "JsPublicContractBridge"
+  ],
+  "checkJs": {
+    "off": "authored-ts-nocheck-leading-pragma-template-projected",
+    "on": "authored-ts-check-leading-pragma"
+  },
+  "jsdoc": "verbatim-authored-generic",
+  "jsx": "authored-expression-preserved",
+  "publicInstance": "InstanceType-of-public-default",
+  "diagnosticSuppression": "none-generated"
+}
