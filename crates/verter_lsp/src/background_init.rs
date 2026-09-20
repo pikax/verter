@@ -49,8 +49,6 @@ pub(super) struct BackgroundInitArgs {
     pub(super) provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     pub(super) pending_snapshot_provider_sync: Arc<DashSet<String>>,
     pub(super) is_tsgo: bool,
-    pub(super) cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
-    pub(super) position_encoding: Arc<parking_lot::RwLock<PositionEncodingKind>>,
     /// Snapshot of MRU list at init time for drain ordering.
     pub(super) mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
     /// VFS workspace handle — populated during background_init with a FilesystemWorkspace.
@@ -167,8 +165,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         provider_sync_states,
         pending_snapshot_provider_sync,
         is_tsgo,
-        cached_verter_diags,
-        position_encoding,
         mru_canonical_ids,
         vfs_workspace,
         carrier_publish_coordinator,
@@ -511,64 +507,10 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 7a. Publish fresh diagnostics for all open files now that project_registry
-    // is built and type_provider is synced. This ensures TS diagnostics appear
+    // 7a. Re-arm diagnostics for all open files now that project_registry is
+    // built and type_provider is synced. This ensures TS diagnostics appear
     // after background init without requiring an edit.
-    {
-        let open_uris = documents.open_uris();
-        for uri_str in &open_uris {
-            let uri: Uri = match uri_str.parse() {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
-            let Some(publication) = documents.begin_diagnostics_publication(&uri) else {
-                continue;
-            };
-
-            let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-            // The SAME complete Verter-owned set the debounced coordinator
-            // publishes. This sweep REPLACES the client's whole list for the
-            // document, so a narrower set here would erase categories the
-            // coordinator had already surfaced.
-            let verter_diags = {
-                let vfs_ws = vfs_workspace.read();
-                crate::server::verter_owned_diagnostics(
-                    &documents,
-                    &uri,
-                    &canonical_id,
-                    &cached_verter_diags,
-                    vfs_ws.as_deref(),
-                    project_sync.as_ref(),
-                )
-            };
-
-            let diagnostics = if let Some(tp) = &type_provider {
-                let encoding = position_encoding.read().clone();
-                crate::sync_coordinator::provider_diagnostics_batch(
-                    &documents,
-                    &provider_sync_states,
-                    tp.as_ref(),
-                    encoding,
-                    &canonical_id,
-                    verter_diags,
-                )
-                .await
-            } else {
-                crate::sync_coordinator::ProviderDiagnosticBatch::complete(verter_diags)
-            };
-
-            documents
-                .publish_diagnostics(
-                    &client,
-                    &uri,
-                    &publication,
-                    diagnostics.diagnostics,
-                    diagnostics.complete,
-                    diagnostics.surface,
-                )
-                .await;
-        }
-    }
+    server.rearm_open_document_diagnostics();
 
     client
         .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
@@ -619,8 +561,52 @@ async fn await_scan_complete_after_ready(
 }
 
 impl super::VerterLanguageServer {
-    /// The post-scan completion tail: publish fresh diagnostics for the open
-    /// documents, then announce level 2 of the readiness ladder.
+    /// Owe every provider-settled open document a fresh diagnostics publication.
+    ///
+    /// The debounced coordinator is the ONE publisher that orders provider
+    /// pulls, so this only retires each document's completion receipt and hands
+    /// the document over — it never pulls itself. A sweep that pulled inline
+    /// served the open documents one after another in arbitrary order (tens of
+    /// seconds after a restart that replays every editor), while discarding
+    /// whatever publication the coordinator already had in flight for them.
+    ///
+    /// Recency is preserved across the hand-off: receipts are stamped in MRU
+    /// order, so the document the user touched last is still served first.
+    /// A document whose own provider sync is still queued is skipped: it has
+    /// nothing current to certify, and the init drain that eventually settles
+    /// it is followed by this same re-arm.
+    pub(crate) fn rearm_open_document_diagnostics(&self) {
+        let mru = self.mru_canonical_ids.lock().clone();
+        let mut open: Vec<(usize, String, String)> = self
+            .documents
+            .open_uris()
+            .into_iter()
+            .filter_map(|uri_str| {
+                let uri: Uri = uri_str.parse().ok()?;
+                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+                if self.pending_snapshot_provider_sync.contains(&canonical_id) {
+                    return None;
+                }
+                let rank = mru
+                    .iter()
+                    .position(|id| id == &canonical_id)
+                    .unwrap_or(mru.len());
+                Some((rank, canonical_id, uri_str))
+            })
+            .collect();
+        open.sort();
+        let newest = tokio::time::Instant::now();
+        for (index, (_, canonical_id, uri_str)) in open.into_iter().enumerate() {
+            let received_at = newest
+                .checked_sub(std::time::Duration::from_nanos(index as u64))
+                .unwrap_or(newest);
+            self.sync_coordinator
+                .signal_diagnostics_only(canonical_id, uri_str, received_at);
+        }
+    }
+
+    /// The post-scan completion tail: owe the open documents fresh diagnostics,
+    /// then announce level 2 of the readiness ladder.
     ///
     /// Returns whether `typeProviderSyncComplete` was announced.
     ///
@@ -642,69 +628,11 @@ impl super::VerterLanguageServer {
         }
 
         tracing::info!(
-            "workspace scanner complete (gen={my_gen}), publishing post-scan diagnostics"
+            "workspace scanner complete (gen={my_gen}), re-arming open-document diagnostics"
         );
 
-        for uri_str in &self.documents.open_uris() {
-            let uri: Uri = match uri_str.parse() {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
-            let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-            if self.pending_snapshot_provider_sync.contains(&canonical_id) {
-                continue;
-            }
-            let Some(publication) = self.documents.begin_diagnostics_publication(&uri) else {
-                continue;
-            };
+        self.rearm_open_document_diagnostics();
 
-            // The SAME complete Verter-owned set the debounced coordinator
-            // publishes. This sweep REPLACES the client's whole list for the
-            // document, so a narrower set here would erase categories the
-            // coordinator had already surfaced.
-            let verter_diags = {
-                let vfs_ws = self.vfs_workspace.read();
-                crate::server::verter_owned_diagnostics(
-                    &self.documents,
-                    &uri,
-                    &canonical_id,
-                    &self.cached_verter_diags,
-                    vfs_ws.as_deref(),
-                    self.project_sync.as_ref(),
-                )
-            };
-
-            let diagnostics = if let Some(tp) = &self.type_provider {
-                let encoding = self.position_encoding.read().clone();
-                crate::sync_coordinator::provider_diagnostics_batch(
-                    &self.documents,
-                    &self.provider_sync_states,
-                    tp.as_ref(),
-                    encoding,
-                    &canonical_id,
-                    verter_diags,
-                )
-                .await
-            } else {
-                crate::sync_coordinator::ProviderDiagnosticBatch::complete(verter_diags)
-            };
-
-            self.documents
-                .publish_diagnostics(
-                    &self.client,
-                    &uri,
-                    &publication,
-                    diagnostics.diagnostics,
-                    diagnostics.complete,
-                    diagnostics.surface,
-                )
-                .await;
-        }
-
-        if superseded() {
-            tracing::info!("init gen={my_gen} superseded during post-scan diagnostics, discarding");
-            return false;
-        }
         if !self.pending_snapshot_provider_sync.is_empty() {
             tracing::warn!(
                 pending = self.pending_snapshot_provider_sync.len(),

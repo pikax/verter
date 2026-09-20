@@ -3498,6 +3498,105 @@ async fn wait_for_provider_syncs(
     provider_syncs_for(provider, canonical_id)
 }
 
+/// A backlog of settled documents (a restart replays every open editor at
+/// once) must not stand between the user and the document they touched last:
+/// the most recently received settled document is always served next, even when
+/// it arrives while an older document's provider sync is still in flight.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_most_recently_touched_document_is_served_ahead_of_an_older_backlog() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">
+const msg = '{marker}'
+</script>
+             <template><div>{{{{ msg }}}}</div></template>
+"
+        )
+    };
+    let open = |name: &str| {
+        let uri: Uri = format!("file:///workspace/src/{name}.vue")
+            .parse()
+            .expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source(name),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the document must be open");
+        (canonical_id, uri)
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    // Every receipt is already overdue, oldest first, so the whole backlog is
+    // dispatchable the moment the coordinator looks at it.
+    let overdue = Instant::now() - Duration::from_secs(60);
+    const BACKLOG: usize = 5;
+    let backlog: Vec<(String, Uri)> = (0..BACKLOG)
+        .map(|index| open(&format!("Backlog{index}")))
+        .collect();
+    let (arrived, release) = provider.block_next_open_file();
+    for (index, (canonical_id, uri)) in backlog.iter().enumerate() {
+        needs_provider_sync.insert(canonical_id.clone());
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+
+    // The coordinator is now parked inside a backlog document's provider sync.
+    tokio::time::timeout(Duration::from_secs(20), arrived.notified())
+        .await
+        .expect("no backlog document ever reached the provider");
+    let (active_id, active_uri) = open("Active");
+    needs_provider_sync.insert(active_id.clone());
+    handle.signal(
+        active_id.clone(),
+        active_uri.as_str().to_string(),
+        overdue + Duration::from_secs(1),
+    );
+    release.notify_one();
+
+    let first_sync_order = |calls: &[MockCall]| {
+        let mut order: Vec<String> = Vec::new();
+        for call in calls {
+            let (MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }) = call else {
+                continue;
+            };
+            let Some(name) = path
+                .strip_prefix("/workspace/src/")
+                .and_then(|rest| rest.split('.').next())
+            else {
+                continue;
+            };
+            if (name == "Active" || name.starts_with("Backlog"))
+                && !order.iter().any(|seen| seen == name)
+            {
+                order.push(name.to_string());
+            }
+        }
+        order
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| first_sync_order(calls).len() == BACKLOG + 1),
+    )
+    .await
+    .expect("every settled document must reach the provider");
+
+    assert_eq!(
+        first_sync_order(&provider.calls()),
+        ["Backlog4", "Active", "Backlog3", "Backlog2", "Backlog1", "Backlog0"],
+        "the newest settled receipt is served next; the rest follow newest-first"
+    );
+}
+
 /// LSP notification handlers are dispatched concurrently, so an OLDER change
 /// can deposit its signal after a newer one has already deposited its own. The
 /// quiet window must take the LATEST receipt, never simply the last deposit —

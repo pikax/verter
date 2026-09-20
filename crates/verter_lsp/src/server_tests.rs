@@ -29451,10 +29451,20 @@ async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_
         !server.complete_post_scan(generation).await,
         "level 2 must stay unannounced while provider work is pending"
     );
-    assert!(
-        server.documents.diagnostics_ready(&healthy_uri),
-        "a healthy open document is owed a current receipt even while an unrelated carrier is pending"
-    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&healthy_uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || {
+                panic!(
+                    "a healthy open document is owed a current receipt even while an unrelated carrier is pending"
+                )
+            },
+        )
+        .await;
     assert!(
         fixture.provider.calls().iter().any(
             |call| matches!(call, MockCall::GetDiagnostics { path } if path == &healthy_provider_path)
@@ -29480,15 +29490,42 @@ async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document()
         .bump_diagnostics_generation(&pending);
     server.queue_snapshot_provider_sync(pending.clone());
     let announced_before = fixture.sync_complete.lock().len();
+    let pending_provider_path = server
+        .capture_provider_request_surface(&pending_uri)
+        .unwrap()
+        .stamp
+        .provider_path
+        .to_string();
+    fixture.provider.clear_calls();
     let generation = server
         .init_generation
         .load(std::sync::atomic::Ordering::Acquire);
     assert!(!server.complete_post_scan(generation).await);
     assert!(
+        !server.documents.diagnostics_ready(&settled_uri),
+        "the settled document's prior receipt is retired before the call returns"
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&settled_uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the settled open document never received its fresh receipt"),
+        )
+        .await;
+    assert!(
         !server.documents.diagnostics_ready(&pending_uri),
         "a document whose provider sync is still pending must not be certified"
     );
-    assert!(server.documents.diagnostics_ready(&settled_uri));
+    assert!(
+        !fixture.provider.calls().iter().any(
+            |call| matches!(call, MockCall::GetDiagnostics { path } if path == &pending_provider_path)
+        ),
+        "a pending document is not pulled at all: {:?}",
+        fixture.provider.calls()
+    );
     assert_eq!(fixture.sync_complete.lock().len(), announced_before);
 }
 
@@ -29507,7 +29544,16 @@ async fn post_scan_completion_announces_only_the_current_settled_generation() {
     );
 
     assert!(server.complete_post_scan(generation).await);
-    assert!(server.documents.diagnostics_ready(&uri));
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the announced generation never republished its open documents"),
+        )
+        .await;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while fixture.sync_complete.lock().last() != Some(&generation) {
             tokio::task::yield_now().await;

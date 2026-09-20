@@ -247,17 +247,10 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
         }
     }
 
-    // background_init routes BOTH its post-scan and post-init publishers through
-    // the shared captured-surface helper and keeps no inline torn merge.
+    // background_init owns NO diagnostics publisher: its post-init and post-scan
+    // steps hand the open documents to the debounced coordinator, so it keeps
+    // no inline torn merge either.
     let background_init = read_server_source("background_init.rs");
-    assert!(
-        background_init
-            .matches("provider_diagnostics_batch(")
-            .count()
-            >= 2,
-        "background_init must route both diagnostics publishers through the shared \
-         captured-surface helper"
-    );
     for forbidden in [".get_diagnostics(", "merge_diagnostics("] {
         assert!(
             !background_init.contains(forbidden),

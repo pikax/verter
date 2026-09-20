@@ -463,6 +463,40 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
     }
 }
 
+/// Move every deposited signal into the coordinator's pending map.
+fn absorb_inbox(
+    inbox: &parking_lot::Mutex<HashMap<String, PendingSignal>>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+) {
+    let signals = std::mem::take(&mut *inbox.lock());
+    for (canonical_id, signal) in signals {
+        tracing::debug!("sync_coordinator: signal {canonical_id}");
+        if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
+            stale.abort();
+        }
+        // Reset the quiet window for the latest edit only — measured from when
+        // that edit REACHED the server, which the signal carries, NOT from now.
+        // Time spent waiting in the inbox is time the file was already quiet,
+        // and must not be charged to the user again. `max` for the same reason
+        // `signal` uses it: a concurrently-dispatched older handler can deposit
+        // after a newer one.
+        let received_at = signal.received_at;
+        pending_files
+            .entry(canonical_id)
+            .and_modify(|(changed_at, pending)| {
+                *changed_at = (*changed_at).max(received_at);
+                pending.uri = signal.uri.clone();
+                pending.requires_sync |= signal.requires_sync;
+                pending.force_diagnostics |= signal.force_diagnostics;
+                pending.sync_retries_remaining = pending
+                    .sync_retries_remaining
+                    .max(signal.sync_retries_remaining);
+            })
+            .or_insert((received_at, signal));
+    }
+}
+
 async fn coordinator_loop(
     mut wake_rx: mpsc::Receiver<()>,
     mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
@@ -501,36 +535,7 @@ async fn coordinator_loop(
         tokio::select! {
             wake = wake_rx.recv() => {
                 match wake {
-                    Some(()) => {
-                        let signals = std::mem::take(&mut *inbox.lock());
-                        for (canonical_id, signal) in signals {
-                            tracing::debug!("sync_coordinator: signal {canonical_id}");
-                            if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
-                                stale.abort();
-                            }
-                            // Reset the quiet window for the latest edit only —
-                            // measured from when that edit REACHED the server,
-                            // which the signal carries, NOT from now. Time spent
-                            // waiting in the inbox is time the file was already
-                            // quiet, and must not be charged to the user again.
-                            // `max` for the same reason `signal` uses it: a
-                            // concurrently-dispatched older handler can deposit
-                            // after a newer one.
-                            let received_at = signal.received_at;
-                            pending_files
-                                .entry(canonical_id)
-                                .and_modify(|(changed_at, pending)| {
-                                    *changed_at = (*changed_at).max(received_at);
-                                    pending.uri = signal.uri.clone();
-                                    pending.requires_sync |= signal.requires_sync;
-                                    pending.force_diagnostics |= signal.force_diagnostics;
-                                    pending.sync_retries_remaining = pending
-                                        .sync_retries_remaining
-                                        .max(signal.sync_retries_remaining);
-                                })
-                                .or_insert((received_at, signal));
-                        }
-                    }
+                    Some(()) => absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks),
                     None => {
                         // All handles dropped — coordinator shutting down.
                         for (_, task) in diagnostic_tasks.drain() {
@@ -674,11 +679,32 @@ async fn coordinator_loop(
                 // would dispatch once per handler for the whole backlog — one
                 // provider sync per keystroke, the exact flood the debounce
                 // exists to prevent.
+                //
+                // ONE document per dispatch, the most recently received first.
+                // The provider sync below is awaited inline, so a batch taken
+                // here is a batch nothing can overtake: a restart replays every
+                // open editor at once, and the document the user touched after
+                // that replay would wait behind the entire backlog in whatever
+                // order the map happened to iterate. Taking only the newest
+                // settled receipt lets each later arrival be considered before
+                // the next older document is started. The rest stay pending
+                // with their deadline already elapsed, so the loop comes
+                // straight back for them.
+                //
+                // Deposits that landed while the previous document was being
+                // served are absorbed FIRST: which select arm runs is not
+                // ordered, and the newest receipt can only win a choice it is
+                // part of.
+                absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks);
                 let now = Instant::now();
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
                     .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
+                    .max_by(|(left_id, (left, _)), (right_id, (right, _))| {
+                        left.cmp(right).then_with(|| left_id.cmp(right_id))
+                    })
                     .map(|(id, (_, signal))| (id.clone(), signal.clone()))
+                    .into_iter()
                     .collect();
 
                 // The canonicals whose settled signal carried a REAL edit

@@ -2732,8 +2732,6 @@ impl VerterLanguageServer {
             provider_sync_states: Arc::clone(&self.provider_sync_states),
             pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
-            position_encoding: Arc::clone(&self.position_encoding),
             mru_canonical_ids: {
                 // Snapshot the MRU list at spawn time — background_init uses it for drain ordering
                 Arc::new(parking_lot::Mutex::new(

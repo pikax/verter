@@ -691,6 +691,16 @@ mod inner {
             (arrived, release)
         }
 
+        /// [`Self::block_open_file`] for whichever path is opened NEXT.
+        pub fn block_next_open_file(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            self.block_open_file("")
+        }
+
         pub fn block_get_completions(
             &self,
             path: &str,
@@ -950,10 +960,12 @@ mod inner {
                     _ => None,
                 };
                 let block = match &state.open_block {
-                    Some((armed_path, _, _)) if armed_path == path => state
-                        .open_block
-                        .take()
-                        .map(|(_, arrived, release)| (arrived, release)),
+                    Some((armed_path, _, _)) if armed_path.is_empty() || armed_path == path => {
+                        state
+                            .open_block
+                            .take()
+                            .map(|(_, arrived, release)| (arrived, release))
+                    }
                     _ => None,
                 };
                 (fail, on_open, block)
