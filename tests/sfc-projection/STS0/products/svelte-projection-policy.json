@@ -1,0 +1,304 @@
+{
+  "schema": "SvelteProjectionPolicy",
+  "version": 1,
+  "product": "SvelteProjectionPolicy",
+  "node": "STS0",
+  "kind": "lock",
+  "componentShape": {
+    "publicShape": "function-shaped Component (import(\"svelte\").Component family)",
+    "vueConstructorRequired": false,
+    "vueEventConvention": false,
+    "vueModelConvention": false,
+    "vueRefConvention": false,
+    "legacyClassSurface": "framework-specific: Svelte 4 class components stay Svelte-owned; no Vue constructor reuse",
+    "instanceTypeRequirement": "none"
+  },
+  "profiles": [
+    {
+      "id": "svelte-ts-instance-runes",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "ts",
+      "semantics": "runes",
+      "checking": "engine-checked",
+      "publishing": "declarations-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-runes.svelte",
+      "publishedSymbols": []
+    },
+    {
+      "id": "svelte-ts-instance-legacy",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "ts",
+      "semantics": "legacy",
+      "checking": "engine-checked",
+      "publishing": "declarations-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy.svelte",
+      "publishedSymbols": [
+        "title"
+      ]
+    },
+    {
+      "id": "svelte-js-instance-runes-unchecked",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "js",
+      "semantics": "runes",
+      "checking": "js-unchecked",
+      "publishing": "declarations-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-runes-js-unchecked.svelte",
+      "publishedSymbols": []
+    },
+    {
+      "id": "svelte-js-instance-runes-checked",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "js",
+      "semantics": "runes",
+      "checking": "engine-checked",
+      "publishing": "declarations-published",
+      "checkJs": true,
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-runes-js-checked.svelte",
+      "publishedSymbols": []
+    },
+    {
+      "id": "svelte-js-instance-legacy-checked",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "js",
+      "semantics": "legacy",
+      "checking": "engine-checked",
+      "publishing": "declarations-published",
+      "checkJs": true,
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-checked.svelte",
+      "publishedSymbols": [
+        "title"
+      ]
+    },
+    {
+      "id": "svelte-js-instance-legacy-unchecked",
+      "fileKind": ".svelte",
+      "scriptContext": "instance",
+      "dialect": "js",
+      "semantics": "legacy",
+      "checking": "js-unchecked",
+      "publishing": "declarations-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/instance-legacy-js-unchecked.svelte",
+      "publishedSymbols": [
+        "name"
+      ]
+    },
+    {
+      "id": "svelte-ts-module-context",
+      "fileKind": ".svelte",
+      "scriptContext": "module",
+      "dialect": "ts",
+      "semantics": "both",
+      "checking": "engine-checked",
+      "publishing": "module-exports-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/module-context.svelte",
+      "publishedSymbols": [
+        "moduleAnswer"
+      ]
+    },
+    {
+      "id": "svelte-js-module-context-unchecked",
+      "fileKind": ".svelte",
+      "scriptContext": "module",
+      "dialect": "js",
+      "semantics": "both",
+      "checking": "js-unchecked",
+      "publishing": "module-exports-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/module-context-js-unchecked.svelte",
+      "publishedSymbols": [
+        "moduleAnswer"
+      ]
+    },
+    {
+      "id": "svelte-js-module-context-checked",
+      "fileKind": ".svelte",
+      "scriptContext": "module",
+      "dialect": "js",
+      "semantics": "both",
+      "checking": "engine-checked",
+      "publishing": "module-exports-published",
+      "checkJs": true,
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/module-context-js-checked.svelte",
+      "publishedSymbols": [
+        "moduleAnswer"
+      ]
+    },
+    {
+      "id": "svelte-ts-svelte-ts-module",
+      "fileKind": ".svelte.ts",
+      "scriptContext": "module-file",
+      "dialect": "ts",
+      "semantics": "runes",
+      "checking": "engine-checked",
+      "publishing": "module-exports-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/state-module.svelte.ts",
+      "publishedSymbols": [
+        "CounterCell",
+        "counter",
+        "derivedCount",
+        "bump"
+      ]
+    },
+    {
+      "id": "svelte-js-svelte-js-module-unchecked",
+      "fileKind": ".svelte.js",
+      "scriptContext": "module-file",
+      "dialect": "js",
+      "semantics": "runes",
+      "checking": "js-unchecked",
+      "publishing": "module-exports-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/state-module-unchecked.svelte.js",
+      "publishedSymbols": [
+        "counter",
+        "derivedCount",
+        "bump"
+      ]
+    },
+    {
+      "id": "svelte-js-svelte-js-module-checked",
+      "fileKind": ".svelte.js",
+      "scriptContext": "module-file",
+      "dialect": "js",
+      "semantics": "runes",
+      "checking": "engine-checked",
+      "publishing": "module-exports-published",
+      "checkJs": true,
+      "evidencePath": "tests/sfc-projection/STS0/probes/state-module-checked.svelte.js",
+      "publishedSymbols": [
+        "counter",
+        "derivedCount",
+        "bump"
+      ]
+    },
+    {
+      "id": "svelte-template-only",
+      "fileKind": ".svelte",
+      "scriptContext": "none",
+      "dialect": "js",
+      "semantics": "both",
+      "checking": "engine-checked",
+      "publishing": "declarations-published",
+      "evidencePath": "tests/sfc-projection/STS0/probes/profiles/template-only.svelte",
+      "publishedSymbols": [],
+      "checkJs": true
+    }
+  ],
+  "semanticsSelection": {
+    "authority": "packages/framework-conformance-harness/evidence/svelte-options.tsv",
+    "row": {
+      "surface": "svelte:CompileOptions",
+      "option": "runes",
+      "classification": "supported canonical"
+    },
+    "note": "Explicit true/false/infer runes selection; runes and supported legacy semantics are distinguished, never conflated."
+  },
+  "refusedOptions": [
+    {
+      "surface": "svelte:CompileOptions",
+      "option": "accessors",
+      "behavior": "refused-fail-closed"
+    },
+    {
+      "surface": "svelte:CompileOptions",
+      "option": "immutable",
+      "behavior": "refused-fail-closed"
+    },
+    {
+      "surface": "svelte:CompileOptions",
+      "option": "hmr",
+      "behavior": "refused-fail-closed"
+    },
+    {
+      "surface": "svelte:CompileOptions",
+      "option": "compatibility.componentApi",
+      "behavior": "refused-fail-closed"
+    },
+    {
+      "surface": "svelte:SvelteOptions.customElement",
+      "option": "extend",
+      "behavior": "refused-fail-closed"
+    },
+    {
+      "surface": "svelte:parse",
+      "option": "loose",
+      "behavior": "refused-fail-closed"
+    }
+  ],
+  "refusalTsvPath": "packages/framework-conformance-harness/evidence/svelte-options.tsv",
+  "division": {
+    "moduleInstanceAndGenericBinders": "STS1",
+    "fullSvelteTypingAndIde": "STS15",
+    "runtimeCompilation": "SCP",
+    "styles": "SST",
+    "nativeNckChecking": "not-a-prerequisite-or-fallback",
+    "legacyRetirement": {
+      "vue": "STP58",
+      "svelte": "STS15"
+    }
+  },
+  "predecessors": [
+    {
+      "node": "STP8",
+      "consumes": "AcceptedProjectionArchitecture boundary products (in-repo: tests/sfc-projection/STP8/products/)"
+    },
+    {
+      "node": "STP9",
+      "consumes": "trusted implemented-ledger readiness input (database-owned; no repo evidence artifact is a scheduling service)"
+    },
+    {
+      "node": "CCA1I",
+      "consumes": "Svelte ProjectionBackend implementation at crates/verter_compiler/src/svelte/svelte_projection_backend.rs"
+    }
+  ],
+  "acceptedProducts": [
+    "SvelteProjectionPolicy",
+    "SvelteCurrentFeatureInventory",
+    "SvelteEngineFrameworkMatrix"
+  ],
+  "charterHome": {
+    "planned": "roadmap/0.1.0-tama/contracts/svelte-typescript-projection.md",
+    "inRepo": "tests/sfc-projection/STS0/ (contract.ts, products/, protocol.mjs)",
+    "rationale": "b940abc1e removed the repository roadmap as database-owned; the ratified Svelte profile contract lives with the sfc-projection family instead of recreating an unvalidated roadmap copy (same divergence STP8 recorded)"
+  },
+  "receivingAmendments": [
+    {
+      "id": "STS0-R-binders",
+      "receiver": "STS1",
+      "consumes": "SvelteProjectionPolicy module/instance profiles"
+    },
+    {
+      "id": "STS0-R-inventory",
+      "receiver": "STS1",
+      "consumes": "SvelteCurrentFeatureInventory owning rows"
+    },
+    {
+      "id": "STS0-R-matrix",
+      "receiver": "STS15",
+      "consumes": "SvelteEngineFrameworkMatrix pinned engine/framework cells"
+    },
+    {
+      "id": "STS0-R-typing",
+      "receiver": "STS15",
+      "consumes": "SvelteProjectionPolicy checking/publishing behaviors"
+    },
+    {
+      "id": "STS0-R-svelte-retire",
+      "receiver": "STS15",
+      "consumes": "recorded displaced call sites/helpers"
+    }
+  ],
+  "noReverseEdges": [
+    "TCM4",
+    "BR0"
+  ],
+  "runtimeActivationAuthorized": false,
+  "newPublicHelperWithoutPredecessorEvidence": false,
+  "ac2": "Hover, definition, references and edit participation are observed on the ratified fixture through the shared STP1 harness on both admitted engines (see manifest probes and tests/sfc-projection/evidence/STS0/cases.md).",
+  "ac3Rationale": "STS0 owns contract artifacts only. State safety for owned state: harness probe runs are incremental=fresh; incomplete/configuration-missing/cancelled observations cannot warm complete caches; publication and edits stay with the existing provider/LSO snapshot authority.",
+  "ac4Rationale": "No production hot path changes; no helper expansion is emitted by this node. Generated text/helper size is unchanged and needs no invented timing claim."
+}

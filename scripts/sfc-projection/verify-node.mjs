@@ -39,6 +39,7 @@ import {
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
+  STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
 export {
@@ -51,6 +52,7 @@ export {
   STP7_MANDATORY_CASES,
   STP8_MANDATORY_CASES,
   STP9_MANDATORY_CASES,
+  STS0_MANDATORY_CASES,
 };
 
 export function canonicalMandatoryCases(nodeId) {
@@ -1803,7 +1805,11 @@ export async function verifyNode(options) {
         errors.push(
           ...evaluateHarnessRun(run, probes, engine.id, {
             maxChecksPerFile,
-            requireInstanceType: nodeId !== "STP7",
+            // The harness Instance observation is Vue-constructor-shaped
+            // (InstanceType<typeof Comp>); it does not apply to the
+            // function-shaped Svelte Component of STP7/STS0, whose manifests
+            // pin expectedInstanceType to the declared interface instead.
+            requireInstanceType: nodeId !== "STP7" && nodeId !== "STS0",
           }),
         );
       }
@@ -1864,6 +1870,11 @@ export async function verifyNode(options) {
   if (nodeId === "STP9") {
     const stp9 = await evaluateStp9Node({ repoRoot });
     errors.push(...stp9.errors);
+  }
+
+  if (nodeId === "STS0") {
+    const sts0 = await evaluateSts0Node({ repoRoot, skipProbes: options.skipProbes });
+    errors.push(...sts0.errors);
   }
 
   return summarize({
@@ -1988,6 +1999,17 @@ async function evaluateStp9Node({ repoRoot }) {
   const protocol = await import(protocolHref);
   const stp9 = await protocol.evaluateStp9({ repoRoot });
   return { errors: stp9.errors };
+}
+
+async function evaluateSts0Node({ repoRoot, skipProbes }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STS0/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  // skipProbes is product-only (assertProfileContract). The live cargo
+  // gate stays mandatory on the default evaluateSts0 path (charter §14).
+  const sts0 = await protocol.evaluateSts0({ repoRoot, skipLive: !!skipProbes });
+  return { errors: sts0.errors };
 }
 
 async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipProbes, runnable }) {
@@ -2119,6 +2141,9 @@ function summarize({
     "tests/sfc-projection/STP8/probes/negative.ts",
     "tests/sfc-projection/STP9/probes/positive.ts",
     "tests/sfc-projection/STP9/probes/negative.ts",
+    "tests/sfc-projection/STS0/probes/positive.ts",
+    "tests/sfc-projection/STS0/probes/negative.ts",
+    "tests/sfc-projection/STS0/probes/state-module.svelte.ts",
   ].filter(Boolean);
   for (const rel of probeFiles) {
     const abs = repoPath(repoRoot, rel);
@@ -2170,10 +2195,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STS0 Svelte profile lock)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
@@ -2192,7 +2217,12 @@ respell InstanceType or remap Vue utilities; and event/slot inference
 contributors postponed until after specialization. STP9 rejects TypeInfo or
 assignability during plan construction, complete-cache admission of malformed
 or unknown syntax, and use identities that shift under comment or unrelated
-sibling insertion.
+sibling insertion. STS0 rejects a current
+supported Svelte feature with no mandatory owning row, runes mislabeled as
+legacy, a Vue constructor or Vue event/model/ref convention required for a
+modern Svelte Component, unspecified profile checking/publishing behavior,
+options silently ignored instead of failing closed, and latest-tool or floating
+engine/framework claims without pinned provenance.
 `;
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

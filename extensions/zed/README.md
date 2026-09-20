@@ -38,6 +38,31 @@ to the languages those official extensions define, so you need:
    project). Install it as a dev dependency in the workspace you open. (No
    TypeScript SDK is bundled with the extension.)
 
+## Install from an IDE release
+
+Starting with IDE 0.0.4, download `verter-zed.tar.gz` and the matching
+`verter-lsp-<platform>` binary from the same
+[IDE release](https://github.com/pikax/verter/releases). The archive contains
+`verter/extension.toml` and the compiled `verter/extension.wasm`, plus this guide,
+a license and `IDE_VERSION`. It needs no local Rust build.
+
+Close Zed and extract the `verter` folder under its `extensions/installed`
+directory. The default parent directory is:
+
+- **Linux:** `~/.local/share/zed/extensions/installed/` (or
+  `$XDG_DATA_HOME/zed/extensions/installed/` when `XDG_DATA_HOME` is set)
+- **macOS:** `~/Library/Application Support/Zed/extensions/installed/`
+- **Windows:** `%LOCALAPPDATA%\Zed\extensions\installed\`
+
+Use your selected data directory if launching Zed with `--user-data-dir`.
+Restart Zed, configure `lsp.verter.binary.path` with the downloaded server's
+absolute path (mark it executable on macOS/Linux), and enable Verter as below.
+The official Vue/Svelte extensions and TypeScript prerequisites still apply.
+
+This is a manual installation, separate from Zed registry publication. The
+**Install Dev Extension** command below builds source and should be used with a
+repository checkout, not this prebuilt archive.
+
 ## Install (dev extension)
 
 1. Clone this repository.
@@ -45,8 +70,7 @@ to the languages those official extensions define, so you need:
 3. Point it at `extensions/zed/` in the clone. Zed compiles the extension with its
    bundled Rust/wasm toolchain.
 
-(Registry publication to `zed-industries/extensions` is a roadmap item; until then
-the dev-extension flow above is the supported install path.)
+Registry publication to `zed-industries/extensions` is a separate planned step.
 
 ## Enable Verter for Vue / Svelte
 

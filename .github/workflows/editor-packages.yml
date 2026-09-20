@@ -1,0 +1,54 @@
+name: Editor packages
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - .github/workflows/editor-packages.yml
+      - .github/workflows/release-ide.yml
+      - scripts/package-editor-integrations*.mjs
+      - extensions/lapce/**
+      - extensions/zed/**
+      - editors/nvim/**
+      - editors/helix/**
+      - crates/verter-editor-client/**
+      - packages/vue-vscode/package.json
+      - rust-toolchain.toml
+      - LICENSE
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build editor integrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-wasip1, wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            extensions/lapce -> target
+            extensions/zed -> target
+          shared-key: editor-packages
+      - name: Test packaging
+        run: node --test scripts/package-editor-integrations.test.mjs
+      - name: Build Lapce volt and Zed extension
+        run: |
+          cargo build --locked --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release
+          cargo build --locked --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release
+      - name: Package editor integrations
+        run: node scripts/package-editor-integrations.mjs --output /tmp/editor-integrations
+      - uses: actions/upload-artifact@v6
+        with:
+          name: editor-integrations
+          path: /tmp/editor-integrations/*.tar.gz
+          if-no-files-found: error

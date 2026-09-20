@@ -1,0 +1,71 @@
+{
+  "node": "ARH7",
+  "kind": "implementation",
+  "products": ["ARH7ActivationCutover"],
+  "cases": [
+    {
+      "id": "ARH7-cutover",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "predecessor-drift (shipped ARH2 validate() runs live inside this verifier)",
+        "boundary-path-missing",
+        "owner-path-missing",
+        "owner-export-missing",
+        "composition-root-missing",
+        "cutover-cardinality"
+      ]
+    },
+    {
+      "id": "ARH7-authority",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ac2-defect-missing",
+        "ac2-evidence-population-drift",
+        "ac2-evidence-missing",
+        "ac2-evidence-unbound"
+      ]
+    },
+    {
+      "id": "ARH7-work",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ac3-concern-missing",
+        "ac3-concern-without-evidence",
+        "ac3-evidence-missing",
+        "ac3-evidence-not-a-test",
+        "ac3-na-rationale-missing"
+      ]
+    },
+    {
+      "id": "ARH7-delivery",
+      "disposition": "reject",
+      "twins": ["clean products", "ac4-rationale-missing", "vsc0-evidence-stale"]
+    },
+    {
+      "id": "ARH7-cost",
+      "disposition": "reject",
+      "twins": ["clean products", "ac5-rationale-missing", "dimension-commits-wall-clock"]
+    },
+    {
+      "id": "ARH7-ratification",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "manifest-case-drift",
+        "manifest-product-drift",
+        "manifest-command-drift",
+        "candidate-basis-drift (product pin must be a 40-hex commit id; current-tree validation does not require git ancestry)",
+        "ci-lane-missing",
+        "arch-filter-missing-vue-vscode",
+        "test-scripts-missing"
+      ]
+    }
+  ],
+  "verify": "node tests/architecture-health/ARH7/verify.mjs",
+  "test": "node --test tests/architecture-health/ARH7/arh7.test.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Implementation node: VS Code activate/deactivate is a small composition root over ActivationSession + StartAttemptScope. Module-level client/MCP locators and the in-file StartAttemptScope class are deleted. activateExtension registers on the session lifetime, not context.subscriptions. The verifier is the sole owning interface, wired into test:scripts and the architecture-health CI lane."
+}

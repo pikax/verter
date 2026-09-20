@@ -9,7 +9,8 @@ layer. There is no compiled extension and no server-side change: the native
 client talks stdio directly to the native `verter-lsp` process. The Lua layer
 does **zero per-request work** — it assembles the config once at attach.
 
-Requires **Neovim ≥ 0.11** (for `vim.lsp.config` / `vim.lsp.enable`).
+Requires **Neovim ≥ 0.11** (for `vim.lsp.config` / `vim.lsp.enable`). This is not
+a classic Vim plugin.
 
 ## Prerequisites
 
@@ -24,6 +25,28 @@ Requires **Neovim ≥ 0.11** (for `vim.lsp.config` / `vim.lsp.enable`).
   provider is `tsgo`, which discovers the native
   `@typescript/typescript-<platform>-<arch>` binary installed by that package
   (`VERTER_TSGO_BIN` → project `node_modules` → `PATH` → npm/npx cache).
+
+## Install from an IDE release
+
+Starting with IDE 0.0.4, download `verter-nvim.tar.gz` and the matching
+`verter-lsp-<platform>` binary from the same
+[IDE release](https://github.com/pikax/verter/releases). The archive contains Lua
+runtime files, this guide, a license and `IDE_VERSION`; there is no compiled
+Neovim plugin.
+
+Run `:echo stdpath('data')` in Neovim. Extract the archive under that directory's
+`site/pack/verter/start/`, producing
+`site/pack/verter/start/verter.nvim/lua/verter/init.lua`. Restart Neovim and add
+this to your `init.lua`:
+
+```lua
+require("verter").setup({ cmd_path = "/absolute/path/to/verter-lsp" })
+```
+
+Use the downloaded server's actual filename (including `.exe` on Windows), and
+mark it executable on macOS/Linux. TypeScript prerequisites above still apply.
+For lazy.nvim, use the extracted `verter.nvim` directory as `dir` in the example
+below.
 
 ## Quick start
 
