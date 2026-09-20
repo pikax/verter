@@ -2802,6 +2802,7 @@ export function evaluateSts0(input = {}) {
   errors.push(...validateSts0Products());
   const policy = loadSts0Product("svelte-projection-policy.json");
   const inventory = loadSts0Product("svelte-current-feature-inventory.json");
+  errors.push(...assertContractConstantsJoin(policy, { repoRoot: input.repoRoot ?? REPO_ROOT }));
   errors.push(
     ...assertModeClassification(inventory, {
       repoRoot: input.repoRoot ?? REPO_ROOT,
