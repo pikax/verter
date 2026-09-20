@@ -58,6 +58,7 @@ mod preprocessor_round_trip_parse_count;
 mod relation_nominal_authority;
 mod runtime_constructor_matrix;
 mod shared_process_contract;
+mod sts0_profile_gate;
 mod style_dialect_admission;
 mod style_native_analysis_preprocessor_boundary;
 mod svelte_jsx_shim_freshness;
