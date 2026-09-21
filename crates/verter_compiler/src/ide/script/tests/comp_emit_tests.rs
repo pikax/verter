@@ -858,22 +858,23 @@ const count = ref(0)
 }
 
 #[test]
-fn jsx_mode_instance_declaration_no_ts_syntax() {
+fn jsx_mode_instance_declaration_uses_public_constructor_bridge() {
     let (code, _) = gen_jsx_script(
         r#"<script setup>
 const count = ref(0)
 </script>
 <template><div>{{ count }}</div></template>"#,
     );
-    // Negative: no TS instance declaration syntax
+    // JSDoc preserves the public constructor contract without TypeScript
+    // declaration syntax or a compiler-authored `any` instance.
     assert!(
         !code.contains("!:"),
         "JSX mode must not have definite assignment assertion '!:':\n{}",
         code
     );
     assert!(
-        !code.contains("InstanceType<"),
-        "JSX mode must not have InstanceType<>:\n{}",
+        code.contains("InstanceType<typeof import(\"./App.vue.verter.js\")['default']>"),
+        "JSX mode must bridge the self-instance through the public constructor:\n{}",
         code
     );
     assert!(
@@ -881,10 +882,12 @@ const count = ref(0)
         "JSX mode must not have 'declare let':\n{}",
         code
     );
-    // Positive: should have JSDoc-style instance declaration
+    // Positive: JSDoc carries the public instance type.
     assert!(
-        code.contains("/** @type {any} */"),
-        "JSX mode should use JSDoc @type for instance:\n{}",
+        code.contains(
+            "/** @type {InstanceType<typeof import(\"./App.vue.verter.js\")['default']>} */"
+        ),
+        "JSX mode should use a JSDoc public-instance declaration:\n{}",
         code
     );
 }

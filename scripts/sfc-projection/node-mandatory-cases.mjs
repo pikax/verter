@@ -90,6 +90,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP11-assertion",
     "STP11-one-body",
   ]),
+  STP12: Object.freeze([
+    "STP12-checkjs-off",
+    "STP12-checkjs-on",
+    "STP12-jsdoc-generic",
+    "STP12-jsx",
+    "STP12-suppression",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -109,4 +116,5 @@ export const STP8_MANDATORY_CASES = NODE_MANDATORY_CASES.STP8;
 export const STP9_MANDATORY_CASES = NODE_MANDATORY_CASES.STP9;
 export const STP10_MANDATORY_CASES = NODE_MANDATORY_CASES.STP10;
 export const STP11_MANDATORY_CASES = NODE_MANDATORY_CASES.STP11;
+export const STP12_MANDATORY_CASES = NODE_MANDATORY_CASES.STP12;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

@@ -41,6 +41,7 @@ import {
   STP9_MANDATORY_CASES,
   STP10_MANDATORY_CASES,
   STP11_MANDATORY_CASES,
+  STP12_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
@@ -56,6 +57,7 @@ export {
   STP9_MANDATORY_CASES,
   STP10_MANDATORY_CASES,
   STP11_MANDATORY_CASES,
+  STP12_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 };
 
@@ -64,7 +66,13 @@ export function canonicalMandatoryCases(nodeId) {
 }
 
 function usesCaseFileRunner(nodeId) {
-  return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4" || nodeId === "STP6";
+  return (
+    nodeId === "STP2" ||
+    nodeId === "STP3" ||
+    nodeId === "STP4" ||
+    nodeId === "STP6" ||
+    nodeId === "STP12"
+  );
 }
 
 export function mandatoryCasesFor(nodeManifest) {
@@ -83,7 +91,6 @@ const REQUIRED_PROBE_STRINGS = Object.freeze([
   "hoverNeedle",
   "definitionNeedle",
   "expectedHoverType",
-  "expectedInstanceType",
 ]);
 
 export function probesAreRunnable(probes) {
@@ -91,6 +98,10 @@ export function probesAreRunnable(probes) {
   for (const key of REQUIRED_PROBE_STRINGS) {
     if (typeof probes[key] !== "string" || probes[key].length === 0) return false;
   }
+  const hasInstanceExpectation =
+    (typeof probes.expectedInstanceType === "string" && probes.expectedInstanceType.length > 0) ||
+    (Array.isArray(probes.expectedInstanceMembers) && probes.expectedInstanceMembers.length > 0);
+  if (!hasInstanceExpectation) return false;
   return Number.isInteger(probes.expectedNegativeCode);
 }
 
@@ -104,6 +115,95 @@ export function err(caseId, code, message) {
 
 export function cloneJson(value) {
   return structuredClone(value);
+}
+
+function remapStp12ProbePath(value, sourceRoot, generatedRoot) {
+  if (typeof value !== "string") return value;
+  return value === sourceRoot || value.startsWith(`${sourceRoot}/`)
+    ? `${generatedRoot}${value.slice(sourceRoot.length)}`
+    : value;
+}
+
+/**
+ * Materialise the STP12 probe tree around carrier bytes returned by the live
+ * host. TypeScript opens only this isolated work directory, whose public
+ * carrier is written from the current host response.
+ */
+export function materializeStp12GeneratedProbes({ repoRoot, nodeManifest, publicApi }) {
+  const root = path.resolve(repoRoot);
+  const sourceRoot = path.dirname(nodeManifest.probes.tsconfig);
+  const sourceAbs = repoPath(root, sourceRoot);
+  const generatedAbs = fs.mkdtempSync(path.join(sourceAbs, ".stp12-generated-"));
+  const generatedRoot = posix(path.relative(root, generatedAbs));
+  try {
+    for (const entry of fs.readdirSync(sourceAbs)) {
+      if (!entry.startsWith(".stp12-generated-")) {
+        fs.cpSync(path.join(sourceAbs, entry), path.join(generatedAbs, entry), {
+          recursive: true,
+        });
+      }
+    }
+    if (typeof publicApi !== "string" || publicApi.length === 0) {
+      throw new Error("the host produced no public API carrier bytes");
+    }
+    const generatedCarrier = path.join(generatedAbs, "generated", "JSDocGeneric.vue.verter.d.ts");
+    fs.mkdirSync(path.dirname(generatedCarrier), { recursive: true });
+    fs.writeFileSync(generatedCarrier, publicApi, "utf8");
+
+    const manifest = cloneJson(nodeManifest);
+    for (const key of ["positive", "negative", "cleanTwin", "tsconfig"]) {
+      manifest.probes[key] = remapStp12ProbePath(manifest.probes[key], sourceRoot, generatedRoot);
+    }
+    for (const row of manifest.cases || []) {
+      row.file = remapStp12ProbePath(row.file, sourceRoot, generatedRoot);
+      row.dirtyTwin = remapStp12ProbePath(row.dirtyTwin, sourceRoot, generatedRoot);
+      row.files = (row.files || []).map((file) =>
+        remapStp12ProbePath(file, sourceRoot, generatedRoot),
+      );
+      if (row.fileExpectedCodes) {
+        row.fileExpectedCodes = Object.fromEntries(
+          Object.entries(row.fileExpectedCodes).map(([file, code]) => [
+            remapStp12ProbePath(file, sourceRoot, generatedRoot),
+            code,
+          ]),
+        );
+      }
+    }
+    return {
+      manifest,
+      generatedCarrier,
+      probesRoot: generatedRoot,
+      close: () => fs.rmSync(generatedAbs, { recursive: true, force: true }),
+    };
+  } catch (error) {
+    fs.rmSync(generatedAbs, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function generateStp12PublicApi(repoRoot) {
+  const require = createRequire(repoPath(repoRoot, "packages/native/index.js"));
+  const { VerterHost } = require(repoPath(repoRoot, "packages/native/index.js"));
+  const host = new VerterHost();
+  const canonicalId = "/stp12/JSDocGeneric.vue";
+  try {
+    host.upsert({
+      canonicalId,
+      inputId: canonicalId,
+      source: fs.readFileSync(
+        repoPath(repoRoot, "tests/sfc-projection/STP12/fixtures/jsdoc-generic.vue"),
+        "utf8",
+      ),
+      fileKind: "vue",
+    });
+    const result = host.getPublicApi(canonicalId, "public");
+    if (result?.error)
+      throw new Error(`public API projection failed: ${JSON.stringify(result.error)}`);
+    if (!result?.value?.code) throw new Error("public API projection returned no carrier");
+    return result.value.code;
+  } finally {
+    host.close?.();
+  }
 }
 
 export function readJson(absPath) {
@@ -933,6 +1033,30 @@ export function assertExactType({
   return [];
 }
 
+export function assertInstanceMembers(instance, members, engineId, caseId) {
+  if (!instance) {
+    return [err(caseId, "vacuous-type", `${engineId} missing Instance type`)];
+  }
+  const errors = assertExactType({
+    actual: instance.printed,
+    flags: instance.flags,
+  }).map((item) => ({ ...item, caseId }));
+  const properties = new Set(instance.properties || []);
+  for (const member of members || []) {
+    if (!properties.has(member)) {
+      errors.push(err(caseId, "type-mismatch", `${engineId} Instance lacks ${member}`));
+    }
+  }
+  return errors;
+}
+
+function typePropertyNames(checker, type) {
+  return [...checker.getPropertiesOfType(type)]
+    .map((property) => property.getName?.() ?? property.name)
+    .filter((name) => typeof name === "string")
+    .sort();
+}
+
 export function assertCleanTwin(diagnostics, { fileLabel = "clean twin" } = {}) {
   const unexpected = (diagnostics || []).filter((diag) => diag && diag.code);
   if (unexpected.length > 0) {
@@ -1034,6 +1158,7 @@ function observeJs(ts, checker, sf, text, probes = {}) {
       out.types.Instance = {
         printed: checker.typeToString(type),
         flags: jsTypeFlags(ts, type),
+        properties: typePropertyNames(checker, type),
       };
     }
   }
@@ -1189,6 +1314,7 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
       observations.types.Instance = {
         printed: project.checker.typeToString(type),
         flags: type.flags ?? 0,
+        properties: typePropertyNames(project.checker, type),
       };
     }
   }
@@ -1389,8 +1515,12 @@ function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } 
           caseId,
         })),
       );
-      if (row.expectedInstanceType) {
-        const instance = primary.observations.types.Instance;
+      const instance = primary.observations.types.Instance;
+      if (Array.isArray(row.expectedInstanceMembers)) {
+        errors.push(
+          ...assertInstanceMembers(instance, row.expectedInstanceMembers, engineId, caseId),
+        );
+      } else if (row.expectedInstanceType) {
         if (!instance) {
           errors.push(err(caseId, "vacuous-type", `${engineId} missing Instance type`));
         } else {
@@ -1776,9 +1906,33 @@ export async function verifyNode(options) {
     );
   }
 
+  let activeNodeManifest = nodeLoad.manifest;
+  let activeCases = cases;
+  let stp12ProbeScope = null;
   const probes = nodeLoad.manifest?.probes;
   const runnable = probesAreRunnable(probes);
   const shouldRun = resolvedEngines.length > 0 && runnable && !options.skipProbes;
+  if (nodeId === "STP12" && shouldRun) {
+    try {
+      stp12ProbeScope = materializeStp12GeneratedProbes({
+        repoRoot,
+        nodeManifest: nodeLoad.manifest,
+        publicApi: generateStp12PublicApi(repoRoot),
+      });
+      activeNodeManifest = stp12ProbeScope.manifest;
+      activeCases = selectCases(activeNodeManifest, nodeId);
+    } catch (error) {
+      errors.push(
+        err(
+          "STP12-jsdoc-generic",
+          "missing-generated-output",
+          `STP12 could not materialize the host-generated public API carrier: ${error?.message || error}`,
+        ),
+      );
+    }
+  }
+  const activeProbes = activeNodeManifest?.probes;
+  const runProbes = shouldRun && (nodeId !== "STP12" || stp12ProbeScope !== null);
   if (resolvedEngines.length > 0 && !options.skipProbes && !runnable) {
     if (
       !errors.some((error) => error.caseId === "STP1-harness" && error.code === "missing-probes")
@@ -1791,32 +1945,38 @@ export async function verifyNode(options) {
         ),
       );
     }
-  } else if (shouldRun) {
+  } else if (runProbes) {
     const maxChecksPerFile = methodology?.boundedWork?.maxChecksPerFilePerEngine ?? 1;
     const caseFiles = usesCaseFileRunner(nodeId);
-    for (const engine of resolvedEngines) {
-      const run = caseFiles
-        ? engine.kind === "javascript"
-          ? runJsStp2(engine, probes, repoRoot, cases)
-          : await runNativeStp2(engine, probes, repoRoot, cases)
-        : engine.kind === "javascript"
-          ? runJsEngine(engine, probes, repoRoot)
-          : await runNativeEngine(engine, probes, repoRoot);
-      harnessRuns.push(run);
-      if (caseFiles) {
-        errors.push(...evaluateStp2Run(run, probes, cases, engine.id, { maxChecksPerFile }));
-      } else {
-        errors.push(
-          ...evaluateHarnessRun(run, probes, engine.id, {
-            maxChecksPerFile,
-            // The harness Instance observation is Vue-constructor-shaped
-            // (InstanceType<typeof Comp>); it does not apply to the
-            // function-shaped Svelte Component of STP7/STS0, whose manifests
-            // pin expectedInstanceType to the declared interface instead.
-            requireInstanceType: nodeId !== "STP7" && nodeId !== "STS0",
-          }),
-        );
+    try {
+      for (const engine of resolvedEngines) {
+        const run = caseFiles
+          ? engine.kind === "javascript"
+            ? runJsStp2(engine, activeProbes, repoRoot, activeCases)
+            : await runNativeStp2(engine, activeProbes, repoRoot, activeCases)
+          : engine.kind === "javascript"
+            ? runJsEngine(engine, activeProbes, repoRoot)
+            : await runNativeEngine(engine, activeProbes, repoRoot);
+        harnessRuns.push(run);
+        if (caseFiles) {
+          errors.push(
+            ...evaluateStp2Run(run, activeProbes, activeCases, engine.id, { maxChecksPerFile }),
+          );
+        } else {
+          errors.push(
+            ...evaluateHarnessRun(run, activeProbes, engine.id, {
+              maxChecksPerFile,
+              // The harness Instance observation is Vue-constructor-shaped
+              // (InstanceType<typeof Comp>); it does not apply to the
+              // function-shaped Svelte Component of STP7/STS0, whose manifests
+              // pin expectedInstanceType to the declared interface instead.
+              requireInstanceType: nodeId !== "STP7" && nodeId !== "STS0",
+            }),
+          );
+        }
       }
+    } finally {
+      stp12ProbeScope?.close();
     }
     if (harnessRuns.length === 0) {
       errors.push(err("STP1-harness", "missing-probes", "zero probe executions"));
@@ -1884,6 +2044,11 @@ export async function verifyNode(options) {
   if (nodeId === "STP11") {
     const stp11 = await evaluateStp11Node({ repoRoot });
     errors.push(...stp11.errors);
+  }
+
+  if (nodeId === "STP12") {
+    const stp12 = await evaluateStp12Node({ repoRoot });
+    errors.push(...stp12.errors);
   }
 
   if (nodeId === "STS0") {
@@ -2031,6 +2196,15 @@ async function evaluateStp11Node({ repoRoot }) {
   const protocol = await import(protocolHref);
   const stp11 = await protocol.evaluateStp11({ repoRoot });
   return { errors: stp11.errors };
+}
+
+async function evaluateStp12Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP12/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp12 = await protocol.evaluateStp12({ repoRoot });
+  return { errors: stp12.errors };
 }
 
 async function evaluateSts0Node({ repoRoot, skipProbes }) {
@@ -2227,10 +2401,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STS0 Svelte profile lock)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STP12 JavaScript projection, STS0 Svelte profile lock)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STP12|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
