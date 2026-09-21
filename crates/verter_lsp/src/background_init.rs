@@ -634,9 +634,15 @@ impl super::VerterLanguageServer {
         self.rearm_open_document_diagnostics();
 
         if !self.pending_snapshot_provider_sync.is_empty() {
+            let mut pending: Vec<String> = self
+                .pending_snapshot_provider_sync
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect();
+            pending.sort();
             tracing::warn!(
-                pending = self.pending_snapshot_provider_sync.len(),
-                "post-scan provider retries remain pending (gen={my_gen}); suppressing typeProviderSyncComplete"
+                pending = pending.len(),
+                "post-scan provider retries remain pending (gen={my_gen}); suppressing typeProviderSyncComplete: {pending:?}"
             );
             return false;
         }

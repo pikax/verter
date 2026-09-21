@@ -29437,6 +29437,54 @@ async fn drain_pending_provider_sync_for(server: &VerterLanguageServer) {
     .await;
 }
 
+/// An open script that NO configured project owns (a TypeScript lib file the
+/// user navigated into, a scratch file outside the workspace) can never be
+/// delivered to the provider. Once ownership is authoritative that is a
+/// terminal answer, not a retry: left queued, it would hold the pending set
+/// non-empty for the rest of the session and level 2 would never be announced.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_script_with_no_owning_project_is_not_retried_forever() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let outside = tempfile::tempdir().unwrap();
+    let ownerless = format!(
+        "{}/lib.ownerless.d.ts",
+        crate::test_utils::canonical_test_path(outside.path())
+    );
+    std::fs::write(
+        outside.path().join("lib.ownerless.d.ts"),
+        "declare const x: 1;",
+    )
+    .unwrap();
+    server.documents.did_open(&TextDocumentItem {
+        uri: crate::uri::path_to_file_uri(&ownerless).unwrap(),
+        language_id: "typescript".into(),
+        version: 1,
+        text: "declare const x: 1;".into(),
+    });
+    let owned = format!("{}/src/helper.ts", fixture.root);
+
+    server.queue_snapshot_provider_sync(ownerless.clone());
+    server.queue_snapshot_provider_sync(owned.clone());
+    drain_pending_provider_sync_for(server).await;
+
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&owned),
+        "control: an owned script settles and is dequeued"
+    );
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&ownerless),
+        "a script no project owns is a terminal answer, not a pending retry"
+    );
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        server.complete_post_scan(generation).await,
+        "with nothing genuinely pending, level 2 is announced"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_is_pending() {
     let fixture = watched_dependency_fixture(true).await;
