@@ -43,7 +43,7 @@ use crate::cursor::ScriptLanguage;
 use crate::utils::oxc::vue::parse_generic;
 
 /// Vue macros recognised at setup scope.
-const MACRO_NAMES: [&str; 7] = [
+pub(super) const MACRO_NAMES: [&str; 7] = [
     "defineProps",
     "defineEmits",
     "defineExpose",
@@ -72,7 +72,7 @@ pub enum ScriptGrammar {
 }
 
 impl ScriptGrammar {
-    fn source_type(self) -> SourceType {
+    pub(super) fn source_type(self) -> SourceType {
         match self {
             Self::TypeScript => SourceType::ts().with_module(true),
             Self::Tsx => SourceType::tsx().with_module(true),
@@ -224,7 +224,9 @@ pub struct ScriptProjectionFacts {
     pub binder: UniversalSetupBinder,
 }
 
-fn grammar_of(lang: Option<ScriptLanguage>) -> Result<ScriptGrammar, SetupProjectionRefusal> {
+pub(super) fn grammar_of(
+    lang: Option<ScriptLanguage>,
+) -> Result<ScriptGrammar, SetupProjectionRefusal> {
     match lang {
         Some(ScriptLanguage::TypeScript) => Ok(ScriptGrammar::TypeScript),
         Some(ScriptLanguage::TSX) => Ok(ScriptGrammar::Tsx),
@@ -234,7 +236,7 @@ fn grammar_of(lang: Option<ScriptLanguage>) -> Result<ScriptGrammar, SetupProjec
     }
 }
 
-fn range(span: oxc_span::Span, base: u32) -> SourceRange {
+pub(super) fn range(span: oxc_span::Span, base: u32) -> SourceRange {
     SourceRange {
         start: base + span.start,
         end: base + span.end,
@@ -262,7 +264,7 @@ const PURE_TYPE_SPACE: SymbolFlags = SymbolFlags::Interface
 /// Root-scope names bound to a runtime value, for macro-shadow checks. A
 /// type-only declaration (`interface`, `type`, `import type`) of the same
 /// name as a macro must not suppress the macro.
-fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
+pub(super) fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
     scoping
         .get_bindings(scoping.root_scope_id())
         .iter()
@@ -279,7 +281,7 @@ fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
 /// that shadow a macro name. Vue's `compileScript` strips a
 /// `defineProps`/`defineEmits`/... specifier imported from `'vue'` and still
 /// processes the call as the macro.
-fn vue_runtime_macro_imports<'a>(program: &Program<'a>) -> FxHashSet<&'a str> {
+pub(super) fn vue_runtime_macro_imports<'a>(program: &Program<'a>) -> FxHashSet<&'a str> {
     let mut names = FxHashSet::default();
     for statement in &program.body {
         let Statement::ImportDeclaration(import) = statement else {
@@ -350,12 +352,24 @@ fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupPr
     if !result.is_ok() {
         return Err(SetupProjectionRefusal::InvalidGeneric);
     }
+    Ok(binder_product_from(&result, text, leading_offset))
+}
+
+/// The authored binder product for an already-parsed `generic` attribute.
+/// Sole owner of the parameter-name/constraint/default projection, so a
+/// consumer that needs the parsed binder AST as well never re-parses the
+/// attribute to rebuild the same rows.
+pub(super) fn binder_product_from(
+    result: &crate::utils::oxc::vue::GenericParseResult<'_>,
+    text: &str,
+    leading_offset: u32,
+) -> UniversalSetupBinder {
     let bytes = text.as_bytes();
     let span = |s: crate::common::RelativeSpan| SourceRange {
         start: s.start + leading_offset,
         end: s.end + leading_offset,
     };
-    Ok(UniversalSetupBinder {
+    UniversalSetupBinder {
         params: result
             .params
             .iter()
@@ -365,7 +379,7 @@ fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupPr
                 default: param.default_span.map(span),
             })
             .collect(),
-    })
+    }
 }
 
 fn is_type_only_declaration(declaration: &Declaration<'_>) -> bool {
@@ -462,12 +476,14 @@ fn project_setup(
     let module_bound: FxHashSet<&str> = normal_value_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
     let mut collector = SetupCollector {
-        scoping: semantic.scoping(),
-        module_bound: &module_bound,
-        vue_macro_imports: &vue_macro_imports,
+        macros_ctx: MacroContext {
+            scoping: semantic.scoping(),
+            module_bound: &module_bound,
+            vue_macro_imports: &vue_macro_imports,
+            macro_positions: macro_positions(program),
+        },
         base: block.content_start,
         depth: 0,
-        macro_positions: macro_positions(program),
         top_level_await: None,
         macros: Vec::new(),
     };
@@ -507,14 +523,50 @@ fn classify(statement: &Statement<'_>) -> SetupStatementKind {
     }
 }
 
+/// Macro-resolution inputs for one parsed setup block. Macro recognition has
+/// exactly one owner: both the statement-oriented setup projection and the
+/// public-dependency capture answer "is this call a Vue macro?" here, so the
+/// two products can never drift into two spellings of the same rule.
+pub(super) struct MacroContext<'s> {
+    /// Setup-block scoping, for free-reference resolution.
+    pub(super) scoping: &'s Scoping,
+    /// Root-scope value names from the normal script.
+    pub(super) module_bound: &'s FxHashSet<&'s str>,
+    /// Macro names imported as runtime bindings from `'vue'`.
+    pub(super) vue_macro_imports: &'s FxHashSet<&'s str>,
+    /// Start offsets of calls in a legal macro position.
+    pub(super) macro_positions: FxHashSet<u32>,
+}
+
+impl MacroContext<'_> {
+    /// The macro this call resolves to, or `None` for an ordinary call.
+    /// `depth` is the count of enclosing functions/classes: a call is only a
+    /// macro at setup root.
+    pub(super) fn resolve(&self, call: &CallExpression<'_>, depth: u32) -> Option<&'static str> {
+        if depth != 0 || !self.macro_positions.contains(&call.span.start) {
+            return None;
+        }
+        let Expression::Identifier(callee) = &call.callee else {
+            return None;
+        };
+        let name = callee.name.as_str();
+        if self.module_bound.contains(name) {
+            return None;
+        }
+        let macro_name = *MACRO_NAMES.iter().find(|m| **m == name)?;
+        let free = self
+            .scoping
+            .get_reference(callee.reference_id())
+            .symbol_id()
+            .is_none();
+        (free || self.vue_macro_imports.contains(name)).then_some(macro_name)
+    }
+}
+
 struct SetupCollector<'s> {
-    scoping: &'s Scoping,
-    module_bound: &'s FxHashSet<&'s str>,
-    vue_macro_imports: &'s FxHashSet<&'s str>,
+    macros_ctx: MacroContext<'s>,
     base: u32,
     depth: u32,
-    /// Start offsets of calls in a legal macro position.
-    macro_positions: FxHashSet<u32>,
     top_level_await: Option<SourceRange>,
     macros: Vec<SetupMacroCall>,
 }
@@ -628,26 +680,11 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        if let Expression::Identifier(callee) = &it.callee {
-            let name = callee.name.as_str();
-            if self.depth == 0
-                && self.macro_positions.contains(&it.span.start)
-                && !self.module_bound.contains(name)
-            {
-                if let Some(&macro_name) = MACRO_NAMES.iter().find(|m| **m == name) {
-                    let free = self
-                        .scoping
-                        .get_reference(callee.reference_id())
-                        .symbol_id()
-                        .is_none();
-                    if free || self.vue_macro_imports.contains(name) {
-                        self.macros.push(SetupMacroCall {
-                            name: macro_name,
-                            span: range(it.span, self.base),
-                        });
-                    }
-                }
-            }
+        if let Some(macro_name) = self.macros_ctx.resolve(it, self.depth) {
+            self.macros.push(SetupMacroCall {
+                name: macro_name,
+                span: range(it.span, self.base),
+            });
         }
         walk::walk_call_expression(self, it);
     }
@@ -679,7 +716,7 @@ fn note_macro_position(expr: &Expression<'_>, out: &mut FxHashSet<u32>) {
 
 /// Calls in a position Vue processes as a macro: root expression statements,
 /// root declarator initializers, and `withDefaults`' first argument.
-fn macro_positions(program: &Program<'_>) -> FxHashSet<u32> {
+pub(super) fn macro_positions(program: &Program<'_>) -> FxHashSet<u32> {
     let mut out = FxHashSet::default();
     for statement in &program.body {
         match statement {

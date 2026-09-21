@@ -33,11 +33,20 @@ use crate::framework_common::projection_plan::{
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
+use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::script_setup::{
     project_script_pair, ScriptBlockInput, ScriptProjectionFacts, SetupProjectionRefusal,
 };
 use crate::parser::types::RootNodeScript;
 use crate::standalone::{DirectCompileError, StandaloneCompiler};
+
+/// The two authored script blocks of one carrier plus the `generic`
+/// attribute value: normal script, setup script, generic.
+type AuthoredScriptBlocks<'s> = (
+    Option<ScriptBlockInput<'s>>,
+    Option<ScriptBlockInput<'s>>,
+    Option<&'s str>,
+);
 
 /// Vue IDE projection backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -137,6 +146,33 @@ impl VueProjectionBackend {
         source: &str,
         artifact: &FrameworkParseArtifact,
     ) -> Result<ScriptProjectionFacts, SetupProjectionRefusal> {
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        project_script_pair(normal, setup, generic)
+    }
+
+    /// Binder-aware public dependency capture for the admitted parse: the
+    /// free bindings of each public type surface, the script declarations
+    /// reachable from them, and the binder parameters each lifted declaration
+    /// must be re-bound over. Dormant relative to [`Self::project_ide`];
+    /// STP58 owns Vue atomic activation.
+    pub fn public_type_dependencies(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<BinderCapturePlan, SetupProjectionRefusal> {
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        capture_binder_plan(normal, setup, generic)
+    }
+
+    /// The two authored script blocks and the `generic` attribute value of
+    /// an admitted parse of exactly `source`. Both script-facing projections
+    /// read the blocks here, so neither can drift onto a different notion of
+    /// which bytes the authored blocks occupy.
+    fn script_blocks<'s>(
+        &self,
+        source: &'s str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<AuthoredScriptBlocks<'s>, SetupProjectionRefusal> {
         let parsed = VueCarrierCompiler
             .parsed_sfc(artifact)
             .ok_or(SetupProjectionRefusal::MissingParse)?;
@@ -156,11 +192,11 @@ impl VueProjectionBackend {
         let generic = setup
             .and_then(|s| s.generic)
             .and_then(|span| source.get(span.start as usize..span.end as usize));
-        project_script_pair(
+        Ok((
             parsed.script().and_then(block),
             setup.and_then(block),
             generic,
-        )
+        ))
     }
 
     /// Checking text and correspondence from one CodeTransform record, bound

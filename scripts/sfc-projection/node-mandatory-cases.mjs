@@ -97,6 +97,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP12-jsx",
     "STP12-suppression",
   ]),
+  STP14: Object.freeze([
+    "STP14-local-capture",
+    "STP14-dependent-default",
+    "STP14-typeof-capture",
+    "STP14-alias-cycle",
+    "STP14-duplicate-error",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -117,4 +124,5 @@ export const STP9_MANDATORY_CASES = NODE_MANDATORY_CASES.STP9;
 export const STP10_MANDATORY_CASES = NODE_MANDATORY_CASES.STP10;
 export const STP11_MANDATORY_CASES = NODE_MANDATORY_CASES.STP11;
 export const STP12_MANDATORY_CASES = NODE_MANDATORY_CASES.STP12;
+export const STP14_MANDATORY_CASES = NODE_MANDATORY_CASES.STP14;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;
