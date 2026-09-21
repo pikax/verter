@@ -268,7 +268,8 @@ mod tests {
         // build a minimal bundle and stamp the fixture's surfaces onto
         // its (pub) scope fields.
         let state = crate::resolver_core::ShallowFileState::service_backed_for_test("");
-        let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+        let interner =
+            Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
         let mut bundle = build_prepared_decl_bundle(
             "/shadow-fixture.ts",
             state,

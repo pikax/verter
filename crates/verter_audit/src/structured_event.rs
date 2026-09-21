@@ -152,6 +152,16 @@ pub enum NonAdmissionReason {
     ResolutionIncompleteProvenance,
     /// Stable world capture/revalidation exhausted its bounded retry loop.
     ResolutionRetryExhausted,
+    /// The aggregate semantic-retention account refused the bytes this
+    /// entry would retain — the value is COMPLETE and correct, and the
+    /// process declined to keep it.
+    ///
+    /// Distinct from [`Self::BudgetExceeded`] and never folded into it:
+    /// a budget exhaustion means the compute stopped early and its value
+    /// may be PARTIAL, whereas this refusal describes a finished value
+    /// the caller returns in full. Reporting one as the other would
+    /// either poison a complete result or warm-replay a partial.
+    RetentionPressure,
 }
 
 impl std::fmt::Display for NonAdmissionReason {
@@ -178,6 +188,7 @@ impl std::fmt::Display for NonAdmissionReason {
             Self::ResolutionUntrackedBackend => "ResolutionUntrackedBackend",
             Self::ResolutionIncompleteProvenance => "ResolutionIncompleteProvenance",
             Self::ResolutionRetryExhausted => "ResolutionRetryExhausted",
+            Self::RetentionPressure => "RetentionPressure",
         };
         f.write_str(name)
     }
@@ -1036,6 +1047,7 @@ mod non_admission_reason_tests {
         NonAdmissionReason::ResolutionIncompleteProvenance,
         NonAdmissionReason::ResolutionRetryExhausted,
         NonAdmissionReason::MutationUnstable,
+        NonAdmissionReason::RetentionPressure,
     ];
 
     /// Exhaustive positional index over the enum.
@@ -1069,11 +1081,12 @@ mod non_admission_reason_tests {
             NonAdmissionReason::ResolutionIncompleteProvenance => 18,
             NonAdmissionReason::ResolutionRetryExhausted => 19,
             NonAdmissionReason::MutationUnstable => 20,
+            NonAdmissionReason::RetentionPressure => 21,
         }
     }
 
     /// The variant count the exhaustive `variant_index` match covers.
-    const VARIANT_COUNT: usize = 21;
+    const VARIANT_COUNT: usize = 22;
 
     #[test]
     fn all_lists_every_variant_exactly_once() {

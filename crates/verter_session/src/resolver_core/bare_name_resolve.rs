@@ -599,7 +599,8 @@ export interface Props { label: string }
 export const defaults = { label: 'ok' }
 "#;
         let state = ShallowFileState::service_backed_for_test(source);
-        let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+        let interner =
+            Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
         let mut script_setup: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
         script_setup.insert(
             "T".to_string(),

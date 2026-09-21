@@ -43,9 +43,15 @@ pub(crate) fn non_admission_propagation(
     use crate::resolver_core::fact_read_set::NonCacheablePropagation;
 
     match reason {
-        NonAdmissionReason::IntrinsicNonCacheable | NonAdmissionReason::ForcedTestRefusal => {
-            NonCacheablePropagation::LocalOnly
-        }
+        // A retention refusal declines to STORE a value that is complete
+        // and correct. The caller still returns it, and an enclosing
+        // derivation that consumed it observed no defective input — so
+        // the refusal stays confined to the family that made it. Marking
+        // it transitive would make one cache's memory pressure suppress
+        // every enclosing cache's admission.
+        NonAdmissionReason::IntrinsicNonCacheable
+        | NonAdmissionReason::ForcedTestRefusal
+        | NonAdmissionReason::RetentionPressure => NonCacheablePropagation::LocalOnly,
         NonAdmissionReason::SignatureOverflow
         // A domain that moved mid-scope invalidates the DERIVATION BASIS,
         // not just this scope's own entry: an enclosing scope that

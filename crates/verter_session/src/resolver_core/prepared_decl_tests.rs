@@ -15,7 +15,7 @@ static_assertions::assert_impl_all!(TypeParamBinding: verter_no_typeexpr::NoType
 
 /// Shared test pool: prepare fns intern identities through it.
 fn test_interner() -> Arc<crate::identity_interner::IdentityInterner> {
-    Arc::new(crate::identity_interner::IdentityInterner::with_default_budget())
+    Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account())
 }
 
 fn ordinary_import_canonicalization(entries: &[(&str, &str, &str)]) -> ImportCanonicalization {
@@ -1361,7 +1361,8 @@ export interface Props { label: string }
 export type Variant = 'solid' | 'outline'
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
-    let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+    let interner =
+        Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
     let bundle = build_prepared_decl_bundle(
         "/src/types.ts",
         Arc::clone(&state),
@@ -1412,7 +1413,8 @@ export interface Props { label: string }
 export const defaults = { label: 'ok' }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
-    let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+    let interner =
+        Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
     let bundle = build_prepared_decl_bundle(
         "/src/types.ts",
         Arc::clone(&state),

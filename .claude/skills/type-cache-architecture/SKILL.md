@@ -95,6 +95,83 @@ the cache-runtime overhaul and any feature admitting cache entries.
 20. Benchmarks must report cache mode, source-map policy, batch shape,
     thread count, hit count, and fallback count. A benchmark without
     those dimensions is not an architecture signal.
+21. Retained bytes are admitted against ONE process-local aggregate
+    account. See "Aggregate retention account" below: a store must not
+    carry a private byte quota beside it, and a refused admission
+    returns its COMPLETE value uncached under
+    `NonAdmissionReason::RetentionPressure`.
+
+## Aggregate retention account
+
+`crates/verter_session/src/semantic_retention_account.rs` owns
+`SemanticRetentionAccount` — the single process-local byte account every
+host-owned semantic store charges. One account per PROCESS (not per
+project): `ProjectTypeStore::retention_account()` hands back
+`SemanticRetentionAccount::process_local()`, so loading N projects does
+not multiply the ratified ceiling by N.
+
+**Limits** (`RetentionLimits::defaults()`, the ratified aggregate
+semantic-memory budget): 1 GiB `aggregate_ceiling_bytes`, 512 MiB
+`pin_threshold_bytes`, 4 MiB `max_entry_bytes`, and a 512 MiB
+process-wide `active_ceiling_bytes`. They are constants, not a config
+surface; a test injects a private account
+(`ProjectTypeStore::with_retention_account`,
+`ComponentMetaResultDb::with_account_for_test`,
+`DeclLoweringService::new_with_account`) rather than mutating them.
+
+**Three charge classes.** `Retained` (warm cache-entry bytes) and
+`Active` (in-flight bytes, additionally sub-limited) are REFUSABLE;
+`Pinned` (bytes a live handle obliges the process to keep — the
+lease-pinned parse snapshots in `decl_lowering`) is charged
+UNCONDITIONALLY. Refusing a pin would force a live artifact to re-parse
+or revoke a live handle, so pins consume headroom instead of being
+refused, and crossing `pin_threshold_bytes` is REPORTED
+(`under_pin_pressure()`) rather than enforced. The hard invariant is
+therefore over the refusable classes: `active + retained` never exceeds
+`aggregate_ceiling_bytes − pinned`, under any concurrent interleaving
+(the admission is a CAS, never a check-then-reserve).
+
+**Reserve / commit / release.** `reserve` hands back a
+`RetentionCharge`, an RAII token whose `Drop` is the ONLY release path —
+so cancellation, a failed build, an abandoned publish, a cap eviction,
+a same-discriminant replacement and a whole-map clear all release
+exactly once with no explicit call to forget. Ownership transfer is a
+move; a charge shared by several owners lives behind an `Arc` so one
+allocation is charged once (a same-payload memo backfill, an SCC
+component's co-resident members). A charge stored beside a cache entry
+outlives an eviction for as long as a reader snapshot holds the entry —
+which is correct, because the bytes are still resident.
+
+**Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
+ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,
+whose propagation is `LocalOnly`: the value is complete and correct, so
+only the refusing family declines to store it and an enclosing
+derivation may still cache its own result. This is deliberately DISTINCT
+from `BudgetExceeded`, which means the compute stopped early and its
+value may be partial.
+
+**Participants** (each charges the account, none keeps a parallel byte
+quota): `IdentityInterner` (exact payload bytes; sheds pool-only entries
+and retries once on refusal, else returns the string un-pooled),
+`ComponentMetaResultDb` via `BoundedCandidateMap` (the charge rides the
+`RetentionCandidate`), the `SemanticGraphStore` family memo (the charge
+rides `MemoEntry`; `warm_publish_one` refusal returns
+`WarmPublishOutcome::Skipped`, and an SCC batch is charged once as a
+whole so a component can never publish torn), and
+`DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
+snapshot, owned by the `ShardEntry` so a second lease on the same
+snapshot never charges twice).
+
+Per-family COUNT caps (`GlobalRetentionBudget`, `FamilyKey::candidate_cap`)
+are unchanged and still hold; this account bounds the byte SUM across
+them.
+
+**The byte figures are estimates.** `RetainedFootprint` produces an
+accounting estimate; nothing in cache VALIDITY reads it, so an imprecise
+estimate costs hit rate and never correctness. Bytes reached only
+through an `Arc` a different charged owner already accounts for are
+deliberately excluded so one allocation is charged once — notably the
+shared semantic node arena is not charged per memo candidate.
 
 The existing `Cache Architecture` guard cluster covers the current production
 subset. The plan in `.claude/skills/type-cache-architecture/SKILL.md` names the
