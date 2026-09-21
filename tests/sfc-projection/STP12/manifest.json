@@ -16,22 +16,68 @@
     "STP12-suppression"
   ],
   "probes": {
-    "positive": "tests/sfc-projection/STP12/probes/positive.ts",
-    "negative": "tests/sfc-projection/STP12/probes/negative.ts",
-    "cleanTwin": "tests/sfc-projection/STP12/probes/positive.ts",
+    "positive": "tests/sfc-projection/STP12/probes/jsdoc-generic.ts",
+    "negative": "tests/sfc-projection/STP12/probes/suppression.js",
+    "cleanTwin": "tests/sfc-projection/STP12/probes/jsdoc-generic.ts",
     "tsconfig": "tests/sfc-projection/STP12/probes/tsconfig.json",
     "hoverNeedle": "stp12HoverTarget",
     "definitionNeedle": "stp12DefinitionTarget",
-    "expectedNegativeCode": 2345,
+    "expectedNegativeCode": 2322,
     "expectedHoverType": "string",
     "expectedInstanceType": "Comp"
   },
   "cases": [
-    { "id": "STP12-checkjs-off", "disposition": "accept", "twins": ["unchecked-script", "checked-template"] },
-    { "id": "STP12-checkjs-on", "disposition": "accept", "twins": ["checked-script", "checked-template"] },
-    { "id": "STP12-jsdoc-generic", "disposition": "accept", "twins": ["JSDoc-generic", "public-instance"] },
-    { "id": "STP12-jsx", "disposition": "accept", "twins": ["authored-JSX", "JSX-dialect"] },
-    { "id": "STP12-suppression", "disposition": "reject", "twins": ["implicit-nocheck", "customer-diagnostics"] }
+    {
+      "id": "STP12-checkjs-off",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP12/probes/checkjs-off.js",
+      "hoverNeedle": "stp12HoverTarget",
+      "expectedHoverType": "string",
+      "files": ["tests/sfc-projection/STP12/probes/checkjs-off-template.ts"],
+      "fileExpectedCodes": { "tests/sfc-projection/STP12/probes/checkjs-off-template.ts": 2322 },
+      "twins": ["authored @ts-nocheck script", "independently checked template"]
+    },
+    {
+      "id": "STP12-checkjs-on",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP12/probes/checkjs-on.js",
+      "hoverNeedle": "stp12HoverTarget",
+      "expectedHoverType": "string",
+      "files": [
+        "tests/sfc-projection/STP12/probes/checkjs-on-script-error.js",
+        "tests/sfc-projection/STP12/probes/checkjs-on-template-error.ts"
+      ],
+      "fileExpectedCodes": {
+        "tests/sfc-projection/STP12/probes/checkjs-on-script-error.js": 2322,
+        "tests/sfc-projection/STP12/probes/checkjs-on-template-error.ts": 2322
+      },
+      "twins": ["authored @ts-check script", "checked template"]
+    },
+    {
+      "id": "STP12-jsdoc-generic",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP12/probes/jsdoc-generic.ts",
+      "expectedInstanceType": "Comp",
+      "hoverNeedle": "stp12HoverTarget",
+      "expectedHoverType": "string",
+      "twins": ["JSDoc generic", "public .verter.js constructor bridge"]
+    },
+    {
+      "id": "STP12-jsx",
+      "disposition": "accept",
+      "file": "tests/sfc-projection/STP12/probes/jsx.tsx",
+      "hoverNeedle": "stp12HoverTarget",
+      "expectedHoverType": "string",
+      "twins": ["authored JSX", "JSX dialect"]
+    },
+    {
+      "id": "STP12-suppression",
+      "disposition": "reject",
+      "file": "tests/sfc-projection/STP12/probes/suppression.js",
+      "dirtyTwin": "tests/sfc-projection/STP12/probes/suppression-nocheck.js",
+      "expectedCode": 2322,
+      "twins": ["generated @ts-nocheck", "customer diagnostic"]
+    }
   ],
   "verify": "node scripts/sfc-projection/verify-node.mjs --node STP12 --engine all --require-all --json",
   "test": "node --test tests/sfc-projection/STP12/projection.spec.mjs",

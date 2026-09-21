@@ -391,10 +391,9 @@ pub(super) fn instance_declaration(filename: &str, is_jsx: bool, override_attrs:
     // specifier must use the BASENAME (the live publish path passes the full
     // canonical path; a `./d:/…/Comp.vue.verter.ts` specifier resolves to nothing).
     let basename = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
-    // TypeScript module specifiers must not carry the physical `.ts` extension
-    // unless the user's project opts into `allowImportingTsExtensions`. The API
-    // carrier is always TypeScript, so its extensionless sibling specifier is
-    // portable and still resolves to the exact virtual `.verter.ts` file.
+    // TypeScript resolves the ESM `.js` spelling to the sibling `.ts` API
+    // carrier. That avoids `allowImportingTsExtensions` while retaining the
+    // exact virtual `.verter.ts` provider identity.
     let api_specifier_suffix = carrier_api_module_specifier_suffix();
     if is_jsx {
         format!(

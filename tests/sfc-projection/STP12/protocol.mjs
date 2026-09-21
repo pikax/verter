@@ -18,11 +18,14 @@ export const STP12_MANDATORY_CASES = Object.freeze([
 ]);
 
 const RUST_CASES = Object.freeze({
-  "STP12-checkjs-off": "vue_compiler_js_unchecked_script_keeps_template_projection",
-  "STP12-checkjs-on": "vue_compiler_js_check_directive_is_a_leading_pragma",
-  "STP12-jsdoc-generic": "vue_compiler_jsdoc_generic_uses_public_instance_contract",
-  "STP12-jsx": "vue_compiler_jsx_keeps_authored_jsx_expression",
-  "STP12-suppression": "vue_compiler_js_projection_never_injects_nocheck",
+  "STP12-checkjs-off": ["vue_compiler_js_unchecked_script_keeps_template_projection"],
+  "STP12-checkjs-on": ["vue_compiler_js_check_directive_is_a_leading_pragma"],
+  "STP12-jsdoc-generic": ["vue_compiler_jsdoc_generic_uses_public_instance_contract"],
+  "STP12-jsx": [
+    "vue_compiler_jsx_keeps_authored_jsx_expression",
+    "jsx_mode_instance_declaration_uses_public_constructor_bridge",
+  ],
+  "STP12-suppression": ["vue_compiler_js_projection_never_injects_nocheck"],
 });
 
 function err(caseId, code, message) {
@@ -67,15 +70,21 @@ export function validateProduct(product = loadProduct()) {
 }
 
 export function runRustCases(repoRoot = REPO_ROOT) {
-  const result = spawnSync(
-    "cargo",
-    ["test", "-p", "verter_compiler", "--lib", "vue_compiler_js", "--", "--test-threads=1"],
-    { cwd: repoRoot, encoding: "utf8", windowsHide: true, timeout: 300000, env: process.env },
+  const filters = [
+    "vue_compiler_js",
+    "jsx_mode_instance_declaration_uses_public_constructor_bridge",
+  ];
+  const results = filters.map((filter) =>
+    spawnSync(
+      "cargo",
+      ["test", "-p", "verter_compiler", "--lib", filter, "--", "--test-threads=1"],
+      { cwd: repoRoot, encoding: "utf8", windowsHide: true, timeout: 300000, env: process.env },
+    ),
   );
   return {
-    status: result.status,
-    error: result.error,
-    stdout: `${result.stdout || ""}${result.stderr || ""}`,
+    status: results.every((result) => result.status === 0) ? 0 : 1,
+    error: results.find((result) => result.error)?.error,
+    stdout: results.map((result) => `${result.stdout || ""}${result.stderr || ""}`).join("\n"),
   };
 }
 
@@ -94,9 +103,11 @@ export function assertRustCases(run) {
       ),
     );
   }
-  for (const [id, name] of Object.entries(RUST_CASES)) {
-    if (!output.includes(`${name} ... ok`) || output.includes(`${name} ... FAILED`)) {
-      errors.push(err(id, "rust-case", `cargo test did not pass ${name}`));
+  for (const [id, names] of Object.entries(RUST_CASES)) {
+    for (const name of names) {
+      if (!output.includes(`${name} ... ok`) || output.includes(`${name} ... FAILED`)) {
+        errors.push(err(id, "rust-case", `cargo test did not pass ${name}`));
+      }
     }
   }
   return errors;

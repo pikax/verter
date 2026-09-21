@@ -28,7 +28,7 @@ test("JavaScript projection rejects incomplete Rust receipts", () => {
     error: null,
     stdout: "test unrelated ... ok\ntest result: ok. 1 passed; 0 failed\n",
   });
-  assert.equal(errors.length, STP12_MANDATORY_CASES.length);
+  assert.equal(errors.length, 6);
 });
 
 test("JavaScript projection accepts only a complete Rust receipt", () => {
@@ -37,12 +37,13 @@ test("JavaScript projection accepts only a complete Rust receipt", () => {
     "vue_compiler_js_check_directive_is_a_leading_pragma",
     "vue_compiler_jsdoc_generic_uses_public_instance_contract",
     "vue_compiler_jsx_keeps_authored_jsx_expression",
+    "jsx_mode_instance_declaration_uses_public_constructor_bridge",
     "vue_compiler_js_projection_never_injects_nocheck",
   ];
   const errors = assertRustCases({
     status: 0,
     error: null,
-    stdout: `${names.map((name) => `test ${name} ... ok`).join("\n")}\ntest result: ok. 5 passed; 0 failed\n`,
+    stdout: `${names.map((name) => `test ${name} ... ok`).join("\n")}\ntest result: ok. 6 passed; 0 failed\n`,
   });
   assert.equal(errors.length, 0, JSON.stringify(errors));
 });

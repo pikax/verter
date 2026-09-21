@@ -3746,13 +3746,7 @@ mod tests {
     #[test]
     fn vue_compiler_js_check_directive_is_a_leading_pragma() {
         let compiler = VueCarrierCompiler;
-        let source = concat!(
-            "<script setup>\n",
-            "// @ts-check\n",
-            "const label = 'label'\n",
-            "</script>\n",
-            "<template><div>{{ label }}</div></template>",
-        );
+        let source = include_str!("../../../../tests/sfc-projection/STP12/fixtures/checkjs-on.vue");
         let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(
@@ -3772,18 +3766,18 @@ mod tests {
             "the authored check directive must remain a leading pragma:\n{}",
             out.code
         );
+        assert!(
+            out.code.contains("const label = 1"),
+            "the checked JavaScript diagnostic source must remain authored:\n{}",
+            out.code
+        );
     }
 
     #[test]
     fn vue_compiler_js_unchecked_script_keeps_template_projection() {
         let compiler = VueCarrierCompiler;
-        let source = concat!(
-            "<script setup>\n",
-            "// @ts-nocheck\n",
-            "const label = 'label'\n",
-            "</script>\n",
-            "<template><div>{{ label }}</div></template>",
-        );
+        let source =
+            include_str!("../../../../tests/sfc-projection/STP12/fixtures/checkjs-off.vue");
         let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(
@@ -3813,14 +3807,8 @@ mod tests {
     #[test]
     fn vue_compiler_jsdoc_generic_uses_public_instance_contract() {
         let compiler = VueCarrierCompiler;
-        let source = concat!(
-            "<script setup>\n",
-            "/** @template T @param {T} value @returns {T} */\n",
-            "const identity = (value) => value\n",
-            "const label = identity('label')\n",
-            "</script>\n",
-            "<template><div>{{ label }}</div></template>",
-        );
+        let source =
+            include_str!("../../../../tests/sfc-projection/STP12/fixtures/jsdoc-generic.vue");
         let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(
@@ -3851,12 +3839,7 @@ mod tests {
     #[test]
     fn vue_compiler_jsx_keeps_authored_jsx_expression() {
         let compiler = VueCarrierCompiler;
-        let source = concat!(
-            "<script setup lang=\"jsx\">\n",
-            "const authored = <span>authored</span>\n",
-            "</script>\n",
-            "<template><div>{{ authored }}</div></template>",
-        );
+        let source = include_str!("../../../../tests/sfc-projection/STP12/fixtures/jsx.vue");
         let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(
@@ -3880,10 +3863,8 @@ mod tests {
     #[test]
     fn vue_compiler_js_projection_never_injects_nocheck() {
         let compiler = VueCarrierCompiler;
-        let source = concat!(
-            "<script setup>const label = 'label'</script>",
-            "<template><div>{{ label }}</div></template>",
-        );
+        let source =
+            include_str!("../../../../tests/sfc-projection/STP12/fixtures/suppression.vue");
         let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(
@@ -3899,6 +3880,11 @@ mod tests {
         assert!(
             !out.code.contains("@ts-nocheck"),
             "the projection must not suppress customer diagnostics:\n{}",
+            out.code
+        );
+        assert!(
+            out.code.contains("const label = 1"),
+            "the customer diagnostic source must remain visible:\n{}",
             out.code
         );
     }

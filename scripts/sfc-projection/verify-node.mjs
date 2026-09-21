@@ -66,7 +66,13 @@ export function canonicalMandatoryCases(nodeId) {
 }
 
 function usesCaseFileRunner(nodeId) {
-  return nodeId === "STP2" || nodeId === "STP3" || nodeId === "STP4" || nodeId === "STP6";
+  return (
+    nodeId === "STP2" ||
+    nodeId === "STP3" ||
+    nodeId === "STP4" ||
+    nodeId === "STP6" ||
+    nodeId === "STP12"
+  );
 }
 
 export function mandatoryCasesFor(nodeManifest) {
@@ -2243,10 +2249,10 @@ export function selectedCaseIds(result) {
   return [...(result.selectedCaseIds || [])];
 }
 
-const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STS0 Svelte profile lock)
+const HELP = `ProjectionProbeRunner — SFC projection probe harness (STP1 inventory, STP2 constructor, STP3 coupled inference, STP4 dialect topology, STP5 mapper, STP6 packed consumer, STP7 svelte boundary, STP8 ABI ratification, STP9 projection plan, STP10 emission correspondence, STP11 script setup, STP12 JavaScript projection, STS0 Svelte profile lock)
 
 USAGE
-  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
+  node scripts/sfc-projection/verify-node.mjs --node STP1|STP2|STP3|STP4|STP5|STP6|STP7|STP8|STP9|STP10|STP11|STP12|STS0 [--engine all|ts-js|ts-native] [--require-all] [--json]
 
 Rejects absent/empty manifests, zero selected cases, missing inventory fixtures,
 vacuous any/never type matches, unrelated clean-twin diagnostics, a substituted
