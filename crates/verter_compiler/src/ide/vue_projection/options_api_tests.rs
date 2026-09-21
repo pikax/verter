@@ -175,7 +175,8 @@ fn stp13_combined_coexists_without_template_leakage() {
     let setup = ts("const local = 1;\nconst stp13setup = local;");
     let combined = project_options_pair(Some(normal), Some(setup), None).expect("projects");
     assert!(combined.named_exports.contains(&"storeKey".to_string()));
-    assert!(combined.named_exports.contains(&"default".to_string()));
+    // The default export is constructor-shaped, never a named export.
+    assert!(!combined.named_exports.contains(&"default".to_string()));
     let view = OptionsTemplateBindingView::build(&combined);
     assert_eq!(view.lookup("title"), Some(&OptionsBindingKind::Prop));
     assert_eq!(view.lookup("local"), Some(&OptionsBindingKind::SetupLocal));
@@ -244,6 +245,74 @@ fn stp13_lang_conflict_and_syntax_errors_refuse() {
         project_options_block(ts("export default {;")).unwrap_err(),
         SetupProjectionRefusal::SyntaxErrors { setup: false }
     );
+}
+
+#[test]
+fn stp13_default_js_normal_conflicts_with_ts_setup() {
+    // An absent lang is Vue's default JavaScript dialect, so it conflicts
+    // with an explicit TypeScript setup block in either direction.
+    let js_normal = block("export default {};", 0, None);
+    let ts_setup = block("const a = 1;", 0, Some(ScriptLanguage::TypeScript));
+    assert_eq!(
+        project_options_pair(Some(js_normal), Some(ts_setup), None).unwrap_err(),
+        SetupProjectionRefusal::ScriptLangConflict
+    );
+    let ts_normal = block("export default {};", 0, Some(ScriptLanguage::TypeScript));
+    let js_setup = block("const a = 1;", 0, None);
+    assert_eq!(
+        project_options_pair(Some(ts_normal), Some(js_setup), None).unwrap_err(),
+        SetupProjectionRefusal::ScriptLangConflict
+    );
+}
+
+#[test]
+fn stp13_named_exports_exclude_default_in_both_dialects() {
+    // A default export (declaration or `as default` specifier) never
+    // appears in named_exports; ordinary named exports still do.
+    for normal in [
+        ts("export const keep = 1;\nexport default keep;"),
+        block(
+            "export const keep = 1;\nexport { keep as default };",
+            0,
+            None,
+        ),
+    ] {
+        let combined = project_options_pair(Some(normal), None, None).expect("projects");
+        assert!(combined.named_exports.contains(&"keep".to_string()));
+        assert!(!combined.named_exports.contains(&"default".to_string()));
+    }
+}
+
+#[test]
+fn stp13_string_literal_keys_slice_without_quotes() {
+    let content = "export default { emits: { 'update:modelValue': null }, \
+        props: { 'custom-prop': String }, computed: { 'doubled up'() { return 1; } } };";
+    let source = content.to_string();
+    let projection = project_options_block(ts(content)).expect("projects");
+    assert!(!projection.members.is_empty());
+    for member in &projection.members {
+        assert_eq!(
+            &source[member.range.start as usize..member.range.end as usize],
+            member.name
+        );
+    }
+}
+
+#[test]
+fn stp13_identifier_setup_and_data_are_opaque() {
+    let content = "import { useFeature } from './f';\n\
+        export default { setup: useFeature, data: initialData };";
+    let normal = ts(content);
+    let combined = project_options_pair(Some(normal), None, None).expect("projects");
+    let view = OptionsTemplateBindingView::build(&combined);
+    assert!(view.opaque_sources.contains(&"setup()".to_string()));
+    assert!(view.opaque_sources.contains(&"data()".to_string()));
+    // Explicit null/undefined composes no runtime state.
+    let content = "export default { setup: null, data: undefined };";
+    let combined = project_options_pair(Some(ts(content)), None, None).expect("projects");
+    let view = OptionsTemplateBindingView::build(&combined);
+    assert!(!view.opaque_sources.contains(&"setup()".to_string()));
+    assert!(!view.opaque_sources.contains(&"data()".to_string()));
 }
 
 #[test]

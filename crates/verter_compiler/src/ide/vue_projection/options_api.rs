@@ -397,6 +397,28 @@ fn key_name(key: &PropertyKey<'_>) -> Option<String> {
     }
 }
 
+/// True for an explicit `null` or `undefined` option value, which composes
+/// no runtime state.
+fn is_null_or_undefined(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name == "undefined",
+        _ => false,
+    }
+}
+
+/// Carrier offsets of an option property key. A string-literal span covers
+/// its enclosing quotes; the member range covers the name itself (quotes
+/// are one-byte ASCII), matching `string_array_names`.
+fn key_range(key: &PropertyKey<'_>) -> (u32, u32) {
+    let span = key.span();
+    if matches!(key, PropertyKey::StringLiteral(_)) {
+        (span.start + 1, span.end - 1)
+    } else {
+        (span.start, span.end)
+    }
+}
+
 fn string_array_names(expression: &Expression<'_>) -> Vec<(String, u32, u32)> {
     let Expression::ArrayExpression(array) = expression else {
         return Vec::new();
@@ -437,12 +459,8 @@ fn object_entries(
                 return None;
             };
             let name = key_name(&property.key)?;
-            Some((
-                name,
-                kind,
-                property.key.span().start,
-                property.key.span().end,
-            ))
+            let (start, end) = key_range(&property.key);
+            Some((name, kind, start, end))
         })
         .collect()
 }
@@ -556,12 +574,8 @@ fn collect_option_members(
                         }
                         _ => false,
                     };
-                    push(
-                        name,
-                        OptionsMemberKind::Computed { setter },
-                        entry.key.span().start,
-                        entry.key.span().end,
-                    );
+                    let (start, end) = key_range(&entry.key);
+                    push(name, OptionsMemberKind::Computed { setter }, start, end);
                 }
             }
             "methods" => {
@@ -596,16 +610,14 @@ fn collect_option_members(
                 }
             }
             "data" => {
-                projection.has_data_fn = matches!(
-                    &property.value,
-                    Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
-                );
+                // Any present value other than an explicit null/undefined
+                // composes runtime state the projection cannot enumerate
+                // (inline function, identifier reference, call result), so
+                // the template view records it as opaque.
+                projection.has_data_fn = !is_null_or_undefined(&property.value);
             }
             "setup" => {
-                projection.has_setup_fn = matches!(
-                    &property.value,
-                    Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
-                );
+                projection.has_setup_fn = !is_null_or_undefined(&property.value);
             }
             "name" => {
                 if let Expression::StringLiteral(literal) = &property.value {
@@ -658,7 +670,10 @@ fn collect_named_exports(program: &Program<'_>, into: &mut Vec<String>) {
                     if export.export_kind.is_type() || specifier.export_kind.is_type() {
                         continue;
                     }
-                    into.push(specifier.exported.name().to_string());
+                    let name = specifier.exported.name().to_string();
+                    if name != "default" {
+                        into.push(name);
+                    }
                 }
             }
             Statement::ExportAllDeclaration(export) => {
@@ -666,7 +681,10 @@ fn collect_named_exports(program: &Program<'_>, into: &mut Vec<String>) {
                     continue;
                 }
                 if let Some(exported) = &export.exported {
-                    into.push(exported.name().to_string());
+                    let name = exported.name().to_string();
+                    if name != "default" {
+                        into.push(name);
+                    }
                 }
             }
             _ => {}
@@ -723,10 +741,8 @@ pub fn project_options_pair(
     generic: Option<&str>,
 ) -> Result<CombinedScriptProjection, SetupProjectionRefusal> {
     if let (Some(normal_block), Some(setup_block)) = (&normal, &setup) {
-        if let (Some(normal_lang), Some(setup_lang)) = (normal_block.lang, setup_block.lang) {
-            if normal_lang != setup_lang {
-                return Err(SetupProjectionRefusal::ScriptLangConflict);
-            }
+        if normal_block.lang != setup_block.lang {
+            return Err(SetupProjectionRefusal::ScriptLangConflict);
         }
     }
     let options = normal.map(project_options_block).transpose()?;
@@ -742,7 +758,7 @@ pub fn project_options_pair(
         named_exports.extend(options_projection.named_exports.iter().cloned());
     }
     for export in &facts.module.named_exports {
-        if !named_exports.iter().any(|existing| existing == export) {
+        if export != "default" && !named_exports.iter().any(|existing| existing == export) {
             named_exports.push(export.clone());
         }
     }
