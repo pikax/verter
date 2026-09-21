@@ -28,6 +28,15 @@ fn carrier_api_module_specifier_suffix() -> &'static str {
     CARRIER_API_MODULE_SPECIFIER_SUFFIX
 }
 
+fn relative_api_module_specifier(filename: &str) -> String {
+    let basename = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
+    serde_json::to_string(&format!(
+        "./{basename}{}",
+        carrier_api_module_specifier_suffix()
+    ))
+    .expect("module specifier is serializable")
+}
+
 pub(super) fn should_infer_function_types(lang: Option<ScriptLanguage>) -> bool {
     matches!(lang, Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX))
 }
@@ -390,32 +399,28 @@ pub(super) fn instance_declaration(filename: &str, is_jsx: bool, override_attrs:
     // (`Comp.vue.verter.ts`) in the SAME directory, so the `./`-relative
     // specifier must use the BASENAME (the live publish path passes the full
     // canonical path; a `./d:/…/Comp.vue.verter.ts` specifier resolves to nothing).
-    let basename = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
     // TypeScript resolves the ESM `.js` spelling to the sibling `.ts` API
     // carrier. That avoids `allowImportingTsExtensions` while retaining the
     // exact virtual `.verter.ts` provider identity.
-    let api_specifier_suffix = carrier_api_module_specifier_suffix();
+    let api_specifier = relative_api_module_specifier(filename);
     if is_jsx {
         format!(
-            "\n/** @type {{InstanceType<typeof import('./{basename}{API}')['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\nvoid {P}instance;\n",
+            "\n/** @type {{InstanceType<typeof import({api_specifier})['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\nvoid {P}instance;\n",
             P = PREFIX,
-            basename = basename,
-            API = api_specifier_suffix,
+            api_specifier = api_specifier,
         )
     } else if override_attrs {
         // With Comp functions + attrs type aliases: override $attrs with composed type
         format!(
-            "\nlet {P}instance!: Omit<InstanceType<typeof import('./{basename}{API}')['default']>, '$attrs'> & {{ $attrs: {P}Attrs }};\nvoid {P}instance;\n",
+            "\nlet {P}instance!: Omit<InstanceType<typeof import({api_specifier})['default']>, '$attrs'> & {{ $attrs: {P}Attrs }};\nvoid {P}instance;\n",
             P = PREFIX,
-            basename = basename,
-            API = api_specifier_suffix,
+            api_specifier = api_specifier,
         )
     } else {
         format!(
-            "\nlet {P}instance!: InstanceType<typeof import('./{basename}{API}')['default']>;\nvoid {P}instance;\n",
+            "\nlet {P}instance!: InstanceType<typeof import({api_specifier})['default']>;\nvoid {P}instance;\n",
             P = PREFIX,
-            basename = basename,
-            API = api_specifier_suffix,
+            api_specifier = api_specifier,
         )
     }
 }
@@ -436,8 +441,7 @@ pub(super) fn instance_declaration_ambient(
     // The self-import targets the sibling API carrier in the same directory, so
     // the `./`-relative specifier must use the BASENAME (the live publish path
     // passes the full canonical path).
-    let basename = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
-    let api_specifier_suffix = carrier_api_module_specifier_suffix();
+    let api_specifier = relative_api_module_specifier(filename);
     if is_jsx {
         if needs_define_component_wrap {
             // Inline defineComponent wrapping — avoids self-import, works with TSGO + tsserver
@@ -449,18 +453,16 @@ pub(super) fn instance_declaration_ambient(
             // Already has defineComponent — self-import the typed default export
             // from the PUBLIC-API carrier (`.verter.ts`), not the IDE output.
             format!(
-                "\n/** @type {{InstanceType<typeof import('./{basename}{API}')['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\n",
+                "\n/** @type {{InstanceType<typeof import({api_specifier})['default']>}} */\nvar {P}instance = /** @type {{*}} */ (null);\n",
                 P = PREFIX,
-                basename = basename,
-                API = api_specifier_suffix,
+                api_specifier = api_specifier,
             )
         }
     } else {
         format!(
-            "\ndeclare let {P}instance: InstanceType<typeof import('./{basename}{API}')['default']>;\n",
+            "\ndeclare let {P}instance: InstanceType<typeof import({api_specifier})['default']>;\n",
             P = PREFIX,
-            basename = basename,
-            API = api_specifier_suffix,
+            api_specifier = api_specifier,
         )
     }
 }
@@ -497,12 +499,10 @@ pub(super) fn public_facade_reexport(filename: &str) -> String {
     // the BASENAME — a caller passing the full canonical path (the live publish
     // path does) would otherwise emit `./d:/…/Comp.vue.verter.ts`, which resolves
     // to nothing and breaks the public default re-export for plain-script imports.
-    let basename = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
-    let api_specifier_suffix = carrier_api_module_specifier_suffix();
+    let api_specifier = relative_api_module_specifier(filename);
     format!(
-        "\nexport {{ default }} from './{basename}{API}';\n",
-        basename = basename,
-        API = api_specifier_suffix,
+        "\nexport {{ default }} from {api_specifier};\n",
+        api_specifier = api_specifier,
     )
 }
 

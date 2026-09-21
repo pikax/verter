@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   assertInstanceMembers,
@@ -11,7 +11,7 @@ import { STP12_MANDATORY_CASES, assertRustCases } from "./protocol.mjs";
 
 test("public instance probe rejects a missing consumer member", () => {
   const errors = assertInstanceMembers(
-    { printed: "{ $props: {} }", flags: 0 },
+    { printed: "{ $props: {} }", flags: 0, properties: ["$props"] },
     ["$props", "$emit"],
     "test",
     "STP12-jsdoc-generic",
@@ -19,9 +19,23 @@ test("public instance probe rejects a missing consumer member", () => {
   assert.equal(errors.length, 1);
 });
 
+test("public instance probe rejects nested and similarly named members", () => {
+  const errors = assertInstanceMembers(
+    {
+      printed: "{ nested: { $props: {} }, $emitExtra: () => void }",
+      flags: 0,
+      properties: ["nested", "$emitExtra"],
+    },
+    ["$props", "$emit"],
+    "test",
+    "STP12-jsdoc-generic",
+  );
+  assert.equal(errors.length, 2);
+});
+
 test("public instance probe uses a fresh compiler carrier, not the tracked declaration", () => {
   const scope = materializeStp12GeneratedProbes({
-    repoRoot: path.resolve(new URL("../../..", import.meta.url).pathname),
+    repoRoot: fileURLToPath(new URL("../../..", import.meta.url)),
     nodeManifest: {
       probes: { tsconfig: "tests/sfc-projection/STP12/probes/tsconfig.json" },
       cases: [
@@ -37,6 +51,7 @@ test("public instance probe uses a fresh compiler carrier, not the tracked decla
       fs.readFileSync(scope.generatedCarrier, "utf8"),
       "declare const Fresh: { new(): { $emit: () => void } }; export default Fresh;\n",
     );
+    assert.match(scope.generatedCarrier, /JSDocGeneric\.vue\.verter\.d\.ts$/);
     assert.notEqual(
       scope.manifest.probes.tsconfig,
       "tests/sfc-projection/STP12/probes/tsconfig.json",

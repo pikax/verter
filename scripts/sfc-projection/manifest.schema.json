@@ -52,8 +52,11 @@
         "hoverNeedle",
         "definitionNeedle",
         "expectedNegativeCode",
-        "expectedHoverType",
-        "expectedInstanceType"
+        "expectedHoverType"
+      ],
+      "anyOf": [
+        { "required": ["expectedInstanceType"] },
+        { "required": ["expectedInstanceMembers"] }
       ],
       "properties": {
         "positive": { "type": "string", "minLength": 1 },
@@ -65,6 +68,11 @@
         "expectedNegativeCode": { "type": "integer" },
         "expectedHoverType": { "type": "string", "minLength": 1 },
         "expectedInstanceType": { "type": "string", "minLength": 1 },
+        "expectedInstanceMembers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
         "utilityRecipe": { "type": "string", "minLength": 1 },
         "utilityErrorTwin": { "type": "string", "minLength": 1 }
       }
@@ -94,6 +102,11 @@
           "hoverNeedle": { "type": "string", "minLength": 1 },
           "expectedHoverType": { "type": "string", "minLength": 1 },
           "expectedInstanceType": { "type": "string", "minLength": 1 },
+          "expectedInstanceMembers": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
           "twins": {
             "type": "array",
             "items": { "type": "string", "minLength": 1 }

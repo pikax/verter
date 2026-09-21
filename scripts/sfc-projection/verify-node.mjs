@@ -146,11 +146,7 @@ export function materializeStp12GeneratedProbes({ repoRoot, nodeManifest, public
     if (typeof publicApi !== "string" || publicApi.length === 0) {
       throw new Error("the host produced no public API carrier bytes");
     }
-    const generatedCarrier = path.join(
-      generatedAbs,
-      "generated",
-      "JSDocGeneric.vue.verter.js.d.ts",
-    );
+    const generatedCarrier = path.join(generatedAbs, "generated", "JSDocGeneric.vue.verter.d.ts");
     fs.mkdirSync(path.dirname(generatedCarrier), { recursive: true });
     fs.writeFileSync(generatedCarrier, publicApi, "utf8");
 
@@ -1045,12 +1041,20 @@ export function assertInstanceMembers(instance, members, engineId, caseId) {
     actual: instance.printed,
     flags: instance.flags,
   }).map((item) => ({ ...item, caseId }));
+  const properties = new Set(instance.properties || []);
   for (const member of members || []) {
-    if (!instance.printed.includes(member)) {
+    if (!properties.has(member)) {
       errors.push(err(caseId, "type-mismatch", `${engineId} Instance lacks ${member}`));
     }
   }
   return errors;
+}
+
+function typePropertyNames(checker, type) {
+  return [...checker.getPropertiesOfType(type)]
+    .map((property) => property.getName?.() ?? property.name)
+    .filter((name) => typeof name === "string")
+    .sort();
 }
 
 export function assertCleanTwin(diagnostics, { fileLabel = "clean twin" } = {}) {
@@ -1154,6 +1158,7 @@ function observeJs(ts, checker, sf, text, probes = {}) {
       out.types.Instance = {
         printed: checker.typeToString(type),
         flags: jsTypeFlags(ts, type),
+        properties: typePropertyNames(checker, type),
       };
     }
   }
@@ -1309,6 +1314,7 @@ function observeNative(project, fileAbs, probes, checkCounts, fileKey) {
       observations.types.Instance = {
         printed: project.checker.typeToString(type),
         flags: type.flags ?? 0,
+        properties: typePropertyNames(project.checker, type),
       };
     }
   }
