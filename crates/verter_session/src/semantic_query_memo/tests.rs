@@ -10830,6 +10830,37 @@ mod prepared_identity_bijection {
                     context: structural_reduce_context(0),
                 },
             ),
+            SemanticQueryKeyTag::SignaturesOfType => (
+                SemanticQueryKey::SignaturesOfType {
+                    subject: SemanticNodeId(1),
+                    kind: crate::semantic_query::SignatureKind::Call,
+                    context: crate::semantic_query::SemanticContextId::production(),
+                },
+                SemanticQueryKey::SignaturesOfType {
+                    subject: SemanticNodeId(1),
+                    kind: crate::semantic_query::SignatureKind::Construct,
+                    context: crate::semantic_query::SemanticContextId::production(),
+                },
+            ),
+            SemanticQueryKeyTag::ReadSignatureResult => {
+                let key = |projection| {
+                    SemanticQueryKey::ReadSignatureResult(
+                        crate::signature_kernel::ReadSignatureResultKey {
+                            descriptor: crate::signature_kernel::SignatureDescriptorId::from_raw(1),
+                            call_substitution:
+                                crate::signature_kernel::CallSubstitutionId::from_raw(1),
+                            projection,
+                            evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+                            semantic_context: crate::semantic_query::SemanticContextId::production(
+                            ),
+                        },
+                    )
+                };
+                (
+                    key(crate::signature_kernel::ResultDemand::Return),
+                    key(crate::signature_kernel::ResultDemand::Both),
+                )
+            }
         }
     }
 
@@ -10879,6 +10910,7 @@ mod prepared_identity_bijection {
                 type_env_hash: h16(0),
                 lib_env_hash: h16(0),
                 project_identity: h16(0),
+                result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
                 policy: crate::semantic_query::FlowReturnPolicy {},
             },

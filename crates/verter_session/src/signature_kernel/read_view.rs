@@ -7,8 +7,13 @@
 use std::sync::Arc;
 
 use super::lifetime::{check_epoch, EpochInner, SignatureStore, StoreError};
+use super::provenance::ConstituentSequence;
 use super::provenance::SignatureProvenance;
 use super::records::GraphEpoch;
+use super::records::{
+    BinderSpace, BinderSpaceId, BodyLocatorId, ConstituentSequenceId, DeclarationInstantiationId,
+    ParameterLayout, ParameterLayoutId, ParameterSlot, ParameterSlotId, SpellingId, TypeToken,
+};
 use super::records::{
     CallSubstitutionId, SignatureCandidate, SignatureDescriptor, SignatureDescriptorId,
     SignatureInputShape, SignatureInputShapeId, SignatureProvenanceId, SignatureResultRecipe,
@@ -16,6 +21,7 @@ use super::records::{
     SignatureTemplateId,
 };
 use super::substitution::{CallSubstitution, SubstTerm};
+use crate::semantic_query::{CanonicalTypeSubstitution, SemanticNodeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadError {
@@ -115,6 +121,69 @@ impl SemanticReadView {
         self.inner
             .substitutions
             .get(id.index())
+            .ok_or(ReadError::Missing)
+    }
+
+    pub fn layout(&self, id: ParameterLayoutId) -> Result<&ParameterLayout, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.layouts.get(id.index()).ok_or(ReadError::Missing)
+    }
+
+    pub fn slot(&self, id: ParameterSlotId) -> Result<&ParameterSlot, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.slots.get(id.index()).ok_or(ReadError::Missing)
+    }
+
+    pub fn space(&self, id: BinderSpaceId) -> Result<&BinderSpace, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.spaces.get(id.index()).ok_or(ReadError::Missing)
+    }
+
+    pub fn environment(
+        &self,
+        id: DeclarationInstantiationId,
+    ) -> Result<&CanonicalTypeSubstitution, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner
+            .environments
+            .get(id.index())
+            .ok_or(ReadError::Missing)
+    }
+
+    pub fn sequence(&self, id: ConstituentSequenceId) -> Result<&ConstituentSequence, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner
+            .sequences
+            .get(id.index())
+            .ok_or(ReadError::Missing)
+    }
+
+    pub fn body_locator(&self, id: BodyLocatorId) -> Result<u64, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner
+            .locators
+            .get(id.index())
+            .copied()
+            .ok_or(ReadError::Missing)
+    }
+
+    pub fn spelling(&self, id: SpellingId) -> Result<&str, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner
+            .strings
+            .get(id.index())
+            .map(|s| &**s)
+            .ok_or(ReadError::Missing)
+    }
+
+    pub fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
+        let raw = token.as_u64();
+        check_epoch(self.inner.epoch, super::records::handle_epoch(raw))
+            .map_err(ReadError::from)?;
+        self.inner
+            .type_tokens
+            .get(super::records::handle_index(raw))
+            .copied()
             .ok_or(ReadError::Missing)
     }
 

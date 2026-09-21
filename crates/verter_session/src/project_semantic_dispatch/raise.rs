@@ -302,6 +302,8 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
         SemanticQueryKey::AwaitedNormalize { .. } => "AwaitedNormalize",
         SemanticQueryKey::AsyncReturnPayload { .. } => "AsyncReturnPayload",
+        SemanticQueryKey::SignaturesOfType { .. } => "SignaturesOfType",
+        SemanticQueryKey::ReadSignatureResult(_) => "ReadSignatureResult",
     }
 }
 

@@ -9,7 +9,7 @@ use super::records::{
 use super::storage::InternError;
 use super::test_support::intern_one_call;
 
-fn intern_shape(store: &SignatureStore, min: u16) -> super::records::SignatureInputShapeId {
+fn intern_shape(store: &SignatureStore, min: usize) -> super::records::SignatureInputShapeId {
     let space = store
         .intern_binder_space(
             BinderSpace {
@@ -138,6 +138,14 @@ fn intern_order_does_not_change_logical_identity() {
         forward.binder_token_for(df, 0).unwrap(),
         reverse.binder_token_for(dr, 0).unwrap()
     );
+}
+
+#[test]
+fn declared_minimum_preserves_counts_above_u16() {
+    let store = SignatureStore::new();
+    let shape = intern_shape(&store, usize::from(u16::MAX) + 1);
+    let view = super::read_view::SemanticReadView::pin(&store);
+    assert_eq!(view.shape(shape).unwrap().declared_minimum, 65_536);
 }
 
 #[test]

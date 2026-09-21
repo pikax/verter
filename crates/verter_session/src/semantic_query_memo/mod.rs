@@ -238,6 +238,8 @@ pub struct SemanticGraphStore {
     #[allow(dead_code)]
     operand_identity: SemanticGraphIdentity,
     arena: NodeArena,
+    /// Epoch-safe signature records (candidates, descriptors, results).
+    signatures: crate::signature_kernel::SignatureStore,
     /// Family-keyed warm memo.
     ///
     /// Each entry's [`FamilyKey`] is mode-erased; the per-mode result lives
@@ -791,6 +793,12 @@ impl std::fmt::Debug for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    /// The store's epoch-safe signature records.
+    #[must_use]
+    pub(crate) fn signature_store(&self) -> &crate::signature_kernel::SignatureStore {
+        &self.signatures
+    }
+
     #[allow(dead_code)]
     pub(crate) fn operand_store_identity(&self) -> u64 {
         self.operand_identity.0
@@ -1579,6 +1587,7 @@ impl SemanticGraphStore {
     /// the same `entries` lock domain (its entries are `Relate` families
     /// in the family memo) — no separate relation gate exists.
     pub fn invalidate_all(&self) -> usize {
+        let _ = self.signatures.replace_epoch();
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
             let count = entries.values().map(FamilySlots::populated_count).sum();

@@ -1536,3 +1536,14 @@ useCounter(): Ref<number>` in a `.d.ts` can never be classified by it and today
 publishes the undecided `MaybeRef`. Acceptance:
 `component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed` plus its
 siblings in `crates/verter_session/src/host_manage_tests.rs`.
+
+
+## Signature discovery (`SignaturesOfType` / `ReadSignatureResult`)
+
+One discovery authority enumerates call and construct signature candidates; consumers are not cut over yet, and the old collectors remain until they are.
+
+- **Modules.** `signature_kernel/positional.rs` is the ONE positional model (declared vs effective minimum, void-sensitive and untyped-JS arity, receiver exclusion, array/generic rest with required tails, tuple projection, names never in type equality). `signature_kernel/discovery.rs` is the record-level authority (publish candidates, `compareSignaturesIdentical` under a positional binder correspondence, union common-match then restricted synthesis, intersection dedup and mixin constructor composition) and reaches the type graph only through `DiscoveryTypes`. `project_semantic_dispatch/signature_discovery.rs` is the graph-facing subject walk and the result reader.
+- **Subjects.** Direct signatures (One only for the matching kind), object surfaces (already inherited/merged/visibility-filtered), aliases and merged declarations, constrained type parameters (an unconstrained one is a complete Empty), unions (arms in `VerterStableV1` order), intersections (authored order), apparent primitives/literals/templates/arrays/tuples through the resolved global population (an absent global is the checker's empty apparent type; no request/demand scope is an incomplete outcome). Anything else that cannot settle is an explicit `IncompleteReason`, never Empty.
+- **Precedence.** Comparisons run in authored order and an undecided earlier comparison surfaces as incomplete — a later successful candidate is never committed past it. No Cartesian product of overloads; synthesis runs only when no common match exists and at most one arm has several signatures.
+- **Results.** Enumeration completes with closed body recipes and never inspects a body. `ReadSignatureResult` composes the declaration environment then the call substitution into ONE map applied once (an image still in the binder-token namespace is dropped, so no token escapes into the graph), forces a body only when the projection demands the return, and treats only the context-free evaluation as supported.
+- **Known gaps.** Predicate/assertion payloads are not lowered (the IR carries none), so the effects half is always `None`; `Function`/`any` dynamic-call permission stays a call-resolution rule; `SignatureSet` handles are epoch-qualified and nothing replaces the store epoch in production yet.

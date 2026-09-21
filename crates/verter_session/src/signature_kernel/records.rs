@@ -105,6 +105,7 @@ packed_id!(ParameterSlotId);
 packed_id!(BodyLocatorId);
 packed_id!(SpellingId);
 packed_id!(ConstituentSequenceId);
+packed_id!(AppliedResultId);
 
 /// Interned type-shape token. Not a source span, and not a
 /// `SemanticNodeId`: the raw value lives in the kernel's own token
@@ -140,6 +141,9 @@ pub struct SignatureSemanticFlags(u16);
 impl SignatureSemanticFlags {
     pub const NONE: Self = Self(0);
     pub const LITERAL_SPECIALIZATION: Self = Self(1 << 0);
+    /// Untyped JavaScript signature: every parameter is optional unless a
+    /// strong-arity read is requested.
+    pub const UNTYPED_JS: Self = Self(1 << 1);
 
     #[must_use]
     pub const fn bits(self) -> u16 {
@@ -185,18 +189,50 @@ impl ParameterOptionality {
     }
 }
 
-/// One positional or rest slot.
+/// One positional or rest slot. `name` is diagnostic/signature-help
+/// metadata only: positional type equality never reads it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ParameterSlot {
     pub ty: TypeToken,
     pub optionality: ParameterOptionality,
+    pub name: Option<SpellingId>,
+}
+
+impl ParameterSlot {
+    #[must_use]
+    pub const fn new(ty: TypeToken, optionality: ParameterOptionality) -> Self {
+        Self {
+            ty,
+            optionality,
+            name: None,
+        }
+    }
+}
+
+/// Whether a rest slot's type is a resolved array-like element run or a
+/// still-uninstantiated type-parameter rest (one open inference position).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RestKind {
+    Array,
+    GenericTuple,
+}
+
+/// The rest run of a layout. `slot.ty` is the ELEMENT type for an array
+/// rest; `tail` holds required/optional positions AFTER the run
+/// (`[...string[], number]`). Fixed tuple rests are flattened into
+/// `ParameterLayout::parameters` at construction and never appear here.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct RestSlot {
+    pub slot: ParameterSlot,
+    pub kind: RestKind,
+    pub tail: Box<[ParameterSlot]>,
 }
 
 /// Ordered parameter layout, interned as a whole.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ParameterLayout {
     pub parameters: Box<[ParameterSlot]>,
-    pub rest: Option<ParameterSlot>,
+    pub rest: Option<RestSlot>,
 }
 
 /// One binder in a residual or declaration space: constraints and defaults.
@@ -257,7 +293,8 @@ pub struct SignatureInputShape {
     pub binder_declarations: BinderSpaceId,
     pub this_parameter: Option<ParameterSlotId>,
     pub parameter_layout: ParameterLayoutId,
-    pub declared_minimum: u16,
+    /// Exact required positional count; it is not saturating.
+    pub declared_minimum: usize,
     pub signature_semantic_flags: SignatureSemanticFlags,
 }
 
@@ -326,6 +363,12 @@ pub struct AppliedResult {
     pub evaluation: ResultEvaluationContextId,
     pub semantic_context: SemanticContextId,
     pub evidence: OutcomeEvidenceId,
+    /// The forced return, already in call space. `None` when the demand
+    /// was effects-only (no return was read).
+    pub return_type: Option<TypeToken>,
+    /// Predicate/assertion effect payload, when the demand read effects and
+    /// the signature declares one.
+    pub effects: Option<TypeToken>,
 }
 
 impl AppliedResult {
@@ -347,6 +390,8 @@ impl AppliedResult {
             evaluation: CONTEXT_FREE_EVALUATION,
             semantic_context,
             evidence: CONTEXT_FREE_EVIDENCE,
+            return_type: None,
+            effects: None,
         }
     }
 }

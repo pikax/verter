@@ -9,43 +9,43 @@ use super::records::{SignatureDescriptorId, SignatureProvenanceId};
 
 /// Declaration-group identity (overload group, merged interface group, …).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub struct DeclarationGroupId(u32);
+pub struct DeclarationGroupId(u64);
 
 impl DeclarationGroupId {
     #[must_use]
-    pub const fn from_raw(id: u32) -> Self {
+    pub const fn from_raw(id: u64) -> Self {
         Self(id)
     }
 
     #[must_use]
-    pub const fn as_u32(self) -> u32 {
+    pub const fn as_u64(self) -> u64 {
         self.0
     }
 }
 
 /// Declaration-parent identity (containing class/module/namespace).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub struct DeclarationParentId(u32);
+pub struct DeclarationParentId(u64);
 
 impl DeclarationParentId {
     #[must_use]
-    pub const fn from_raw(id: u32) -> Self {
+    pub const fn from_raw(id: u64) -> Self {
         Self(id)
     }
 
     #[must_use]
-    pub const fn as_u32(self) -> u32 {
+    pub const fn as_u64(self) -> u64 {
         self.0
     }
 }
 
 /// Stable source locator handle (not a recycled arena offset).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub struct SourceLocatorId(u32);
+pub struct SourceLocatorId(u64);
 
 impl SourceLocatorId {
     #[must_use]
-    pub const fn from_raw(id: u32) -> Self {
+    pub const fn from_raw(id: u64) -> Self {
         Self(id)
     }
 }

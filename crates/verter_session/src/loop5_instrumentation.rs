@@ -138,7 +138,9 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///  27 = ClassifyTruthinessDomain
 ///  28 = AwaitedNormalize
 ///  29 = AsyncReturnPayload
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 30;
+///  30 = SignaturesOfType
+///  31 = ReadSignatureResult
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 32;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -174,6 +176,8 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "ClassifyTruthinessDomain",
     "AwaitedNormalize",
     "AsyncReturnPayload",
+    "SignaturesOfType",
+    "ReadSignatureResult",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
@@ -182,6 +186,8 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -222,6 +228,8 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -399,6 +407,8 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::ClassifyTruthinessDomain { .. } => 27,
         SemanticQueryKey::AwaitedNormalize { .. } => 28,
         SemanticQueryKey::AsyncReturnPayload { .. } => 29,
+        SemanticQueryKey::SignaturesOfType { .. } => 30,
+        SemanticQueryKey::ReadSignatureResult(_) => 31,
     }
 }
 
