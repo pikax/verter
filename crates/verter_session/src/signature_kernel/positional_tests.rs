@@ -270,7 +270,16 @@ fn parameter_names_never_take_part_in_type_equality() {
     // A layout naming a spelling from another epoch is rejected.
     let stale = layout(vec![named(super::records::SpellingId::from_raw(0))], None);
     assert!(store.intern_layout(stale, None).is_err());
-    assert!(store.intern_layout(la, None).is_ok());
+    let live = store
+        .intern_type_token(crate::semantic_query::SemanticNodeId(5), None)
+        .unwrap();
+    let live_named = ParameterSlot {
+        name: Some(a),
+        ..req(live)
+    };
+    assert!(store
+        .intern_layout(layout(vec![live_named], None), None)
+        .is_ok());
 }
 
 #[test]

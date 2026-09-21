@@ -595,7 +595,15 @@ pub fn append_signatures(
     new: &[SignatureCandidate],
 ) -> Res<()> {
     for &sig in new {
-        if find_matching(store, types, existing, sig, MatchOptions::EXACT)?.is_none() {
+        if find_matching(
+            store,
+            types,
+            existing,
+            sig,
+            MatchOptions::EXACT_IGNORING_RETURNS,
+        )?
+        .is_none()
+        {
             existing.push(sig);
         }
     }
