@@ -19,6 +19,9 @@ use crate::semantic_query::{
     RelationContext, RelationOutcome, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
     SemanticNodeData,
 };
+use crate::semantic_retention_account::{
+    ChargeClass, RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
+};
 
 /// Seed a decided root candidate and return the witness a batch fences on.
 fn seed_root(store: &SemanticGraphStore, key: &RelateMemoKey) -> SccRootWitness {
@@ -179,6 +182,62 @@ fn pending_flow_members(
             }
         })
         .collect()
+}
+
+#[test]
+fn scc_member_reservation_excludes_the_roots_shared_carrier() {
+    use crate::resolver_core::FactVersionRef;
+
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: "/ws/scc-accounting.ts".to_string(),
+            hash: [7; 16],
+        },
+    ]));
+    let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/ws/scc-accounting.ts")]);
+    let limits = RetentionLimits {
+        aggregate_ceiling_bytes: usize::MAX,
+        active_ceiling_bytes: usize::MAX,
+        max_entry_bytes: usize::MAX,
+        pin_threshold_bytes: usize::MAX,
+    };
+    let account = SemanticRetentionAccount::new(limits);
+    let store = SemanticGraphStore::with_account(Arc::clone(&account));
+    let root = store.stage_entry(
+        None,
+        SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
+        super::relation_memo::relation_satisfied_projection(),
+        &carrier,
+        &roots,
+        &empty_signature(),
+        0,
+    );
+    let member = store.stage_entry(
+        None,
+        SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
+        super::relation_memo::relation_satisfied_projection(),
+        &carrier,
+        &roots,
+        &empty_signature(),
+        0,
+    );
+    let root_charge = account
+        .reserve(ChargeClass::Retained, root.retained_footprint_bytes())
+        .admitted()
+        .expect("the root is admitted");
+    let member_unique = member.unique_retained_footprint_bytes();
+    let batch = store
+        .reserve_scc_batch(&[&member])
+        .expect("the member's incremental footprint is admitted")
+        .expect("the store owns an account");
+
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        root_charge.bytes() + member_unique,
+        "the root already owns the shared carrier and self-root allocations"
+    );
+    drop(batch);
+    drop(root_charge);
 }
 
 /// Run one batch of `members` (in the given order) plus `flow_members`

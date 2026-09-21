@@ -126,7 +126,7 @@ impl MemoEntry {
 
     /// The portion of this candidate's footprint that remains distinct
     /// when an SCC component shares its carrier and self-root list.
-    fn unique_retained_footprint_bytes(&self) -> usize {
+    pub(super) fn unique_retained_footprint_bytes(&self) -> usize {
         /// One observed dependency fact on the dispatch-return rail.
         const FACT_BYTES: usize = 64;
         /// One recorded materialised `(path, point)` record.
@@ -138,34 +138,6 @@ impl MemoEntry {
             + self.walker_diagnostics.len() * DIAGNOSTIC_BYTES
             + self.satisfied_projection.points().len() * POINT_BYTES
             + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES
-    }
-
-    /// Estimated resident bytes for entries sharing one SCC carrier and
-    /// self-root list. Every entry still delegates its complete estimate to
-    /// [`crate::semantic_retention_account::RetainedFootprint`]; only the
-    /// repeated shared allocation is removed from later entries.
-    pub(super) fn retained_footprint_bytes_for_shared_component(entries: &[&Self]) -> usize {
-        let Some((first, rest)) = entries.split_first() else {
-            return 0;
-        };
-        let first = *first;
-        let mut bytes =
-            crate::semantic_retention_account::RetainedFootprint::retained_footprint_bytes(first);
-        for entry in rest {
-            let entry = *entry;
-            verter_debug_assert!(Arc::ptr_eq(
-                &first.read_set_signature.facts,
-                &entry.read_set_signature.facts
-            ));
-            verter_debug_assert!(Arc::ptr_eq(
-                &first.self_root_canonicals,
-                &entry.self_root_canonicals
-            ));
-            bytes += crate::semantic_retention_account::RetainedFootprint::retained_footprint_bytes(
-                entry,
-            ) - entry.shared_retained_footprint_bytes();
-        }
-        bytes
     }
 }
 

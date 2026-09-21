@@ -350,7 +350,8 @@ impl SemanticGraphStore {
             });
         }
 
-        let batch_charge = self.reserve_scc_batch(&prepared);
+        let staged_entries: Vec<_> = prepared.iter().map(|member| &member.entry).collect();
+        let batch_charge = self.reserve_scc_batch(&staged_entries);
         let batch_charge = match batch_charge {
             Ok(charge) => charge.map(std::sync::Arc::new),
             Err(_) => {
@@ -471,7 +472,7 @@ impl SemanticGraphStore {
 
     /// Build one candidate for the batch. Pure construction — no lock,
     /// no eviction planning.
-    fn stage_entry(
+    pub(super) fn stage_entry(
         &self,
         retention_charge: Option<Arc<crate::semantic_retention_account::RetentionCharge>>,
         value: SemanticQueryValue,
@@ -501,9 +502,9 @@ impl SemanticGraphStore {
     /// and the caller must refuse the WHOLE batch — a component that
     /// published only the members that fit would be exactly the torn
     /// component the root-witness fence forbids.
-    fn reserve_scc_batch(
+    pub(super) fn reserve_scc_batch(
         &self,
-        members: &[PreparedMember],
+        members: &[&MemoEntry],
     ) -> Result<
         Option<crate::semantic_retention_account::RetentionCharge>,
         crate::semantic_retention_account::RetentionRefusal,
@@ -512,8 +513,15 @@ impl SemanticGraphStore {
         let Some(account) = self.retention_account() else {
             return Ok(None);
         };
-        let entries: Vec<&MemoEntry> = members.iter().map(|member| &member.entry).collect();
-        let bytes = MemoEntry::retained_footprint_bytes_for_shared_component(&entries);
+        // The published root already owns the SCC carrier and self-root
+        // allocations. The member batch therefore reserves only each
+        // member's distinct allocation; including the first member's
+        // shared portion here would charge the root-owned allocations a
+        // second time and create a spurious pressure refusal.
+        let bytes = members
+            .iter()
+            .map(|entry| entry.unique_retained_footprint_bytes())
+            .sum();
         match account.reserve(ChargeClass::Retained, bytes) {
             RetentionAdmission::Admitted(charge) => Ok(Some(charge)),
             RetentionAdmission::Refused(refusal) => {
