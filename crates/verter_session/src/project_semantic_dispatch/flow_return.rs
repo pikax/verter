@@ -1156,13 +1156,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn is_flow_return_type_member_base_data(&self, data: &SemanticNodeData) -> bool {
         if let SemanticNodeData::InstantiationRef { base, args } = data {
             return base.canonical_id.as_ref() == "__builtin__"
-                && base.decl_name.as_ref() == "ReturnType"
+                && super::signature_utility::SignatureUtility::ReturnType
+                    .spells(base.decl_name.as_ref())
                 && args.len() == 1
                 && self.flow_return_callee_for_typeof_arg(args[0]).is_some();
         }
         if let Some((name, _scope)) = data.bare_ref_head() {
             let args = data.carrier_type_args();
-            return name.as_ref() == "ReturnType"
+            return super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
                 && args.len() == 1
                 && self.flow_return_callee_for_typeof_arg(args[0]).is_some();
         }
@@ -14691,7 +14692,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 else {
                     return self.degraded_unrepresentable_callee();
                 };
-                if name.as_ref() != "ReturnType" || type_arguments.len() != 1 {
+                if !super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
+                    || type_arguments.len() != 1
+                {
                     return self.degraded_unrepresentable_callee();
                 }
                 // A member-call callee rooted at a FRAME binding

@@ -74,6 +74,15 @@ impl SignatureUtility {
             .find(|utility| utility.builtin_name() == name)
     }
 
+    /// Whether `head` is this utility's spelling. Answers for a resolved
+    /// builtin head AND for a still-unresolved authored head: the carrier
+    /// normalization that settles an authored head is shadowing-aware, so a
+    /// userland declaration of the same name resolves to itself there and
+    /// never reaches a builtin rail.
+    pub(crate) fn spells(self, head: &str) -> bool {
+        Self::from_builtin_name(head) == Some(self)
+    }
+
     /// The builtin head this key is spelled as.
     pub(crate) const fn builtin_name(self) -> &'static str {
         match self {
