@@ -5554,9 +5554,9 @@ const tag = 'div';
 }
 
 #[test]
-fn nexus_notification_produces_valid_tsx() {
+fn external_notification_component_produces_valid_tsx() {
     let Some(source) = read_external_corpus_vue(
-        "VERTER_NEXUS_UI_ROOT",
+        "VERTER_PRIVATE_CORPUS_ROOT",
         "packages/ui/src/components/Notifications/components/Notification.vue",
     ) else {
         return;
@@ -5653,9 +5653,9 @@ const { msg, count } = defineProps<{
 }
 
 #[test]
-fn nexus_bloc_produces_valid_tsx() {
+fn external_bloc_component_produces_valid_tsx() {
     let Some(source) = read_external_corpus_vue(
-        "VERTER_NEXUS_UI_ROOT",
+        "VERTER_PRIVATE_CORPUS_ROOT",
         "packages/ui/src/components/atom/Bloc/Bloc.vue",
     ) else {
         return;

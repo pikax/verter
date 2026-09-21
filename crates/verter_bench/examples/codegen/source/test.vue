@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { GameVo, ListCategory, ListParams, ListSort } from "@/services/api/index";
-import { Popover, Tab, Tabs } from "@nexus/ui";
+import { Popover, Tab, Tabs } from "@acme/ui";
 import { useQueries } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
