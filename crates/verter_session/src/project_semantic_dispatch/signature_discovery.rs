@@ -158,20 +158,20 @@ impl DiscoveryTypes for GraphTypes<'_, '_> {
         self.token(mapped)
     }
 
-    fn unknown(&self) -> TypeToken {
+    fn unknown(&self) -> Option<TypeToken> {
         let node = self
             .dispatch
             .graph()
             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-        self.token(node).expect("token intern on a live epoch")
+        self.token(node)
     }
 
-    fn any(&self) -> TypeToken {
+    fn any(&self) -> Option<TypeToken> {
         let node = self
             .dispatch
             .graph()
             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-        self.token(node).expect("token intern on a live epoch")
+        self.token(node)
     }
 
     fn is_any(&self, ty: TypeToken) -> bool {
@@ -609,6 +609,9 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             ),
             None => {
                 let key = crate::semantic_query::stable_key::stable_key_for_node(graph, node);
+                if !key.is_complete() {
+                    return unsettled();
+                }
                 let fingerprint = key.fingerprint();
                 (
                     space_key_of(&fingerprint),

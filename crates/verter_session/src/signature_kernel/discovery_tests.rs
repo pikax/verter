@@ -55,15 +55,15 @@ impl DiscoveryTypes for DelayedTypes<'_> {
     ) -> Option<TypeToken> {
         Some(ty)
     }
-    fn unknown(&self) -> TypeToken {
+    fn unknown(&self) -> Option<TypeToken> {
         self.store
             .intern_type_token(SemanticNodeId(9_000), None)
-            .unwrap()
+            .ok()
     }
-    fn any(&self) -> TypeToken {
+    fn any(&self) -> Option<TypeToken> {
         self.store
             .intern_type_token(SemanticNodeId(9_001), None)
-            .unwrap()
+            .ok()
     }
     fn is_any(&self, _: TypeToken) -> bool {
         false

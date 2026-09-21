@@ -1125,7 +1125,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::SignatureSet,
             env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
-            cross_context_guard: "signatures_of_type_do_not_warm_hit_across_semantic_contexts",
+            cross_context_guard: "signatures_of_type_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
         // ReadSignatureResult(ReadSignatureResultKey) — forces the demanded

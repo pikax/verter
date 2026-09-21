@@ -1587,6 +1587,7 @@ impl SemanticGraphStore {
     /// the same `entries` lock domain (its entries are `Relate` families
     /// in the family memo) — no separate relation gate exists.
     pub fn invalidate_all(&self) -> usize {
+        let _ = self.signatures.replace_epoch();
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
             let count = entries.values().map(FamilySlots::populated_count).sum();

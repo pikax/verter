@@ -88,8 +88,8 @@ pub trait DiscoveryTypes: SlotTypeFacts {
         ty: TypeToken,
         map: &[(SemanticNodeId, SemanticNodeId)],
     ) -> Option<TypeToken>;
-    fn unknown(&self) -> TypeToken;
-    fn any(&self) -> TypeToken;
+    fn unknown(&self) -> Option<TypeToken>;
+    fn any(&self) -> Option<TypeToken>;
     fn is_any(&self, ty: TypeToken) -> bool;
     /// The return type a candidate's recipe denotes. This FORCES a body
     /// recipe; discovery calls it only when comparison semantics need a
@@ -414,7 +414,9 @@ fn slot_type_identical(
     b: TypeAt<'_>,
     corr: &[(SemanticNodeId, SemanticNodeId)],
 ) -> Res<bool> {
-    let any = types.any();
+    let any = types
+        .any()
+        .ok_or(DiscoveryError::Incomplete(IncompleteReason::Budget))?;
     let one = |ty: TypeAt<'_>| match ty {
         TypeAt::Absent => Some((any, false)),
         TypeAt::One(s) => Some((s.ty, s.optionality.includes_undefined)),
@@ -648,6 +650,9 @@ fn residual_of(
     let Some(cb) = c.binder_nodes() else {
         return undecided();
     };
+    if cb.len() != rb.len() {
+        return undecided();
+    }
     let _ = view;
     let mut to_rep = Vec::new();
     for ((ordinal, _), (rep_ordinal, _)) in cb.iter().zip(rb.iter()) {
@@ -986,8 +991,9 @@ fn combine_union_signatures(
     for pos in 0..longest_count {
         let longest_ty = type_of(longest, pos, right_is_longest)?
             .ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
-        let shorter_ty =
-            type_of(shorter, pos, !right_is_longest)?.unwrap_or_else(|| types.unknown());
+        let shorter_ty = type_of(shorter, pos, !right_is_longest)?
+            .or(types.unknown())
+            .ok_or(DiscoveryError::Incomplete(IncompleteReason::Budget))?;
         let ty = match types.intersect(&[longest_ty, shorter_ty]) {
             Some(t) => t,
             None => return undecided(),
@@ -1027,7 +1033,11 @@ fn combine_union_signatures(
     }
     let receiver = match (l.receiver, r.receiver) {
         (None, None) => None,
-        (Some(a), None) | (None, Some(a)) => Some(a),
+        (Some(a), None) => Some(a),
+        (None, Some(a)) => Some(ParameterSlot {
+            ty: mapped(a.ty, true)?,
+            ..a
+        }),
         (Some(a), Some(b)) => {
             let b_ty = mapped(b.ty, true)?;
             match types.intersect(&[a.ty, b_ty]) {

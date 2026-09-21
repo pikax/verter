@@ -324,6 +324,13 @@ impl SignatureStore {
     }
 
     fn check_slot(inner: &EpochInner, slot: &ParameterSlot) -> Result<(), StoreError> {
+        let raw = slot.ty.as_u64();
+        Self::require_id(
+            inner,
+            super::records::handle_epoch(raw),
+            super::records::handle_index(raw),
+            &inner.type_tokens,
+        )?;
         match slot.name {
             Some(name) => Self::require_id(inner, name.epoch(), name.index(), &inner.strings),
             None => Ok(()),
@@ -506,6 +513,13 @@ impl SignatureStore {
             descriptor.epoch(),
             descriptor.index(),
             &inner.descriptors,
+        )?;
+        let raw = source.as_u64();
+        Self::require_id(
+            &inner,
+            super::records::handle_epoch(raw),
+            super::records::handle_index(raw),
+            &inner.type_tokens,
         )?;
         inner
             .descriptor_sources
