@@ -1038,6 +1038,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.graph();
         let session_watermark = self.dispatch_txn.borrow().relation.sessions.len();
         let callee = self.substitute_canonical(key.callee, &key.context.substitution);
+        // The shared signature list reads an apparent global (a primitive or
+        // collection callee) from the project of the demanding site: the
+        // call site is that site.
+        let _demand_scope = super::LexicalDemandScopeGuard::push(
+            &self.lexical_demand_scope,
+            Arc::clone(&key.point.canonical_id),
+        );
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
             key.explicit_type_args
                 .iter()
@@ -1059,11 +1066,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // A candidate-set miss under a TRIPPED connected-demand ledger is
         // the budget, never evidence that the callee carries no signature.
+        // A callee is `NotCallable` on a COMPLETE, empty shared signature
+        // list, and when the callee itself never resolved (a typed miss has
+        // no type to enumerate). Any other list that did not settle proves
+        // nothing about the callee.
         let non_callable = || {
             CandidateVerdict::Degraded(if self.connected_demand_tripped() {
                 ResolveCallFailure::Budget
-            } else {
+            } else if self.call_callee_is_unresolved(callee) {
                 ResolveCallFailure::NotCallable
+            } else {
+                match self.shared_signature_buckets(callee) {
+                    Ok(_) => ResolveCallFailure::NotCallable,
+                    Err(
+                        crate::semantic_query::IncompleteReason::Budget
+                        | crate::semantic_query::IncompleteReason::Cancelled,
+                    ) => ResolveCallFailure::Budget,
+                    Err(_) => ResolveCallFailure::Undecidable,
+                }
             })
         };
         let Some(visible) =
@@ -1170,20 +1190,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                         substitution,
                                         fresh_literal_returns: fresh_literal_returns.to_vec(),
                                     },
-                                    ResolvedCallResult::UnionSelected { selections, .. } => {
-                                        ResolveCallSelection::UnionSelected {
-                                            arms: selections
-                                                .iter()
-                                                .map(|arm| {
-                                                    super::dispatch_txn::ResolveCallUnionArmSelection {
-                                                        selected: arm.selected.clone(),
-                                                        selected_signature: arm.selected_signature,
-                                                        substitution: arm.substitution.clone(),
-                                                    }
-                                                })
-                                                .collect(),
-                                        }
-                                    }
                                     ResolvedCallResult::DynamicAny { .. } => {
                                         ResolveCallSelection::DynamicAny
                                     }
@@ -1219,42 +1225,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => None,
             }
         };
-        // A UNION callee is one composite union-signature group: declaration
-        // order applies independently WITHIN an arm (first-applicable), arm
-        // order carries no overload precedence, and the call succeeds only
-        // when EVERY callable arm decides a winner — the arm returns union
-        // at the close. Uncertainty in any arm degrades the whole call; an
-        // arm with no bucket signature is `NotCallable`; a callable arm
-        // with no applicable signature is `NoApplicableOverload`.
-        let arm_count = visible
-            .iter()
-            .map(|candidate| candidate.arm_ordinal)
-            .max()
-            .map_or(1, |max| max.saturating_add(1));
-        let mut arm_states: Vec<Option<ResolveCallPendingState>> =
-            (0..arm_count).map(|_| None).collect();
-        let mut current_arm: Option<u32> = None;
-        let mut arm_saw_bucket = false;
+        // The candidates are the callee's shared signature list in call-site
+        // order: the first applicable candidate of this call's bucket wins.
+        // A union callee arrives as its common or synthesized union
+        // signatures, so there is no per-arm acceptance here.
         for (position, candidate) in visible.iter().enumerate() {
-            if current_arm != Some(candidate.arm_ordinal) {
-                // Close out the previous arm: a callable arm that selected
-                // nothing rejects the whole union call.
-                if let Some(previous_arm) = current_arm {
-                    if arm_states[previous_arm as usize].is_none() {
-                        return if arm_saw_bucket {
-                            CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
-                        } else {
-                            non_callable()
-                        };
-                    }
-                }
-                current_arm = Some(candidate.arm_ordinal);
-                arm_saw_bucket = false;
-            }
-            if arm_states[candidate.arm_ordinal as usize].is_some() {
-                // This arm already selected its first-applicable winner.
-                continue;
-            }
             let Some(kind) = bucket_kind(candidate.node) else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
@@ -1270,38 +1245,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // node-id pairing would lose the raw type parameters. A
             // ROOTLESS candidate has no occurrence to compare: both lists
             // are the same callee's ordered bucket, so its raw form is the
-            // candidate at the same flat position IN THE SAME ARM (an
-            // explicit-argument drop can re-order arms between the two
-            // lists; a cross-arm pairing would recover the wrong raw
-            // binders, so it fails closed as `Undecidable` instead).
+            // candidate at the same flat position.
             let raw_candidate = match candidate.occurrence.authored() {
                 Some(occurrence) => raw.iter().find(|raw| {
                     raw.occurrence.authored() == Some(occurrence)
                         && bucket_kind(raw.node) == Some(kind)
                 }),
                 None => raw.get(position).filter(|raw| {
-                    raw.occurrence.authored().is_none()
-                        && bucket_kind(raw.node) == Some(kind)
-                        && raw.arm_ordinal == candidate.arm_ordinal
+                    raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
                 }),
             };
             let Some(raw_candidate) = raw_candidate else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
             saw_bucket = true;
-            arm_saw_bucket = true;
             if !budget.start_candidate() {
                 self.abandon_call_sessions_since(session_watermark);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
             }
             match self.check_call_candidate(key, candidate, raw_candidate, &arguments, &mut budget)
             {
-                CandidateVerdict::Selected(result) => {
-                    if arm_count == 1 {
-                        return CandidateVerdict::Selected(result);
-                    }
-                    arm_states[candidate.arm_ordinal as usize] = Some(result);
-                }
+                CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
                 CandidateVerdict::Mismatch => {}
                 CandidateVerdict::Degraded(failure) => {
                     if failure == ResolveCallFailure::Budget {
@@ -1311,102 +1275,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        // Close out the FINAL arm.
-        if let Some(previous_arm) = current_arm {
-            if arm_states[previous_arm as usize].is_none() {
-                return if arm_saw_bucket {
-                    CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
-                } else {
-                    non_callable()
-                };
-            }
-        }
         if !saw_bucket {
             return non_callable();
         }
-        if arm_count == 1 {
-            // The single-arm loop returns its winner inline; reaching here
-            // means no candidate selected.
-            return CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload);
-        }
-        // Every arm decided a winner: merge into ONE composite selection.
-        // An arm that saw no bucket candidate at all never reached
-        // `arm_states` — that is a non-callable arm.
-        let mut arm_selections = Vec::with_capacity(arm_states.len());
-        for state in &arm_states {
-            if state.is_none() {
-                return non_callable();
-            }
-        }
-        let mut merged_seeds = Vec::new();
-        let mut merged_holds = Vec::new();
-        let mut merged_replay = false;
-        let mut merged_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            Vec::new();
-        let mut arm_proofs_complete = true;
-        for state in arm_states.into_iter().flatten() {
-            let ResolveCallPendingState {
-                selection,
-                concrete_seeds,
-                holds,
-                staged_session,
-                replay_applicability,
-                inline_flight: _,
-                self_roots,
-                proof_complete,
-            } = state;
-            // Per-arm candidate sessions are per-winner scratch: the arm's
-            // substitution is already extracted onto its selection, and the
-            // composite close owns no per-arm commit — abandon them exactly
-            // as a relation-deferred single winner does.
-            if let Some(session) = staged_session {
-                self.abandon_session(session);
-            }
-            merged_replay |= replay_applicability;
-            arm_proofs_complete &= proof_complete;
-            merged_seeds.extend(concrete_seeds);
-            merged_holds.extend(holds);
-            union_self_roots(&mut merged_self_roots, &self_roots);
-            let arm_selection = match selection {
-                ResolveCallSelection::Selected {
-                    selected,
-                    selected_signature,
-                    substitution,
-                    fresh_literal_returns: _,
-                } => super::dispatch_txn::ResolveCallUnionArmSelection {
-                    selected,
-                    selected_signature: match selected_signature {
-                        super::dispatch_txn::SelectedSignature::General(node) => node,
-                        // Re-intern the sealed carrier: content-addressed
-                        // interning recovers the SAME node id the candidate
-                        // carried.
-                        super::dispatch_txn::SelectedSignature::Deferred(callable) => self
-                            .graph()
-                            .intern_node(SemanticNodeData::DeferredCallable(*callable)),
-                    },
-                    substitution,
-                },
-                // Per-arm winners come only from `check_call_candidate`,
-                // which selects concrete candidates.
-                ResolveCallSelection::UnionSelected { .. } | ResolveCallSelection::DynamicAny => {
-                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable)
-                }
-            };
-            arm_selections.push(arm_selection);
-        }
-        let mut merged = self.resolve_call_pending_state(
-            key,
-            ResolveCallSelection::UnionSelected {
-                arms: arm_selections,
-            },
-            merged_seeds,
-            merged_holds,
-            None,
-            merged_replay,
-        );
-        union_self_roots(&mut merged.self_roots, &merged_self_roots);
-        merged.proof_complete &= arm_proofs_complete;
-        CandidateVerdict::Selected(merged)
+        CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
     }
 
     fn acquire_call_candidates(
@@ -1429,6 +1301,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) => Some(candidates),
             _ => None,
         }
+    }
+
+    fn call_callee_is_unresolved(&self, mut node: SemanticNodeId) -> bool {
+        let mut seen = rustc_hash::FxHashSet::default();
+        while seen.insert(node) {
+            match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Opaque(_)) => return true,
+                Some(SemanticNodeData::Alias(target)) => node = *target,
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn call_callee_is_dynamic_any(&self, mut node: SemanticNodeId) -> bool {

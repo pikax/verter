@@ -13979,8 +13979,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         node: SemanticNodeId,
         site: crate::flow_slice_content::SliceCallSite,
     ) -> bool {
-        let Some((_, call_sigs, construct_sigs)) = self.dispatch.settle_signature_group(node)
-        else {
+        let Ok((call_sigs, construct_sigs)) = self.dispatch.shared_signature_buckets(node) else {
             return false;
         };
         if call_sigs.len() + construct_sigs.len() > 1 {
@@ -14584,8 +14583,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // the typed degradation — the read cannot pick).
                 if self.call_group_needs_executor(node, site) {
                     let overloaded = matches!(
-                        self.dispatch.settle_signature_group(node),
-                        Some((_, call_sigs, construct_sigs))
+                        self.dispatch.shared_signature_buckets(node),
+                        Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
                     if let Some(value) = self.eval_call_via_resolve_call(node, site) {
@@ -14740,8 +14739,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // and an undecided executor falls back to it.
                 if self.call_group_needs_executor(callee_node, site) {
                     let overloaded = matches!(
-                        self.dispatch.settle_signature_group(callee_node),
-                        Some((_, call_sigs, construct_sigs))
+                        self.dispatch.shared_signature_buckets(callee_node),
+                        Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
                     if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {

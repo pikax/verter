@@ -2013,33 +2013,12 @@ pub enum ResolvedCallResult {
         /// the binding's widening membership.
         fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
     },
-    /// A UNION callee selected one first-applicable signature in EVERY
-    /// callable arm; the call's return is the union of the selected arm
-    /// returns. Arm order carries no overload precedence.
-    UnionSelected {
-        /// The per-arm winners, in arm order.
-        selections: Arc<[ResolvedUnionArm]>,
-        /// The union of the selected arm returns.
-        return_type: SemanticNodeId,
-    },
     /// The callee is genuine dynamic `any` — a COMPLETE result, not a
     /// fallback.
     DynamicAny {
         /// The call's return type (`any`).
         return_type: SemanticNodeId,
     },
-}
-
-/// One union-callee arm's winner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedUnionArm {
-    /// The arm winner's origin.
-    pub selected: SignatureCandidateOrigin,
-    /// The arm winner's (instantiated) signature node — the sealed
-    /// deferred carrier node when the winner deferred its return.
-    pub selected_signature: SemanticNodeId,
-    /// The substitution the arm's winner was selected under.
-    pub substitution: CanonicalTypeSubstitution,
 }
 
 /// A [`ResolvedCallResult`] that MAY be admitted to a shared cache.
@@ -2069,9 +2048,7 @@ impl AdmissibleCallResult {
             return false;
         }
         match result {
-            ResolvedCallResult::Selected { .. }
-            | ResolvedCallResult::UnionSelected { .. }
-            | ResolvedCallResult::DynamicAny { .. } => true,
+            ResolvedCallResult::Selected { .. } | ResolvedCallResult::DynamicAny { .. } => true,
         }
     }
 
@@ -5975,12 +5952,6 @@ pub struct SignatureRef {
     /// Where the candidate's return comes from (a declared node — a
     /// concrete seed — or a body-derived `FlowReturn` position).
     pub return_carrier: SignatureReturnCarrier,
-    /// The UNION-callee arm this candidate belongs to (`0` for a
-    /// non-union callee). Declaration order applies independently WITHIN
-    /// an arm; arm order is never overload precedence — a call selects a
-    /// first-applicable signature in EVERY callable arm and unions the
-    /// selected returns.
-    pub arm_ordinal: u32,
 }
 
 /// A type produced by flow / contextual program analysis (the narrowed or
@@ -10612,7 +10583,6 @@ mod tests {
                             signature_ordinal: 0,
                         }),
                         return_carrier: SignatureReturnCarrier::Declared(node),
-                        arm_ordinal: 0,
                     }]
                     .into_boxed_slice(),
                 )),

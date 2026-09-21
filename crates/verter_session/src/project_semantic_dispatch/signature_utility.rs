@@ -138,7 +138,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         subject: SemanticNodeId,
         kind: SignatureKind,
-    ) -> Option<Arc<[Option<SemanticNodeId>]>> {
+    ) -> Option<Vec<Option<SemanticNodeId>>> {
         match self
             .execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
                 subject,
@@ -147,7 +147,9 @@ impl ProjectSemanticDispatch<'_> {
             })
             .value
         {
-            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => Some(value.authored),
+            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => {
+                Some(value.nodes.iter().map(|nodes| nodes.authored).collect())
+            }
             _ => None,
         }
     }

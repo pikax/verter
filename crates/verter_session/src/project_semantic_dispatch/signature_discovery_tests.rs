@@ -1229,8 +1229,15 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         candidates(from_second.set, store)[0].signature,
         "premise: both subjects publish the one content-interned descriptor"
     );
-    assert_eq!(&*from_first.authored, &[Some(first)]);
-    assert_eq!(&*from_second.authored, &[Some(second)]);
+    let authored = |value: &crate::signature_kernel::SignatureSetValue| {
+        value
+            .nodes
+            .iter()
+            .map(|nodes| nodes.authored)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(authored(&from_first), [Some(first)]);
+    assert_eq!(authored(&from_second), [Some(second)]);
 
     let other = signature(
         &d,
@@ -1247,7 +1254,12 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         recipe_of(store, candidates(composite.set, store)[0]),
         SignatureResultRecipe::UnionCommon { .. }
     ));
-    assert_eq!(&*composite.authored, &[None]);
+    assert_eq!(authored(&composite), [None]);
+    assert_eq!(
+        &*composite.nodes[0].constituents,
+        &[first, other],
+        "a composite names the authored node of every constituent, in arm order"
+    );
 }
 
 /// Signature-utility inference reads the LAST signature of the shared list —
