@@ -23,6 +23,13 @@ export interface HTMLAttributes { class?: string }
 export interface NativeElements { div: HTMLAttributes; [name: string]: unknown }
 export interface Directive<T = any, V = any, M extends string = string, A = any> {}
 export interface GlobalComponents {}
+export type ExtractPublicPropTypes<O> = {
+  [K in keyof O as O[K] extends { required: true } ? K : never]: O[K] extends { type: (...args: any[]) => infer V } ? V : unknown;
+} & {
+  [K in keyof O as O[K] extends { required: true } ? never : K]?: unknown;
+};
+export type EmitsToProps<T> = {};
+export type ComponentPublicInstance<P = {}> = { $props: P };
 export interface GlobalDirectives {}
 declare global { namespace JSX { interface Element {} } }
 `;
@@ -410,6 +417,61 @@ describe("VERTER_TYPES_STUB", () => {
 // between the copies are invisible and a semantic divergence in ANY of them
 // fails.
 describe("declaration-surface parity", () => {
+  it("infers generic slot props through every shipped constructor helper", () => {
+    const perCopy = typecheckStubCopies(
+      [
+        ["plugin", VERTER_TYPES_STUB],
+        ["lsp", readFileSync(LSP_STUB_PATH, "utf8")],
+        ["standalone", readFileSync(GENERATED_STANDALONE_DTS_PATH, "utf8")],
+      ],
+      `
+      import { componentConstructor, extractArgumentsFromRenderSlot } from "@verter/types";
+      declare const Select: { name: string } & {
+        new<T>(props?: { options: T[]; modelValue: T }): {
+          $slots: { selected(props: { value: T }): unknown }
+        }
+      };
+      const stringInstance = new (componentConstructor(Select))({ options: ["one"], modelValue: "one" });
+      const numberInstance = new (componentConstructor(Select))({ options: [1], modelValue: 1 });
+      const text = extractArgumentsFromRenderSlot(stringInstance, "selected");
+      const number = extractArgumentsFromRenderSlot(numberInstance, "selected");
+      const stringValue: string = text.value;
+      const numberValue: number = number.value;
+      // @ts-expect-error the slot must not degrade to any
+      const wrongString: number = text.value;
+      // @ts-expect-error each instance retains its own inferred type
+      const wrongNumber: string = number.value;
+    `,
+    );
+    for (const [copy, diagnostics] of perCopy) expect(diagnostics, copy).toEqual([]);
+  });
+
+  it("normalizes a defineAsyncComponent result identically in every shipped copy", () => {
+    const perCopy = typecheckStubCopies(
+      [
+        ["plugin", VERTER_TYPES_STUB],
+        ["lsp", readFileSync(LSP_STUB_PATH, "utf8")],
+        ["standalone", readFileSync(GENERATED_STANDALONE_DTS_PATH, "utf8")],
+      ],
+      `
+      import { asyncComponent } from "@verter/types";
+      declare const raw: { props: { id: { type: StringConstructor; required: true } }; template: string };
+      const Raw = asyncComponent(raw);
+      const instance = new Raw();
+      const id: string = instance.$props.id;
+      // @ts-expect-error the derived prop must not degrade to any
+      const wrongId: number = instance.$props.id;
+      declare const Generic: new <T>(props: { value: T }) => { $props: { value: T } };
+      const kept: typeof Generic = asyncComponent(Generic);
+      // @ts-expect-error a constructor is returned exactly, never widened
+      const widened: { unrelated: true } = asyncComponent(Generic);
+      declare const Functional: <T>(props: { value: T }) => T;
+      const keptFunctional: typeof Functional = asyncComponent(Functional);
+    `,
+    );
+    for (const [copy, diagnostics] of perCopy) expect(diagnostics, copy).toEqual([]);
+  });
+
   it("every copy carries the directive Arg type parameter, and a pre-fix copy is caught", () => {
     const pluginStub = VERTER_TYPES_STUB;
     const lspStub = readFileSync(LSP_STUB_PATH, "utf8");

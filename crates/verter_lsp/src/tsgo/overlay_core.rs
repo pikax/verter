@@ -741,6 +741,13 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                 })
                 .collect()
         };
+        if !candidates.is_empty() {
+            tracing::debug!(
+                candidates = candidates.len(),
+                epoch = ?run_epoch,
+                "shared overlay: injecting dirty editor-demand carriers"
+            );
+        }
         for path in candidates {
             // The FRESH shadow-safety decision for THIS generation is recorded BEFORE the
             // gated inject/retract (never held across it; monotonic, so an older-generation

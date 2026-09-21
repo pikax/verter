@@ -671,6 +671,20 @@ pub(super) async fn sync_pending_snapshot_provider_file(
         let Some(sync) = sync else {
             return SyncOutcome::Nothing;
         };
+        // A script NO configured project owns (a TypeScript lib file the user
+        // navigated into, a file outside every workspace root) can never be
+        // delivered. Once ownership is authoritative that is a TERMINAL answer:
+        // retrying it would keep the pending set non-empty — and level 2
+        // unannounced — for the rest of the session. While ownership is still
+        // cold the same absence is merely unknown, so it stays queued.
+        if snapshot.ownership_ready
+            && snapshot
+                .resolver
+                .nearest_config_for_path(canonical_id)
+                .is_none()
+        {
+            return SyncOutcome::Terminal;
+        }
         // Non-carrier files have a single Shadow kind: synced fully or not at all.
         if sync_pending_non_carrier_provider_file(
             sync,

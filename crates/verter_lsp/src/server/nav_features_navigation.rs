@@ -1680,4 +1680,4 @@ mod nav_features_navigation_tests;
 
 #[cfg(test)]
 #[path = "nav_features_rename_completeness_tests.rs"]
-mod nav_features_rename_completeness_tests;
+pub(crate) mod nav_features_rename_completeness_tests;

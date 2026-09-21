@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 import {
   assertLogNotContains,
   findPosition,
+  hoverText,
   FIXTURE_NAME,
   getCompletions,
   measureHover,
@@ -17,7 +18,7 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
   let doc: vscode.TextDocument;
 
   suiteSetup(async function () {
-    if (FIXTURE_NAME !== "single-project" || !TYPE_PROVIDER) {
+    if (!["single-project", "path-aliases"].includes(FIXTURE_NAME) || !TYPE_PROVIDER) {
       this.skip();
       return;
     }
@@ -40,6 +41,9 @@ suite(`Imported Props [${FIXTURE_NAME}]`, function () {
     });
     expect(hovers.length, "hover should resolve on imported prop").to.be.greaterThan(0);
     expect(hovers[0].contents.length, "hover should have content").to.be.greaterThan(0);
+    expect(hoverText(hovers[0]), "imported prop hover should preserve its string type").to.include(
+      "string",
+    );
 
     const completionPos = findPosition(doc, "props.cou", "props.".length);
     expect(completionPos, "should find partial imported prop member usage").to.exist;

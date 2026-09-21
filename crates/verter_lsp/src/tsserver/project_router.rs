@@ -884,8 +884,22 @@ impl TypeProvider for ProjectTsserverProvider {
         companion_paths: &'a [String],
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
+            let mut batches: Vec<(Arc<dyn TypeProvider>, Vec<String>)> = Vec::new();
             for path in companion_paths {
-                self.notify_carrier_changed(path).await?;
+                // Resolve every path against live ownership before grouping by
+                // the actual engine instance, not the provider kind or a route cache.
+                let provider = self.provider_for_path(path).await?;
+                if let Some((_, paths)) = batches
+                    .iter_mut()
+                    .find(|(existing, _)| Arc::ptr_eq(existing, &provider))
+                {
+                    paths.push(path.clone());
+                } else {
+                    batches.push((provider, vec![path.clone()]));
+                }
+            }
+            for (provider, paths) in batches {
+                provider.notify_carriers_changed(&paths).await?;
             }
             Ok(())
         })
@@ -964,14 +978,27 @@ impl TypeProvider for ProjectTsserverProvider {
         members: &'a [CarrierActivation],
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
+            let mut batches: Vec<(Arc<dyn TypeProvider>, Vec<CarrierActivation>)> = Vec::new();
             for member in members {
-                self.activate_carrier_member(
+                let (binding, generation) = self.binding_for_registered(
                     &member.source_path,
                     &member.companion_path,
                     &member.project_file_name,
-                    member.script_kind,
-                )
-                .await?;
+                )?;
+                let provider = self.provider_for_binding(&binding, generation).await?;
+                if let Some((_, members)) = batches
+                    .iter_mut()
+                    .find(|(existing, _)| Arc::ptr_eq(existing, &provider))
+                {
+                    members.push(member.clone());
+                } else {
+                    batches.push((provider, vec![member.clone()]));
+                }
+            }
+            // Preserve each engine's input order and its single-refresh bulk
+            // activation contract. Scalar editor opens keep their separate path.
+            for (provider, members) in batches {
+                provider.activate_carrier_members(&members).await?;
             }
             Ok(())
         })

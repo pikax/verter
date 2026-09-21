@@ -24,6 +24,7 @@ export type StatisticsSummary = {
 };
 
 export type StatisticsSnapshot = {
+  diagnostics?: Record<string, { version: number; ready: boolean }>;
   enabled: boolean;
   session: {
     events?: StatisticsEvent[];

@@ -149,7 +149,7 @@ async fn carrier_channel_refuses_exit_shutdown_initialize_and_arbitrary() {
 }
 
 #[tokio::test]
-async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apisession() {
+async fn carrier_channel_allows_didopen_didchange_didclose_barrier_and_apisession() {
     let (conn, trace, join) = connection_to_recording_server();
     let overlays = StdMutex::new(HashSet::new());
     let taint = StdMutex::new(HashSet::new());
@@ -193,7 +193,7 @@ async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apises
     for (i, expected) in [
         "textDocument/didOpen",
         "textDocument/didChange",
-        "textDocument/diagnostic",
+        CARRIER_SYNC_BARRIER_METHOD,
         crate::attach::INITIALIZE_API_SESSION_METHOD,
         "textDocument/didClose",
     ]
@@ -226,11 +226,11 @@ async fn carrier_channel_refuses_kind_mismatched_allowlisted_ops() {
     // diagnostic is a REQUEST-only carrier op — sent as a NOTIFICATION it is a
     // kind mismatch and must be refused, though the method name is allowlisted.
     let err = channel
-        .gated_notify("textDocument/diagnostic", serde_json::json!({}))
+        .gated_notify(CARRIER_SYNC_BARRIER_METHOD, serde_json::json!({}))
         .await
         .expect_err("an allowlisted REQUEST method sent as a NOTIFICATION must be refused");
     assert!(
-        matches!(err, TsgoApiError::WriteGateDenied { method: ref m } if m == "textDocument/diagnostic"),
+        matches!(err, TsgoApiError::WriteGateDenied { method: ref m } if m == CARRIER_SYNC_BARRIER_METHOD),
         "the kind-mismatch refusal must be the typed WriteGateDenied; got {err:?}"
     );
 
@@ -275,24 +275,21 @@ async fn carrier_channel_refuses_kind_mismatched_allowlisted_ops() {
             .cloned()
             .collect()
     };
-    // Exactly ONE diagnostic frame — the control REQUEST (it carries an `id`).
-    // A leaked `gated_notify("textDocument/diagnostic")` would add an id-LESS
+    // Exactly ONE barrier frame — the control REQUEST (it carries an `id`).
+    // A leaked `gated_notify(CARRIER_SYNC_BARRIER_METHOD)` would add an id-LESS
     // notification frame, so the count AND the kind discriminate the gate.
-    let diagnostics = frames_for("textDocument/diagnostic");
+    let barriers = frames_for(CARRIER_SYNC_BARRIER_METHOD);
     assert_eq!(
-        diagnostics.len(),
+        barriers.len(),
         1,
-        "exactly one diagnostic frame (the control request) reached the wire — \
-         no kind-mismatched diagnostic leaked: {frames:?}"
+        "exactly one barrier frame (the control request) reached the wire — \
+         no kind-mismatched barrier leaked: {frames:?}"
     );
     assert!(
-        diagnostics[0]
-            .get("id")
-            .map(|v| !v.is_null())
-            .unwrap_or(false),
-        "the sole diagnostic frame is a REQUEST (carries an id) — a leaked \
-         diagnostic-as-notification would be id-less: {:?}",
-        diagnostics[0]
+        barriers[0].get("id").map(|v| !v.is_null()).unwrap_or(false),
+        "the sole barrier frame is a REQUEST (carries an id) — a leaked \
+         barrier-as-notification would be id-less: {:?}",
+        barriers[0]
     );
     // Exactly ONE didChange frame — the control NOTIFICATION (no `id`). A leaked
     // `gated_request("textDocument/didChange")` would carry an `id`.
@@ -883,21 +880,21 @@ async fn relay_injected_request_demuxes_to_verter_not_editor() {
     let channel = relay.injection_channel();
     let result = channel
         .gated_request(
-            "textDocument/diagnostic",
+            CARRIER_SYNC_BARRIER_METHOD,
             serde_json::json!({ "textDocument": { "uri": "file:///ws/Inj.vue.tsx" } }),
         )
         .await
         .expect("the injected allowlisted request must round-trip");
     assert_eq!(
         result,
-        serde_json::json!({ "answered": "textDocument/diagnostic" }),
+        serde_json::json!({ "answered": CARRIER_SYNC_BARRIER_METHOD }),
         "the injected request's response must demux back to Verter"
     );
     // The server observed the injected request under a reserved `verter:*` id.
     let frames = server_trace.lock().unwrap().clone();
     let injected = frames
         .iter()
-        .find(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/diagnostic"))
+        .find(|f| f.get("method").and_then(|m| m.as_str()) == Some(CARRIER_SYNC_BARRIER_METHOD))
         .expect("the server must observe the injected request");
     let injected_id = injected
         .get("id")
@@ -1837,12 +1834,19 @@ async fn injected_didopen_precedes_sync_barrier() {
         .expect("the server observes the injected didOpen");
     let barrier_at = methods
         .iter()
-        .position(|m| m == "textDocument/diagnostic")
+        .position(|m| m == CARRIER_SYNC_BARRIER_METHOD)
         .expect("the server observes the sync-barrier request");
     assert!(
         open_at < barrier_at,
         "the injected didOpen must be observed BEFORE the sync barrier on the \
          ordered server wire: {methods:?}"
+    );
+    // The barrier only has to prove ORDER. A pull-diagnostic there costs the
+    // editor's engine a semantic check per injected overlay, and an editor
+    // request arriving during a project-wide injection waits behind all of them.
+    assert!(
+        methods.iter().all(|m| m != "textDocument/diagnostic"),
+        "injecting an overlay must never ask the engine for a semantic check: {methods:?}"
     );
     drop(editor_write);
     relay.shutdown().await;

@@ -62,19 +62,19 @@ const SCRIPT_OCCURRENCES: [(u32, u32); 2] = [(1, 6), (2, 12)];
 /// (`___VERTER___instance.count`), a DIFFERENT symbol from the script `const`.
 const TEMPLATE_OCCURRENCES: [(u32, u32); 2] = [(6, 13), (6, 23)];
 
-struct RenameFixture {
+pub(crate) struct RenameFixture {
     _temp: tempfile::TempDir,
     service: tower_lsp_server::LspService<VerterLanguageServer>,
     drain: tokio::task::JoinHandle<()>,
-    uri: Uri,
+    pub(crate) uri: Uri,
 }
 
 impl RenameFixture {
-    fn server(&self) -> &VerterLanguageServer {
+    pub(crate) fn server(&self) -> &VerterLanguageServer {
         self.service.inner()
     }
 
-    async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         self.drain.abort();
         drop(self.service);
     }
@@ -87,7 +87,7 @@ async fn fixture(source: &str) -> RenameFixture {
     fixture_with_provider(source, None).await
 }
 
-async fn fixture_with_provider(
+pub(crate) async fn fixture_with_provider(
     source: &str,
     type_provider: Option<Arc<dyn crate::TypeProvider>>,
 ) -> RenameFixture {

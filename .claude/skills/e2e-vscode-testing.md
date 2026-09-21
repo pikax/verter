@@ -266,20 +266,19 @@ await waitForFileReady(slotDoc, { probePosition, expectedLabel: "slot" });
 // GOOD: Event-driven — resolves within ms of diagnostic arrival
 const diags = await waitForDiagnostics(doc.uri, { source: "ts", minCount: 1 });
 
-// Also GOOD: Checking for absence of diagnostics after file is ready
-await waitForFileReady(doc);
-const diags = vscode.languages.getDiagnostics(doc.uri);
+// Also GOOD: Absence checks require a completed diagnostic pass.
+const diags = await waitForDiagnosticsSettled(doc.uri);
 expect(diags.filter((d) => d.code === "2307")).to.be.empty;
 ```
 
 **When to use:** When a test needs to wait for specific diagnostics to appear (e.g., TS2304 after inserting an error).
 
-**For absence checks:** Use `waitForFileReady()` first (ensures type provider processed the file), then read diagnostics synchronously.
+**For absence checks:** Use `waitForDiagnosticsSettled()`. Hover readiness and a quiet editor collection alone do not prove the provider completed diagnostics.
 
 ### `waitForDiagnosticsSettled(uri, options)` — Quiescence-based diagnostic waiting
 
 ```typescript
-// GOOD: Resolves when diagnostics stop changing for stableMs
+// GOOD: Requires current completion and then a stable editor collection.
 const diags = await waitForDiagnosticsSettled(doc.uri, {
   timeoutMs: 5_000,
   stableMs: 500,
@@ -292,9 +291,9 @@ const diags = await waitForDiagnostics(doc.uri, {
 });
 ```
 
-**When to use:** When you want to see what diagnostics look like after all processing is complete, without requiring any specific predicate. Resolves when no `onDidChangeDiagnostics` events fire for `stableMs` milliseconds.
+**When to use:** When you need the completed diagnostic result without requiring a particular diagnostic. The helper requires a server completion receipt for the current document version, then no `onDidChangeDiagnostics` events for `stableMs` milliseconds after receipt observation. Pending work, stale snapshots and provider errors cannot satisfy readiness. The deadline rejects even when the editor collection stays empty.
 
-**Defaults:** `timeoutMs: 5_000`, `stableMs: 500`.
+**Defaults:** The shared `pollBudget("waitForDiagnosticsSettled")` deadline and `stableMs: 500`.
 
 ### `invalidateFileCache(path)` — After mutation tests
 

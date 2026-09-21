@@ -20,6 +20,7 @@ import {
   registerFrameworkTest,
   failParityGap,
 } from "../../../lib/parityHarness";
+import { SUITE_TIMEOUT_MS } from "../../../lib/timeouts";
 import { acceptCompletionInEditor } from "../../../dx/dxScenarioRunner";
 
 function parityFramework(): "vue" | "svelte" | null {
@@ -62,7 +63,7 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
     if (!fw) {
       throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     }
-    this.timeout(20_000);
+    this.timeout(SUITE_TIMEOUT_MS);
     await ensureParityReady(fw === "vue" ? "src/App.vue" : "src/App.svelte");
   });
 

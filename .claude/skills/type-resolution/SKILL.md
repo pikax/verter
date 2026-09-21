@@ -183,6 +183,8 @@ Full normative text: `docs/contributing/path-precise-resolution-currency.md`.
 
 ### Module-resolution keying (split env)
 
+Import probing distinguishes recognized source extensions from dotted filename stems. Imports such as `./types.d` and `./Button.types` still probe appended script/declaration extensions; registered carrier suffixes retain literal carrier ownership. Literal SFC `src` attributes do not gain this dotted-stem import fallback.
+
 Import/module resolution is keyed on the **split** env dimensions — see
 `### Module-Resolution Keying (CRITICAL)` in the `/type-cache-architecture`
 skill (the owner). `resolve_env_hash` carries the resolve-domain inputs (the

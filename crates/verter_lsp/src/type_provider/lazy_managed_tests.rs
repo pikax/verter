@@ -323,109 +323,132 @@ async fn lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle() {
     let Some(executable) = real_tsgo_or_skip().await else {
         return;
     };
-    let workspace = tempfile::tempdir().expect("temporary real-tsgo project");
-    let source_dir = workspace.path().join("src");
-    let carrier_dir = source_dir.join("z-carrier");
-    std::fs::create_dir_all(&carrier_dir).expect("real-tsgo source directory");
-    std::fs::write(carrier_dir.join("Case.svelte"), "<p>{label}</p>\n")
-        .expect("authored carrier source");
-    std::fs::write(
+    for update_loaded in [false, true] {
+        let workspace = tempfile::tempdir().expect("temporary real-tsgo project");
+        let source_dir = workspace.path().join("src");
+        let carrier_dir = source_dir.join("z-carrier");
+        std::fs::create_dir_all(&carrier_dir).expect("real-tsgo source directory");
+        std::fs::write(carrier_dir.join("Case.svelte"), "<p>{label}</p>\n")
+            .expect("authored carrier source");
+        std::fs::write(
         workspace.path().join("tsconfig.json"),
         r#"{"compilerOptions":{"strict":true,"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","jsx":"preserve","allowArbitraryExtensions":true,"allowImportingTsExtensions":true,"noEmit":true},"include":["src/**/*"]}"#,
     )
     .expect("real-tsgo tsconfig");
 
-    let normalize = |path: std::path::PathBuf| path.to_string_lossy().replace('\\', "/");
-    let declaration_path = normalize(carrier_dir.join("Case.d.svelte.ts"));
-    let ide_path = normalize(carrier_dir.join("Case.svelte.tsx"));
-    let consumer_path = normalize(source_dir.join("a-consumer.ts"));
-    let declaration_content = "type Component<Props, Exports> = (props: Props) => Exports;\n\
+        let normalize = |path: std::path::PathBuf| path.to_string_lossy().replace('\\', "/");
+        let declaration_path = normalize(carrier_dir.join(if update_loaded {
+            "Case.svelte.verter.ts"
+        } else {
+            "Case.d.svelte.ts"
+        }));
+        let ide_path = normalize(carrier_dir.join("Case.svelte.tsx"));
+        let consumer_path = normalize(source_dir.join("a-consumer.ts"));
+        let declaration_content = "type Component<Props, Exports> = (props: Props) => Exports;\n\
                        declare const PublicCase: Component<{ label: string }, { focus: () => void }>;\n\
                        export default PublicCase;\n";
-    let ide_content = "type Component<Props, Exports> = (props: Props) => Exports;\n\
+        let ide_content = "type Component<Props, Exports> = (props: Props) => Exports;\n\
                        interface Props { label: string }\n\
                        declare const IdeCase: Component<Props, {}>;\n\
                        export default IdeCase;\n";
-    let consumer_content =
-        "import Case from './z-carrier/Case.svelte';\nexport const observed = Case;\n";
-    let hover_offset = consumer_content.rfind("Case").expect("consumer reference") as u32;
+        let consumer_content =
+            "import Case from './z-carrier/Case.svelte';\nexport const observed = Case;\n";
+        std::fs::write(&consumer_path, consumer_content)
+            .expect("disk consumer with authored imports");
+        let rewritten_content = "import Case from './z-carrier/Case.svelte.verter.js';\nexport const observed = Case;\n";
+        let consumer_content = if update_loaded {
+            rewritten_content
+        } else {
+            consumer_content
+        };
+        let hover_offset = consumer_content.rfind("Case").expect("consumer reference") as u32;
 
-    async fn open_fixture(
-        provider: &dyn TypeProvider,
-        ide_path: &str,
-        ide_content: &str,
-        declaration_path: &str,
-        declaration_content: &str,
-        consumer_path: &str,
-        consumer_content: &str,
-    ) {
-        provider
-            .open_file(ide_path, ide_content)
-            .await
-            .expect("open IDE projection first");
-        provider
-            .open_file(declaration_path, declaration_content)
-            .await
-            .expect("open public declaration projection second");
-        provider
-            .open_file(consumer_path, consumer_content)
-            .await
-            .expect("open consumer after its dependencies");
-    }
-
-    let eager = spawn_real_owned_tsgo(&executable, workspace.path()).await;
-    open_fixture(
-        eager.as_ref(),
-        &ide_path,
-        ide_content,
-        &declaration_path,
-        declaration_content,
-        &consumer_path,
-        consumer_content,
-    )
-    .await;
-    let eager_hover = eager
-        .get_hover(&consumer_path, hover_offset)
-        .await
-        .expect("eager real-tsgo hover")
-        .expect("eager real-tsgo QuickInfo");
-    eager.shutdown().await.expect("shutdown eager real tsgo");
-
-    let lazy = LazyManagedTypeProvider::new({
-        let executable = executable.clone();
-        let workspace = workspace.path().to_path_buf();
-        move || {
-            let executable = executable.clone();
-            let workspace = workspace.clone();
-            async move { Ok(spawn_real_owned_tsgo(&executable, &workspace).await) }
+        async fn open_fixture(
+            provider: &dyn TypeProvider,
+            ide: (&str, &str),
+            declaration: (&str, &str),
+            consumer_path: &str,
+            consumer_content: &str,
+            update_loaded: bool,
+        ) {
+            provider
+                .open_file(ide.0, ide.1)
+                .await
+                .expect("open IDE projection first");
+            provider
+                .open_file(declaration.0, declaration.1)
+                .await
+                .expect("open public declaration projection second");
+            if update_loaded {
+                let disk = std::fs::read_to_string(consumer_path).expect("authored consumer");
+                provider
+                    .load_file(consumer_path, &disk)
+                    .await
+                    .expect("background discovery");
+                provider
+                    .update_file(consumer_path, consumer_content)
+                    .await
+                    .expect("editor shadow update before the first query");
+            } else {
+                provider
+                    .open_file(consumer_path, consumer_content)
+                    .await
+                    .expect("open consumer after its dependencies");
+            }
         }
-    });
-    open_fixture(
-        &lazy,
-        &ide_path,
-        ide_content,
-        &declaration_path,
-        declaration_content,
-        &consumer_path,
-        consumer_content,
-    )
-    .await;
-    let lazy_hover = lazy
-        .get_hover(&consumer_path, hover_offset)
-        .await
-        .expect("lazy real-tsgo hover")
-        .expect("lazy real-tsgo QuickInfo");
-    lazy.shutdown().await.expect("shutdown lazy real tsgo");
 
-    assert_eq!(
-        lazy_hover.contents, eager_hover.contents,
-        "lazy activation must reproduce the exact QuickInfo of the eager file lifecycle"
-    );
-    assert!(
+        let eager = spawn_real_owned_tsgo(&executable, workspace.path()).await;
+        open_fixture(
+            eager.as_ref(),
+            (&ide_path, ide_content),
+            (&declaration_path, declaration_content),
+            &consumer_path,
+            consumer_content,
+            update_loaded,
+        )
+        .await;
+        let eager_hover = eager
+            .get_hover(&consumer_path, hover_offset)
+            .await
+            .expect("eager real-tsgo hover")
+            .expect("eager real-tsgo QuickInfo");
+        eager.shutdown().await.expect("shutdown eager real tsgo");
+
+        let lazy = LazyManagedTypeProvider::new({
+            let executable = executable.clone();
+            let workspace = workspace.path().to_path_buf();
+            move || {
+                let executable = executable.clone();
+                let workspace = workspace.clone();
+                async move { Ok(spawn_real_owned_tsgo(&executable, &workspace).await) }
+            }
+        });
+        open_fixture(
+            &lazy,
+            (&ide_path, ide_content),
+            (&declaration_path, declaration_content),
+            &consumer_path,
+            consumer_content,
+            update_loaded,
+        )
+        .await;
+        let lazy_hover = lazy
+            .get_hover(&consumer_path, hover_offset)
+            .await
+            .expect("lazy real-tsgo hover")
+            .expect("lazy real-tsgo QuickInfo");
+        lazy.shutdown().await.expect("shutdown lazy real tsgo");
+
+        assert_eq!(
+            lazy_hover.contents, eager_hover.contents,
+            "lazy activation must reproduce the exact QuickInfo of the eager file lifecycle"
+        );
+        assert!(
         lazy_hover.contents.contains("focus") && !lazy_hover.contents.contains("IdeCase"),
         "the direct carrier import must resolve the public projection, not the later IDE projection: {}",
         lazy_hover.contents
     );
+    }
 }
 
 #[tokio::test]

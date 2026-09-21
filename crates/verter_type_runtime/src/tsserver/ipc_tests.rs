@@ -1783,6 +1783,73 @@ async fn one_shot_background_admission_reports_preemption_before_first_frame() {
 /// diagnostics as one idle transaction. Paying the 150 ms quiet window per
 /// command adds fixed latency and creates three separate starvation points.
 #[tokio::test(start_paused = true)]
+async fn diagnostic_pull_requires_success_from_every_category_even_with_cached_content() {
+    for failed_category in [None, Some(0), Some(1), Some(2)] {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+        let transport = Arc::new(test_transport(stdin_tx));
+        let generation = AtomicU64::new(0);
+        let file = "/proj/src/control.ts".to_string();
+        let query = DiagnosticsQuery {
+            file: file.clone(),
+            diagnostic_file: file.clone(),
+            transport: Arc::clone(&transport),
+            contents_cache: Arc::new(Mutex::new(HashMap::from([(
+                file.clone(),
+                Arc::from("export {};"),
+            )]))),
+            carrier_companions: Default::default(),
+            normalize_response_paths: false,
+            active_sources: Default::default(),
+            carrier_refresh: Default::default(),
+            carrier_refresh_generation: &generation,
+            project_file_name: None,
+        };
+        let answer = async {
+            for round in 0..2 {
+                for (category, command) in [
+                    "semanticDiagnosticsSync",
+                    "syntacticDiagnosticsSync",
+                    "suggestionDiagnosticsSync",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let request = receive_tsserver_request(&mut stdin_rx).await;
+                    assert_eq!(request["command"], command);
+                    transport
+                    .pending
+                    .table
+                    .take(request["seq"].as_i64().unwrap())
+                    .unwrap()
+                    .send(serde_json::json!({
+                        "type": "response", "request_seq": request["seq"],
+                        "command": command, "success": round == 0 || failed_category != Some(category),
+                        "message": "diagnostics unavailable", "body": [],
+                    }))
+                    .unwrap();
+                }
+            }
+        };
+        let pull = async {
+            assert!(query.clone().execute().await.unwrap().is_empty());
+            query.execute().await
+        };
+        let (result, ()) = tokio::join!(pull, answer);
+        if failed_category.is_some() {
+            assert!(
+                result.is_err(),
+                "a failed category cannot certify a clean file: {failed_category:?} {result:?}"
+            );
+        } else {
+            assert!(
+                result.unwrap().is_empty(),
+                "three successful empty categories are clean"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn diagnostic_triplet_pays_one_background_idle_grace() {
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
     let transport = Arc::new(test_transport(stdin_tx));
@@ -4911,43 +4978,6 @@ async fn handle_message_does_not_cache_unversioned_diagnostic_events() {
         pending.project_loads_in_flight.load(Ordering::Relaxed),
         0,
         "an unversioned diagnostics event must remain a non-authoritative progress signal"
-    );
-}
-
-/// A last-good synchronous pull may mask a transient transport failure only for
-/// the exact local content generation that produced it. An edit or close/reopen
-/// must make the fallback miss instead of reviving stale diagnostics.
-///
-/// @ai-generated - Guards generation-fenced diagnostics fallback behavior.
-#[test]
-fn diagnostics_fallback_requires_the_exact_content_generation() {
-    let diagnostic = TypeDiagnostic {
-        message: "sentinel".to_string(),
-        severity: TypeDiagnosticSeverity::Error,
-        start: 0,
-        end: 1,
-        code: Some("2322".to_string()),
-        tags: Vec::new(),
-        related_information: Vec::new(),
-    };
-    let cached = CachedDiagnostics {
-        content_generation: 41,
-        diagnostics: vec![diagnostic.clone()],
-    };
-
-    let exact = cached_diagnostics_for_generation(Some(&cached), Some(41));
-    assert_eq!(exact.len(), 1);
-    assert_eq!(
-        exact[0].message, diagnostic.message,
-        "an exact-generation transient failure may preserve the last-good pull"
-    );
-    assert!(
-        cached_diagnostics_for_generation(Some(&cached), Some(42)).is_empty(),
-        "an edit must invalidate the last-good diagnostics fallback"
-    );
-    assert!(
-        cached_diagnostics_for_generation(Some(&cached), None).is_empty(),
-        "close must invalidate the last-good diagnostics fallback"
     );
 }
 

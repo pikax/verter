@@ -411,7 +411,15 @@ fn owned_over_duplex() -> (
         snapshot: SyncMutex::new(None),
     });
 
-    (TsgoOwnedProvider { lsp, api }, lsp_peer, api_peer)
+    (
+        TsgoOwnedProvider {
+            lsp,
+            api,
+            lsp_writes: Arc::default(),
+        },
+        lsp_peer,
+        api_peer,
+    )
 }
 
 /// The BACKGROUND load is local-only: `load_file` caches content for import
@@ -502,4 +510,192 @@ async fn open_file_still_delivers_the_editor_open_on_the_lsp_surface() {
         "the interactive open must still deliver the editor open: {methods:?}"
     );
     open.abort();
+}
+
+/// Read framed `--lsp` messages until `done` says stop, returning their methods
+/// (requests carry their `id` so a test can answer them).
+async fn read_lsp_frames(
+    peer: &mut tokio::io::DuplexStream,
+    framer: &mut verter_tsgo_api::jsonrpc::framing::MessageFramer,
+    mut done: impl FnMut(&[(String, Option<i64>)]) -> bool,
+) -> Vec<(String, Option<i64>)> {
+    let mut seen: Vec<(String, Option<i64>)> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !done(&seen) {
+        let n = tokio::time::timeout_at(deadline, peer.read(&mut chunk))
+            .await
+            .expect("the expected --lsp frames never arrived")
+            .expect("read from the --lsp peer");
+        assert_ne!(n, 0, "the --lsp transport closed early");
+        framer.push(&chunk[..n]);
+        while let Some(message) = framer.next_message().expect("decode message") {
+            if let Some(method) = message["method"].as_str() {
+                seen.push((method.to_string(), message["id"].as_i64()));
+            }
+        }
+    }
+    seen
+}
+
+/// An editor write costs the engine a document notification and NOTHING else.
+///
+/// The `--api` checker must not enumerate roots before the `--lsp` side has
+/// processed the writes it depends on, and that ordering used to be bought with a
+/// full `textDocument/diagnostic` pull after EVERY open and update — a semantic
+/// check of the file, about a second each against a real project. A restart that
+/// replays sixty editors, each with its companions, paid that hundreds of times
+/// before the first real answer. The barrier belongs to the `--api` query that
+/// needs it, once, not to every write.
+#[tokio::test]
+async fn editor_writes_never_pay_a_diagnostic_round_trip() {
+    let (provider, mut lsp_peer, _api_peer) = owned_over_duplex();
+    let paths = if cfg!(windows) {
+        ["D:/w/A.vue.tsx", "D:/w/B.vue.tsx"]
+    } else {
+        ["/w/A.vue.tsx", "/w/B.vue.tsx"]
+    };
+
+    // No peer answers anything here, so a write that waits on a response can
+    // never return.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        TypeProvider::open_file(&provider, paths[0], "export const a = 1;\n")
+            .await
+            .expect("open");
+        TypeProvider::open_file(&provider, paths[1], "export const b = 1;\n")
+            .await
+            .expect("open");
+        TypeProvider::update_file(&provider, paths[0], "export const a = 2;\n")
+            .await
+            .expect("update");
+    })
+    .await
+    .expect("an editor write must not block on an --lsp round trip");
+
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    let frames = read_lsp_frames(&mut lsp_peer, &mut framer, |seen| seen.len() >= 3).await;
+    let methods: Vec<&str> = frames.iter().map(|(method, _)| method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "textDocument/didOpen",
+            "textDocument/didOpen",
+            "textDocument/didChange"
+        ],
+        "only the document notifications reach the wire"
+    );
+}
+
+/// The ordering the barrier exists for is still bought — once, by the `--api`
+/// query that needs it: one request after any number of writes, and none at all
+/// when nothing was written since the last one.
+#[tokio::test]
+async fn the_api_side_settles_pending_writes_with_exactly_one_barrier() {
+    use tokio::io::AsyncWriteExt;
+
+    let (provider, mut lsp_peer, _api_peer) = owned_over_duplex();
+    let provider = Arc::new(provider);
+    let path = if cfg!(windows) {
+        "D:/w/A.vue.tsx"
+    } else {
+        "/w/A.vue.tsx"
+    };
+    TypeProvider::open_file(provider.as_ref(), path, "export const a = 1;\n")
+        .await
+        .expect("open");
+    TypeProvider::update_file(provider.as_ref(), path, "export const a = 2;\n")
+        .await
+        .expect("update");
+
+    let settling = {
+        let provider = Arc::clone(&provider);
+        tokio::spawn(async move { provider.settle_lsp_writes(path).await })
+    };
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    let frames = read_lsp_frames(&mut lsp_peer, &mut framer, |seen| {
+        seen.iter()
+            .any(|(method, _)| method == "textDocument/foldingRange")
+    })
+    .await;
+    let barriers: Vec<_> = frames
+        .iter()
+        .filter(|(method, _)| method == "textDocument/foldingRange")
+        .collect();
+    assert_eq!(
+        barriers.len(),
+        1,
+        "two writes are settled by ONE barrier: {frames:?}"
+    );
+    assert!(
+        !settling.is_finished(),
+        "the barrier is a real round trip: it holds until the engine answers"
+    );
+
+    let id = barriers[0].1.expect("a request carries an id");
+    let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":[]}}"#);
+    lsp_peer
+        .write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+        .await
+        .expect("answer the barrier");
+    tokio::time::timeout(Duration::from_secs(5), settling)
+        .await
+        .expect("an answered barrier settles")
+        .expect("settle task");
+
+    // Nothing was written since: the next query owes no barrier.
+    tokio::time::timeout(Duration::from_secs(2), provider.settle_lsp_writes(path))
+        .await
+        .expect("with no new writes there is nothing to wait for");
+    let quiet = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut chunk = [0u8; 1024];
+        lsp_peer.read(&mut chunk).await
+    })
+    .await;
+    assert!(
+        quiet.is_err(),
+        "no new write means no new frame on the --lsp transport"
+    );
+}
+
+/// TSGO has no disk watcher of its own; the forwarded event is the only way it
+/// learns that a file it does not hold open was created or deleted.
+#[tokio::test]
+async fn disk_changes_reach_the_engine_as_a_watched_files_notification() {
+    let (provider, mut lsp_peer, _api_peer) = owned_over_duplex();
+    let path = if cfg!(windows) {
+        "D:/w/helper.ts"
+    } else {
+        "/w/helper.ts"
+    };
+    TypeProvider::notify_watched_files_changed(
+        &provider,
+        &[crate::WatchedFileChange {
+            path: path.to_string(),
+            kind: crate::WatchedFileChangeKind::Deleted,
+        }],
+    )
+    .await
+    .expect("forward the disk change");
+
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    let mut chunk = [0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(5), lsp_peer.read(&mut chunk))
+        .await
+        .expect("the notification must reach the --lsp transport")
+        .expect("read");
+    framer.push(&chunk[..n]);
+    let message = framer
+        .next_message()
+        .expect("decode")
+        .expect("one complete frame");
+    assert_eq!(message["method"], "workspace/didChangeWatchedFiles");
+    assert!(message.get("id").is_none(), "a notification carries no id");
+    let change = &message["params"]["changes"][0];
+    assert_eq!(change["type"], 3, "LSP FileChangeType::Deleted");
+    assert!(
+        change["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.starts_with("file://") && uri.ends_with("/w/helper.ts")),
+        "the change names the file by URI: {change}"
+    );
 }

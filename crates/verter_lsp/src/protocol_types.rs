@@ -93,6 +93,21 @@ pub struct TypeProviderSyncCompleteParams {
     pub gen: u64,
 }
 
+/// Server → client notification: the on-disk carrier store changed.
+///
+/// An editor that runs its OWN TypeScript service over that store refreshes its
+/// view of it on this signal. It says nothing about readiness: it fires after
+/// every carrier publication, so it is deliberately NOT
+/// [`TypeProviderSyncComplete`] — a client (or a test gate) waiting for level 2
+/// of the readiness ladder must never be released by a store write.
+pub enum CarrierStoreChanged {}
+
+impl tower_lsp_server::ls_types::notification::Notification for CarrierStoreChanged {
+    /// Payload-free: the signal is the whole message.
+    type Params = ();
+    const METHOD: &'static str = "$/verter/carrierStoreChanged";
+}
+
 /// Server → client notification: MCP HTTP server is ready.
 /// Sent during `initialized()` with the actual bound port (may differ from requested
 /// when port 0 is used for OS-assigned dynamic ports).
@@ -371,6 +386,7 @@ pub struct StatisticsRequestParams {
 #[derive(Debug, Serialize)]
 pub struct StatisticsSnapshot {
     pub enabled: bool,
+    pub diagnostics: serde_json::Map<String, serde_json::Value>,
     pub session: StatisticsSession,
     /// Present only when `interactionTrace.enabled` was set at initialize.
     #[serde(rename = "interactionTrace", skip_serializing_if = "Option::is_none")]

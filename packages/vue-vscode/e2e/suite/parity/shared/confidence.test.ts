@@ -8,7 +8,7 @@
  * Absolute contracts only (TS + Verter product). No Volar / Svelte Official LS.
  */
 import * as vscode from "vscode";
-import { pollBudget } from "../../../lib/timeouts";
+import { pollBudget, SUITE_TIMEOUT_MS } from "../../../lib/timeouts";
 import { FIXTURE_NAME, sleep, waitForNoDiagnosticsMatching } from "../../../helpers";
 import {
   assertCleanErrors,
@@ -46,7 +46,7 @@ suite(`Confidence hardening [${FIXTURE_NAME}]`, function () {
     if (!fw) {
       throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     }
-    this.timeout(20_000);
+    this.timeout(SUITE_TIMEOUT_MS);
     await ensureParityReady(fw === "vue" ? "src/App.vue" : "src/App.svelte");
   });
 

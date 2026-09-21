@@ -9,6 +9,7 @@ import {
   hoverTextAt,
   assertTsExpectErrorFileHolds,
 } from "../../../lib/parityHarness";
+import { SUITE_TIMEOUT_MS } from "../../../lib/timeouts";
 
 function onlySvelteParity(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "svelte-parity")
@@ -17,7 +18,7 @@ function onlySvelteParity(ctx: Mocha.Context): void {
 
 suite(`Svelte public surface (negative) [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
-    this.timeout(20_000);
+    this.timeout(SUITE_TIMEOUT_MS);
     onlySvelteParity(this);
     await ensureParityReady("src/App.svelte");
   });
