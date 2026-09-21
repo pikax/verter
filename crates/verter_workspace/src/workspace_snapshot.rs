@@ -383,7 +383,39 @@ impl WorkspaceSnapshot {
     /// managed-tsgo, and shared-tsgo carrier routes all consume identically.
     pub fn default_configured_owner_for_file(&self, canonical_id: &str) -> Option<ProjectId> {
         let path = CanonicalPath::new(canonical_id);
+        // The default-configured-owner walk models tsgo's program-file
+        // membership: a NON-EMPTY materialized set is authoritative, so a file
+        // no configured program contains yields `None` rather than an owner
+        // invented from a broad include glob. General spec-based ownership
+        // stays in `membership.contains` (used by `owners_for_file`).
+        self.default_configured_owner_by(&path, |membership| membership.directly_includes(&path))
+    }
 
+    /// The single DEFAULT configured owner of an OFF-DISK generated unit — the
+    /// SAME tsgo-faithful walk as [`Self::default_configured_owner_for_file`],
+    /// with the claimant predicate a generated unit needs.
+    ///
+    /// A generated unit never exists on disk, so it can never appear in a
+    /// walk-time `materialized_files` program set; asking
+    /// `directly_includes` about it would report "no claimant" for every
+    /// project with a materialized set. Its claimants are instead the configured
+    /// projects whose compiled `files`/`include`/`exclude` spec WOULD root it the
+    /// moment an engine is handed the unit ([`ConfiguredMembership::contains`]).
+    /// Everything after claimant collection — the nearest-solution reference BFS
+    /// in declared order, the ancestor climb, the name-least fallback — is shared.
+    pub fn default_configured_owner_for_generated_unit(
+        &self,
+        unit: &CanonicalPath,
+    ) -> Option<ProjectId> {
+        self.default_configured_owner_by(unit, |membership| membership.contains(unit))
+    }
+
+    /// The default-configured-owner walk over an explicit claimant predicate.
+    fn default_configured_owner_by(
+        &self,
+        path: &CanonicalPath,
+        claims: impl Fn(&ConfiguredMembership) -> bool,
+    ) -> Option<ProjectId> {
         // Claimants = configured projects that DIRECTLY include the file, walked
         // in the pre-sorted `projects` precedence order (an ordered Vec, never a
         // set).
@@ -391,15 +423,7 @@ impl WorkspaceSnapshot {
             .projects
             .iter()
             .filter(|project| match &project.payload {
-                // The default-configured-owner walk models tsgo's
-                // program-file membership: a NON-EMPTY materialized set is
-                // authoritative, so a file no configured program contains
-                // yields `None` rather than an owner invented from a broad
-                // include glob. General spec-based ownership stays in
-                // `membership.contains` (used by `owners_for_file`).
-                ProjectPayload::Configured { membership, .. } => {
-                    membership.directly_includes(&path)
-                }
+                ProjectPayload::Configured { membership, .. } => claims(membership),
                 ProjectPayload::Fallback { .. } => false,
             })
             .map(|project| project.id)
@@ -414,7 +438,7 @@ impl WorkspaceSnapshot {
             _ => {}
         }
 
-        if let Some(winner) = self.find_default_configured_project(&path, &claimants) {
+        if let Some(winner) = self.find_default_configured_project(path, &claimants) {
             return Some(winner);
         }
 

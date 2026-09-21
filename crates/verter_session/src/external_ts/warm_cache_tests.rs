@@ -16,6 +16,12 @@ use crate::external_ts::mode::{
 };
 use crate::file_artifact_store::ProjectIdentity;
 
+/// The generated-unit admission every key in these tests is proven under, unless a
+/// test varies it.
+const ADMITTED_RAW: u64 = 1;
+static ADMITTED: std::sync::LazyLock<[GeneratedUnitAdmissionFingerprint; 1]> =
+    std::sync::LazyLock::new(|| [GeneratedUnitAdmissionFingerprint::from_raw(ADMITTED_RAW)]);
+
 fn pid(b: u8) -> ProjectIdentity {
     ProjectIdentity([b; 16])
 }
@@ -81,7 +87,7 @@ fn reconnect_generation_bump_makes_prior_entry_unreachable() {
     let mut cache = EngineWarmCache::new();
 
     let v1 = shared_single(a, 3);
-    let key_v1 = WarmCacheKey::for_decision(&v1, "c:/repo/a/tsconfig.json", 1, a);
+    let key_v1 = WarmCacheKey::for_decision(&v1, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     cache.insert_shared(key_v1.clone(), v1.clone()).unwrap();
     assert!(cache.get(&key_v1).is_some(), "the fresh entry is reachable");
 
@@ -92,7 +98,7 @@ fn reconnect_generation_bump_makes_prior_entry_unreachable() {
         v1.engine(),
         "a reconnect mints a fresh engine identity"
     );
-    let key_v2 = WarmCacheKey::for_decision(&v2, "c:/repo/a/tsconfig.json", 1, a);
+    let key_v2 = WarmCacheKey::for_decision(&v2, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     assert_ne!(
         key_v1, key_v2,
         "the reconnect key differs from the prior key"
@@ -113,8 +119,8 @@ fn reconnect_supersession_purges_only_older_generations() {
 
     let old = shared_single(a, 3);
     let new = shared_single(a, 4);
-    let key_old = WarmCacheKey::for_decision(&old, "c:/repo/a/tsconfig.json", 1, a);
-    let key_new = WarmCacheKey::for_decision(&new, "c:/repo/a/tsconfig.json", 1, a);
+    let key_old = WarmCacheKey::for_decision(&old, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
+    let key_new = WarmCacheKey::for_decision(&new, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     cache.insert_shared(key_old.clone(), old).unwrap();
     cache.insert_shared(key_new.clone(), new).unwrap();
     assert_eq!(cache.len(), 2);
@@ -140,8 +146,10 @@ fn warm_key_is_entry_independent_across_component_members() {
     let from_b = select_component_mode(&g, &b, &candidates(3));
     assert_eq!(from_a.mode(), ServeMode::Shared);
 
-    let key_from_a = WarmCacheKey::for_decision(&from_a, "c:/repo/a/tsconfig.json", 1, a);
-    let key_from_b = WarmCacheKey::for_decision(&from_b, "c:/repo/a/tsconfig.json", 1, a);
+    let key_from_a =
+        WarmCacheKey::for_decision(&from_a, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
+    let key_from_b =
+        WarmCacheKey::for_decision(&from_b, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     assert_eq!(
         key_from_a, key_from_b,
         "either component member keys the same warm slot"
@@ -165,7 +173,8 @@ fn warm_key_is_entry_independent_across_component_members() {
 fn each_key_dimension_change_is_a_miss() {
     let a = pid(1);
     let base_decision = shared_single(a, 3);
-    let base_key = WarmCacheKey::for_decision(&base_decision, "c:/repo/a/tsconfig.json", 1, a);
+    let base_key =
+        WarmCacheKey::for_decision(&base_decision, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
 
     let mut cache = EngineWarmCache::new();
     cache
@@ -175,16 +184,22 @@ fn each_key_dimension_change_is_a_miss() {
 
     // Different component representative (a different project entirely).
     let other = shared_single(pid(2), 3);
-    let k = WarmCacheKey::for_decision(&other, "c:/repo/a/tsconfig.json", 1, a);
+    let k = WarmCacheKey::for_decision(&other, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     assert!(cache.get(&k).is_none(), "different component root misses");
 
     // Different canonical tsconfig path.
-    let k = WarmCacheKey::for_decision(&base_decision, "c:/repo/other/tsconfig.json", 1, a);
+    let k = WarmCacheKey::for_decision(
+        &base_decision,
+        "c:/repo/other/tsconfig.json",
+        1,
+        a,
+        &*ADMITTED,
+    );
     assert_ne!(k, base_key);
     assert!(cache.get(&k).is_none(), "different tsconfig path misses");
 
     // Different config generation.
-    let k = WarmCacheKey::for_decision(&base_decision, "c:/repo/a/tsconfig.json", 2, a);
+    let k = WarmCacheKey::for_decision(&base_decision, "c:/repo/a/tsconfig.json", 2, a, &*ADMITTED);
     assert_ne!(k, base_key);
     assert!(
         cache.get(&k).is_none(),
@@ -192,13 +207,35 @@ fn each_key_dimension_change_is_a_miss() {
     );
 
     // Different editor-binding witness.
-    let k = WarmCacheKey::for_decision(&base_decision, "c:/repo/a/tsconfig.json", 1, pid(9));
+    let k = WarmCacheKey::for_decision(
+        &base_decision,
+        "c:/repo/a/tsconfig.json",
+        1,
+        pid(9),
+        &*ADMITTED,
+    );
     assert_ne!(k, base_key);
     assert!(cache.get(&k).is_none(), "different editor binding misses");
 
+    // Different generated-unit admission (a changed include / unit set / owner).
+    let k = WarmCacheKey::for_decision(
+        &base_decision,
+        "c:/repo/a/tsconfig.json",
+        1,
+        a,
+        &[GeneratedUnitAdmissionFingerprint::from_raw(
+            ADMITTED_RAW + 1,
+        )],
+    );
+    assert_ne!(k, base_key);
+    assert!(
+        cache.get(&k).is_none(),
+        "different generated-unit admission misses"
+    );
+
     // Different reconnect generation (fresh EngineIdentity).
     let regen = shared_single(a, 4);
-    let k = WarmCacheKey::for_decision(&regen, "c:/repo/a/tsconfig.json", 1, a);
+    let k = WarmCacheKey::for_decision(&regen, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     assert_ne!(k, base_key);
     assert!(
         cache.get(&k).is_none(),
@@ -209,7 +246,7 @@ fn each_key_dimension_change_is_a_miss() {
     // mode axis of the engine identity separates the keys, so an OWNED lookup
     // never hits the SHARED entry.
     let owned = owned_decision(a);
-    let k = WarmCacheKey::for_decision(&owned, "c:/repo/a/tsconfig.json", 1, a);
+    let k = WarmCacheKey::for_decision(&owned, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     assert_ne!(
         k, base_key,
         "OWNED and SHARED keys are never equal (mode-keyed)"
@@ -231,7 +268,7 @@ fn owned_decision_is_refused_and_never_collides() {
 
     let owned = owned_decision(a);
     assert_eq!(owned.mode(), ServeMode::Owned);
-    let owned_key = WarmCacheKey::for_decision(&owned, "c:/repo/a/tsconfig.json", 1, a);
+    let owned_key = WarmCacheKey::for_decision(&owned, "c:/repo/a/tsconfig.json", 1, a, &*ADMITTED);
     assert_eq!(
         cache.insert_shared(owned_key, owned),
         Err(WarmAdmissionError::NotShared),
@@ -326,7 +363,19 @@ fn seeded_two_components(a: ProjectIdentity, b: ProjectIdentity) -> EngineWarmCa
 }
 
 fn seeded_keys(a: ProjectIdentity, b: ProjectIdentity) -> (WarmCacheKey, WarmCacheKey) {
-    let key_a = WarmCacheKey::for_decision(&shared_single(a, 3), "c:/repo/a/tsconfig.json", 1, a);
-    let key_b = WarmCacheKey::for_decision(&shared_single(b, 3), "c:/repo/b/tsconfig.json", 1, b);
+    let key_a = WarmCacheKey::for_decision(
+        &shared_single(a, 3),
+        "c:/repo/a/tsconfig.json",
+        1,
+        a,
+        &*ADMITTED,
+    );
+    let key_b = WarmCacheKey::for_decision(
+        &shared_single(b, 3),
+        "c:/repo/b/tsconfig.json",
+        1,
+        b,
+        &*ADMITTED,
+    );
     (key_a, key_b)
 }

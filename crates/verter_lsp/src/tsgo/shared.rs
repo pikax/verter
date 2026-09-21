@@ -16,7 +16,7 @@
 //!   (`updateSnapshot`, `getSemanticDiagnostics`) — the shim stays dumb.
 //! - the live session DECISION layer ([`verter_session::external_ts`]): SHARED is
 //!   served ONLY when the queried component's decision is
-//!   [`ServeMode::Shared`] — composed from five provenance-typed eligibility facts
+//!   [`ServeMode::Shared`] — composed from the provenance-typed eligibility facts
 //!   (version gate, attach liveness, project binding, proxy availability, editor
 //!   binding). Incomplete or partial evidence yields OWNED (fail-open is
 //!   forbidden); OWNED is the universal baseline the caller falls back to.
@@ -55,9 +55,9 @@ use verter_tsgo_api::transport::pipe_attach::connect_attach_pipe;
 use verter_session::external_ts::{
     compose_eligibility, decide_live, AttachFact, BindingFact, CarrierOwnershipResolution,
     ComponentModeDecision, ConfigPathProbe, EditorBindingFact, EligibilityFacts,
-    EngineSessionCandidates, EngineSessionFacts, EngineWarmCache, LiveDecision,
-    LiveDecisionRequest, LiveProjectInput, OwnedSessionFacts, ProjectIdentitySource, ProxyFact,
-    ReferenceInput, ServeMode, SharedSessionFacts, VersionGateFact,
+    EngineSessionCandidates, EngineSessionFacts, EngineWarmCache, GeneratedUnitAdmissionFact,
+    LiveDecision, LiveDecisionRequest, LiveProjectInput, OwnedSessionFacts, ProjectIdentitySource,
+    ProxyFact, ReferenceInput, ServeMode, SharedSessionFacts, VersionGateFact,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 
@@ -132,6 +132,10 @@ pub struct EstablishSharedParams<'a> {
     /// real [`CarrierOwnershipResolution::Bound`] is the ONLY value that yields a
     /// [`BindingFact::Bound`]; every other state fails closed to OWNED.
     pub resolution: CarrierOwnershipResolution,
+    /// Whether the generated units this serve would write are admitted to the bound
+    /// configured project. Owning the carrier SOURCE is not that proof; anything but
+    /// `Admitted` fails closed to OWNED before an overlay is written.
+    pub generated_units: GeneratedUnitAdmissionFact,
     /// The published snapshot / config generation the binding was resolved at — the
     /// warm-key `config_generation` dimension for the establishment decision, so a
     /// same-generation first per-query re-decision reuses the establishment's warm entry
@@ -178,7 +182,7 @@ fn stable_project_identity(canonical: &str) -> ProjectIdentity {
     ProjectIdentity(bytes)
 }
 
-/// Compose the five provenance-typed eligibility facts and decide the ONE serve
+/// Compose the provenance-typed eligibility facts and decide the ONE serve
 /// mode for the queried carrier's redirect-ON reference-connected component
 /// through the shared live decision layer.
 ///
@@ -205,6 +209,7 @@ pub fn decide_shared_serve(
     version_gate: VersionGateFact,
     attach: AttachFact,
     binding: BindingFact,
+    generated_units: GeneratedUnitAdmissionFact,
     proxy: ProxyFact,
     editor_binding: EditorBindingFact,
     node_identity: ProjectIdentity,
@@ -227,6 +232,7 @@ pub fn decide_shared_serve(
         version_gate,
         attach,
         binding,
+        generated_units,
         proxy,
         editor_binding,
     };
@@ -330,6 +336,7 @@ impl SharedModeController {
     pub fn decide(
         &self,
         binding_fact: BindingFact,
+        generated_units: GeneratedUnitAdmissionFact,
         node_identity: ProjectIdentity,
         canonical_tsconfig: Arc<str>,
         references: &[ReferenceInput],
@@ -349,6 +356,7 @@ impl SharedModeController {
             self.version_gate.clone(),
             self.attach.clone(),
             binding_fact,
+            generated_units,
             self.proxy,
             editor_binding,
             node_identity,
@@ -440,7 +448,7 @@ impl TsgoSharedProvider {
     /// The full non-owning handshake: discover the shim advertisement under
     /// `params.session_key`, verify the nonce + editor binding on `hello`, take the
     /// in-band `serverInfo.version` witness on `waitInitialized` and gate it, mint
-    /// the `--api` session and connect its pipe DIRECTLY, then compose the five
+    /// the `--api` session and connect its pipe DIRECTLY, then compose the
     /// eligibility facts from the live evidence + the resolved binding and decide
     /// the serve mode. Only a SHARED decision yields a provider; any missing
     /// positive fact (or a non-SHARED decision) returns [`EstablishError`] and the
@@ -577,6 +585,7 @@ impl TsgoSharedProvider {
                 version_gate.clone(),
                 attach.clone(),
                 binding_fact,
+                params.generated_units,
                 proxy,
                 editor_binding_fact,
                 node_identity,
@@ -689,11 +698,13 @@ impl TsgoSharedProvider {
     pub fn redecide_for_binding(
         &self,
         binding: &verter_session::external_ts::ProjectBinding,
+        generated_units: GeneratedUnitAdmissionFact,
         generation: u64,
     ) -> LiveDecision {
         let references = redirect_on_references(binding);
         self.controller.decide(
             BindingFact::from_resolution(&CarrierOwnershipResolution::Bound(binding.clone())),
+            generated_units,
             binding.env_dims().project_identity,
             Arc::from(binding.tsconfig_uri()),
             &references,

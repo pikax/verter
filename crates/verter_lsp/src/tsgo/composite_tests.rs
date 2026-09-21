@@ -286,14 +286,17 @@ const SHADOW_TSCONFIG: &str = "d:/ws/tsconfig.json";
 /// glob-pattern-based (empty `materialized_files` ⇒ bridge mode ⇒ `spec.matches`), so it
 /// owns any `src/**/*.vue` / `.svelte` / `.ts` path whether or not a file sits there.
 fn shadow_fixture_snapshot() -> WorkspaceSnapshot {
+    fixture_snapshot(r#"{ "include": ["src/**/*"] }"#)
+}
+
+/// [`shadow_fixture_snapshot`] over an arbitrary `tsconfig.json` body — the membership
+/// shape under test.
+fn fixture_snapshot(tsconfig_body: &str) -> WorkspaceSnapshot {
     let ws = MemoryWorkspace::new(MemoryOptions {
         roots: vec![SHADOW_WS_ROOT.to_string()],
         default_resolve_extensions: None,
     });
-    ws.inject_file(
-        SHADOW_TSCONFIG.to_string(),
-        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
-    );
+    ws.inject_file(SHADOW_TSCONFIG.to_string(), Arc::<str>::from(tsconfig_body));
     let root = CanonicalPath::new(SHADOW_WS_ROOT);
     let raw_membership = load_project_membership(&ws, SHADOW_TSCONFIG);
     let compiler_options = load_compiler_options(&ws, SHADOW_TSCONFIG);
@@ -325,23 +328,31 @@ fn shadow_fixture_snapshot() -> WorkspaceSnapshot {
 /// same workspace `Arc` the host holds, so the resolver's `file_exists` probe and the
 /// disk-occupancy gate both see them) and whose published snapshot owns `src/**/*`.
 fn shadow_overlay_with(real_files: &[(&str, &str)]) -> SharedTsgoOverlay {
+    overlay_over(real_files, shadow_fixture_snapshot()).0
+}
+
+/// [`shadow_overlay_with`] over an arbitrary published `snapshot`, also handing back the
+/// workspace so a test can publish a LATER snapshot into the same host.
+fn overlay_over(
+    real_files: &[(&str, &str)],
+    snapshot: WorkspaceSnapshot,
+) -> (SharedTsgoOverlay, Arc<FilesystemWorkspace>) {
     let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
     for (path, content) in real_files {
         ws.inject_file((*path).to_string(), Arc::<str>::from(*content));
     }
-    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
-        shadow_fixture_snapshot(),
-    )));
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snapshot)));
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
-    SharedTsgoOverlay::new(
+    let overlay = SharedTsgoOverlay::new(
         host,
         SharedRendezvous {
             control_dir: PathBuf::from("d:/ws/.verter"),
             session_key: "shadow-test".to_string(),
             workspace_root: SHADOW_WS_ROOT.to_string(),
         },
-    )
+    );
+    (overlay, ws)
 }
 
 /// G1 (`carrier_never_shadows_real_user_file`): the SHARED overlay must NEVER inject a
@@ -429,6 +440,238 @@ async fn engage_transport_failure_preserves_source_project_and_generation() {
     assert!(rendered.contains("TransportUnavailable"));
     assert!(rendered.contains(source));
     assert!(rendered.contains(SHADOW_TSCONFIG));
+}
+
+// ── Generated-unit admission at the SHARED write boundary ──
+//
+// A configured project can OWN a carrier source while admitting none of the units
+// generated for it. These tests drive the PRODUCTION admission gate and the PRODUCTION
+// sweep (`inject_editor_demand`) over a real host + published snapshot, with a recording
+// transport double standing in for the editor's engine, and assert on what reached it.
+
+/// The measured shape: every include is extension-specific, so `Foo.vue` is owned and
+/// neither `Foo.vue.tsx` nor `Foo.vue.jsx` is a member.
+const EXTENSION_SPECIFIC_TSCONFIG: &str =
+    r#"{ "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.vue", "src/**/*.d.ts"] }"#;
+
+/// A transport double that records every operation that reached it.
+struct RecordingTransport {
+    ops: parking_lot::Mutex<Vec<String>>,
+}
+
+impl RecordingTransport {
+    fn ops(&self) -> Vec<String> {
+        let mut ops = self.ops.lock().clone();
+        ops.sort();
+        ops
+    }
+}
+
+impl OverlayTransport for RecordingTransport {
+    fn inject(&self, path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+        self.ops.lock().push(format!("write:{path}"));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn retract(&self, path: &str) -> ProviderFuture<'_, ()> {
+        self.ops.lock().push(format!("retract:{path}"));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn is_live(&self) -> bool {
+        true
+    }
+
+    fn teardown(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn establish_recording_transport(
+    core: &LazyOverlayCore<RecordingTransport>,
+) -> crate::tsgo::transport_cell::EstablishedTransport<RecordingTransport> {
+    core.ensure(
+        Some(((), 1)),
+        |_| Some("recording".to_string()),
+        |(), _| async {
+            Some(Arc::new(RecordingTransport {
+                ops: parking_lot::Mutex::new(Vec::new()),
+            }))
+        },
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("establish recording transport")
+}
+
+/// A carrier whose project OWNS the source but does not admit its generated units is
+/// refused with the typed reason BEFORE the transport is established — so nothing can
+/// have been written — and the refusal is reported once per (carrier, generation).
+#[tokio::test]
+async fn unadmitted_carrier_is_refused_before_the_transport_is_touched() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, _ws) = overlay_over(
+        &[(source, "<template></template>")],
+        fixture_snapshot(EXTENSION_SPECIFIC_TSCONFIG),
+    );
+    overlay.record_content(companion, "export {}", OverlayPriority::Interactive);
+    overlay.record_content(
+        "d:/ws/src/Foo.vue.verter.ts",
+        "export {}",
+        OverlayPriority::Interactive,
+    );
+    let carrier = crate::tsgo::project_binding::resolve_carrier_bound(&overlay.inner.host, source)
+        .into_bound()
+        .expect("the extension-specific include OWNS the carrier source");
+
+    let failure = match overlay.engage_provider(companion, &carrier).await {
+        Ok(_) => panic!("an unadmitted carrier cannot engage SHARED"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.kind,
+        SharedEngageFailureKind::GeneratedUnitsNotAdmitted {
+            reason: verter_workspace::GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            // Only the offender: the `.verter.ts` sibling IS matched by `src/**/*.ts`.
+            units: vec![companion.to_string()],
+        }
+    );
+    assert_eq!(failure.transport_epoch, None, "no transport was reached");
+    assert!(
+        overlay.inner.core.current().await.is_none(),
+        "the refusal precedes establishment: no transport exists to have been written to"
+    );
+
+    let generation = overlay.sweep_generation();
+    assert!(
+        !overlay.first_refusal_report(source, generation),
+        "the engage already reported this carrier at this generation"
+    );
+}
+
+/// A carrier with no recorded generated unit has no write set to prove admitted.
+#[tokio::test]
+async fn carrier_without_a_recorded_write_set_is_refused_as_unproven() {
+    let source = "d:/ws/src/Foo.vue";
+    let (overlay, _ws) = overlay_over(
+        &[(source, "<template></template>")],
+        fixture_snapshot(r#"{ "include": ["src"] }"#),
+    );
+    let carrier = crate::tsgo::project_binding::resolve_carrier_bound(&overlay.inner.host, source)
+        .into_bound()
+        .expect("the directory include owns the carrier");
+    let failure = match overlay
+        .engage_provider("d:/ws/src/Foo.vue.tsx", &carrier)
+        .await
+    {
+        Ok(_) => panic!("nothing is recorded for the carrier"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.kind,
+        SharedEngageFailureKind::GeneratedUnitAdmissionUnproven
+    );
+    assert!(overlay.inner.core.current().await.is_none());
+}
+
+/// ONE sweep, three carriers, all recorded on an editor lane (in scope). Only the carrier
+/// whose WHOLE generated family is admitted reaches the transport:
+///
+/// - `admitted/Ok.vue` — `.vue.tsx` matched by the `admitted/**/*.tsx` include ⇒ written;
+/// - `Neighbour.vue` — owned, in scope, its `.vue.tsx` matched by nothing ⇒ NOT written,
+///   and neither is its `.verter.ts` sibling even though `src/**/*.ts` matches that one
+///   (admission is all-or-nothing per carrier);
+/// - `outside/Stray.vue` — no owning configured project at all ⇒ NOT written.
+#[tokio::test]
+async fn sweep_writes_only_carriers_whose_generated_units_are_admitted() {
+    let (overlay, _ws) = overlay_over(
+        &[
+            ("d:/ws/src/admitted/Ok.vue", "<template></template>"),
+            ("d:/ws/src/Neighbour.vue", "<template></template>"),
+            ("d:/ws/outside/Stray.vue", "<template></template>"),
+        ],
+        fixture_snapshot(
+            r#"{ "include": ["src/**/*.ts", "src/**/*.vue", "src/admitted/**/*.tsx"] }"#,
+        ),
+    );
+    let core = LazyOverlayCore::<RecordingTransport>::new();
+    for unit in [
+        "d:/ws/src/admitted/Ok.vue.tsx",
+        "d:/ws/src/admitted/Ok.vue.verter.ts",
+        "d:/ws/src/Neighbour.vue.tsx",
+        "d:/ws/src/Neighbour.vue.verter.ts",
+        "d:/ws/outside/Stray.vue.tsx",
+    ] {
+        core.record_content_at_priority(unit, "export {}", OverlayPriority::Normal);
+    }
+    let established = establish_recording_transport(&core).await;
+
+    overlay
+        .inject_editor_demand(
+            &core,
+            &established,
+            "d:/ws/src/admitted/Ok.vue.tsx",
+            overlay.sweep_generation(),
+        )
+        .await;
+
+    assert_eq!(
+        established.transport.ops(),
+        vec![
+            "write:d:/ws/src/admitted/Ok.vue.tsx".to_string(),
+            "write:d:/ws/src/admitted/Ok.vue.verter.ts".to_string(),
+        ],
+        "only the admitted carrier's family reaches the editor-owned engine"
+    );
+}
+
+/// Admission follows the published membership. Narrowing `include` (a new publication)
+/// re-decides: the units a previous sweep wrote are RETRACTED and nothing is written;
+/// widening it again writes them back. A decision is never carried across a publication.
+#[tokio::test]
+async fn a_new_publication_re_evaluates_generated_unit_admission() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, ws) = overlay_over(
+        &[(source, "<template></template>")],
+        fixture_snapshot(r#"{ "include": ["src"] }"#),
+    );
+    let core = LazyOverlayCore::<RecordingTransport>::new();
+    core.record_content(companion, "export {}");
+    let established = establish_recording_transport(&core).await;
+    let sweep = || async {
+        overlay
+            .inject_editor_demand(&core, &established, companion, overlay.sweep_generation())
+            .await;
+        let ops = established.transport.ops();
+        established.transport.ops.lock().clear();
+        ops
+    };
+
+    assert_eq!(sweep().await, vec![format!("write:{companion}")]);
+
+    // Narrow the membership: the project still OWNS `Foo.vue`, no longer its companion.
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        EXTENSION_SPECIFIC_TSCONFIG,
+    ))));
+    assert_eq!(
+        sweep().await,
+        vec![format!("retract:{companion}")],
+        "the unit written under the earlier membership leaves the editor-owned engine"
+    );
+    assert!(
+        !core
+            .sync_state_for_epoch(companion, established.identity.epoch)
+            .is_synced(),
+        "an unadmitted unit is never reported synced"
+    );
+
+    // Widen it again.
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        r#"{ "include": ["src"] }"#,
+    ))));
+    assert_eq!(sweep().await, vec![format!("write:{companion}")]);
 }
 
 /// Selection retains epoch A until the feature call boundary. If reconnect B lands

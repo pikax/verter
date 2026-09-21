@@ -82,6 +82,7 @@ pub mod exact_resolution;
 pub mod fact_cache;
 pub mod fact_read_set;
 pub mod filesystem;
+pub mod generated_unit_admission;
 pub mod intrinsic_library;
 pub mod membership;
 pub mod memory;
@@ -170,6 +171,10 @@ pub use fact_read_set::{
 };
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 #[cfg(not(target_arch = "wasm32"))]
+pub use generated_unit_admission::{
+    decide_generated_unit_admission, AdmittedGeneratedUnits, GeneratedUnitAdmission,
+    GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmission, GeneratedUnitNonAdmissionReason,
+};
 pub use intrinsic_library::NativeIntrinsicLibrary;
 pub use intrinsic_library::{InMemoryIntrinsicLibrary, IntrinsicLibraryAccess};
 pub use membership::{

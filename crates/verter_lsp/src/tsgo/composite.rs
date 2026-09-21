@@ -35,12 +35,16 @@ use std::time::Duration;
 
 use verter_semantic::resolver_core::normalize_canonical_id;
 use verter_session::external_ts::{
-    AmbiguityCause, CarrierOwnershipResolution, ProjectBinding, ServeMode,
+    AmbiguityCause, CarrierOwnershipResolution, GeneratedUnitAdmissionFact, ProjectBinding,
+    ServeMode,
 };
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
 use verter_workspace::traits::WorkspaceRead;
 use verter_workspace::workspace_snapshot::ProjectPayload;
+use verter_workspace::{
+    AdmittedGeneratedUnits, CanonicalPath, GeneratedUnitAdmission, GeneratedUnitNonAdmissionReason,
+};
 
 use verter_tsgo_api::control::Advertisement;
 use verter_type_runtime::protocol::{
@@ -51,9 +55,9 @@ use verter_type_runtime::protocol::{
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
 use crate::tsgo::overlay_core::{
-    LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport,
+    GeneratedUnitWritePermit, LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport,
 };
-use crate::tsgo::project_binding::{self, BoundCarrier, CarrierAdmissionCache};
+use crate::tsgo::project_binding::{self, AdmissionEpoch, BoundCarrier, CarrierAdmissionCache};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
 use crate::tsgo::transport_cell::{EstablishedTransport, TransportEpoch};
 
@@ -133,11 +137,38 @@ pub(crate) struct SharedEngageFailure {
 /// collapse and retain diagnostic-operation refusals at the same observable boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SharedEngageFailureKind {
+    /// The configured project that owns the carrier SOURCE does not admit the generated
+    /// units this serve would write (`units` are the offenders, sorted). Decided BEFORE
+    /// the transport is touched: nothing was written.
+    GeneratedUnitsNotAdmitted {
+        reason: GeneratedUnitNonAdmissionReason,
+        units: Vec<String>,
+    },
+    /// No generated unit is recorded for the carrier, so there is no write set to prove
+    /// admitted. Decided BEFORE the transport is touched: nothing was written.
+    GeneratedUnitAdmissionUnproven,
     TransportUnavailable,
     QueriedCarrierNotSynced,
-    LiveDecisionNotShared { reason: String },
+    LiveDecisionNotShared {
+        reason: String,
+    },
     ProjectDiagnosticsUnavailable,
-    ProjectDiagnosticsFailed { error: String },
+    ProjectDiagnosticsFailed {
+        error: String,
+    },
+}
+
+impl SharedEngageFailureKind {
+    /// Whether this refusal is the generated-unit admission gate. That answer holds for
+    /// every request until the membership or the write set changes, so it is reported
+    /// once per (carrier, generation) by the gate itself — a caller does not repeat it
+    /// per request.
+    pub(crate) fn is_generated_unit_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::GeneratedUnitsNotAdmitted { .. } | Self::GeneratedUnitAdmissionUnproven
+        )
+    }
 }
 
 impl std::fmt::Display for SharedEngageFailure {
@@ -296,7 +327,25 @@ struct OverlayInner {
     /// ownership is the expensive half; the generation is what any change of answer
     /// advances, so an older generation's entries are dropped wholesale.
     source_shadow_safety: parking_lot::Mutex<(u64, std::collections::HashMap<String, bool>)>,
+    /// The epoch-scoped owning-project resolution for every carrier a sweep considers —
+    /// the queried carrier's neighbours included. The same memo of the ONE shared
+    /// resolver the feature gate uses; never a second binding engine.
+    admission: CarrierAdmissionCache,
+    /// The monotonic sweep generation: it advances whenever the host's admission epoch
+    /// (the published root by identity, the content generation, the project generation)
+    /// differs from the last one observed. Every per-unit write decision the overlay core
+    /// caches is keyed on it, so a changed `include`/`files`/`exclude`, a changed owner,
+    /// or a changed file set re-decides every unit.
+    sweep_generation: parking_lot::Mutex<(Option<AdmissionEpoch>, u64)>,
+    /// Per carrier SOURCE, the generated-unit admission proof decided for ONE sweep
+    /// generation (`None`: no bound project, or the write set is not admitted).
+    admitted_units: parking_lot::Mutex<(u64, AdmittedUnitsBySource)>,
+    /// The carriers whose admission refusal was already reported at ONE sweep generation.
+    reported_refusals: parking_lot::Mutex<(u64, std::collections::HashSet<String>)>,
 }
+
+/// Carrier source → its generated-unit admission proof, if any.
+type AdmittedUnitsBySource = std::collections::HashMap<String, Option<Arc<AdmittedGeneratedUnits>>>;
 
 impl SharedTsgoOverlay {
     /// Build the overlay over the host and the rendezvous evidence. The transport is
@@ -311,6 +360,10 @@ impl SharedTsgoOverlay {
                 rendezvous,
                 core: LazyOverlayCore::new(),
                 source_shadow_safety: parking_lot::Mutex::default(),
+                admission: CarrierAdmissionCache::new(),
+                sweep_generation: parking_lot::Mutex::default(),
+                admitted_units: parking_lot::Mutex::default(),
+                reported_refusals: parking_lot::Mutex::default(),
             }),
         }
     }
@@ -374,6 +427,57 @@ impl SharedTsgoOverlay {
             transport_epoch,
             sync_state,
         };
+        // FIRST, before the transport is established or a single overlay is written:
+        // prove that EVERY generated unit this serve would write is admitted to the
+        // carrier's owning configured project. Owning the carrier source is not that
+        // proof — `src/**/*.vue` owns `Foo.vue` and admits no `Foo.vue.tsx` — and an
+        // unadmitted unit written into the editor's engine lands in an inferred project.
+        // A missing proof selects the managed route here, with its reason, rather than
+        // after a SHARED attempt that already wrote.
+        let sweep_generation = self.sweep_generation();
+        let generated_units = self.queried_generated_unit_admission(
+            &self.inner.core,
+            carrier,
+            &source,
+            sweep_generation,
+        );
+        let admission_refusal = match &generated_units {
+            None => Some(SharedEngageFailureKind::GeneratedUnitAdmissionUnproven),
+            Some(GeneratedUnitAdmission::NotAdmitted(not_admitted)) => {
+                Some(SharedEngageFailureKind::GeneratedUnitsNotAdmitted {
+                    reason: not_admitted.reason(),
+                    units: not_admitted
+                        .offending()
+                        .iter()
+                        .map(|(unit, _)| unit.as_str().to_string())
+                        .collect(),
+                })
+            }
+            Some(GeneratedUnitAdmission::Admitted(_)) => None,
+        };
+        if let Some(kind) = admission_refusal {
+            // Units a PREVIOUS admission wrote (the membership narrowed since) leave the
+            // editor's engine now. Non-establishing: no transport, nothing to withdraw.
+            self.withdraw_unadmitted(&self.inner.core, &source, sweep_generation)
+                .await;
+            if self.first_refusal_report(&source, sweep_generation) {
+                tracing::info!(
+                    source = %source,
+                    config = %config,
+                    generation,
+                    refusal_kind = ?kind,
+                    "editor-owned tsgo did not engage; activating managed fallback: the \
+                     generated units are not proven admitted to the owning configured project"
+                );
+            }
+            return Err(refusal(kind, None, None));
+        }
+        let generated_units_fact = generated_units
+            .as_ref()
+            .map_or(GeneratedUnitAdmissionFact::Unproven, |admission| {
+                GeneratedUnitAdmissionFact::from_admission(admission)
+            });
+
         // Lazily establish (once) the SHARED relay-attach transport for the
         // ALREADY-resolved binding — at QUERY time, off the managed lifecycle critical
         // path (SHARED is never fabricated; the binding is the gate's resolved one). The
@@ -381,54 +485,41 @@ impl SharedTsgoOverlay {
         // instance's epoch (never a re-read of the overlay's current active epoch).
         let engage_started = std::time::Instant::now();
         let established = self
-            .ensure_transport(carrier.binding().clone(), carrier.generation())
+            .ensure_transport(
+                carrier.binding().clone(),
+                generated_units_fact,
+                carrier.generation(),
+            )
             .await
             .ok_or_else(|| refusal(SharedEngageFailureKind::TransportUnavailable, None, None))?;
         let transport_ready = engage_started.elapsed();
 
-        // Inject the recorded content of EVERY open carrier into the established
-        // transport (dirty-tracked — only what changed since the last injection) so the
-        // queried carrier's `--api` diagnostics see the current text AND its companion
-        // family / imported carriers are members of the SHARED Program (else its imports
-        // spuriously fail with TS2307) — the normal open→diagnostics flow, now that the
-        // lifecycle only RECORDS content off-path. GATED on the shadow/conflict
-        // authority: a recorded path that is NOT a genuine generated carrier surface
-        // (e.g. a real user file occupying a carrier-companion path) is NEVER injected /
-        // overlay-shadowed (`carrier_never_shadows_real_user_file`). Best-effort: a
-        // failed inject admits the managed fallback.
-        // The workspace content generation keys the per-carrier shadow-safety cache: a
-        // content-clean carrier re-checks shadow-safety only when this advances (any
-        // file-set/overlay transition bumps it), so a real user file appearing at a
-        // companion path — or a same-stem rune module — is never overlay-shadowed by a
-        // stale "safe" cache (`carrier_never_shadows_real_user_file`). It advances on the
-        // file-existence surface the shadow-safety `file_exists` probes read, which the
-        // snapshot/config generation (`carrier.generation()`) does NOT.
-        let shadow_generation = self.inner.host.workspace_read().content_generation();
-        // EDITOR-DEMAND scope. The request pays only for the carriers the editor is
-        // working with: every carrier an editor lifecycle lane recorded (the open
-        // documents plus the import closure the background import publication delivers,
-        // both of which record INTERACTIVE), plus the queried carrier's own companion
-        // family whatever lane recorded it. That last clause is load-bearing: the
-        // `is_synced` gate below is unconditional, so a queried carrier scoped out would
-        // fail closed and admit the managed fallback.
-        //
-        // The workspace scan's BACKGROUND bulk is deliberately excluded. See
-        // `inject_all_dirty` for why charging a 1.5 s hover with a whole-project publish
-        // is what made every interactive request in the first ~30 s after open expire
-        // without reaching the engine.
-        let queried_source = carrier_source_of(provider_path);
-        self.inner
-            .core
-            .inject_all_dirty(
-                &established,
-                shadow_generation,
-                |companion, priority| {
-                    priority >= OverlayPriority::Normal
-                        || carrier_source_of(companion) == queried_source
+        // Re-decide the serve mode through the live controller at the resolved
+        // snapshot/config generation, reusing the SAME binding and the admission fact
+        // proven above — BEFORE any overlay is written, so a not-SHARED decision admits
+        // managed having written nothing.
+        let decision = established.transport.redecide_for_binding(
+            carrier.binding(),
+            generated_units_fact,
+            carrier.generation(),
+        );
+        if decision.mode() != ServeMode::Shared {
+            return Err(refusal(
+                SharedEngageFailureKind::LiveDecisionNotShared {
+                    reason: format!("{:?}", decision.decision().owned_reason()),
                 },
-                |companion| self.injection_is_shadow_safe(companion),
-            )
-            .await;
+                Some(established.identity.epoch),
+                None,
+            ));
+        }
+
+        self.inject_editor_demand(
+            &self.inner.core,
+            &established,
+            provider_path,
+            sweep_generation,
+        )
+        .await;
         tracing::debug!(
             provider_path,
             transport_ms = transport_ready.as_millis() as u64,
@@ -452,22 +543,6 @@ impl SharedTsgoOverlay {
             ));
         }
 
-        // Re-decide the serve mode through the live controller at the resolved
-        // snapshot/config generation, reusing the SAME binding — a not-SHARED decision
-        // admits managed.
-        let decision = established
-            .transport
-            .redecide_for_binding(carrier.binding(), carrier.generation());
-        if decision.mode() != ServeMode::Shared {
-            return Err(refusal(
-                SharedEngageFailureKind::LiveDecisionNotShared {
-                    reason: format!("{:?}", decision.decision().owned_reason()),
-                },
-                Some(established.identity.epoch),
-                Some(sync_state),
-            ));
-        }
-
         Ok(EngagedSharedProvider {
             provider: established.transport,
             source,
@@ -476,6 +551,217 @@ impl SharedTsgoOverlay {
             transport_epoch: established.identity.epoch,
             sync_state,
         })
+    }
+
+    /// The monotonic sweep generation for the host's CURRENT admission epoch — see
+    /// [`OverlayInner::sweep_generation`].
+    fn sweep_generation(&self) -> u64 {
+        let epoch = AdmissionEpoch::current(&self.inner.host);
+        let mut state = self.inner.sweep_generation.lock();
+        if state.0.as_ref() != Some(&epoch) {
+            state.0 = Some(epoch);
+            state.1 += 1;
+        }
+        state.1
+    }
+
+    /// The generated units recorded for the carrier `source` in `core` — its proposed
+    /// write set. Grouping is the descriptor companion authority in reverse
+    /// ([`carrier_source_of`]), so every companion family (IDE, import surface, testing,
+    /// sidecar, declaration) of the source is included and nothing else.
+    fn recorded_units_of<T: OverlayTransport>(
+        core: &LazyOverlayCore<T>,
+        source: &str,
+    ) -> Vec<CanonicalPath> {
+        core.recorded_paths()
+            .iter()
+            .filter(|unit| carrier_source_of(unit).as_deref() == Some(source))
+            .map(|unit| CanonicalPath::new(unit))
+            .collect()
+    }
+
+    /// Decide the QUERIED carrier's generated-unit admission over its recorded write set,
+    /// against the snapshot its binding was resolved at, and remember a positive proof for
+    /// this sweep generation so the sweep writes the family under the SAME proof. `None`
+    /// when nothing is recorded for the carrier: no write set, nothing proven.
+    fn queried_generated_unit_admission<T: OverlayTransport>(
+        &self,
+        core: &LazyOverlayCore<T>,
+        carrier: &BoundCarrier,
+        source: &str,
+        sweep_generation: u64,
+    ) -> Option<GeneratedUnitAdmission> {
+        let units = Self::recorded_units_of(core, source);
+        if units.is_empty() {
+            return None;
+        }
+        let admission = carrier.admit_generated_units(&units);
+        let proof = match &admission {
+            GeneratedUnitAdmission::Admitted(admitted) => Some(Arc::new(admitted.clone())),
+            GeneratedUnitAdmission::NotAdmitted(_) => None,
+        };
+        self.remember_admitted_units(source, sweep_generation, proof);
+        Some(admission)
+    }
+
+    fn remember_admitted_units(
+        &self,
+        source: &str,
+        sweep_generation: u64,
+        proof: Option<Arc<AdmittedGeneratedUnits>>,
+    ) {
+        let mut memo = self.inner.admitted_units.lock();
+        if memo.0 < sweep_generation {
+            *memo = (sweep_generation, AdmittedUnitsBySource::new());
+        }
+        // Only an answer for the generation it was computed under is kept.
+        if memo.0 == sweep_generation {
+            memo.1.insert(source.to_string(), proof);
+        }
+    }
+
+    /// The admission proof covering `unit` for the carrier `source`, deciding it on a
+    /// miss: resolve the source's OWN owning configured project (the epoch-scoped memo of
+    /// the ONE shared resolver) and ask whether that project admits the carrier's whole
+    /// recorded write set. A carrier with no bound project has no proof.
+    ///
+    /// A remembered proof that does not cover `unit` was decided before `unit` was
+    /// recorded; it is re-decided over the grown write set rather than stretched.
+    fn admitted_units_covering<T: OverlayTransport>(
+        &self,
+        core: &LazyOverlayCore<T>,
+        source: &str,
+        unit: &CanonicalPath,
+        sweep_generation: u64,
+    ) -> Option<Arc<AdmittedGeneratedUnits>> {
+        {
+            let memo = self.inner.admitted_units.lock();
+            if memo.0 == sweep_generation {
+                match memo.1.get(source) {
+                    Some(Some(admitted)) if admitted.covers(unit) => {
+                        return Some(Arc::clone(admitted));
+                    }
+                    // Not admitted at this generation: a larger write set cannot be.
+                    Some(None) => return None,
+                    _ => {}
+                }
+            }
+        }
+        let proof = self
+            .inner
+            .admission
+            .admit(&self.inner.host, source)
+            .bound_carrier()
+            .and_then(|carrier| {
+                match carrier.admit_generated_units(&Self::recorded_units_of(core, source)) {
+                    GeneratedUnitAdmission::Admitted(admitted) => Some(Arc::new(admitted)),
+                    GeneratedUnitAdmission::NotAdmitted(_) => None,
+                }
+            });
+        self.remember_admitted_units(source, sweep_generation, proof.clone());
+        proof.filter(|admitted| admitted.covers(unit))
+    }
+
+    /// The write gate of the sweep: a [`GeneratedUnitWritePermit`] for the recorded
+    /// `companion` IFF it is shadow-safe ([`Self::injection_is_shadow_safe`]) AND its
+    /// carrier's whole recorded write set is admitted to that carrier's owning configured
+    /// project. The permit can only be minted from the admission proof, so the queried
+    /// carrier, its companions, and every neighbour the sweep reaches are held to the
+    /// same rule — a recorded carrier is never written on the strength of its priority.
+    fn generated_unit_write_permit<T: OverlayTransport>(
+        &self,
+        core: &LazyOverlayCore<T>,
+        companion: &str,
+        sweep_generation: u64,
+    ) -> Option<GeneratedUnitWritePermit> {
+        if !self.injection_is_shadow_safe(companion) {
+            return None;
+        }
+        let source = carrier_source_of(companion)?;
+        let unit = CanonicalPath::new(companion);
+        let admitted = self.admitted_units_covering(core, &source, &unit, sweep_generation)?;
+        GeneratedUnitWritePermit::for_admitted_unit(&admitted, companion)
+    }
+
+    /// Inject the recorded content of the EDITOR-DEMAND carrier set into `established`.
+    ///
+    /// Every open carrier (dirty-tracked — only what changed since the last injection) so
+    /// the queried carrier's `--api` diagnostics see the current text AND its companion
+    /// family / imported carriers are members of the SHARED Program (else its imports
+    /// spuriously fail with TS2307) — the normal open→diagnostics flow, now that the
+    /// lifecycle only RECORDS content off-path. Best-effort: a failed inject admits the
+    /// managed fallback.
+    ///
+    /// Two independent bounds apply to every recorded unit:
+    ///
+    /// * SCOPE — the request pays only for the carriers the editor is working with: every
+    ///   carrier an editor lifecycle lane recorded (the open documents plus the import
+    ///   closure the background import publication delivers), plus the queried carrier's
+    ///   own companion family whatever lane recorded it. That last clause is
+    ///   load-bearing: the caller's `is_synced` gate is unconditional, so a queried
+    ///   carrier scoped out would fail closed and admit the managed fallback. The
+    ///   workspace scan's BACKGROUND bulk is deliberately excluded; see
+    ///   [`LazyOverlayCore::inject_all_dirty`] for why.
+    /// * WRITE PERMIT — scope never authorizes a write. Each unit needs
+    ///   [`Self::generated_unit_write_permit`]; a unit without one is skipped and, if a
+    ///   previous sweep wrote it, retracted.
+    ///
+    /// `sweep_generation` keys the overlay core's per-unit decision cache: a clean unit is
+    /// re-decided only when it advances, and it advances on any publication, content, or
+    /// project-generation change — so neither a real user file appearing at a companion
+    /// path (`carrier_never_shadows_real_user_file`) nor a narrowed `include` is answered
+    /// from a stale decision.
+    async fn inject_editor_demand<T: OverlayTransport>(
+        &self,
+        core: &LazyOverlayCore<T>,
+        established: &EstablishedTransport<T>,
+        provider_path: &str,
+        sweep_generation: u64,
+    ) {
+        let queried_source = carrier_source_of(provider_path);
+        core.inject_all_dirty(
+            established,
+            sweep_generation,
+            |companion, priority| {
+                priority >= OverlayPriority::Normal
+                    || carrier_source_of(companion) == queried_source
+            },
+            |companion| self.generated_unit_write_permit(core, companion, sweep_generation),
+        )
+        .await;
+    }
+
+    /// Withdraw the carrier `source`'s units from an ALREADY-established transport after
+    /// its write set stopped being admitted. Never establishes: with no live transport
+    /// nothing was written, so there is nothing to withdraw. The sweep's own no-permit arm
+    /// does the work — it retracts exactly the units a previous sweep committed.
+    async fn withdraw_unadmitted<T: OverlayTransport>(
+        &self,
+        core: &LazyOverlayCore<T>,
+        source: &str,
+        sweep_generation: u64,
+    ) {
+        let Some(established) = core.current_established().await else {
+            return;
+        };
+        core.inject_all_dirty(
+            &established,
+            sweep_generation,
+            |companion, _| carrier_source_of(companion).as_deref() == Some(source),
+            |companion| self.generated_unit_write_permit(core, companion, sweep_generation),
+        )
+        .await;
+    }
+
+    /// Whether this is the FIRST admission refusal reported for `source` at
+    /// `sweep_generation`. The refusal is a property of the membership and the write set,
+    /// not of the request, so it is reported once until either changes.
+    fn first_refusal_report(&self, source: &str, sweep_generation: u64) -> bool {
+        let mut reported = self.inner.reported_refusals.lock();
+        if reported.0 != sweep_generation {
+            *reported = (sweep_generation, std::collections::HashSet::new());
+        }
+        reported.1.insert(source.to_string())
     }
 
     /// Project-bound diagnostics from the exact editor-owned Program. `Some([])` is an
@@ -553,8 +839,13 @@ impl SharedTsgoOverlay {
     ///    rune module beside the source downgrades it to `Ambiguous(SameStemRuneModule)`.
     ///    Either downgrade means skipped and managed serves. A genuine generated companion (a
     ///    clean binding, `NoProject`, `NotReady`, or a MultipleOwners ambiguity,
-    ///    none of which sit a REAL file at a companion path) is safe to inject as a
-    ///    supporting Program member.
+    ///    none of which sit a REAL file at a companion path) displaces no user file.
+    ///
+    /// Shadow-safety is NECESSARY for a write, not sufficient: it says no real file is
+    /// displaced, not that a configured project admits the unit. The write gate
+    /// ([`Self::generated_unit_write_permit`]) additionally requires the generated-unit
+    /// admission proof, so a shadow-safe companion of a carrier with no owning project is
+    /// still never written.
     ///
     /// A not-a-companion path or a not-yet-ready snapshot is conservatively NOT injected.
     fn injection_is_shadow_safe(&self, companion_path: &str) -> bool {
@@ -622,6 +913,7 @@ impl SharedTsgoOverlay {
     async fn ensure_transport(
         &self,
         binding: ProjectBinding,
+        generated_units: GeneratedUnitAdmissionFact,
         generation: u64,
     ) -> Option<EstablishedTransport<TsgoSharedProvider>> {
         // The binding is pre-resolved (bound) — pass it straight to the cell. The core
@@ -634,7 +926,9 @@ impl SharedTsgoOverlay {
             .ensure(
                 Some((binding, generation)),
                 |generation| self.probe_establishment_discriminant(generation),
-                |binding, generation| self.establish_transport(binding, generation),
+                |binding, generation| {
+                    self.establish_transport(binding, generated_units, generation)
+                },
                 SHARED_ESTABLISH_TIMEOUT,
             )
             .await
@@ -668,6 +962,7 @@ impl SharedTsgoOverlay {
     async fn establish_transport(
         &self,
         binding: ProjectBinding,
+        generated_units: GeneratedUnitAdmissionFact,
         generation: u64,
     ) -> Option<Arc<TsgoSharedProvider>> {
         let tsconfig_path = binding.tsconfig_uri().to_string();
@@ -677,6 +972,7 @@ impl SharedTsgoOverlay {
             workspace_root: &self.inner.rendezvous.workspace_root,
             tsconfig_path: &tsconfig_path,
             resolution: CarrierOwnershipResolution::Bound(binding),
+            generated_units,
             config_generation: generation,
             client_label: SHARED_CLIENT_LABEL,
         };
@@ -1000,6 +1296,13 @@ impl TsgoCompositeProvider {
                         transport_epoch: engaged.transport_epoch,
                     });
                 }
+                // The admission gate reported this once for the carrier's generation.
+                Ok(Err(refusal)) if refusal.kind.is_generated_unit_refusal() => tracing::trace!(
+                    feature = feature.name(),
+                    source = %source,
+                    refusal_kind = ?refusal.kind,
+                    "editor-owned tsgo route refused on generated-unit admission; serving managed"
+                ),
                 Ok(Err(refusal)) => tracing::info!(
                     feature = feature.name(),
                     source = %source,
@@ -1066,6 +1369,12 @@ impl TsgoCompositeProvider {
                     );
                     return Ok(diagnostics);
                 }
+                // The admission gate reported this once for the carrier's generation.
+                Ok(Err(refusal)) if refusal.kind.is_generated_unit_refusal() => tracing::trace!(
+                    source = %source,
+                    refusal_kind = ?refusal.kind,
+                    "editor-owned tsgo diagnostics refused on generated-unit admission; serving managed"
+                ),
                 Ok(Err(refusal)) => tracing::info!(
                     source = %source,
                     refusal = %refusal,

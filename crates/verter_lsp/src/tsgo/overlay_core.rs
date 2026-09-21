@@ -44,6 +44,7 @@ use parking_lot::Mutex as SyncMutex;
 use tokio::sync::Mutex as AsyncMutex;
 
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
+use verter_workspace::{AdmittedGeneratedUnits, CanonicalPath};
 
 use crate::tsgo::shared::TsgoSharedProvider;
 use crate::tsgo::transport_cell::{EstablishedTransport, LazyTransport, TransportEpoch};
@@ -55,6 +56,51 @@ use crate::tsgo::transport_cell::{EstablishedTransport, LazyTransport, Transport
 /// composite's outer query deadline — so a wedged relay never delays diagnostics past
 /// those bounds.
 const OVERLAY_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The proof that ONE generated unit may be written into the transport's engine: the
+/// unit is covered by an [`AdmittedGeneratedUnits`] admission — the workspace's proof
+/// that EVERY unit of the carrier's write set is a member of its owning configured
+/// project.
+///
+/// The transport is an engine Verter does not own. A unit written there without its
+/// configured project admitting it lands in an inferred project: the wrong compiler
+/// options for Verter's answer, and extra load on the editor's own TypeScript service.
+/// So the physical write path ([`LazyOverlayCore::inject_permitted`]) takes a permit by
+/// value, and there is no way to build one from a path or a `bool` — only from the
+/// admission proof, and only for a unit that proof covers.
+pub(crate) struct GeneratedUnitWritePermit(());
+
+impl GeneratedUnitWritePermit {
+    /// The permit for `unit` IFF `admitted` covers it. A unit outside the admitted set —
+    /// one recorded after the admission was decided — gets none, so it is never written
+    /// on the strength of its siblings' proof.
+    #[must_use]
+    pub(crate) fn for_admitted_unit(admitted: &AdmittedGeneratedUnits, unit: &str) -> Option<Self> {
+        admitted
+            .covers(&CanonicalPath::new(unit))
+            .then_some(Self(()))
+    }
+}
+
+/// A sweep predicate's verdict for one recorded unit: a [`GeneratedUnitWritePermit`] to
+/// write it, or none — skip it, and retract it if a prior sweep wrote it.
+pub(crate) struct InjectionVerdict(Option<GeneratedUnitWritePermit>);
+
+impl From<Option<GeneratedUnitWritePermit>> for InjectionVerdict {
+    fn from(permit: Option<GeneratedUnitWritePermit>) -> Self {
+        Self(permit)
+    }
+}
+
+/// Transport-double tests drive the sweep with a bare `bool` verdict: they exercise the
+/// overlay state machine, not admission. Production has no such conversion — its only
+/// way to a verdict is a permit minted from an admission proof.
+#[cfg(test)]
+impl From<bool> for InjectionVerdict {
+    fn from(write: bool) -> Self {
+        Self(write.then_some(GeneratedUnitWritePermit(())))
+    }
+}
 
 /// The transport seam the overlay core drives: inject / retract a carrier overlay,
 /// report liveness (the transport-cell eviction predicate), and tear down. Kept small
@@ -291,6 +337,21 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         removed
     }
 
+    /// Every recorded unit path, sorted — the candidate write set a caller groups by
+    /// carrier source to decide generated-unit admission.
+    pub(crate) fn recorded_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.state.lock().content.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    /// The established transport WITH its identity if one is live, else `None` — NEVER
+    /// establishes. For a sweep that may only withdraw: it must not pay for (or cause) an
+    /// attach.
+    pub(crate) async fn current_established(&self) -> Option<EstablishedTransport<T>> {
+        self.transport.current().await
+    }
+
     /// The live transport if already established, else `None` — NEVER establishes
     /// (used by the non-establishing retract / shutdown paths).
     pub(crate) async fn current(&self) -> Option<Arc<T>> {
@@ -421,11 +482,27 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// at `generation`; that decision is recorded before the gated transaction so the
     /// commit's admission gate is satisfiable. Best-effort + fail-closed: on failure the
     /// content stays dirty and a later query retries (self-healing).
+    #[cfg(test)]
     pub(crate) async fn inject_dirty(
         &self,
         established: &EstablishedTransport<T>,
         path: &str,
         generation: u64,
+    ) {
+        self.inject_permitted(established, path, generation, GeneratedUnitWritePermit(()))
+            .await;
+    }
+
+    /// The single-carrier physical write entry. It CONSUMES a
+    /// [`GeneratedUnitWritePermit`], so reaching the transport requires the admission
+    /// proof the permit was minted from; the permit also stands for the shadow-safety
+    /// decision recorded here for `generation`.
+    pub(crate) async fn inject_permitted(
+        &self,
+        established: &EstablishedTransport<T>,
+        path: &str,
+        generation: u64,
+        _permit: GeneratedUnitWritePermit,
     ) {
         let run_epoch = established.identity.epoch;
         self.cache_shadow_decision(path, run_epoch, generation, true);
@@ -675,10 +752,12 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// and every per-carrier physical operation runs under that carrier's gate (so a safe
     /// inject and a concurrent unsafe retract of the same path are strictly ordered).
     ///
-    /// `should_inject` is the caller's shadow/conflict gate: a recorded path that is NOT
-    /// a genuine generated carrier surface — e.g. a real user file occupying a
-    /// carrier-companion path — is SKIPPED and, if previously injected, RETRACTED, never
-    /// left overlay-shadowing the real file (`carrier_never_shadows_real_user_file`).
+    /// `should_inject` is the caller's write gate, answering with a
+    /// [`GeneratedUnitWritePermit`] or none. A recorded path with no permit — a unit its
+    /// configured project does not admit, or one that is NOT a genuine generated carrier
+    /// surface (a real user file occupying a carrier-companion path) — is SKIPPED and, if
+    /// previously injected, RETRACTED: never written into an inferred project, never left
+    /// overlay-shadowing the real file (`carrier_never_shadows_real_user_file`).
     ///
     /// Generation-cached shadow-safety with a dirty-first fast skip: when `generation`
     /// matches the cached one the shadow-safety decision cannot have changed, so the
@@ -709,7 +788,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// dirty — its shadow-safety decision is keyed on the workspace content generation,
     /// orthogonal to the transport epoch, so while the real user file still occupies its
     /// companion path it must not be injected into the fresh transport.
-    pub(crate) async fn inject_all_dirty<S, F>(
+    pub(crate) async fn inject_all_dirty<S, F, V>(
         &self,
         established: &EstablishedTransport<T>,
         generation: u64,
@@ -717,7 +796,8 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         should_inject: F,
     ) where
         S: Fn(&str, OverlayPriority) -> bool,
-        F: Fn(&str) -> bool,
+        F: Fn(&str) -> V,
+        V: Into<InjectionVerdict>,
     {
         self.inject_all_dirty_paced(established, generation, in_scope, should_inject, usize::MAX)
             .await;
@@ -731,7 +811,7 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// editor's engine absorbs an overlay in a few hundred milliseconds and the
     /// relay's control channel is serial, so a request arriving mid-sweep waits for
     /// at most one small group rather than for the rest of the project.
-    pub(crate) async fn inject_all_dirty_paced<S, F>(
+    pub(crate) async fn inject_all_dirty_paced<S, F, V>(
         &self,
         established: &EstablishedTransport<T>,
         generation: u64,
@@ -741,7 +821,8 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     ) -> usize
     where
         S: Fn(&str, OverlayPriority) -> bool,
-        F: Fn(&str) -> bool,
+        F: Fn(&str) -> V,
+        V: Into<InjectionVerdict>,
     {
         let run_epoch = established.identity.epoch;
         let transport = &established.transport;
@@ -821,18 +902,28 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                         .filter(|cache| cache.generation == generation)
                         .map(|cache| cache.safe)
                 });
-                if decided.unwrap_or_else(|| {
-                    let started = std::time::Instant::now();
-                    let safe = should_inject(&path);
-                    predicate_micros.fetch_add(
-                        started.elapsed().as_micros() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    safe
-                }) {
+                // A `{safe:true}` decision cached for THIS generation was recorded by
+                // `inject_permitted`, which only a permit reaches — so it stands for that
+                // permit, and the generation is what would have advanced had the admission
+                // or the shadow-safety answer changed.
+                let permit = match decided {
+                    Some(true) => Some(GeneratedUnitWritePermit(())),
+                    Some(false) => None,
+                    None => {
+                        let started = std::time::Instant::now();
+                        let InjectionVerdict(permit) = should_inject(&path).into();
+                        predicate_micros.fetch_add(
+                            started.elapsed().as_micros() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        permit
+                    }
+                };
+                if let Some(permit) = permit {
                     // The single-carrier entry records the `{safe:true}` admission and runs the
                     // gated inject transaction against the bound epoch.
-                    self.inject_dirty(established, &path, generation).await;
+                    self.inject_permitted(established, &path, generation, permit)
+                        .await;
                 } else {
                     // Flip-to-unsafe: cache `{safe:false}` (so `is_synced` fails closed the
                     // instant it is observed) then retract the carrier's overlay so it leaves

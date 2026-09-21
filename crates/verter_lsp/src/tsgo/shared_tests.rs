@@ -2,7 +2,7 @@
 //! typed eligibility facts + the warm cache (no engine contact).
 //!
 //! These are the decision-layer half of the risk-class negatives:
-//!  - FAIL-OPEN / eligibility-gates-SHARED: each of the five provenance facts
+//!  - FAIL-OPEN / eligibility-gates-SHARED: each of the provenance facts
 //!    missing IN TURN forces OWNED; only the all-positive set serves SHARED.
 //!  - SPLIT-BRAIN: a reconnect (bumped editor-session generation) mints a FRESH
 //!    `EngineIdentity` (never the prior one) and the prior warm entry is
@@ -18,13 +18,14 @@ use std::time::Duration;
 
 use verter_session::external_ts::{
     resolve_reference_canonical_path, AttachFact, BindingFact, CarrierOwnershipResolution,
-    ConfigPathProbe, EditorBindingFact, EngineSessionFacts, EngineWarmCache, OwnedReason,
-    OwnedSessionFacts, ProjectBinding, ProxyFact, ReferenceInput, ServeMode, ServingProvenance,
-    SharedSessionFacts, VersionGateFact,
+    ConfigPathProbe, EditorBindingFact, EngineSessionFacts, EngineWarmCache,
+    GeneratedUnitAdmissionFact, OwnedReason, OwnedSessionFacts, ProjectBinding, ProxyFact,
+    ReferenceInput, ServeMode, ServingProvenance, SharedSessionFacts, VersionGateFact,
 };
 use verter_session::external_ts::{EnvDims, ProjectEnvDimsSource};
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_type_runtime::protocol::TypeProviderError;
+use verter_workspace::{GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmissionReason};
 
 use super::{
     apply_local_sync_commit, carrier_wire_error, decide_shared_serve, promote_synced,
@@ -125,6 +126,7 @@ struct Positive {
     version_gate: VersionGateFact,
     attach: AttachFact,
     binding: BindingFact,
+    generated_units: GeneratedUnitAdmissionFact,
     proxy: ProxyFact,
     editor_binding: EditorBindingFact,
     identity: ProjectIdentity,
@@ -138,6 +140,7 @@ fn positive(identity: ProjectIdentity, generation: u64) -> Positive {
         },
         attach: AttachFact::Live(shared_session(generation)),
         binding: BindingFact::from_resolution(&test_binding(identity)),
+        generated_units: admitted(),
         proxy: ProxyFact::Available,
         editor_binding: EditorBindingFact::evaluate(&identity, &identity),
         identity,
@@ -145,12 +148,25 @@ fn positive(identity: ProjectIdentity, generation: u64) -> Positive {
     }
 }
 
+/// The positive generated-unit admission fact the all-positive fixtures carry.
+fn admitted() -> GeneratedUnitAdmissionFact {
+    GeneratedUnitAdmissionFact::Admitted(GeneratedUnitAdmissionFingerprint::from_raw(1))
+}
+
 fn decide(p: &Positive, warm: &mut EngineWarmCache) -> ServeMode {
+    decide_with_reason(p, warm).0
+}
+
+fn decide_with_reason(
+    p: &Positive,
+    warm: &mut EngineWarmCache,
+) -> (ServeMode, Option<OwnedReason>) {
     // The queried project declares NO references, so its closure is itself alone.
-    decide_shared_serve(
+    let decision = decide_shared_serve(
         p.version_gate.clone(),
         p.attach.clone(),
         p.binding,
+        p.generated_units,
         p.proxy,
         p.editor_binding,
         p.identity,
@@ -161,8 +177,8 @@ fn decide(p: &Positive, warm: &mut EngineWarmCache) -> ServeMode {
         p.generation,
         p.identity,
         warm,
-    )
-    .mode()
+    );
+    (decision.mode(), decision.decision().owned_reason())
 }
 
 // ── FAIL-OPEN / eligibility-gates-SHARED ──
@@ -214,6 +230,32 @@ fn each_missing_positive_fact_fails_closed_to_owned() {
             ServeMode::Owned,
             "no resolved project binding must fail closed to OWNED"
         );
+    }
+    // A bound project whose generated units are refused — or never proven — is
+    // OWNED under its own reason, never "not bound".
+    for (fact, reason) in [
+        (
+            GeneratedUnitAdmissionFact::NotAdmitted(
+                GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            ),
+            OwnedReason::GeneratedUnitsNotAdmitted(
+                GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            ),
+        ),
+        (
+            GeneratedUnitAdmissionFact::Unproven,
+            OwnedReason::GeneratedUnitAdmissionUnproven,
+        ),
+    ] {
+        let mut warm = EngineWarmCache::new();
+        let mut p = positive(id, 1);
+        p.generated_units = fact;
+        assert_eq!(
+            decide_with_reason(&p, &mut warm),
+            (ServeMode::Owned, Some(reason)),
+            "generated units that are not proven admitted must fail closed to OWNED"
+        );
+        assert!(warm.is_empty(), "an OWNED decision warms nothing");
     }
     // 4. Proxy unavailable.
     {
@@ -345,6 +387,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
             version_gate.clone(),
             AttachFact::Live(shared_session(gen)),
             BindingFact::from_resolution(&test_binding(project_b)),
+            admitted(),
             ProxyFact::Available,
             EditorBindingFact::evaluate(&project_b, &project_b),
             project_b,
@@ -371,6 +414,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
             version_gate.clone(),
             AttachFact::Live(shared_session(gen)),
             BindingFact::from_resolution(&test_binding(project_a)),
+            admitted(),
             ProxyFact::Available,
             EditorBindingFact::evaluate(&project_a, &project_a),
             project_a,
@@ -408,6 +452,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
     // on A and cold-misses the primed B-slot.
     let decided = controller.decide(
         BindingFact::from_resolution(&test_binding(project_b)),
+        admitted(),
         project_b,
         Arc::clone(&ts),
         &[],
@@ -451,6 +496,7 @@ fn redirect_reference_to_absent_member_fails_closure_closed_to_owned() {
         p.version_gate.clone(),
         p.attach.clone(),
         p.binding,
+        p.generated_units,
         p.proxy,
         p.editor_binding,
         a,
@@ -503,6 +549,7 @@ fn reconnect_mints_fresh_identity_and_prior_warm_entry_is_unreachable() {
             },
             AttachFact::Live(shared_session(attach_gen)),
             BindingFact::from_resolution(&test_binding(id)),
+            admitted(),
             ProxyFact::Available,
             EditorBindingFact::evaluate(&id, &id),
             id,
