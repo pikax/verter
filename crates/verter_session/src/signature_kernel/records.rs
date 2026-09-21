@@ -401,7 +401,16 @@ pub const LAYOUT_SIGNATURE_SET_REF: usize = 24;
 pub const LAYOUT_READY_SET: usize = 32;
 pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
 /// Measured `MemoEntry` size on 64-bit. Pinned by `layouts_are_the_measured_64_bit_sizes`.
-pub const LAYOUT_MEMO_ENTRY: usize = 160;
+///
+/// The envelope includes the candidate's `Option<Arc<RetentionCharge>>`
+/// reservation against the aggregate retention account. That word is the
+/// deliberate cost of the memo participating in the process-wide byte
+/// ceiling at all: without a per-candidate charge, eviction and reader
+/// lifetime could not release the candidate's bytes exactly once, and
+/// the memo would need a parallel side-table keyed by admission seq — a
+/// second structure to keep consistent with `entries`. One word per
+/// candidate, at the family caps, is a few hundred KiB process-wide.
+pub const LAYOUT_MEMO_ENTRY: usize = 168;
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {

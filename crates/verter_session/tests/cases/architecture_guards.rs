@@ -5314,6 +5314,12 @@ pub(crate) mod foundations_guards {
         // wiring lands with the query-layer adoption).
         "pub mod query_host_port",
         "pub(crate) mod semantic_query_memo",
+        // The one process-local aggregate retained-byte account every
+        // host-owned semantic store charges. Crate-private: no consumer
+        // outside `verter_session` admits cache entries, and the
+        // account is an internal admission rail rather than an API.
+        // Its own unit tests live in-crate, so nothing needs `pub`.
+        "pub(crate) mod semantic_retention_account",
         "pub(crate) mod session_runtime",
         // Stage 4a SessionView trait surface — `HostView` and
         // `OverlaidView` impls. `pub` because the integration smoke

@@ -57,6 +57,7 @@ mod origin_edges;
 mod prepared;
 mod relation_memo;
 mod resolve_call_memo;
+mod retention;
 mod reverse_index;
 mod scc_publish;
 #[cfg(test)]
@@ -343,6 +344,11 @@ pub struct SemanticGraphStore {
     /// Used by `execute_cooperative` to bucket owner vs joiner paths
     /// and held time on `MetaProvenance`.
     provenance: Option<Arc<crate::types::MetaProvenance>>,
+    /// The aggregate retained-byte account every candidate this memo
+    /// publishes charges. `None` for a `Default`-built fixture store,
+    /// which retains nothing past the fixture; host-built stores always
+    /// carry the project's account.
+    retention_account: Option<Arc<crate::semantic_retention_account::SemanticRetentionAccount>>,
     /// Per-store test trigger for the cold-abort sweep path. When a test
     /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
     /// cold-winner re-check in [`Self::warm_publish_one`] marks its own
@@ -944,25 +950,6 @@ impl SemanticGraphStore {
     /// registrations.
     fn alloc_candidate_admission_seq(&self) -> u64 {
         self.candidate_admission_seq.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Construct a store wired to the host's
-    /// [`MetaProvenance`](crate::types::MetaProvenance) so the
-    /// underlying [`NodeArena`] and `execute_cooperative` path record
-    /// contention-instrumentation counters. Test-only direct
-    /// constructions use [`Self::new`] / [`Self::default`]
-    /// (provenance stays `None`).
-    ///
-    /// The constructor installs provenance via field mutation on a
-    /// `Default`-built store so it stays compatible with the dispatch
-    /// invariant tests that require single-owner cardinality for
-    /// `arena: NodeArena` in production code.
-    #[must_use]
-    pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
-        let mut store = Self::default();
-        store.arena.provenance = Some(Arc::clone(&provenance));
-        store.provenance = Some(provenance);
-        store
     }
 
     /// Public read accessor for the shared
@@ -3431,16 +3418,26 @@ impl SemanticGraphStore {
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
         let validated_at_generation = ctx.project_type_store().project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
-        let entry = MemoEntry {
+        let mut entry = MemoEntry {
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
             satisfied_projection: satisfied_projection.clone(),
+            retention_charge: None,
             validated_at_generation,
             admission_seq,
         };
+        // Aggregate retention admission, BEFORE the per-family cap plan:
+        // a refusal must not displace a resident candidate to make room
+        // for an entry the process then declines to keep. The refusal is
+        // `Skipped`, which returns this winner's COMPLETE value to its
+        // caller uncached — never a stale candidate, never a partial.
+        match self.reserve_memo_candidate(&entry) {
+            Ok(charge) => entry.retention_charge = charge.map(Arc::new),
+            Err(_) => return WarmPublishOutcome::Skipped,
+        }
         // Per-family bounded retention: plan the cap eviction against the
         // publishing caller's stable view BEFORE the publish lock (the
         // plan releases `entries` before validating fact rails; the
@@ -3655,7 +3652,7 @@ impl SemanticGraphStore {
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
         let validated_at_generation = ctx.project_type_store().project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
-        let entry = MemoEntry {
+        let mut entry = MemoEntry {
             result: match result {
                 QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
                 QueryResult::Recursive(node) => QueryResult::Recursive(node),
@@ -3666,9 +3663,19 @@ impl SemanticGraphStore {
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
             satisfied_projection,
+            retention_charge: None,
             validated_at_generation,
             admission_seq,
         };
+        // A narrower sibling slot is a fresh candidate with its own
+        // carriers, so it is charged like any other publish. Under
+        // pressure the backfill is simply declined — the broader entry
+        // it would have been cloned from stays warm and a later narrow
+        // request recomputes.
+        match self.reserve_memo_candidate(&entry) {
+            Ok(charge) => entry.retention_charge = charge.map(Arc::new),
+            Err(_) => return false,
+        }
         // Per-family bounded retention: plan the cap eviction against the
         // publishing caller's stable view BEFORE the publish lock —
         // symmetric with `warm_publish_one` (a concurrent cold winner may

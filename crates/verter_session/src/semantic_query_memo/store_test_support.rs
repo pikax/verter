@@ -277,6 +277,10 @@ impl SemanticGraphStore {
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
             satisfied_projection,
+            // Test-support seeding runs against fixture stores that own
+            // no retention account; production publication always goes
+            // through a charged path.
+            retention_charge: None,
             validated_at_generation,
             admission_seq,
         };

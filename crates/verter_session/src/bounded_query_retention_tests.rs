@@ -94,6 +94,14 @@ fn budget_zero_cap_clamps_to_one() {
     );
 }
 
+/// A per-slot candidate cap of zero has no coherent retention semantics;
+/// accepting it as one would hide an invalid caller configuration.
+#[test]
+#[should_panic(expected = "per-slot candidate cap must be nonzero")]
+fn candidate_map_rejects_zero_per_slot_cap() {
+    let _: BoundedCandidateMap<u32, u8, u32> = BoundedCandidateMap::with_caps(0, 1);
+}
+
 /// `BoundedCandidateMap` keeps at most `per_slot_cap` candidates in
 /// one slot, evicting the oldest. DISCRIMINATES: an unbounded slot
 /// would retain all five.
@@ -101,7 +109,7 @@ fn budget_zero_cap_clamps_to_one() {
 fn candidate_map_bounds_one_slot_at_per_slot_cap() {
     let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(3, 100);
     for v in 0u8..5 {
-        map.admit("owner", v, u32::from(v));
+        map.admit("owner", v, u32::from(v), None);
     }
     let slot = map.slot_candidates(&"owner");
     assert_eq!(
@@ -121,9 +129,9 @@ fn candidate_map_bounds_one_slot_at_per_slot_cap() {
 #[test]
 fn candidate_map_same_discriminant_replaces_in_place() {
     let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-    map.admit("owner", 7, 1);
-    map.admit("owner", 7, 2);
-    map.admit("owner", 7, 3);
+    map.admit("owner", 7, 1, None);
+    map.admit("owner", 7, 2, None);
+    map.admit("owner", 7, 3, None);
     let slot = map.slot_candidates(&"owner");
     assert_eq!(
         slot.len(),
@@ -142,7 +150,7 @@ fn candidate_map_global_budget_bounds_across_slots() {
     // 12 distinct slots, one candidate each — per-slot cap never
     // triggers, only the global cap of 5 does.
     for owner in 0u32..12 {
-        map.admit(owner, 0, owner);
+        map.admit(owner, 0, owner, None);
     }
     assert!(
         map.live_count() <= 5,
@@ -157,7 +165,7 @@ fn candidate_map_global_budget_bounds_across_slots() {
 #[test]
 fn candidate_map_reader_arc_survives_eviction() {
     let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-    map.admit("owner", 1, 42);
+    map.admit("owner", 1, 42, None);
     let held = map.get_candidate(&"owner", &1).expect("candidate present");
     let seq = held.seq;
     // Evict the exact candidate the reader is holding.
@@ -188,7 +196,7 @@ fn candidate_map_reader_arc_survives_eviction() {
 fn candidate_map_readmit_into_emptied_slot_stays_visible() {
     let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
     // Admit, then evict — the slot is emptied and detached.
-    map.admit("owner", 1, 100);
+    map.admit("owner", 1, 100, None);
     let first = map.get_candidate(&"owner", &1).expect("first admitted");
     assert!(
         map.evict_candidate(&"owner", first.seq),
@@ -199,7 +207,7 @@ fn candidate_map_readmit_into_emptied_slot_stays_visible() {
 
     // Re-admit under the same key. The fresh candidate MUST be
     // reachable — `admit` re-attaches the slot under its shard guard.
-    map.admit("owner", 2, 200);
+    map.admit("owner", 2, 200, None);
     let readmitted = map
         .get_candidate(&"owner", &2)
         .expect("re-admitted candidate must be reachable after slot detach");
@@ -233,7 +241,7 @@ fn candidate_map_concurrent_admit_vs_detach_never_strands() {
     // Seed every key so the first reaper round has something to
     // evict (and thus a slot to attempt to detach).
     for key in 0u32..8 {
-        map.admit(key, 0, key);
+        map.admit(key, 0, key, None);
     }
 
     let rounds = 400usize;
@@ -247,7 +255,7 @@ fn candidate_map_concurrent_admit_vs_detach_never_strands() {
                 if let Some(c) = map.get_candidate(&key, &0) {
                     map.evict_candidate(&key, c.seq);
                 }
-                map.admit(key, 0, key);
+                map.admit(key, 0, key, None);
             }
         })
     };
@@ -258,7 +266,7 @@ fn candidate_map_concurrent_admit_vs_detach_never_strands() {
                 let key = (r % 8) as u32;
                 // Admit a second discriminant concurrently with the
                 // reaper churning disc 0 on the same slot.
-                map.admit(key, 1, key + 1000);
+                map.admit(key, 1, key + 1000, None);
             }
         })
     };
@@ -290,9 +298,9 @@ fn candidate_map_concurrent_admit_vs_detach_never_strands() {
 #[test]
 fn candidate_map_evict_slot_drops_all_versions() {
     let map: BoundedCandidateMap<&str, u8, u32> = BoundedCandidateMap::with_caps(4, 100);
-    map.admit("a", 0, 1);
-    map.admit("a", 1, 2);
-    map.admit("b", 0, 3);
+    map.admit("a", 0, 1, None);
+    map.admit("a", 1, 2, None);
+    map.admit("b", 0, 3, None);
     assert_eq!(map.evict_slot(&"a"), 2, "both versions of slot a removed");
     assert_eq!(map.live_count(), 1, "only slot b survives");
     assert!(map.slot_candidates(&"a").is_empty());
@@ -334,7 +342,7 @@ fn candidate_map_inflight_admit_engages_gate_against_clear() {
     let _admit_guard = map.test_arm_admit_post_record_gate(StdArc::clone(&admit_parked));
 
     let map_admit = StdArc::clone(&map);
-    let admitter = thread::spawn(move || map_admit.admit(7, 0, 700));
+    let admitter = thread::spawn(move || map_admit.admit(7, 0, 700, None));
 
     // Wait until `admit` has pushed its candidate, recorded its
     // budget admission, and parked — still inside `admit`, still
@@ -380,7 +388,7 @@ fn candidate_map_inflight_admit_engages_gate_against_clear() {
     assert_eq!(map.clear(), 1, "clear drops the one live candidate");
     assert_eq!(map.live_count(), 0);
     assert_eq!(map.budget.tracked_len(), 0);
-    map.admit(8, 0, 800);
+    map.admit(8, 0, 800, None);
     assert_eq!(
         map.live_count(),
         map.budget.tracked_len(),
@@ -418,7 +426,7 @@ fn candidate_map_inflight_clear_engages_gate_against_admit() {
     let map: StdArc<BoundedCandidateMap<u32, u8, u32>> =
         StdArc::new(BoundedCandidateMap::with_caps(4, 4096));
     // Seed one candidate so `clear` has a slot to drop.
-    map.admit(1, 0, 100);
+    map.admit(1, 0, 100, None);
 
     // clear_parked: party 1 = the parked `clear`, party 2 = main.
     let clear_parked = StdArc::new(Barrier::new(2));
@@ -515,7 +523,7 @@ fn candidate_map_concurrent_admit_no_ghost_budget_record() {
     // its empty removed-seq `forget_seq`, then parks at the
     // pre-budget injection point — BEFORE `record_admission`.
     let map_a = StdArc::clone(&map);
-    let admit_a = thread::spawn(move || map_a.admit(1, 0, 100));
+    let admit_a = thread::spawn(move || map_a.admit(1, 0, 100, None));
 
     // Wait until admit-A has pushed its candidate and parked.
     admit_a_parked.wait();
@@ -529,7 +537,7 @@ fn candidate_map_concurrent_admit_no_ghost_budget_record() {
     //     at `slots.entry(1)` until A is released.
     //   - PRE-fix: A holds nothing → B runs into A's gap.
     let map_b = StdArc::clone(&map);
-    let admit_b = thread::spawn(move || map_b.admit(1, 1, 200));
+    let admit_b = thread::spawn(move || map_b.admit(1, 1, 200, None));
 
     // THE DETERMINISTIC DISCRIMINATOR — with admit-A still parked at
     // the pre-budget point, the key's `DashMap` shard MUST be
