@@ -384,6 +384,9 @@ pub mod route_analysis_inputs;
 pub mod semantic_capability;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
+pub(crate) mod semantic_retention_account;
+#[cfg(test)]
+mod semantic_retention_account_tests;
 pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;

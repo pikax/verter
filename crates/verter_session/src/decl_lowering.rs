@@ -9,6 +9,18 @@
 //! worker, returning OWNED typed IR. The snapshot never crosses a thread
 //! boundary; only `Send` job inputs and owned results do.
 //!
+//! Retained snapshots are PINNED BYTES against the process-local
+//! aggregate retention account
+//! ([`SemanticRetentionAccount`](crate::semantic_retention_account::SemanticRetentionAccount)):
+//! the charge is created by the acquisition that actually PARSED and is
+//! dropped when the last lease for that key releases, so the account's
+//! pinned total tracks exactly the snapshots the process is holding —
+//! one charge per snapshot, never one per lease. A pin is never refused:
+//! refusing one would force a live artifact to silently re-parse, which
+//! the retention contract below forbids. Charging it anyway is the point
+//! — pinned bytes consume headroom, so a process holding many live
+//! snapshots admits fewer discretionary cache entries.
+//!
 //! Retention is LEASE-PINNED, not LRU/budget-evicted. A snapshot is
 //! retained for a [`SnapshotKey`] — `(canonical, whole_hash,
 //! parse_env_hash)`, the file-content generation identity — exactly as
@@ -138,7 +150,9 @@ std::thread_local! {
 /// Retention is lease-pinned: an entry exists exactly while at least one
 /// live [`SnapshotLease`] refcounts the key. There is NO count/byte
 /// budget and NO eviction — a live artifact's snapshot can never be
-/// dropped out from under it.
+/// dropped out from under it. The snapshot's bytes are nonetheless
+/// CHARGED as a pin (see the module docs), so the aggregate account sees
+/// them even though nothing may evict them.
 struct SnapshotShard {
     entries: FxHashMap<SnapshotKey, ShardEntry>,
 }
@@ -151,6 +165,14 @@ struct ShardEntry {
     /// Live lease count. The entry is removed (and its `Rc` dropped) when
     /// this reaches zero.
     refcount: usize,
+    /// This snapshot's pin against the aggregate retention account.
+    ///
+    /// Owned by the ENTRY, not by a lease: a second lease on an
+    /// already-retained snapshot pins bytes that already exist, so
+    /// charging per lease would multiply one arena by its lease count.
+    /// The entry is removed at refcount zero, which drops the charge at
+    /// exactly the moment the arena is freed.
+    _pin: crate::semantic_retention_account::RetentionCharge,
 }
 
 impl SnapshotShard {
@@ -165,6 +187,7 @@ impl SnapshotShard {
     /// whether this acquisition had to parse.
     fn acquire(
         &mut self,
+        account: &Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
         key: &SnapshotKey,
         source: &Arc<str>,
         source_type: oxc_span::SourceType,
@@ -175,11 +198,19 @@ impl SnapshotShard {
         }
         let parsed =
             crate::ParsedEvalProgram::parse(Arc::clone(source), source_type).map(std::rc::Rc::new);
+        // Charged from SOURCE bytes rather than by walking the arena:
+        // the lease path is hot, and an arena walk per acquisition would
+        // cost more than the accounting is worth. See
+        // `PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE` for the factor.
+        let pin = account.pin(
+            source.len() * crate::semantic_retention_account::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE,
+        );
         self.entries.insert(
             key.clone(),
             ShardEntry {
                 parsed,
                 refcount: 1,
+                _pin: pin,
             },
         );
         true
@@ -465,9 +496,15 @@ pub(crate) struct DeclLoweringService {
     /// to the unprofiled arms.
     #[cfg(not(target_arch = "wasm32"))]
     profile: Option<Arc<HandoffStats>>,
-    // On `wasm32` the service is FIELDLESS: the retained shard lives in
-    // the `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
-    // service stays `Send + Sync` without any `unsafe impl`.
+    /// The aggregate retention account this service's retained parse
+    /// snapshots pin against. Production uses the process-local account;
+    /// a test may inject a private one so pin accounting is observable
+    /// without racing another test's snapshots.
+    account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    // On `wasm32` the shard itself lives in the
+    // `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
+    // service stays `Send + Sync` without any `unsafe impl`; only the
+    // `Send + Sync` account handle is a field.
 }
 
 impl std::fmt::Debug for DeclLoweringService {
@@ -503,6 +540,21 @@ impl DeclLoweringService {
     /// zero decl-lowering threads.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new_with(lazy: bool, worker_count: usize) -> Self {
+        Self::new_with_account(
+            lazy,
+            worker_count,
+            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+        )
+    }
+
+    /// [`Self::new_with`] against an explicit retention account. Test-only:
+    /// production services pin against the one process-local account.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_with_account(
+        lazy: bool,
+        worker_count: usize,
+        account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    ) -> Self {
         let worker_count = worker_count.max(1);
         let workers = std::sync::OnceLock::new();
         if !lazy {
@@ -514,6 +566,7 @@ impl DeclLoweringService {
             worker_count,
             workers,
             profile: global_handoff_stats().cloned(),
+            account,
         }
     }
 
@@ -523,7 +576,22 @@ impl DeclLoweringService {
     /// spawn policy is inert here — both arguments are ignored.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn new_with(_lazy: bool, _worker_count: usize) -> Self {
-        Self {}
+        Self::new_with_account(
+            _lazy,
+            _worker_count,
+            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+        )
+    }
+
+    /// [`Self::new_with`] against an explicit retention account. The spawn
+    /// policy is inert on wasm; only the account is retained.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_with_account(
+        _lazy: bool,
+        _worker_count: usize,
+        account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    ) -> Self {
+        Self { account }
     }
 
     /// Test-only single-worker constructor: forces every key onto one
@@ -591,8 +659,10 @@ impl DeclLoweringService {
             match self.profile.as_ref() {
                 None => {
                     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let account = Arc::clone(&self.account);
                     let job: WorkerJob = Box::new(move |shard| {
-                        let parsed_now = shard.acquire(&key_for_job, &source, source_type);
+                        let parsed_now =
+                            shard.acquire(&account, &key_for_job, &source, source_type);
                         let _ = result_tx.send(parsed_now);
                     });
                     workers[shard_index]
@@ -609,9 +679,11 @@ impl DeclLoweringService {
                 Some(stats) => {
                     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                     let submitted = std::time::Instant::now();
+                    let account = Arc::clone(&self.account);
                     let job: WorkerJob = Box::new(move |shard| {
                         let started = std::time::Instant::now();
-                        let parsed_now = shard.acquire(&key_for_job, &source, source_type);
+                        let parsed_now =
+                            shard.acquire(&account, &key_for_job, &source, source_type);
                         let _ = result_tx.send((parsed_now, started, std::time::Instant::now()));
                     });
                     workers[shard_index]
@@ -632,8 +704,10 @@ impl DeclLoweringService {
             }
         };
         #[cfg(target_arch = "wasm32")]
-        let parsed_now = WASM_DECL_LOWERING_SHARD
-            .with(|cell| cell.borrow_mut().acquire(key, source, source_type));
+        let parsed_now = WASM_DECL_LOWERING_SHARD.with(|cell| {
+            cell.borrow_mut()
+                .acquire(&self.account, key, source, source_type)
+        });
 
         LeaseOutcome {
             lease: SnapshotLease {

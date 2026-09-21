@@ -1028,6 +1028,16 @@ pub struct ProjectTypeStore {
     /// Bounded by retained payload bytes; see
     /// [`crate::identity_interner::IdentityInterner`].
     identity_interner: Arc<crate::identity_interner::IdentityInterner>,
+    /// The aggregate retained-byte account every store in this graph
+    /// charges.
+    ///
+    /// Held as a handle, NOT as a per-store budget: the default is the
+    /// ONE process-local account
+    /// ([`SemanticRetentionAccount::process_local`]), so a workspace with
+    /// three loaded projects admits against one ceiling rather than
+    /// three. A test may inject a private account to drive pressure
+    /// deterministically without perturbing concurrent tests.
+    retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1049,7 +1059,30 @@ impl std::fmt::Debug for ProjectTypeStore {
 impl ProjectTypeStore {
     #[must_use]
     pub fn new() -> Self {
-        Self::build(None)
+        Self::build(
+            None,
+            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+        )
+    }
+
+    /// Construct a store charging `retention_account` instead of the
+    /// process-local one. Test-support only: production hosts share the
+    /// single process-local account so the ratified ceiling is not
+    /// multiplied per project.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_retention_account(
+        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    ) -> Self {
+        Self::build(None, retention_account)
+    }
+
+    /// The aggregate retained-byte account this store's caches charge.
+    #[must_use]
+    pub fn retention_account(
+        &self,
+    ) -> &Arc<crate::semantic_retention_account::SemanticRetentionAccount> {
+        &self.retention_account
     }
 
     /// Construct a store wired to the host's
@@ -1061,10 +1094,16 @@ impl ProjectTypeStore {
     /// `stats_snapshot` surface).
     #[must_use]
     pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
-        Self::build(Some(provenance))
+        Self::build(
+            Some(provenance),
+            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+        )
     }
 
-    fn build(provenance: Option<Arc<crate::types::MetaProvenance>>) -> Self {
+    fn build(
+        provenance: Option<Arc<crate::types::MetaProvenance>>,
+        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    ) -> Self {
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
         // `counters` so the `snapshot()` method sees in-place updates.
@@ -1078,14 +1117,15 @@ impl ProjectTypeStore {
         );
         let owner_import_surfaces =
             OwnerImportSurfaceDb::with_counter(Arc::clone(&counters.owner_import_live));
-        let component_meta_results = ComponentMetaResultDb::with_counters(
+        let component_meta_results = ComponentMetaResultDb::with_counters_and_account(
             Arc::clone(&counters.component_meta_live),
             Arc::clone(&counters.component_meta_stale_sweeps),
+            Arc::clone(&retention_account),
         );
-        let semantic_graph = match provenance {
-            Some(prov) => Arc::new(SemanticGraphStore::with_provenance(prov)),
-            None => Arc::new(SemanticGraphStore::new()),
-        };
+        let semantic_graph = Arc::new(match provenance {
+            Some(prov) => SemanticGraphStore::with_provenance(prov, Arc::clone(&retention_account)),
+            None => SemanticGraphStore::with_account(Arc::clone(&retention_account)),
+        });
         let imported_registry_db =
             ImportedRegistryDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let declaration_lookup_db =
@@ -1132,9 +1172,10 @@ impl ProjectTypeStore {
             mapper_binder_registry: Arc::new(
                 crate::mapper_binder_registry::MapperBinderRegistry::new(),
             ),
-            identity_interner: Arc::new(
-                crate::identity_interner::IdentityInterner::with_default_budget(),
-            ),
+            identity_interner: Arc::new(crate::identity_interner::IdentityInterner::new(
+                Arc::clone(&retention_account),
+            )),
+            retention_account,
             counters,
         }
     }

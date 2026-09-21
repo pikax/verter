@@ -325,6 +325,8 @@ declare_work_sites! {
 
     // retention
     StoreRetainedBytes      => "session.store_retained_bytes",       Retention, Gauge;
+    RetentionAdmitRefused   => "session.retention_admit_refused",    Retention, Calls;
+    RetentionPoolShed       => "session.retention_pool_shed",        Retention, Bytes;
 
     // pinning
     ArtifactPinAcquire      => "session.artifact_pin_acquire",       Pinning, Calls;

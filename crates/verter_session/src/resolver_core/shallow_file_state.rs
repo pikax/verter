@@ -3561,7 +3561,7 @@ export interface Props { child: Inner; data: Local }
             "Props",
             Some(&dep_edges),
             &import_canonicalization,
-            &crate::identity_interner::IdentityInterner::with_default_budget(),
+            &crate::identity_interner::IdentityInterner::with_process_local_account(),
         )
         .expect("Props preparation should not fail")
         .expect("Props should prepare");

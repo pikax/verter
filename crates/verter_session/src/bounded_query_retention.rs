@@ -76,6 +76,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use crate::semantic_retention_account::RetentionCharge;
+
 /// Process-wide monotonic allocator for candidate / entry insertion
 /// sequence numbers. The sequence number is the FIFO eviction order and
 /// doubles as a per-admission identity that survives a same-key
@@ -360,6 +362,25 @@ pub struct RetentionCandidate<D, V> {
     pub seq: u64,
     /// Caller payload.
     pub value: V,
+    /// The candidate's reservation against the aggregate retention
+    /// account, held for exactly as long as the candidate's payload is.
+    ///
+    /// Storing the charge HERE — rather than releasing it from an
+    /// eviction path — is what makes release exactly-once across every
+    /// way a candidate can leave: per-slot cap eviction, global FIFO
+    /// eviction, same-discriminant replacement, slot removal, and a
+    /// whole-map `clear` all simply drop the candidate.
+    ///
+    /// It also keeps a READER honest. A reader clones the candidate
+    /// `Arc` out of the slot before validating, so an evicted candidate
+    /// outlives the eviction for as long as that reader holds it; the
+    /// charge rides the same `Arc`, so the bytes stay accounted while
+    /// they are still resident and become reclaimable at the exact
+    /// moment the last reader drops.
+    ///
+    /// `None` for a substrate caller that owns no account (the generic
+    /// unit tests over this module).
+    _charge: Option<RetentionCharge>,
 }
 
 /// Outcome of a [`BoundedCandidateMap::admit`] call.
@@ -705,7 +726,21 @@ where
     /// its candidate" — the slot the admitter populates is always still
     /// attached when the shard guard is released, and the published
     /// candidate is always reachable by later reads / `live_count`.
-    pub fn admit(&self, key: K, discriminant: D, value: V) -> AdmitOutcome {
+    ///
+    /// `charge` is the caller's already-granted reservation for this
+    /// candidate's payload. Admission control lives with the cache
+    /// OWNER, which knows how to route a refusal back to its caller as
+    /// an uncached result; the substrate's job is to hold the granted
+    /// charge for exactly the candidate's lifetime. Passing `None` means
+    /// the caller owns no retention account at all — the generic unit
+    /// tests over this module — never a production path opting out.
+    pub fn admit(
+        &self,
+        key: K,
+        discriminant: D,
+        value: V,
+        charge: Option<RetentionCharge>,
+    ) -> AdmitOutcome {
         // Hold the retention-gate read guard across the WHOLE map +
         // budget mutation: the slot push, the per-slot eviction, the
         // budget `forget_seq` cleanup, the global-budget admission, and
@@ -755,10 +790,14 @@ where
                 // record the fresh one so FIFO order reflects the latest
                 // write.
                 forget_seqs.push(existing.seq);
+                // Assigning through drops the replaced candidate's own
+                // `Arc`, releasing its charge once the last reader of it
+                // is gone — the fresh candidate's charge replaces it.
                 *existing = Arc::new(RetentionCandidate {
                     discriminant,
                     seq,
                     value,
+                    _charge: charge,
                 });
             } else {
                 fresh = true;
@@ -766,6 +805,7 @@ where
                     discriminant,
                     seq,
                     value,
+                    _charge: charge,
                 }));
                 // Per-slot cap: evict oldest-by-seq until within cap.
                 while candidates.len() > self.per_slot_cap {

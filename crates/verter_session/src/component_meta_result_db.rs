@@ -117,6 +117,67 @@ pub struct ComponentMetaResultEntry<P> {
     pub validated_at_generation: u64,
 }
 
+/// Per-record byte estimates for the component-meta footprint.
+///
+/// Each constant is the approximate resident cost of one record of that
+/// family — the struct plus the short owned strings and typed IR it
+/// keeps alive. These are ACCOUNTING estimates: they decide whether the
+/// process may RETAIN an entry, never whether a retained entry is valid.
+/// An imprecise constant therefore costs hit rate, never correctness.
+mod footprint {
+    /// A surface record with a resolved type descriptor: a prop, event,
+    /// slot, model, exposed member, or accepted-surface entry.
+    pub(super) const SURFACE_RECORD_BYTES: usize = 512;
+    /// A lighter structural record: an import, binding, template ref,
+    /// component usage, API call, or style block.
+    pub(super) const STRUCTURAL_RECORD_BYTES: usize = 192;
+    /// A resolved type-registry analysis, which carries an expanded
+    /// member list and is the heaviest per-record family.
+    pub(super) const TYPE_RECORD_BYTES: usize = 1024;
+    /// One observed dependency fact on the entry's validity rail.
+    pub(super) const FACT_BYTES: usize = 64;
+}
+
+impl crate::semantic_retention_account::RetainedFootprint for CachedComponentMetaResult {
+    fn retained_footprint_bytes(&self) -> usize {
+        let analysis = &self.analysis;
+        let surfaces = analysis.props.len()
+            + analysis.events.len()
+            + analysis.slots.len()
+            + analysis.models.len()
+            + analysis.exposed.len()
+            + analysis.accepted_props.len()
+            + analysis.accepted_events.len();
+        let structural = analysis.components.len()
+            + analysis.template_refs.len()
+            + analysis.imports.len()
+            + analysis.bindings.len()
+            + analysis.vue_api_calls.len()
+            + analysis.styles.len();
+        let types = analysis.type_registry.len()
+            + self.resolution_template.resolved_type_registry.len()
+            + self.resolution_template.resolved_type_registry_meta.len()
+            + self.resolution_template.resolved_macros.len();
+        surfaces * footprint::SURFACE_RECORD_BYTES
+            + structural * footprint::STRUCTURAL_RECORD_BYTES
+            + types * footprint::TYPE_RECORD_BYTES
+            + self.resolution_template.fact_versions.len() * footprint::FACT_BYTES
+            + self.canonical_id.len()
+            + std::mem::size_of::<Self>()
+    }
+}
+
+impl<P> crate::semantic_retention_account::RetainedFootprint for ComponentMetaResultEntry<P>
+where
+    P: crate::semantic_retention_account::RetainedFootprint,
+{
+    fn retained_footprint_bytes(&self) -> usize {
+        self.payload.retained_footprint_bytes()
+            + self.read_set_signature.facts.len() * footprint::FACT_BYTES
+            + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES
+    }
+}
+
 /// Evidence carrier for the exact final-result entry admitted by one cold
 /// component-meta computation.
 ///
@@ -377,6 +438,11 @@ pub struct ComponentMetaResultDb<P> {
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
+    /// The aggregate retained-byte account this cache admits against.
+    /// `None` only for a standalone Db built outside a
+    /// [`crate::project_type_store::ProjectTypeStore`] (substrate unit
+    /// fixtures), which retain nothing beyond the fixture's own lifetime.
+    retention_account: Option<Arc<crate::semantic_retention_account::SemanticRetentionAccount>>,
 }
 
 impl<P> ComponentMetaResultDb<P> {
@@ -407,6 +473,38 @@ impl<P> ComponentMetaResultDb<P> {
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            None,
+        )
+    }
+
+    /// The production constructor: counters plus the project's aggregate
+    /// retention account, so every admitted entry's bytes are charged
+    /// against the one process-local ceiling.
+    pub(crate) fn with_counters_and_account(
+        live_counter: Arc<AtomicU64>,
+        stale_sweeps: Arc<AtomicU64>,
+        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    ) -> Self {
+        Self::with_counters_and_schema_version(
+            live_counter,
+            stale_sweeps,
+            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            Some(retention_account),
+        )
+    }
+
+    /// Test-only constructor binding a specific retention account, so a
+    /// pressure fixture can exercise the aggregate refusal path without
+    /// perturbing the process-local account every other test shares.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_account_for_test(
+        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    ) -> Self {
+        Self::with_counters_and_account(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            retention_account,
         )
     }
 
@@ -418,6 +516,7 @@ impl<P> ComponentMetaResultDb<P> {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             schema_version,
+            None,
         )
     }
 
@@ -425,6 +524,7 @@ impl<P> ComponentMetaResultDb<P> {
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
         schema_version: u32,
+        retention_account: Option<Arc<crate::semantic_retention_account::SemanticRetentionAccount>>,
     ) -> Self {
         Self {
             inner: BoundedCandidateMap::with_caps(
@@ -434,6 +534,7 @@ impl<P> ComponentMetaResultDb<P> {
             live_counter,
             stale_sweeps,
             schema_version,
+            retention_account,
         }
     }
 
@@ -650,6 +751,7 @@ impl<P> ComponentMetaResultDb<P> {
     where
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
+        P: crate::semantic_retention_account::RetainedFootprint,
     {
         self.compute_and_admit_with_entry(host, canonical, path_label, compute, decide)
             .0
@@ -669,6 +771,7 @@ impl<P> ComponentMetaResultDb<P> {
     where
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
+        P: crate::semantic_retention_account::RetainedFootprint,
     {
         let (value, read_set) =
             host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, compute);
@@ -690,12 +793,16 @@ impl<P> ComponentMetaResultDb<P> {
                         ),
                         validated_at_generation,
                     });
-                    self.insert_owned(key.clone(), owner_whole_hash, entry.as_ref().clone());
-                    admitted = Some(AdmittedComponentMetaResult {
-                        key,
-                        owner_whole_hash,
-                        entry,
-                    });
+                    // A retention refusal leaves `admitted` unset: the
+                    // caller keeps its complete value, and no evidence
+                    // carrier claims an entry the cache never stored.
+                    if self.insert_owned(key.clone(), owner_whole_hash, entry.as_ref().clone()) {
+                        admitted = Some(AdmittedComponentMetaResult {
+                            key,
+                            owner_whole_hash,
+                            entry,
+                        });
+                    }
                 }
                 ComponentMetaPublishDecision::ReturnOnly(reason) => {
                     crate::cache_runtime::admission::propagate_non_admission(reason);
@@ -754,13 +861,51 @@ impl<P> ComponentMetaResultDb<P> {
     /// place; a new owner content version appends a candidate to the
     /// slot, and the bounded substrate evicts the oldest candidate /
     /// global-oldest entry to stay within the per-slot and global caps.
+    ///
+    /// Returns `false` when the aggregate retention account refused the
+    /// entry's bytes: the freshly computed value is COMPLETE and is
+    /// returned to its caller, the cache simply does not keep it. No
+    /// stale candidate is substituted and no partial is fabricated — the
+    /// slot is left exactly as it was.
     fn insert_owned(
         &self,
         key: ComponentMetaResultKey,
         owner_whole_hash: Hash16,
         entry: ComponentMetaResultEntry<P>,
-    ) {
-        let outcome = self.inner.admit(key, owner_whole_hash, entry);
+    ) -> bool
+    where
+        P: crate::semantic_retention_account::RetainedFootprint,
+    {
+        let charge = match &self.retention_account {
+            Some(account) => {
+                let bytes = {
+                    use crate::semantic_retention_account::RetainedFootprint as _;
+                    entry.retained_footprint_bytes()
+                };
+                match account.reserve(
+                    crate::semantic_retention_account::ChargeClass::Retained,
+                    bytes,
+                ) {
+                    crate::semantic_retention_account::RetentionAdmission::Admitted(charge) => {
+                        Some(charge)
+                    }
+                    crate::semantic_retention_account::RetentionAdmission::Refused(refusal) => {
+                        crate::cache_runtime::admission::propagate_non_admission(
+                            refusal.non_admission_reason(),
+                        );
+                        tracing::debug!(
+                            target: "verter::audit::record",
+                            file = %key.owner_canonical,
+                            refusal = %refusal,
+                            "skipping component-meta cache promotion: aggregate retention refusal",
+                        );
+                        return false;
+                    }
+                }
+            }
+            None => None,
+        };
+        let outcome = self.inner.admit(key, owner_whole_hash, entry, charge);
         if outcome.evicted > 0 {
             self.stale_sweeps
                 .fetch_add(outcome.evicted as u64, Ordering::Relaxed);
@@ -770,6 +915,7 @@ impl<P> ComponentMetaResultDb<P> {
         // evictions remove that many. `fetch_add`/`fetch_sub` compose
         // exactly under concurrent admissions.
         self.apply_live_delta(usize::from(outcome.fresh), outcome.evicted);
+        true
     }
 
     /// Test-support seed seam. Production admission must route through
@@ -781,7 +927,9 @@ impl<P> ComponentMetaResultDb<P> {
         key: ComponentMetaResultKey,
         owner_whole_hash: Hash16,
         entry: ComponentMetaResultEntry<P>,
-    ) {
+    ) where
+        P: crate::semantic_retention_account::RetainedFootprint,
+    {
         self.insert_owned(key, owner_whole_hash, entry);
     }
 
@@ -864,7 +1012,9 @@ impl<P> ComponentMetaResultDb<P> {
         &self,
         key: ComponentMetaResultKey,
         payload: P,
-    ) {
+    ) where
+        P: crate::semantic_retention_account::RetainedFootprint,
+    {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
             read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
@@ -1143,6 +1293,11 @@ mod tests {
     fn insert_and_get_roundtrip() {
         #[derive(Clone, PartialEq, Eq, Debug)]
         struct MockPayload(u32);
+        impl crate::semantic_retention_account::RetainedFootprint for MockPayload {
+            fn retained_footprint_bytes(&self) -> usize {
+                std::mem::size_of::<Self>()
+            }
+        }
         let db: ComponentMetaResultDb<MockPayload> = ComponentMetaResultDb::new();
         let key = mk_result_key("/w/Accordion.vue", [9u8; 16]);
         let entry = ComponentMetaResultEntry {

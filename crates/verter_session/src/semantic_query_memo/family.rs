@@ -80,6 +80,19 @@ pub(super) struct MemoEntry {
     /// a recorded point dominates that sibling's requested point — never by
     /// enum rank.
     pub(super) satisfied_projection: MaterializedSet,
+    /// This candidate's reservation against the project's aggregate
+    /// retained-byte account, held for exactly as long as the candidate
+    /// is reachable.
+    ///
+    /// `Arc`, not a bare charge, because a same-payload BACKFILL clones
+    /// this entry into a sibling slot: the clone shares the payload's
+    /// allocations, so it must share ONE reservation rather than charge
+    /// the same bytes twice. The bytes become reclaimable when the last
+    /// clone — including any reader snapshot that outlived an eviction —
+    /// drops, which is the moment they are actually free.
+    ///
+    /// `None` for a fixture store that owns no account.
+    pub(super) retention_charge: Option<Arc<crate::semantic_retention_account::RetentionCharge>>,
     /// LRU eviction-recency metadata for the multi-candidate slot
     /// vector — NOT a semantic-validity oracle. Validity is decided
     /// exclusively by `read_set_signature.validate_with_self_roots`
@@ -95,6 +108,38 @@ pub(super) struct MemoEntry {
     /// `warm_publish_one_if_absent` / the test publish helpers — the
     /// only paths that create a `MemoEntry`.
     pub(super) admission_seq: u64,
+}
+
+impl crate::semantic_retention_account::RetainedFootprint for MemoEntry {
+    /// Estimated resident bytes for one memo candidate.
+    ///
+    /// Counted from the candidate's own carriers — its validity rail,
+    /// self-root list, walker diagnostics and materialised-point record.
+    /// The interned result node is deliberately NOT counted here: the
+    /// node arena is shared across every candidate that references it,
+    /// so charging it per candidate would multiply one allocation by its
+    /// reference count. This is an ACCOUNTING estimate and never a
+    /// validity input.
+    fn retained_footprint_bytes(&self) -> usize {
+        /// One observed dependency fact on the validity rail.
+        const FACT_BYTES: usize = 64;
+        /// One recorded materialised `(path, point)` record.
+        const POINT_BYTES: usize = 96;
+        /// One replayed walker diagnostic.
+        const DIAGNOSTIC_BYTES: usize = 256;
+        let self_roots: usize = self
+            .self_root_canonicals
+            .iter()
+            .map(|canonical| canonical.len() + std::mem::size_of::<Arc<str>>())
+            .sum();
+        std::mem::size_of::<Self>()
+            + self.read_set_signature.facts.len() * FACT_BYTES
+            + self.dispatch_dep_signature.len() * FACT_BYTES
+            + self_roots
+            + self.walker_diagnostics.len() * DIAGNOSTIC_BYTES
+            + self.satisfied_projection.points().len() * POINT_BYTES
+            + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES
+    }
 }
 
 impl MemoEntry {
