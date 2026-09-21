@@ -70,7 +70,7 @@
 //! decides whether the process may retain the entry at all, so an
 //! imprecise estimate costs hit rate, never correctness.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use verter_audit::NonAdmissionReason;
@@ -357,10 +357,10 @@ impl RetentionAccountSnapshot {
 #[derive(Debug)]
 pub struct SemanticRetentionAccount {
     limits: RetentionLimits,
-    /// Serializes every aggregate occupancy transition. Its CAS is the
-    /// admission linearization point: refusable reservations and pins
+    /// Serializes every aggregate occupancy transition. Acquiring it is
+    /// the admission linearization point: refusable reservations and pins
     /// therefore cannot validate against different aggregate states.
-    admission_lock: AtomicBool,
+    admission_lock: parking_lot::Mutex<()>,
     /// `active + retained` — the refusable occupancy. Kept as ONE cell
     /// so the two refusable classes share one aggregate state.
     refusable_bytes: AtomicUsize,
@@ -384,7 +384,7 @@ impl SemanticRetentionAccount {
     pub fn new(limits: RetentionLimits) -> Arc<Self> {
         Arc::new(Self {
             limits,
-            admission_lock: AtomicBool::new(false),
+            admission_lock: parking_lot::Mutex::new(()),
             refusable_bytes: AtomicUsize::new(0),
             active_bytes: AtomicUsize::new(0),
             pinned_bytes: AtomicUsize::new(0),
@@ -573,19 +573,8 @@ impl SemanticRetentionAccount {
         self.releases.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn lock_aggregate_state(&self) -> AggregateStateLock<'_> {
-        loop {
-            if self
-                .admission_lock
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return AggregateStateLock(&self.admission_lock);
-            }
-            while self.admission_lock.load(Ordering::Relaxed) {
-                std::hint::spin_loop();
-            }
-        }
+    fn lock_aggregate_state(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.admission_lock.lock()
     }
 
     /// Called only while [`Self::lock_aggregate_state`] is held.
@@ -594,15 +583,6 @@ impl SemanticRetentionAccount {
             + self.pinned_bytes.load(Ordering::Relaxed);
         self.peak_total_bytes.fetch_max(total, Ordering::Relaxed);
         verter_audit::attribute_max!(StoreRetainedBytes, total);
-    }
-}
-
-/// Guard for one atomic aggregate-account transition.
-struct AggregateStateLock<'a>(&'a AtomicBool);
-
-impl Drop for AggregateStateLock<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
     }
 }
 
