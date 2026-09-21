@@ -1,0 +1,56 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP13",
+  "kind": "implementation",
+  "products": [
+    "OptionsComponentProjection",
+    "CombinedScriptProjection",
+    "OptionsTemplateBindingView"
+  ],
+  "mandatoryCases": [
+    "STP13-options-this",
+    "STP13-mixins",
+    "STP13-combined",
+    "STP13-shadowed-macro",
+    "STP13-options-instance"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP13/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP13/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP13/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP13/probes/tsconfig.json",
+    "hoverNeedle": "stp13HoverTarget",
+    "definitionNeedle": "stp13DefinitionTarget",
+    "expectedNegativeCode": 2551,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP13-options-this",
+      "disposition": "accept",
+      "twins": ["contextual-this-members", "misspelled-member-errors"]
+    },
+    { "id": "STP13-mixins", "disposition": "accept", "twins": ["mixin-extends-inherited-members"] },
+    {
+      "id": "STP13-combined",
+      "disposition": "accept",
+      "twins": ["named-exports-coexist-without-leakage"]
+    },
+    {
+      "id": "STP13-shadowed-macro",
+      "disposition": "reject",
+      "twins": ["local-define-props-is-an-ordinary-call"]
+    },
+    {
+      "id": "STP13-options-instance",
+      "disposition": "accept",
+      "twins": ["constructor-shaped-instancetype"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP13 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::options_api",
+  "runtimeCorrectness": true,
+  "notes": "Classic Options API and combined-script compatibility. Options member extraction is syntax facts over the admitted block; contextual typing stays with TypeScript and the default export stays constructor-shaped. Combined pairs delegate module/setup scope to the STP11 setup authority and admit JS normal blocks per the STP12 policy. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::options_projection. STP58 owns atomic Vue activation."
+}
