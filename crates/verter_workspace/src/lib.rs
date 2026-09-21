@@ -170,11 +170,11 @@ pub use fact_read_set::{
     FACT_DOMAIN_PRECISE_MAX, FACT_SIGNATURE_CAP,
 };
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
-#[cfg(not(target_arch = "wasm32"))]
 pub use generated_unit_admission::{
     decide_generated_unit_admission, AdmittedGeneratedUnits, GeneratedUnitAdmission,
     GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmission, GeneratedUnitNonAdmissionReason,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use intrinsic_library::NativeIntrinsicLibrary;
 pub use intrinsic_library::{InMemoryIntrinsicLibrary, IntrinsicLibraryAccess};
 pub use membership::{
