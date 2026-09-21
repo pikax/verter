@@ -2338,6 +2338,23 @@ impl TsgoTypeProvider {
         self.versions.lock().await.remove(path);
     }
 
+    /// Wait until the engine has processed every notification sent before this
+    /// call. The engine handles document notifications in arrival order and only
+    /// then dispatches a request, so ANY response proves it; a syntax-only request
+    /// is used because it costs the engine no type checking (about a millisecond,
+    /// against most of a second for a diagnostic pull on a real project). The
+    /// answer itself is irrelevant and an error response proves the same thing.
+    pub async fn ordering_barrier(&self, path: &str) {
+        let uri = Self::path_to_uri(path);
+        let _ = self
+            .transport
+            .request(
+                "textDocument/foldingRange",
+                serde_json::json!({ "textDocument": { "uri": uri } }),
+            )
+            .await;
+    }
+
     /// Pull and parse the current document diagnostics without degrading a wire
     /// failure to the push-diagnostic cache. Non-owning editor-session consumers use
     /// this to distinguish a legitimate empty report from a failed relay request, so

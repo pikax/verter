@@ -614,12 +614,12 @@ async fn the_api_side_settles_pending_writes_with_exactly_one_barrier() {
     let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
     let frames = read_lsp_frames(&mut lsp_peer, &mut framer, |seen| {
         seen.iter()
-            .any(|(method, _)| method == "textDocument/diagnostic")
+            .any(|(method, _)| method == "textDocument/foldingRange")
     })
     .await;
     let barriers: Vec<_> = frames
         .iter()
-        .filter(|(method, _)| method == "textDocument/diagnostic")
+        .filter(|(method, _)| method == "textDocument/foldingRange")
         .collect();
     assert_eq!(
         barriers.len(),
@@ -632,7 +632,7 @@ async fn the_api_side_settles_pending_writes_with_exactly_one_barrier() {
     );
 
     let id = barriers[0].1.expect("a request carries an id");
-    let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"kind":"full","items":[]}}}}"#);
+    let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":[]}}"#);
     lsp_peer
         .write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
         .await

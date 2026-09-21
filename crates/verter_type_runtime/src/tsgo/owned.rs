@@ -604,9 +604,9 @@ impl TsgoOwnedProvider {
     /// enumerates roots. One round trip covers every write sent before it; with
     /// nothing written since the last one it is free.
     ///
-    /// The request is the carrier's own diagnostic pull: it is the request the
-    /// per-write barrier always used, so what the engine has been made to
-    /// process is unchanged — only how often it is asked.
+    /// The barrier needs ORDERING only, so it is a syntax-only request rather
+    /// than the diagnostic pull it used to be: that made the engine type-check
+    /// the carrier immediately before the `--api` side type-checked it again.
     pub(crate) async fn settle_lsp_writes(&self, path: &str) {
         let mut settled = self.lsp_writes.settled.lock().await;
         let written = self
@@ -616,7 +616,7 @@ impl TsgoOwnedProvider {
         if *settled >= written {
             return;
         }
-        let _ = self.lsp.get_diagnostics(path).await;
+        self.lsp.ordering_barrier(path).await;
         *settled = written;
     }
 
