@@ -688,7 +688,7 @@
       "snapshot": {
         "pubFn": 0,
         "pubFnTestHooks": 0,
-        "pubCrateFn": 14,
+        "pubCrateFn": 15,
         "pubType": 0,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
@@ -1006,7 +1006,7 @@
         "pubType": 198,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 287
+        "pubStructField": 288
       },
       "authority": [
         {
@@ -1034,6 +1034,7 @@
           "locator_identity",
           "project_semantic_dispatch",
           "resolver_core",
+          "signature_kernel",
           "semantic_query",
           "semantic_query_memo"
         ],
