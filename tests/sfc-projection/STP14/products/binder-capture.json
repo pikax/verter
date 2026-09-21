@@ -1,0 +1,47 @@
+{
+  "schema": "BinderCapturePlan",
+  "version": 1,
+  "product": "BinderCapturePlan",
+  "node": "STP14",
+  "kind": "implementation",
+  "products": ["PublicTypeDependencySlice", "BinderCapturePlan", "LiftedSourceDeclaration"],
+  "owner": "compiler.sfc-ts-projection:generic",
+  "implementationHome": "crates/verter_compiler/src/ide/vue_projection/binder_capture.rs",
+  "backendSurface": "VueProjectionBackend::public_type_dependencies (dormant vs project_ide; STP58 owns activation)",
+  "predecessors": {
+    "STP11": {
+      "consumes": ["TsSetupProjection", "ModuleScopeProjection", "UniversalSetupBinder"]
+    },
+    "STP8": {
+      "consumes": ["AcceptedProjectionArchitecture", "AcceptedVueConstructorABI", "HelperABI v1"]
+    }
+  },
+  "capture": {
+    "syntaxAndProvenanceOnly": true,
+    "evaluatesTypes": false,
+    "followsImportedAliasesIntoOtherFiles": false
+  },
+  "binder": {
+    "scopesSetupOnly": true,
+    "constraintAndDefaultClosure": true,
+    "alphaRenamesOnModuleScopeCollision": true,
+    "specializedFromParentUse": false
+  },
+  "lifting": {
+    "minimalReachableOnly": true,
+    "preservesAuthoredVisibility": true,
+    "preservesSourceOrigin": true,
+    "suppressesSourceDiagnostics": false,
+    "inventsSecondDeclarationForDuplicate": false
+  },
+  "cycles": {
+    "terminatesByDeclarationIdentity": true,
+    "eagerNativeExpansion": false
+  },
+  "deletionPopulationThisNode": [],
+  "retirementAtActivation": [
+    "native-reconstructed public type expressions for the TypeScript path"
+  ],
+  "svelteRoute": "preserved; STS1/STS15 own Svelte",
+  "runtimeActivationAuthorized": false
+}

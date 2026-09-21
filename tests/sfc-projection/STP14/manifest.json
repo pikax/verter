@@ -1,0 +1,56 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP14",
+  "kind": "implementation",
+  "products": ["PublicTypeDependencySlice", "BinderCapturePlan", "LiftedSourceDeclaration"],
+  "mandatoryCases": [
+    "STP14-local-capture",
+    "STP14-dependent-default",
+    "STP14-typeof-capture",
+    "STP14-alias-cycle",
+    "STP14-duplicate-error"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP14/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP14/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP14/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP14/probes/tsconfig.json",
+    "hoverNeedle": "stp14HoverTarget",
+    "definitionNeedle": "stp14DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp<{ id: number; }, readonly { id: number; }[]>"
+  },
+  "cases": [
+    {
+      "id": "STP14-local-capture",
+      "disposition": "accept",
+      "twins": ["binder-bound local alias", "module-scope emission"]
+    },
+    {
+      "id": "STP14-dependent-default",
+      "disposition": "accept",
+      "twins": ["later default over earlier parameter", "closure over constraints"]
+    },
+    {
+      "id": "STP14-typeof-capture",
+      "disposition": "accept",
+      "twins": ["unique symbol and local class", "nameable emitted declaration"]
+    },
+    {
+      "id": "STP14-alias-cycle",
+      "disposition": "reject",
+      "twins": ["recursive alias pair", "declaration-identity closure"]
+    },
+    {
+      "id": "STP14-duplicate-error",
+      "disposition": "reject",
+      "twins": ["doubly-bound name", "preserved source origins"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP14 --engine all --require-all --json",
+  "test": "node --test tests/sfc-projection/STP14/binder-capture.spec.ts",
+  "runtimeCorrectness": true,
+  "notes": "Binder-aware public dependency capture and local type lifting. Public type surfaces are captured by syntax and provenance; reachable declarations are lifted under alpha-renamed binder parameters with their constraint/default closure. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::public_type_dependencies. STP58 owns atomic Vue activation."
+}
