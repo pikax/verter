@@ -147,14 +147,13 @@ fn stp14_dependent_default_keeps_the_earlier_parameter_bound() {
 }
 
 #[test]
-fn stp14_dependent_default_only_binds_parameters_declared_before_it() {
-    // A parameter cannot refer forward, so a same-named later parameter is
-    // not a dependency edge.
+fn forward_binder_constraints_close_over_later_parameters() {
+    // TypeScript permits a constraint to refer to a later parameter. The
+    // closure must retain the edge so consuming the first parameter binds the
+    // second one too.
     let captured = plan("const a = 1", Some("A extends B, B = string"));
-    assert_eq!(
-        captured.binder_param_dependencies,
-        [Vec::<usize>::new(), Vec::new()]
-    );
+    assert_eq!(captured.binder_param_dependencies, [vec![1], Vec::new()]);
+    assert_eq!(captured.binder_closure(&[0]), [0, 1]);
 }
 
 #[test]

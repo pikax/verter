@@ -462,8 +462,9 @@ fn capture_binder(
                 .references
                 .iter()
                 .filter_map(|reference| names.iter().position(|name| *name == reference.name))
-                // A parameter may only refer to parameters declared before it.
-                .filter(|target| *target < ordinal)
+                // Constraints may refer to later parameters; only a parameter
+                // referring to itself is not a dependency edge.
+                .filter(|target| *target != ordinal)
                 .collect();
             found.sort_unstable();
             found.dedup();

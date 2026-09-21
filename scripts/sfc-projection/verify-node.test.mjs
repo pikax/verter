@@ -1191,6 +1191,25 @@ test("STP14 verify: binder-aware capture on both engines", async () => {
   assert.equal(result.incremental, "fresh");
 });
 
+test("STP14 product-only verification skips Rust capture tests", async () => {
+  const originalPath = process.env.PATH;
+  process.env.PATH = path.join(os.tmpdir(), "missing-cargo");
+  try {
+    const result = await verifyNode({
+      repoRoot: REPO_ROOT,
+      node: "STP14",
+      engine: "all",
+      requireAll: true,
+      json: true,
+      skipProbes: true,
+    });
+    assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+    assert.equal(result.probesSkipped, true);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
 test("STS0 node manifest is runnable without STP1 mandatory cases", () => {
   const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STS0/manifest.json");
   assert.equal(node.errors.length, 0, JSON.stringify(node.errors));

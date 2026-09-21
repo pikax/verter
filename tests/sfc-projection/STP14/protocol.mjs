@@ -165,11 +165,21 @@ export function validateStp14Products(product = loadStp14Product()) {
   if (product.schema !== "BinderCapturePlan") {
     errors.push(err("STP14-local-capture", "removed-fixture", "BinderCapturePlan schema"));
   }
-  const named = new Set(product.products || []);
+  const products = Array.isArray(product.products) ? product.products : [];
+  const named = new Set(products);
   for (const id of ACCEPTED_PRODUCTS) {
     if (!named.has(id)) {
       errors.push(err("STP14-local-capture", "removed-fixture", `missing product ${id}`));
     }
+  }
+  if (
+    products.length !== ACCEPTED_PRODUCTS.length ||
+    named.size !== products.length ||
+    products.some((id) => !ACCEPTED_PRODUCTS.includes(id))
+  ) {
+    errors.push(
+      err("STP14-local-capture", "product-list", "products must exactly match accepted products"),
+    );
   }
   for (const rel of [BINDER_CAPTURE_RS, BACKEND_RS]) {
     if (!fs.existsSync(path.join(REPO_ROOT, rel))) {

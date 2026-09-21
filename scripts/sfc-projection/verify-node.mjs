@@ -2054,7 +2054,10 @@ export async function verifyNode(options) {
   }
 
   if (nodeId === "STP14") {
-    const stp14 = await evaluateStp14Node({ repoRoot });
+    const stp14 = await evaluateStp14Node({
+      repoRoot,
+      skipRust: options.skipProbes,
+    });
     errors.push(...stp14.errors);
   }
 
@@ -2214,12 +2217,12 @@ async function evaluateStp12Node({ repoRoot }) {
   return { errors: stp12.errors };
 }
 
-async function evaluateStp14Node({ repoRoot }) {
+async function evaluateStp14Node({ repoRoot, skipRust }) {
   const protocolHref = pathToFileURL(
     repoPath(repoRoot, "tests/sfc-projection/STP14/protocol.mjs"),
   ).href;
   const protocol = await import(protocolHref);
-  const stp14 = await protocol.evaluateStp14({ repoRoot });
+  const stp14 = await protocol.evaluateStp14({ repoRoot, skipRust: !!skipRust });
   return { errors: stp14.errors };
 }
 

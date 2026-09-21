@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -21,6 +22,17 @@ test("STP14 products name the charter capture contracts", () => {
   assert.equal(errors.length, 0, JSON.stringify(errors, null, 2));
 });
 
+test("STP14 products reject duplicates and unsupported names", () => {
+  const product = loadStp14Product();
+  const duplicate = cloneJson(product);
+  duplicate.products.push(duplicate.products[0]);
+  assert.ok(validateStp14Products(duplicate).some((error) => error.code === "product-list"));
+
+  const extra = cloneJson(product);
+  extra.products.push("UnsupportedProduct");
+  assert.ok(validateStp14Products(extra).some((error) => error.code === "product-list"));
+});
+
 test("STP14 dirty twins for each forbidden design are rejected", () => {
   assert.equal(assertCapturePolicy(loadStp14Product()).length, 0);
   const errors = evaluateRejectTwins();
@@ -32,6 +44,14 @@ test("STP14 dirty twins for each forbidden design are rejected", () => {
 
 test("STP14 evaluate joins the rust capture, closure, typeof, cycle and duplicate cases", async () => {
   const result = await evaluateStp14();
+  assert.equal(result.errors.length, 0, JSON.stringify(result.errors, null, 2));
+});
+
+test("STP14 product-only evaluation skips Rust execution", async () => {
+  const result = await evaluateStp14({
+    skipRust: true,
+    repoRoot: path.join(process.cwd(), "missing-stp14-rust-worktree"),
+  });
   assert.equal(result.errors.length, 0, JSON.stringify(result.errors, null, 2));
 });
 
