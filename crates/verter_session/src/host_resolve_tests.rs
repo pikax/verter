@@ -520,6 +520,54 @@ fn empty_sfc_serves_empty_component_not_missing_virtual_node() {
         .expect("importing an empty SFC must compile");
 }
 
+#[test]
+fn javascript_setup_companions_match_the_published_consumer_carriers() {
+    const CANONICAL: &str = "/src/JSDocGeneric.vue";
+    const SOURCE: &str =
+        include_str!("../../../tests/sfc-projection/STP12/fixtures/jsdoc-generic.vue");
+    const PUBLIC_API: &str = include_str!(
+        "../../../tests/sfc-projection/STP12/probes/generated/JSDocGeneric.vue.verter.js.d.ts"
+    );
+
+    let host = strict_host();
+    upsert_vue(&host, CANONICAL, SOURCE);
+
+    let profile = CompileProfile {
+        target: CompileTarget::IDE,
+        ..CompileProfile::default()
+    };
+    assert!(
+        host.ensure_ide_compiled(CANONICAL, &profile)
+            .expect("JavaScript setup must publish an IDE companion"),
+        "JavaScript setup must produce an IDE companion"
+    );
+    let ide = host
+        .get_ide(CANONICAL, &profile)
+        .expect("published IDE companion");
+    let api = host
+        .get_public_api(CANONICAL)
+        .expect("published public API")
+        .expect("Vue carrier public API");
+
+    assert_eq!(
+        api.ts_labeled_code().as_ref(),
+        PUBLIC_API,
+        "the consumer declaration must be the provider-published public API output"
+    );
+    assert!(
+        ide.code
+            .contains("@template T @param {T} value @returns {T}"),
+        "the IDE companion must preserve the authored JSDoc generic: {}",
+        ide.code
+    );
+    assert!(
+        ide.code
+            .contains("InstanceType<typeof import('./JSDocGeneric.vue.verter.js')['default']>"),
+        "the IDE companion must resolve its instance through the published public API: {}",
+        ide.code
+    );
+}
+
 fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::DiagnosticsSnapshot {
     match host.get_virtual_file(VirtualQuery {
         raw_id: None,

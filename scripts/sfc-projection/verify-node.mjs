@@ -91,7 +91,6 @@ const REQUIRED_PROBE_STRINGS = Object.freeze([
   "hoverNeedle",
   "definitionNeedle",
   "expectedHoverType",
-  "expectedInstanceType",
 ]);
 
 export function probesAreRunnable(probes) {
@@ -99,6 +98,10 @@ export function probesAreRunnable(probes) {
   for (const key of REQUIRED_PROBE_STRINGS) {
     if (typeof probes[key] !== "string" || probes[key].length === 0) return false;
   }
+  const hasInstanceExpectation =
+    (typeof probes.expectedInstanceType === "string" && probes.expectedInstanceType.length > 0) ||
+    (Array.isArray(probes.expectedInstanceMembers) && probes.expectedInstanceMembers.length > 0);
+  if (!hasInstanceExpectation) return false;
   return Number.isInteger(probes.expectedNegativeCode);
 }
 
@@ -941,6 +944,22 @@ export function assertExactType({
   return [];
 }
 
+export function assertInstanceMembers(instance, members, engineId, caseId) {
+  if (!instance) {
+    return [err(caseId, "vacuous-type", `${engineId} missing Instance type`)];
+  }
+  const errors = assertExactType({
+    actual: instance.printed,
+    flags: instance.flags,
+  }).map((item) => ({ ...item, caseId }));
+  for (const member of members || []) {
+    if (!instance.printed.includes(member)) {
+      errors.push(err(caseId, "type-mismatch", `${engineId} Instance lacks ${member}`));
+    }
+  }
+  return errors;
+}
+
 export function assertCleanTwin(diagnostics, { fileLabel = "clean twin" } = {}) {
   const unexpected = (diagnostics || []).filter((diag) => diag && diag.code);
   if (unexpected.length > 0) {
@@ -1397,8 +1416,12 @@ function evaluateStp2Run(run, probes, cases, engineId, { maxChecksPerFile = 1 } 
           caseId,
         })),
       );
-      if (row.expectedInstanceType) {
-        const instance = primary.observations.types.Instance;
+      const instance = primary.observations.types.Instance;
+      if (Array.isArray(row.expectedInstanceMembers)) {
+        errors.push(
+          ...assertInstanceMembers(instance, row.expectedInstanceMembers, engineId, caseId),
+        );
+      } else if (row.expectedInstanceType) {
         if (!instance) {
           errors.push(err(caseId, "vacuous-type", `${engineId} missing Instance type`));
         } else {

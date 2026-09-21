@@ -15878,8 +15878,8 @@ const attrs = useAttrs()
 // ── Instance declaration regression tests ─────────────────────────
 //
 // These tests verify that the ___VERTER___instance declaration is correctly
-// typed based on the script language. TS SFCs must get InstanceType<...>,
-// not `any`. JS SFCs must get `@type {any}` (JSDoc style).
+// typed based on the script language. TS SFCs use TypeScript declarations;
+// JS SFCs use a JSDoc InstanceType bridge to the public API carrier.
 
 #[test]
 fn tsx_instance_declaration_ts_sfc_has_instance_type() {
@@ -15915,7 +15915,7 @@ const count = ref(0)
 }
 
 #[test]
-fn tsx_instance_declaration_js_sfc_has_jsdoc_any() {
+fn tsx_instance_declaration_js_sfc_has_jsdoc_public_instance_bridge() {
     let result = compile_tsx(
         r#"<script setup>
 const count = ref(0)
@@ -15926,19 +15926,16 @@ const count = ref(0)
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(tsx.is_jsx, "JS SFC (no lang attr) should produce JSX");
 
-    // Positive: should have JSDoc-style instance
+    // Positive: JSDoc carries the public constructor instance type.
     assert!(
-        tsx.code.contains("/** @type {any} */"),
-        "JS SFC should use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code.contains(
+            "/** @type {InstanceType<typeof import('./App.vue.verter.js')['default']>} */"
+        ),
+        "JS SFC should use the JSDoc public-instance bridge, got:\n{}",
         tsx.code
     );
 
-    // Negative: must NOT have TS-style InstanceType
-    assert!(
-        !tsx.code.contains("InstanceType<typeof import("),
-        "JS SFC must NOT use a TypeScript InstanceType self-import, got:\n{}",
-        tsx.code
-    );
+    // Negative: the JavaScript carrier must not use TypeScript declaration syntax.
     assert!(
         !tsx.code.contains("let ___VERTER___instance!:"),
         "JS SFC must NOT use definite assignment 'let ... !:', got:\n{}",
@@ -15947,7 +15944,7 @@ const count = ref(0)
 }
 
 #[test]
-fn tsx_instance_declaration_explicit_js_lang_has_jsdoc_any() {
+fn tsx_instance_declaration_explicit_js_lang_has_jsdoc_public_instance_bridge() {
     let result = compile_tsx(
         r#"<script setup lang="js">
 const count = ref(0)
@@ -15958,17 +15955,19 @@ const count = ref(0)
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(tsx.is_jsx, "lang='js' SFC should produce JSX");
 
-    // Positive: should have JSDoc-style instance
+    // Positive: JSDoc carries the public constructor instance type.
     assert!(
-        tsx.code.contains("/** @type {any} */"),
-        "lang='js' SFC should use JSDoc @type {{any}} for instance, got:\n{}",
+        tsx.code.contains(
+            "/** @type {InstanceType<typeof import('./App.vue.verter.js')['default']>} */"
+        ),
+        "lang='js' SFC should use the JSDoc public-instance bridge, got:\n{}",
         tsx.code
     );
 
-    // Negative: must NOT have TS InstanceType
+    // Negative: the JavaScript carrier must not use TypeScript declaration syntax.
     assert!(
-        !tsx.code.contains("InstanceType<"),
-        "lang='js' SFC must NOT use InstanceType, got:\n{}",
+        !tsx.code.contains("let ___VERTER___instance!:"),
+        "lang='js' SFC must NOT use definite assignment 'let ... !:', got:\n{}",
         tsx.code
     );
 }

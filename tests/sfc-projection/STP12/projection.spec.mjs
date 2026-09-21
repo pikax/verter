@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  STP12_MANDATORY_CASES,
-  assertRustCases,
-  loadProduct,
-  validateProduct,
-} from "./protocol.mjs";
+import { assertInstanceMembers } from "../../../scripts/sfc-projection/verify-node.mjs";
+import { STP12_MANDATORY_CASES, assertRustCases } from "./protocol.mjs";
 
-test("JavaScript projection names its three contracts", () => {
-  assert.equal(validateProduct(loadProduct()).length, 0);
+test("public instance probe rejects a missing consumer member", () => {
+  const errors = assertInstanceMembers(
+    { printed: "{ $props: {} }", flags: 0 },
+    ["$props", "$emit"],
+    "test",
+    "STP12-jsdoc-generic",
+  );
+  assert.equal(errors.length, 1);
+});
+
+test("JavaScript projection retains every mandatory case", () => {
   assert.deepEqual(
     [...STP12_MANDATORY_CASES],
     [
@@ -28,7 +33,7 @@ test("JavaScript projection rejects incomplete Rust receipts", () => {
     error: null,
     stdout: "test unrelated ... ok\ntest result: ok. 1 passed; 0 failed\n",
   });
-  assert.equal(errors.length, 6);
+  assert.equal(errors.length, 7);
 });
 
 test("JavaScript projection accepts only a complete Rust receipt", () => {
@@ -36,6 +41,7 @@ test("JavaScript projection accepts only a complete Rust receipt", () => {
     "vue_compiler_js_unchecked_script_keeps_template_projection",
     "vue_compiler_js_check_directive_is_a_leading_pragma",
     "vue_compiler_jsdoc_generic_uses_public_instance_contract",
+    "javascript_setup_companions_match_the_published_consumer_carriers",
     "vue_compiler_jsx_keeps_authored_jsx_expression",
     "jsx_mode_instance_declaration_uses_public_constructor_bridge",
     "vue_compiler_js_projection_never_injects_nocheck",

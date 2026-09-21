@@ -24,7 +24,7 @@
     "definitionNeedle": "stp12DefinitionTarget",
     "expectedNegativeCode": 2322,
     "expectedHoverType": "string",
-    "expectedInstanceType": "Comp"
+    "expectedInstanceMembers": ["$props", "$emit", "$attrs", "$refs"]
   },
   "cases": [
     {
@@ -57,7 +57,7 @@
       "id": "STP12-jsdoc-generic",
       "disposition": "accept",
       "file": "tests/sfc-projection/STP12/probes/jsdoc-generic.ts",
-      "expectedInstanceType": "Comp",
+      "expectedInstanceMembers": ["$props", "$emit", "$attrs", "$refs"],
       "hoverNeedle": "stp12HoverTarget",
       "expectedHoverType": "string",
       "twins": ["JSDoc generic", "public .verter.js constructor bridge"]

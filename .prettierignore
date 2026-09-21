@@ -16,3 +16,8 @@ packages/types/audit.generated.ts
 # `gen:vue-goldens:check` byte-compares against a fresh generator run.
 # Formatting them would diverge from the official compiler output.
 crates/verter_vue_conformance/corpus/goldens/**
+
+# Provider-published JavaScript declaration fixture — its bytes are pinned by
+# the host integration test, so formatting it would disconnect the probe from
+# actual compiler output.
+tests/sfc-projection/STP12/probes/generated/JSDocGeneric.vue.verter.js.d.ts
