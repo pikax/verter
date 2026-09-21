@@ -764,7 +764,7 @@ pub(super) async fn handle_semantic_tokens_full(
     // Deliberately NOT `repaired_type_provider_context`: semantic tokens are a
     // render-cadence decoration and the client re-requests them — see the
     // healing-feature list on `repaired_type_provider_context`.
-    if !server.is_typing_cooldown() {
+    if !server.decorations_must_wait() {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
                 if let Ok(type_tokens) = tp.get_semantic_tokens(&ctx.tsx_path).await {
@@ -854,8 +854,8 @@ pub(super) async fn handle_inlay_hint(
     let range = &params.range;
 
     // Skip TSGO while typing — serial TSGO pipeline must stay clear
-    // for interactive requests.
-    let typing = server.is_typing_cooldown();
+    // for interactive requests — and while the workspace is being published.
+    let typing = server.decorations_must_wait();
 
     let inlay_enabled = server
         .inlay_hints_enabled
@@ -1526,3 +1526,7 @@ mod code_action_diag_ctx_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "aux_features_decoration_tests.rs"]
+mod aux_features_decoration_tests;

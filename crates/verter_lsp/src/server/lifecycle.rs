@@ -73,6 +73,23 @@ pub(super) async fn handle_initialize(
         })
         .unwrap_or(PositionEncodingKind::UTF16);
     tracing::info!("negotiated position encoding: {}", encoding.as_str());
+    {
+        let workspace = params.capabilities.workspace.as_ref();
+        server.client_refreshes_semantic_tokens.store(
+            workspace
+                .and_then(|workspace| workspace.semantic_tokens.as_ref())
+                .and_then(|tokens| tokens.refresh_support)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
+        server.client_refreshes_inlay_hints.store(
+            workspace
+                .and_then(|workspace| workspace.inlay_hint.as_ref())
+                .and_then(|hints| hints.refresh_support)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
     *server.position_encoding.write() = encoding.clone();
     server.documents.set_encoding(encoding.clone());
 

@@ -614,6 +614,35 @@ impl super::VerterLanguageServer {
         }
     }
 
+    /// Decorations were kept off the type provider while the workspace was being
+    /// published; ask the editor to pull them again now that it is whole. Only an
+    /// editor that said it honours the request is asked.
+    ///
+    /// The requests are not awaited: readiness must never wait on an editor's reply.
+    fn refresh_deferred_decorations(&self) {
+        use std::sync::atomic::Ordering;
+        let semantic_tokens = self
+            .client_refreshes_semantic_tokens
+            .load(Ordering::Acquire);
+        let inlay_hints = self.client_refreshes_inlay_hints.load(Ordering::Acquire);
+        if !semantic_tokens && !inlay_hints {
+            return;
+        }
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            if semantic_tokens {
+                if let Err(error) = client.semantic_tokens_refresh().await {
+                    tracing::debug!("semantic-token refresh was not accepted: {error}");
+                }
+            }
+            if inlay_hints {
+                if let Err(error) = client.inlay_hint_refresh().await {
+                    tracing::debug!("inlay-hint refresh was not accepted: {error}");
+                }
+            }
+        });
+    }
+
     /// The post-scan completion tail: owe the open documents fresh diagnostics,
     /// then announce level 2 of the readiness ladder.
     ///
@@ -643,6 +672,7 @@ impl super::VerterLanguageServer {
         self.sync_coordinator.set_workspace_scan_in_progress(false);
 
         self.rearm_open_document_diagnostics();
+        self.refresh_deferred_decorations();
 
         if !self.pending_snapshot_provider_sync.is_empty() {
             let mut pending: Vec<String> = self

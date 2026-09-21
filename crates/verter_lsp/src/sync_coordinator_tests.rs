@@ -3644,9 +3644,22 @@ const msg = '{marker}'
     .await
     .expect("every settled document must reach the provider");
 
+    // Which backlog document the coordinator was parked in is not the subject:
+    // it may wake on the first signal, before the rest of the backlog is queued.
+    // Everything AFTER that document is: the user's document next, then the rest
+    // of the backlog newest-first — the re-armed oldest document not promoted.
+    let order = first_sync_order(&provider.calls());
+    let parked = order[0].clone();
+    assert!(parked.starts_with("Backlog"), "{order:?}");
+    let mut expected = vec![parked.clone(), "Active".to_string()];
+    expected.extend(
+        (0..BACKLOG)
+            .rev()
+            .map(|index| format!("Backlog{index}"))
+            .filter(|name| *name != parked),
+    );
     assert_eq!(
-        first_sync_order(&provider.calls()),
-        ["Backlog4", "Active", "Backlog3", "Backlog2", "Backlog1", "Backlog0"],
+        order, expected,
         "the newest settled receipt is served next; the rest follow newest-first"
     );
 }

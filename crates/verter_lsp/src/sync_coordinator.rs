@@ -256,6 +256,11 @@ impl SyncCoordinatorHandle {
         let _ = self.wake_tx.try_send(());
     }
 
+    /// Whether a workspace scan is publishing documents into the engine right now.
+    pub fn workspace_scan_in_progress(&self) -> bool {
+        self.scanning.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The user turned to this document without editing it (an interactive
     /// request against it). It queues no work; it only moves the document to
     /// the front of whatever work is already owed to it.

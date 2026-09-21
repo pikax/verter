@@ -2182,6 +2182,22 @@ impl VerterLanguageServer {
     /// Used to suppress non-critical TSGO requests (diagnostics, semantic tokens, inlay hints)
     /// during rapid typing.  TSGO processes requests serially, so queuing these during typing
     /// blocks interactive requests like completions.
+    /// Whether a render-cadence decoration (semantic tokens, inlay hints) must
+    /// stay off the type provider for now.
+    ///
+    /// The editor asks for decorations on its own, for every visible document,
+    /// the moment the server is up — while the workspace is still being published
+    /// into the engine. An engine that builds its program lazily answers that one
+    /// request by building a program from the HALF-published workspace, and then
+    /// pays many times the cost of a cold build to absorb the rest into it: one
+    /// stray decoration turns a few seconds of start-up into half a minute during
+    /// which nothing else is served. Nothing is lost by waiting — the answer would
+    /// describe a half-published workspace, and the editor is asked to refresh its
+    /// decorations once the publication completes.
+    pub(super) fn decorations_must_wait(&self) -> bool {
+        self.is_typing_cooldown() || self.sync_coordinator.workspace_scan_in_progress()
+    }
+
     pub(super) fn is_typing_cooldown(&self) -> bool {
         let last = self
             .last_change_ms
