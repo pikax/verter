@@ -88,17 +88,47 @@ fn stp13_local_wrapper_binding_is_an_ordinary_call() {
 
 #[test]
 fn stp13_vue_import_alias_still_unwraps_by_binding() {
+    // An imported alias resolves by binding, not callee spelling: `dc` is
+    // the `defineComponent` symbol imported from `'vue'`.
     let content =
         "import { defineComponent as dc } from 'vue';\nexport default dc({ props: ['a'] });";
     let projection = project_options_block(ts(content)).expect("projects");
-    // Aliased to a different local name: the callee is not the wrapper name,
-    // so this stays an ordinary call rather than text-matched unwrapping.
-    assert!(!projection.define_component_wrapped);
+    assert!(projection.define_component_wrapped);
+    assert!(member_names(&projection).contains(&("a", OptionsMemberKind::Prop)));
+    let content =
+        "import { defineOptions as configure } from 'vue';\nexport default configure({ name: 'Aliased' });";
+    let projection = project_options_block(ts(content)).expect("projects");
+    assert!(projection.define_component_wrapped);
+    assert_eq!(projection.component_name.as_deref(), Some("Aliased"));
     let content =
         "import { defineComponent } from 'vue';\nexport default defineComponent({ props: ['a'] });";
     let projection = project_options_block(ts(content)).expect("projects");
     assert!(projection.define_component_wrapped);
     assert!(member_names(&projection).contains(&("a", OptionsMemberKind::Prop)));
+}
+
+#[test]
+fn stp13_vue_import_masquerade_stays_an_ordinary_call() {
+    // A different `'vue'` symbol aliased to the wrapper name is not the
+    // wrapper: the binding must originate from `defineComponent` itself.
+    let content =
+        "import { ref as defineComponent } from 'vue';\nexport default defineComponent({ props: ['a'] });";
+    let projection = project_options_block(ts(content)).expect("projects");
+    assert!(!projection.define_component_wrapped);
+    assert!(projection.members.is_empty());
+}
+
+#[test]
+fn stp13_identifier_mixins_are_opaque_not_dropped() {
+    // A dynamically composed `mixins` value keeps no static member list but
+    // must surface in the template view as an opaque source.
+    let content = "import M from './m';\nexport default { mixins: componentMixins };";
+    let projection = project_options_block(ts(content)).expect("projects");
+    assert!(projection.mixins.is_empty());
+    assert!(projection.has_nonstatic_mixins);
+    let combined = project_options_pair(Some(ts(content)), None, None).expect("projects");
+    let view = OptionsTemplateBindingView::build(&combined);
+    assert!(view.opaque_sources.contains(&"mixins".to_string()));
 }
 
 #[test]

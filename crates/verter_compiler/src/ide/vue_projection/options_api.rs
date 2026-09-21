@@ -31,13 +31,13 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, BindingPattern, Declaration, Expression, ImportDeclarationSpecifier,
-    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
+    Argument, BindingPattern, Declaration, Expression, ImportDeclarationSpecifier, ImportSpecifier,
+    ModuleExportName, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
 };
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cursor::ScriptLanguage;
 
@@ -303,9 +303,21 @@ fn range(base: u32, start: u32, end: u32) -> SourceRange {
     }
 }
 
-/// Runtime (non-type-only) local names imported from `'vue'`.
-fn vue_runtime_imports<'a>(program: &Program<'a>) -> FxHashSet<&'a str> {
-    let mut names = FxHashSet::default();
+/// Exported name a runtime (non-type-only) `'vue'` import specifier binds.
+fn imported_name<'a>(spec: &'a ImportSpecifier<'a>) -> &'a str {
+    match &spec.imported {
+        ModuleExportName::IdentifierName(name) => name.name.as_str(),
+        ModuleExportName::IdentifierReference(name) => name.name.as_str(),
+        ModuleExportName::StringLiteral(literal) => literal.value.as_str(),
+    }
+}
+
+/// Runtime (non-type-only) `'vue'` imports as local name to exported symbol.
+/// Only specifiers whose exported symbol is actually imported are recorded,
+/// so `import { ref as defineComponent } from 'vue'` never resolves as the
+/// Options wrapper.
+fn vue_runtime_imports<'a>(program: &'a Program<'a>) -> FxHashMap<&'a str, &'a str> {
+    let mut names = FxHashMap::default();
     for statement in &program.body {
         let Statement::ImportDeclaration(import) = statement else {
             continue;
@@ -321,19 +333,26 @@ fn vue_runtime_imports<'a>(program: &Program<'a>) -> FxHashSet<&'a str> {
                 if spec.import_kind.is_type() {
                     continue;
                 }
-                names.insert(spec.local.name.as_str());
+                names.insert(spec.local.name.as_str(), imported_name(spec));
             }
         }
     }
     names
 }
 
-/// True when `name` at call position is the Vue wrapper: imported from
-/// `'vue'` (under any alias) or a free reference. A normal-script value
+/// True when `name` at call position is the Vue wrapper: a runtime import
+/// from `'vue'` of `defineComponent` / `defineOptions` (under any local
+/// alias), or a free reference to one of those names. A normal-script value
 /// binding of the same name is an ordinary call. Resolution, not spelling.
-fn is_vue_wrapper(name: &str, values: &FxHashSet<String>, vue_imports: &FxHashSet<&str>) -> bool {
-    (name == "defineComponent" || name == "defineOptions")
-        && (vue_imports.contains(name) || !values.iter().any(|bound| bound == name))
+fn is_vue_wrapper(
+    name: &str,
+    values: &FxHashSet<String>,
+    vue_imports: &FxHashMap<&str, &str>,
+) -> bool {
+    if let Some(imported) = vue_imports.get(name) {
+        return *imported == "defineComponent" || *imported == "defineOptions";
+    }
+    (name == "defineComponent" || name == "defineOptions") && !values.contains(name)
 }
 
 /// Unwrap `defineComponent(obj)` / `defineOptions(obj)` to the options
@@ -342,7 +361,7 @@ fn is_vue_wrapper(name: &str, values: &FxHashSet<String>, vue_imports: &FxHashSe
 fn options_object<'a>(
     expression: &'a Expression<'a>,
     values: &FxHashSet<String>,
-    vue_imports: &FxHashSet<&str>,
+    vue_imports: &FxHashMap<&str, &str>,
 ) -> (Option<&'a ObjectExpression<'a>>, bool) {
     match expression {
         Expression::ObjectExpression(object) => (Some(object), false),
@@ -604,6 +623,12 @@ fn collect_option_members(
                             _ => projection.has_nonstatic_mixins = true,
                         }
                     }
+                } else {
+                    // A non-array `mixins` value (identifier, call, spread
+                    // source) is dynamically composed: its members are not
+                    // statically known, so the template view must record it
+                    // as opaque rather than silently drop it.
+                    projection.has_nonstatic_mixins = true;
                 }
             }
             "extends" => {

@@ -35,10 +35,14 @@ export const ACCEPTED_PRODUCTS = Object.freeze([
 
 const RUST_CASES = Object.freeze({
   "STP13-options-this": ["stp13_options_this_members_keep_contextual_kinds"],
-  "STP13-mixins": ["stp13_mixins_extends_components_and_directives_recorded"],
+  "STP13-mixins": [
+    "stp13_mixins_extends_components_and_directives_recorded",
+    "stp13_identifier_mixins_are_opaque_not_dropped",
+  ],
   "STP13-combined": [
     "stp13_combined_coexists_without_template_leakage",
     "stp13_opaque_sources_recorded_never_invented",
+    "options_projection_reads_admitted_carrier_blocks",
   ],
   "STP13-shadowed-macro": [
     "stp13_shadowed_macro_is_an_ordinary_call",
@@ -46,6 +50,7 @@ const RUST_CASES = Object.freeze({
     "stp13_type_only_binding_does_not_shadow",
     "stp13_local_wrapper_binding_is_an_ordinary_call",
     "stp13_vue_import_alias_still_unwraps_by_binding",
+    "stp13_vue_import_masquerade_stays_an_ordinary_call",
   ],
   "STP13-options-instance": [
     "stp13_options_instance_preserves_constructor_shape",
@@ -67,19 +72,26 @@ export function validateStp13Products({ repoRoot = REPO_ROOT } = {}) {
   const optionsAbs = path.join(repoRoot, OPTIONS_API_RS);
   if (fs.existsSync(optionsAbs)) {
     const options = fs.readFileSync(optionsAbs, "utf8");
+    // Products must be exported items (`pub struct`), not passing mentions
+    // in comments or string literals; the owning entry must be public too.
+    // Syntactic validity itself is proven physically by the cargo test runs
+    // below, which compile this crate.
     for (const product of ACCEPTED_PRODUCTS) {
-      if (!options.includes(product)) {
-        errors.push(err("STP13-combined", "removed-fixture", `missing product ${product}`));
+      const exported = new RegExp(`pub\\s+struct\\s+${product}\\b`).test(options);
+      if (!exported) {
+        errors.push(
+          err("STP13-combined", "removed-fixture", `missing exported product ${product}`),
+        );
       }
     }
-    if (!options.includes("fn project_options_pair(")) {
+    if (!/pub\s+fn\s+project_options_pair\s*\(/.test(options)) {
       errors.push(err("STP13-combined", "removed-fixture", "project_options_pair is missing"));
     }
   }
   const backendAbs = path.join(repoRoot, BACKEND_RS);
   if (fs.existsSync(backendAbs)) {
     const backend = fs.readFileSync(backendAbs, "utf8");
-    if (!backend.includes("fn options_projection(")) {
+    if (!/pub\s+fn\s+options_projection\s*\(/.test(backend)) {
       errors.push(
         err(
           "STP13-combined",
@@ -88,7 +100,12 @@ export function validateStp13Products({ repoRoot = REPO_ROOT } = {}) {
         ),
       );
     }
-    if (!backend.includes("fn project_ide(")) {
+    if (!/pub\s+struct\s+VueProjectionBackend\b/.test(backend)) {
+      errors.push(
+        err("STP13-combined", "removed-fixture", "VueProjectionBackend is missing"),
+      );
+    }
+    if (!/fn\s+project_ide\s*\(/.test(backend)) {
       errors.push(err("STP13-combined", "removed-fixture", "existing project_ide route missing"));
     }
   }
@@ -96,23 +113,33 @@ export function validateStp13Products({ repoRoot = REPO_ROOT } = {}) {
 }
 
 export function runRustCases(repoRoot = REPO_ROOT) {
-  const result = spawnSync(
-    "cargo",
+  // Both runs compile the owning crate (physical syntactic proof) and
+  // execute the Options suites: unit facts plus the production
+  // `options_projection` path over real admitted `.vue` carrier bytes.
+  const invocations = [
+    ["test", "-p", "verter_compiler", "--lib", "ide::vue_projection::options_api"],
     [
       "test",
       "-p",
       "verter_compiler",
-      "--lib",
-      "ide::vue_projection::options_api",
-      "--",
-      "--test-threads=1",
+      "--test",
+      "main",
+      "options_projection_reads_admitted_carrier_blocks",
     ],
-    { cwd: repoRoot, encoding: "utf8", windowsHide: true, timeout: 300000, env: process.env },
+  ];
+  const results = invocations.map((args) =>
+    spawnSync("cargo", [...args, "--", "--test-threads=1"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 300000,
+      env: process.env,
+    }),
   );
   return {
-    status: result.status,
-    error: result.error,
-    stdout: `${result.stdout || ""}${result.stderr || ""}`,
+    status: results.every((result) => result.status === 0) ? 0 : 1,
+    error: results.find((result) => result.error)?.error,
+    stdout: results.map((result) => `${result.stdout || ""}${result.stderr || ""}`).join("\n"),
   };
 }
 

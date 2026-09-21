@@ -1,3 +1,8 @@
+// Contract-shape pin for the STP13 tsc probes: the constructor-shaped public
+// surface `VueProjectionBackend::options_projection` must preserve (checked
+// by `options_projection_reads_admitted_carrier_blocks` over real carrier
+// bytes; full carrier-to-declaration generation is STP58-owned). Not
+// compiler output.
 import type { ComponentPublicInstance } from "vue";
 
 export type OptionsProps = {
