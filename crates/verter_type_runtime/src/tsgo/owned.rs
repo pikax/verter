@@ -84,6 +84,24 @@ pub struct TsgoOwnedProvider {
     lsp: Arc<TsgoTypeProvider>,
     /// The attached `--api` checker surface (diagnostics authority).
     api: Arc<ApiSurface>,
+    /// Editor writes the `--lsp` side has been sent but not yet PROVEN to have
+    /// processed. See [`Self::settle_lsp_writes`].
+    lsp_writes: Arc<LspWriteBarrier>,
+}
+
+/// The two surfaces ride different transports over one engine session, so the
+/// `--api` side can enumerate roots before the `--lsp` side has processed a
+/// `didOpen` it was already sent. A response on the `--lsp` connection proves
+/// every earlier notification on it was handled, so ONE request settles any
+/// number of writes — and it is owed only by an `--api` query, never by a write.
+#[derive(Default)]
+struct LspWriteBarrier {
+    /// Count of editor writes sent on the `--lsp` transport.
+    written: std::sync::atomic::AtomicU64,
+    /// The `written` count the last completed barrier covered. The mutex also
+    /// serializes barriers, so a second query waits for the first one's round
+    /// trip instead of racing past it.
+    settled: tokio::sync::Mutex<u64>,
 }
 
 impl std::fmt::Debug for TsgoOwnedProvider {
@@ -167,6 +185,7 @@ impl TsgoOwnedProvider {
                 engine_version,
                 snapshot: SyncMutex::new(None),
             }),
+            lsp_writes: Arc::default(),
         })
     }
 
@@ -196,6 +215,7 @@ impl TsgoOwnedProvider {
         tsconfig: &str,
     ) -> Result<Vec<TypeDiagnostic>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
+        self.settle_lsp_writes(path).await;
         let Some((snapshot, project, engine_carrier, project_check_js)) =
             self.api.resolve_for(&carrier, tsconfig).await
         else {
@@ -245,6 +265,7 @@ impl TsgoOwnedProvider {
         tsconfig: &str,
     ) -> Result<Option<Vec<TypeDiagnostic>>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
+        self.settle_lsp_writes(path).await;
         let Some((snapshot, project, engine_carrier, project_check_js)) =
             self.api.resolve_for(&carrier, tsconfig).await
         else {
@@ -578,6 +599,34 @@ fn map_api_diagnostic(
     }
 }
 
+impl TsgoOwnedProvider {
+    /// Make the `--lsp` side observe every editor write before the `--api` side
+    /// enumerates roots. One round trip covers every write sent before it; with
+    /// nothing written since the last one it is free.
+    ///
+    /// The request is the carrier's own diagnostic pull: it is the request the
+    /// per-write barrier always used, so what the engine has been made to
+    /// process is unchanged — only how often it is asked.
+    pub(crate) async fn settle_lsp_writes(&self, path: &str) {
+        let mut settled = self.lsp_writes.settled.lock().await;
+        let written = self
+            .lsp_writes
+            .written
+            .load(std::sync::atomic::Ordering::Acquire);
+        if *settled >= written {
+            return;
+        }
+        let _ = self.lsp.get_diagnostics(path).await;
+        *settled = written;
+    }
+
+    fn note_lsp_write(&self) {
+        self.lsp_writes
+            .written
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 impl TypeProvider for TsgoOwnedProvider {
     fn provider_id(&self) -> &'static str {
         // The OWNED dual-surface provider IS the tsgo provider — the `--api` attach
@@ -593,19 +642,16 @@ impl TypeProvider for TsgoOwnedProvider {
     }
 
     // ── File lifecycle: delegate to --lsp (the --api checker shares the session
-    //    and sees the didOpen overlays). After a content change we issue the --lsp
-    //    diagnostic barrier so the --api side observes the overlay before its next
-    //    updateSnapshot (the two surfaces ride different transports). ──
+    //    and sees the didOpen overlays). A write only RECORDS that the --lsp side
+    //    owes the --api side a barrier; the next --api query pays it, once
+    //    (`settle_lsp_writes`). A write never waits on the engine. ──
 
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        let lsp = Arc::clone(&self.lsp);
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            lsp.open_file(&path, &content).await?;
-            // Barrier: force the --lsp server to process the didOpen before any
-            // --api updateSnapshot enumerates roots on the shared session.
-            let _ = lsp.get_diagnostics(&path).await;
+            self.lsp.open_file(&path, &content).await?;
+            self.note_lsp_write();
             Ok(())
         })
     }
@@ -623,12 +669,11 @@ impl TypeProvider for TsgoOwnedProvider {
     }
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        let lsp = Arc::clone(&self.lsp);
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            lsp.update_file(&path, &content).await?;
-            let _ = lsp.get_diagnostics(&path).await;
+            self.lsp.update_file(&path, &content).await?;
+            self.note_lsp_write();
             Ok(())
         })
     }
