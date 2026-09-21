@@ -356,6 +356,10 @@ pub fn display(
                 display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
             )
         }
+        SemanticQueryValue::SignatureSet(value) => DisplayString(format!("{:?}", value.set)),
+        SemanticQueryValue::SignatureResult(value) => {
+            DisplayString(format!("{:?}", value.result))
+        }
         SemanticQueryValue::TruthinessDomain(domain) => {
             DisplayString(format!("{domain:?}"))
         }

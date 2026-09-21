@@ -75,6 +75,7 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
                 type_env_hash: [0u8; 16],
                 lib_env_hash: [0u8; 16],
                 project_identity: [0u8; 16],
+                result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {},
             },

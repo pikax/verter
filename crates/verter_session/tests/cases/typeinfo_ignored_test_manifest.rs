@@ -460,6 +460,8 @@ semantic_query_names! {
     ClassifyTruthinessDomain,
     AwaitedNormalize,
     AsyncReturnPayload,
+    SignaturesOfType,
+    ReadSignatureResult,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -765,6 +767,9 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         AwaitedNormalize => U6FlowReturnSubstrate,
         // The async publication rule, produced by the return wrap.
         AsyncReturnPayload => U6FlowReturnSubstrate,
+        // Shared signature discovery and demand-driven results: the call
+        // and construct consumers read them; no manifest row consumes them.
+        SignaturesOfType | ReadSignatureResult => U6CallResolve,
     }
 }
 
@@ -2103,6 +2108,10 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // takes `AwaitedNormalize` for its iteration parameters, which is
         // exactly the distinction these two families exist to keep.
         (AsyncReturnPayload, U6FlowReturnSubstrate),
+        // Shared signature discovery and result reads serve call/construct
+        // resolution.
+        (SignaturesOfType, U6CallResolve),
+        (ReadSignatureResult, U6CallResolve),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.

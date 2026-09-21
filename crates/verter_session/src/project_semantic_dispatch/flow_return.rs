@@ -664,6 +664,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
             project_identity: host.host_view_project_identity().0,
+            result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy {},
         }
@@ -757,12 +758,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         normalized_type_args: Arc<[SemanticNodeId]>,
         substitution: crate::semantic_query::CanonicalTypeSubstitution,
     ) -> FlowReturnKey {
+        self.flow_return_key_for_instantiation_with_evaluation(
+            identity,
+            normalized_type_args,
+            substitution,
+            crate::semantic_query::CONTEXT_FREE_EVALUATION,
+        )
+    }
+
+    pub(crate) fn flow_return_key_for_instantiation_with_evaluation(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        normalized_type_args: Arc<[SemanticNodeId]>,
+        substitution: crate::semantic_query::CanonicalTypeSubstitution,
+        evaluation: crate::semantic_query::ResultEvaluationContextId,
+    ) -> FlowReturnKey {
         let mut key = self.flow_return_key_with_demand(
             identity,
             crate::semantic_query::ReturnProjectionDemand::whole_return(),
         );
         key.normalized_type_args = normalized_type_args;
         key.context.type_substitution = substitution;
+        key.context.result_evaluation = evaluation;
         key
     }
 

@@ -182,6 +182,10 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
             SemanticQueryKeyTag::ClassifyTruthinessDomain => {
                 SemanticQueryValueTag::TruthinessDomain
             }
+            // Shared signature discovery and result reads carry their own
+            // value domains (epoch-qualified signature records).
+            SemanticQueryKeyTag::SignaturesOfType => SemanticQueryValueTag::SignatureSet,
+            SemanticQueryKeyTag::ReadSignatureResult => SemanticQueryValueTag::SignatureResult,
             _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(
@@ -193,7 +197,8 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
              must be `BroadRuntime`, `ClassifyMaterializationCycleGate` must be \
              `MaterializationCycleGate`, `ProjectObjectSpread` must be \
              `ObjectProjection`, `ClassifyTruthinessDomain` must be \
-             `TruthinessDomain`, and every other \
+             `TruthinessDomain`, `SignaturesOfType` must be `SignatureSet`, \
+             `ReadSignatureResult` must be `SignatureResult`, and every other \
              live key must be `TypeNode`",
             spec.variant.name()
         );

@@ -578,6 +578,21 @@ pub(super) enum FamilyKey {
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
     },
+    /// Mode-erased `SignaturesOfType` identity: subject node, kind, and the
+    /// interned semantic context (which owns the options, environment, and
+    /// policy set). No content or version hash (R6).
+    SignaturesOfType {
+        subject: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
+        context: crate::semantic_query::SemanticContextId,
+    },
+    /// Mode-erased `ReadSignatureResult` identity: the full sealed demand
+    /// key (descriptor, call substitution, projection, evaluation context,
+    /// semantic context) — two distinct contextual evaluations of one
+    /// descriptor never alias.
+    ReadSignatureResult {
+        key: crate::signature_kernel::ReadSignatureResultKey,
+    },
     /// Mode-erased `FlowReturn` identity. The family fields are EXACTLY
     /// the full [`crate::semantic_query::FlowReturnKey`] — function slot
     /// identity (declaration slot + part + overload ordinal), normalized
@@ -755,6 +770,8 @@ impl FamilyKey {
             FamilyKey::ClassifyTruthinessDomain { .. } => "ClassifyTruthinessDomain",
             FamilyKey::AwaitedNormalize { .. } => "AwaitedNormalize",
             FamilyKey::AsyncReturnPayload { .. } => "AsyncReturnPayload",
+            FamilyKey::SignaturesOfType { .. } => "SignaturesOfType",
+            FamilyKey::ReadSignatureResult { .. } => "ReadSignatureResult",
         }
     }
 
@@ -815,6 +832,8 @@ impl FamilyKey {
             // Content-light modeless reduction families keep the floor.
             FamilyKey::AwaitedNormalize { .. } => 4,
             FamilyKey::AsyncReturnPayload { .. } => 4,
+            FamilyKey::SignaturesOfType { .. } => 4,
+            FamilyKey::ReadSignatureResult { .. } => 4,
         }
     }
 }
@@ -2071,6 +2090,25 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 lib_env_hash: context.lib_env_hash,
                 project_identity: context.project_identity,
             },
+            ModeSlot::Single,
+        ),
+        // SignaturesOfType / ReadSignatureResult — LIVE, mode-erased: the
+        // sealed keys ARE the family identity (the semantic context owns
+        // options / environment / policy), so both use the `Single` slot.
+        SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind,
+            context,
+        } => (
+            FamilyKey::SignaturesOfType {
+                subject: *subject,
+                kind: *kind,
+                context: *context,
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::ReadSignatureResult(key) => (
+            FamilyKey::ReadSignatureResult { key: *key },
             ModeSlot::Single,
         ),
     }

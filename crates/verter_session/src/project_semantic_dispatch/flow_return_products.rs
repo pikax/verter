@@ -98,6 +98,7 @@ mod tests {
                     type_env_hash: [0; 16],
                     lib_env_hash: [0; 16],
                     project_identity: [0; 16],
+                    result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                     type_substitution: CanonicalTypeSubstitution::empty(),
                     policy: FlowReturnPolicy {},
                 },
