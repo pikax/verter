@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
-import { assertInstanceMembers } from "../../../scripts/sfc-projection/verify-node.mjs";
+import {
+  assertInstanceMembers,
+  materializeStp12GeneratedProbes,
+} from "../../../scripts/sfc-projection/verify-node.mjs";
 import { STP12_MANDATORY_CASES, assertRustCases } from "./protocol.mjs";
 
 test("public instance probe rejects a missing consumer member", () => {
@@ -12,6 +17,33 @@ test("public instance probe rejects a missing consumer member", () => {
     "STP12-jsdoc-generic",
   );
   assert.equal(errors.length, 1);
+});
+
+test("public instance probe uses a fresh compiler carrier, not the tracked declaration", () => {
+  const scope = materializeStp12GeneratedProbes({
+    repoRoot: path.resolve(new URL("../../..", import.meta.url).pathname),
+    nodeManifest: {
+      probes: { tsconfig: "tests/sfc-projection/STP12/probes/tsconfig.json" },
+      cases: [
+        {
+          file: "tests/sfc-projection/STP12/probes/jsdoc-generic.ts",
+        },
+      ],
+    },
+    publicApi: "declare const Fresh: { new(): { $emit: () => void } }; export default Fresh;\n",
+  });
+  try {
+    assert.equal(
+      fs.readFileSync(scope.generatedCarrier, "utf8"),
+      "declare const Fresh: { new(): { $emit: () => void } }; export default Fresh;\n",
+    );
+    assert.notEqual(
+      scope.manifest.probes.tsconfig,
+      "tests/sfc-projection/STP12/probes/tsconfig.json",
+    );
+  } finally {
+    scope.close();
+  }
 });
 
 test("JavaScript projection retains every mandatory case", () => {
