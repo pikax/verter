@@ -1,5 +1,5 @@
 use super::binder_capture::*;
-use super::script_setup::{ScriptBlockInput, SetupProjectionRefusal, SourceRange};
+use super::script_setup::{project_script_pair, ScriptBlockInput, SourceRange};
 use crate::cursor::ScriptLanguage;
 
 fn ts(content: &str, start: u32) -> ScriptBlockInput<'_> {
@@ -419,16 +419,10 @@ fn stp14_capture_reads_a_class_shape_without_reading_method_bodies() {
 
 #[test]
 fn stp14_capture_refuses_the_same_inputs_the_statement_projection_refuses() {
-    assert_eq!(
-        capture_binder_plan(None, Some(ts("const a = 1", 0)), Some("T extends")).unwrap_err(),
-        SetupProjectionRefusal::InvalidGeneric
-    );
-    assert_eq!(
-        capture_binder_plan(None, Some(ts("const a = (", 0)), None).unwrap_err(),
-        SetupProjectionRefusal::SyntaxErrors { setup: true }
-    );
-    assert_eq!(
-        capture_binder_plan(
+    let cases = [
+        (None, Some(ts("const a = 1", 0)), Some("T extends")),
+        (None, Some(ts("const a = (", 0)), None),
+        (
             None,
             Some(ScriptBlockInput {
                 content: "const a = 1",
@@ -436,12 +430,8 @@ fn stp14_capture_refuses_the_same_inputs_the_statement_projection_refuses() {
                 lang: None,
             }),
             None,
-        )
-        .unwrap_err(),
-        SetupProjectionRefusal::NotTypeScript
-    );
-    assert_eq!(
-        capture_binder_plan(
+        ),
+        (
             Some(ts("const a = 1", 0)),
             Some(ScriptBlockInput {
                 content: "const b = 2",
@@ -449,10 +439,46 @@ fn stp14_capture_refuses_the_same_inputs_the_statement_projection_refuses() {
                 lang: Some(ScriptLanguage::TSX),
             }),
             None,
-        )
-        .unwrap_err(),
-        SetupProjectionRefusal::ScriptLangConflict
-    );
+        ),
+    ];
+
+    for (normal, setup, generic) in cases {
+        assert_eq!(
+            capture_binder_plan(normal, setup, generic).unwrap_err(),
+            project_script_pair(normal, setup, generic).unwrap_err(),
+        );
+    }
+}
+
+#[test]
+fn stp14_local_capture_collects_type_parameter_constraints_and_defaults() {
+    let setup = "type Constraint = { id: number }\n\
+                 type DefaultType = { name: string }\n\
+                 type Selection<T extends Constraint = P> = { item: T }\n\
+                 interface Box<U extends P = DefaultType> { value: U }\n\
+                 defineProps<{ selection: Selection; box: Box }>()";
+    let captured = plan(setup, Some("P extends { active: boolean }"));
+
+    for (name, dependencies) in [
+        ("Selection", ["Constraint", "P"]),
+        ("Box", ["P", "DefaultType"]),
+    ] {
+        let declaration = captured.declaration(name).expect("lifted declaration");
+        assert_eq!(
+            names(&declaration.dependencies),
+            dependencies,
+            "{name} must close over parameter constraint/default dependencies"
+        );
+        assert_eq!(
+            declaration
+                .binder_params
+                .iter()
+                .map(|param| param.source_name.as_str())
+                .collect::<Vec<_>>(),
+            ["P"],
+            "{name} must retain the free setup binder in its parameter list"
+        );
+    }
 }
 
 #[test]

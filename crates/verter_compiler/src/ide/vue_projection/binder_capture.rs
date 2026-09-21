@@ -55,9 +55,9 @@ use oxc_ast::ast::{
     ArrowFunctionExpression, CallExpression, Class, ClassElement, Declaration, Expression,
     Function, ImportDeclarationSpecifier, ObjectPropertyKind, Program, Statement,
     TSCallSignatureDeclaration, TSConstructSignatureDeclaration, TSInferType,
-    TSInterfaceDeclaration, TSInterfaceHeritage, TSMethodSignature, TSType, TSTypeName,
-    TSTypeOperatorOperator, TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName,
-    TSTypeReference,
+    TSInterfaceDeclaration, TSInterfaceHeritage, TSMethodSignature, TSType, TSTypeAliasDeclaration,
+    TSTypeName, TSTypeOperatorOperator, TSTypeParameterDeclaration, TSTypeQuery,
+    TSTypeQueryExprName, TSTypeReference,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -486,7 +486,7 @@ struct DeclRecord<'a> {
 }
 
 enum DeclBody<'a> {
-    Alias(&'a TSType<'a>),
+    Alias(&'a TSTypeAliasDeclaration<'a>),
     Interface(&'a TSInterfaceDeclaration<'a>),
     Class(&'a Class<'a>),
     Function(&'a Function<'a>),
@@ -620,7 +620,7 @@ fn record_declaration<'a>(
             LiftedDeclarationKind::TypeAlias,
             range(alias.span, base),
             type_param_names(alias.type_parameters.as_deref()),
-            DeclBody::Alias(&alias.type_annotation),
+            DeclBody::Alias(alias),
         ),
         Declaration::TSInterfaceDeclaration(interface) => push(
             interface.id.name.to_string(),
@@ -1271,8 +1271,16 @@ fn close_over_declarations(
         let mut collector = RefCollector::new(record.base);
         collector.push_scope(record.own_type_params.clone());
         match &record.body {
-            DeclBody::Alias(ty) => collector.visit_ts_type(ty),
+            DeclBody::Alias(alias) => {
+                if let Some(parameters) = &alias.type_parameters {
+                    collector.visit_ts_type_parameter_declaration(parameters);
+                }
+                collector.visit_ts_type(&alias.type_annotation);
+            }
             DeclBody::Interface(interface) => {
+                if let Some(parameters) = &interface.type_parameters {
+                    collector.visit_ts_type_parameter_declaration(parameters);
+                }
                 for heritage in &interface.extends {
                     collector.visit_ts_interface_heritage(heritage);
                 }
