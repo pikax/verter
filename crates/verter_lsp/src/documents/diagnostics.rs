@@ -79,6 +79,24 @@ impl DocumentRegistry {
         });
     }
 
+    /// A compile advances a document's diagnostics generation, and one document's
+    /// pass compiles others: a parent compiles the children it imports. When that
+    /// lands after the child's receipt is committed, no publication of the child
+    /// is in flight to notice, and no editor signal follows. Every publication
+    /// therefore settles the receipts its own computation may have outdated.
+    fn refresh_outdated_receipts(&self) {
+        let receipts: Vec<(Uri, DiagnosticPublication)> = self
+            .diagnostics_state
+            .lock()
+            .receipts
+            .iter()
+            .filter_map(|(uri, (publication, _))| Some((uri.parse().ok()?, publication.clone())))
+            .collect();
+        for (uri, publication) in receipts {
+            self.refresh_superseded_diagnostics(&uri, &publication);
+        }
+    }
+
     /// Pending work invalidates immediately, including same-version semantic
     /// enrichment. The epoch also fences publications already awaiting a provider.
     pub(crate) fn invalidate_diagnostics(&self, uri: &str) -> u64 {
@@ -149,6 +167,7 @@ impl DocumentRegistry {
                 current_generation = ?self.host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
                 "diagnostics publication superseded");
             self.refresh_superseded_diagnostics(uri, publication);
+            self.refresh_outdated_receipts();
             return;
         }
         client
@@ -167,6 +186,7 @@ impl DocumentRegistry {
         }
         drop(state);
         self.refresh_superseded_diagnostics(uri, publication);
+        self.refresh_outdated_receipts();
     }
 
     pub(crate) fn diagnostics_ready(&self, uri: &Uri) -> bool {

@@ -2063,6 +2063,50 @@ async fn diagnostics_generation_advance_during_query_eventually_publishes_withou
     );
 }
 
+/// Computing a PARENT's diagnostics compiles the children it imports, and a
+/// compile advances the child's diagnostics generation. When that lands after
+/// the child's receipt is already committed, no publication of the child is in
+/// flight to notice it: the receipt reads stale from then on, and with no editor
+/// signal to follow, the child would stay uncertified until its next edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn generation_advance_after_a_committed_receipt_owes_a_refresh() {
+    let (documents, _, _provider, canonical_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let parent: Uri = "file:///workspace/src/Parent.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><p>parent</p></template>
+"
+        .to_string(),
+    });
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    assert!(refreshes.try_recv().is_err());
+
+    // The parent's pass compiles the child, then publishes the PARENT.
+    documents.host().bump_diagnostics_generation(&canonical_id);
+    let publication = documents.begin_diagnostics_publication(&parent).unwrap();
+    documents
+        .publish_diagnostics(&deps.client, &parent, &publication, Vec::new(), true, None)
+        .await;
+
+    let refresh = refreshes
+        .try_recv()
+        .expect("the child's stale receipt must owe a refresh");
+    assert_eq!(refresh.uri, uri);
+    assert!(documents.claim_diagnostics_refresh(&refresh));
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    assert!(
+        refreshes.try_recv().is_err(),
+        "a stable generation does not schedule polling"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn queued_generation_refresh_cannot_displace_a_newer_complete_publication() {
     let (documents, _, provider, canonical_id, ide_path, deps) =
