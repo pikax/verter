@@ -3616,7 +3616,7 @@ const msg = '{marker}'
 async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_user() {
     let (documents, _states, provider, _app_id, _ide_path, deps) =
         make_carrier_diagnostics_fixture().await;
-    let cap = crate::sync_coordinator::max_inflight_diagnostics(&deps.type_provider_kind);
+    let cap = crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind) + 1;
     let backlog_len = cap.min(64) + 3;
     let source = |marker: &str| {
         format!(
@@ -3846,7 +3846,7 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
 async fn background_pulls_always_leave_a_slot_for_the_document_the_user_opens() {
     let (documents, _states, provider, _app_id, _ide_path, deps) =
         make_carrier_diagnostics_fixture().await;
-    let cap = crate::sync_coordinator::max_inflight_diagnostics(&deps.type_provider_kind);
+    let cap = crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind) + 1;
     assert!(cap > 1, "a window of one cannot reserve anything");
     let source = |marker: &str| {
         format!(

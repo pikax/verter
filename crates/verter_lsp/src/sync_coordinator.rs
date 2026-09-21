@@ -507,6 +507,17 @@ pub(crate) fn max_inflight_diagnostics(kind: &crate::TypeProviderKind) -> usize 
     }
 }
 
+/// How many of those pulls may be BACKGROUND work — documents nobody touched,
+/// re-armed by a scan completing, semantic enrichment or a generation refresh.
+///
+/// Always at least one below the window, so a slot is kept for the document the
+/// user turns to next; and small in absolute terms, because every background
+/// check competes inside the engine with the hover, completion and semantic
+/// tokens of the document the user is actually looking at.
+pub(crate) fn max_background_diagnostics(kind: &crate::TypeProviderKind) -> usize {
+    max_inflight_diagnostics(kind).saturating_sub(1).clamp(1, 2)
+}
+
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
     let documents = Arc::downgrade(&deps.documents);
@@ -635,6 +646,10 @@ async fn coordinator_loop(
     // A finished (or cancelled) pull frees its slot and wakes the loop. Capacity
     // one: a full channel means a wake is already queued.
     let max_inflight = max_inflight_diagnostics(&deps.type_provider_kind);
+    let max_background = max_background_diagnostics(&deps.type_provider_kind);
+    // The in-flight pulls that are background work (see `max_background`).
+    let mut background_inflight: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let (pull_done_tx, mut pull_done_rx) = mpsc::channel::<()>(1);
 
     loop {
@@ -646,7 +661,8 @@ async fn coordinator_loop(
         // Background work may never fill the window: one slot is always kept
         // for a document the user touched, which would otherwise wait behind
         // pulls this side can no longer overtake.
-        let user_slots_only = max_inflight > 1 && diagnostic_tasks.len() + 1 >= max_inflight;
+        background_inflight.retain(|id| diagnostic_tasks.contains_key(id));
+        let user_slots_only = background_inflight.len() >= max_background;
         let dispatchable = |signal: &PendingSignal, id: &String| {
             !user_slots_only || signal.user_received_at.is_some() || touches.lock().contains_key(id)
         };
@@ -952,6 +968,13 @@ async fn coordinator_loop(
 
                         if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
                             stale.abort();
+                        }
+                        if signal.user_received_at.is_none()
+                            && !touches.contains_key(&canonical_id)
+                        {
+                            background_inflight.insert(canonical_id.clone());
+                        } else {
+                            background_inflight.remove(&canonical_id);
                         }
                         let task_deps = Arc::clone(&deps);
                         let task_canonical_id = canonical_id.clone();
