@@ -372,10 +372,12 @@ impl SharedTsgoOverlay {
         // path (SHARED is never fabricated; the binding is the gate's resolved one). The
         // identity-bound object is retained so injection is attributed to THIS transport
         // instance's epoch (never a re-read of the overlay's current active epoch).
+        let engage_started = std::time::Instant::now();
         let established = self
             .ensure_transport(carrier.binding().clone(), carrier.generation())
             .await
             .ok_or_else(|| refusal(SharedEngageFailureKind::TransportUnavailable, None, None))?;
+        let transport_ready = engage_started.elapsed();
 
         // Inject the recorded content of EVERY open carrier into the established
         // transport (dirty-tracked — only what changed since the last injection) so the
@@ -420,6 +422,12 @@ impl SharedTsgoOverlay {
                 |companion| self.injection_is_shadow_safe(companion),
             )
             .await;
+        tracing::debug!(
+            provider_path,
+            transport_ms = transport_ready.as_millis() as u64,
+            total_ms = engage_started.elapsed().as_millis() as u64,
+            "shared engage: transport ensured and editor-demand overlays injected"
+        );
 
         // Admit managed when the queried carrier's current content is not
         // confirmed synced into the shared Program (its dirty injection failed) — never

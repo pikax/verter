@@ -77,7 +77,7 @@ pub(crate) enum CarrierWriteKind {
 ///
 /// - `textDocument/didOpen` / `didChange` / `didClose` — Verter's carrier
 ///   overlay lifecycle NOTIFICATIONS.
-/// - `textDocument/diagnostic` — the ordered sync-barrier REQUEST (see
+/// - [`CARRIER_SYNC_BARRIER_METHOD`] — the ordered sync-barrier REQUEST (see
 ///   [`CarrierInjectionChannel::sync_overlay`]).
 /// - `custom/initializeAPISession` — the `--api` session (re-)emission REQUEST.
 ///
@@ -88,7 +88,7 @@ const CARRIER_INJECTION_ALLOWLIST: &[(&str, CarrierWriteKind)] = &[
     ("textDocument/didOpen", CarrierWriteKind::Notification),
     ("textDocument/didChange", CarrierWriteKind::Notification),
     ("textDocument/didClose", CarrierWriteKind::Notification),
-    ("textDocument/diagnostic", CarrierWriteKind::Request),
+    (CARRIER_SYNC_BARRIER_METHOD, CarrierWriteKind::Request),
     ("custom/initializeAPISession", CarrierWriteKind::Request),
 ];
 
@@ -160,6 +160,13 @@ impl GatedWireSink for JsonRpcConnection {
 /// the LSP file lifecycle — beyond this. On elapse the barrier fails CLOSED
 /// ([`TsgoApiError::Timeout`]) so the caller degrades to the OWNED baseline.
 pub const CARRIER_SYNC_BARRIER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The ordered request [`CarrierInjectionChannel::sync_overlay`] awaits. It only
+/// has to prove ORDER on the `--lsp` connection, so it is syntax-only: a pull
+/// diagnostic here costs the editor's engine a semantic check per injected
+/// overlay, and a project-wide injection (the import closure of one open file)
+/// then holds every editor request behind dozens of them.
+pub const CARRIER_SYNC_BARRIER_METHOD: &str = "textDocument/foldingRange";
 
 /// The gated carrier-injection write facade: the SINGLE deny-by-default
 /// allowlist gate in front of a private wire sink.
@@ -341,15 +348,13 @@ impl<'a> CarrierInjectionChannel<'a> {
     /// just-opened overlay would not yet be a Program member. LSP processes
     /// messages in order ON ONE connection, so awaiting a `--lsp` REQUEST for
     /// `uri` after the `didOpen` guarantees the overlay is registered by the
-    /// time it returns. The pull `textDocument/diagnostic` request serves as
-    /// that barrier (its result is discarded — the OWNED diagnostics
-    /// authority is the `--api` checker; a server that does not implement
-    /// pull diagnostics still processes the queued didOpen before answering
-    /// or erroring here).
+    /// time it returns. [`CARRIER_SYNC_BARRIER_METHOD`] serves as that barrier
+    /// (its result is discarded; a server that does not implement it still
+    /// processes the queued didOpen before answering or erroring here).
     ///
     /// Returns `Ok` exactly when the barrier round-trip COMPLETED: a success
     /// result, or a completed JSON-RPC error response (e.g. "method not
-    /// found" from a server without pull diagnostics) — the server processed
+    /// found" from a server without the barrier method) — the server processed
     /// the queued notifications in order either way. A request that never
     /// round-trips (a send failure / closed connection) means the ordering
     /// guarantee did NOT hold, and the failure propagates. This depends on
@@ -359,7 +364,7 @@ impl<'a> CarrierInjectionChannel<'a> {
     /// surfaces as [`TsgoApiError::Closed`].
     ///
     /// The barrier is BOUNDED by [`CARRIER_SYNC_BARRIER_TIMEOUT`]: a slow or broken
-    /// editor tsgo that never answers the pull-diagnostic request cannot stall the
+    /// editor tsgo that never answers the barrier request cannot stall the
     /// carrier lifecycle indefinitely — on timeout the barrier returns
     /// [`TsgoApiError::Timeout`] (fail-closed; the caller degrades to the OWNED baseline)
     /// rather than blocking forever.
@@ -377,9 +382,9 @@ impl<'a> CarrierInjectionChannel<'a> {
         timeout: Duration,
     ) -> TsgoApiResult<()> {
         let params = serde_json::json!({ "textDocument": { "uri": uri } });
-        let barrier = self.gated_request("textDocument/diagnostic", params);
+        let barrier = self.gated_request(CARRIER_SYNC_BARRIER_METHOD, params);
         match tokio::time::timeout(timeout, barrier).await {
-            // The round-trip completed (the diagnostic RESULT is discarded;
+            // The round-trip completed (the RESULT is discarded;
             // a JSON-RPC error response still proves in-order consumption of
             // the queued didOpen/didChange): the barrier held.
             Ok(Ok(_)) | Ok(Err(TsgoApiError::Transport(_))) => Ok(()),

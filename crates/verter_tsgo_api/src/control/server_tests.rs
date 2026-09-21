@@ -124,7 +124,9 @@ fn spawn_fake_tsgo_cfg(
                         )
                         .await;
                     }
-                    (Some("textDocument/diagnostic"), Some(id)) if answer_barrier => {
+                    (Some(crate::relay::CARRIER_SYNC_BARRIER_METHOD), Some(id))
+                        if answer_barrier =>
+                    {
                         // The sync barrier: any completed response proves order.
                         reply(
                             &mut write,
@@ -585,7 +587,7 @@ async fn abnormal_control_termination_retracts_open_carriers_non_destructively()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sent_but_unsynced_open_is_retracted_on_session_end() {
     // A fake tsgo that answers `initialize` and RECORDS didOpen/didClose but NEVER answers
-    // the `textDocument/diagnostic` sync barrier — the connection stays OPEN (relay alive),
+    // the sync barrier — the connection stays OPEN (relay alive),
     // so the carrier's sync barrier fails CLOSED via timeout.
     let mut lb = wire_loopback_cfg("the-nonce", false);
 

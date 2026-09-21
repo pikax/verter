@@ -300,7 +300,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "product.extract-component.command": "ISSUE-product-extract-component",
     "shared.code-action.apply.organize-imports": "ISSUE-code-action-apply-organize",
     "shared.inlay-hints.script-region": "ISSUE-product-inlay-hints",
-    "shared.lifecycle.external-ts-create-delete": "ISSUE-lifecycle-external-ts",
     "shared.rename.from-markup.applies": "ISSUE-shared-rename-from-markup",
     "shared.rename.from-script.applies": "ISSUE-shared-rename-apply",
     "shared.style.id.references": "ISSUE-style-id-references",
