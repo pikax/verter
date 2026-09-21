@@ -143,6 +143,80 @@ fn concurrent_admissions_never_jointly_overshoot_the_ceiling() {
     );
 }
 
+/// Live pins and discretionary admissions share the same aggregate
+/// transition: pins leave only their actual headroom, never a stale
+/// pre-pin allowance for retained entries.
+#[test]
+fn concurrent_pins_limit_retained_admissions_to_their_headroom() {
+    const PINNERS: usize = 4;
+    const ADMITTERS: usize = 8;
+    const PER_THREAD: usize = 40;
+    const CEILING: usize = 4_000;
+    const PIN_BYTES: usize = 500;
+
+    let account = account(CEILING, CEILING, CEILING);
+    let pins_ready = Arc::new(Barrier::new(PINNERS + 1));
+    let release_pins = Arc::new(Barrier::new(PINNERS + 1));
+    let admitted = Arc::new(AtomicUsize::new(0));
+    let overshoot = Arc::new(AtomicUsize::new(0));
+
+    std::thread::scope(|scope| {
+        let mut pin_handles = Vec::with_capacity(PINNERS);
+        for _ in 0..PINNERS {
+            let account = Arc::clone(&account);
+            let pins_ready = Arc::clone(&pins_ready);
+            let release_pins = Arc::clone(&release_pins);
+            pin_handles.push(scope.spawn(move || {
+                let _pin = account.pin(PIN_BYTES);
+                pins_ready.wait();
+                release_pins.wait();
+            }));
+        }
+        pins_ready.wait();
+
+        let mut admission_handles = Vec::with_capacity(ADMITTERS);
+        for _ in 0..ADMITTERS {
+            let account = Arc::clone(&account);
+            let admitted = Arc::clone(&admitted);
+            let overshoot = Arc::clone(&overshoot);
+            admission_handles.push(scope.spawn(move || {
+                let mut held: Vec<RetentionCharge> = Vec::new();
+                for _ in 0..PER_THREAD {
+                    if let RetentionAdmission::Admitted(charge) =
+                        account.reserve(ChargeClass::Retained, 100)
+                    {
+                        admitted.fetch_add(1, Ordering::Relaxed);
+                        held.push(charge);
+                    }
+                    if account.snapshot().total_bytes() > CEILING {
+                        overshoot.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                std::mem::forget(held);
+            }));
+        }
+        for handle in admission_handles {
+            handle.join().expect("admitter thread must not panic");
+        }
+        release_pins.wait();
+        for handle in pin_handles {
+            handle.join().expect("pinner thread must not panic");
+        }
+    });
+
+    assert_eq!(
+        overshoot.load(Ordering::Relaxed),
+        0,
+        "a retained admission exceeded headroom consumed by live pins"
+    );
+    assert_eq!(
+        admitted.load(Ordering::Relaxed),
+        20,
+        "only ceiling minus pinned bytes may be retained"
+    );
+    assert_eq!(account.snapshot().pinned_bytes, 0);
+}
+
 /// Pinned bytes are charged and consume headroom, so a process holding
 /// live parse snapshots admits fewer discretionary cache entries.
 #[test]

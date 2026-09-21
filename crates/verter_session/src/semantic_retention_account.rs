@@ -70,7 +70,7 @@
 //! decides whether the process may retain the entry at all, so an
 //! imprecise estimate costs hit rate, never correctness.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use verter_audit::NonAdmissionReason;
@@ -357,9 +357,12 @@ impl RetentionAccountSnapshot {
 #[derive(Debug)]
 pub struct SemanticRetentionAccount {
     limits: RetentionLimits,
-    /// `active + retained` — the refusable occupancy the CAS admission
-    /// loop is defined over. Kept as ONE cell so the two refusable
-    /// classes admit against a single linearisation point.
+    /// Serializes every aggregate occupancy transition. Its CAS is the
+    /// admission linearization point: refusable reservations and pins
+    /// therefore cannot validate against different aggregate states.
+    admission_lock: AtomicBool,
+    /// `active + retained` — the refusable occupancy. Kept as ONE cell
+    /// so the two refusable classes share one aggregate state.
     refusable_bytes: AtomicUsize,
     active_bytes: AtomicUsize,
     pinned_bytes: AtomicUsize,
@@ -381,6 +384,7 @@ impl SemanticRetentionAccount {
     pub fn new(limits: RetentionLimits) -> Arc<Self> {
         Arc::new(Self {
             limits,
+            admission_lock: AtomicBool::new(false),
             refusable_bytes: AtomicUsize::new(0),
             active_bytes: AtomicUsize::new(0),
             pinned_bytes: AtomicUsize::new(0),
@@ -412,10 +416,10 @@ impl SemanticRetentionAccount {
     /// A [`ChargeClass::Pinned`] request is charged unconditionally and
     /// always returns [`RetentionAdmission::Admitted`] — see the module
     /// docs for why a pin is not a policy choice. The refusable classes
-    /// admit only when the reservation fits under the ceiling AT THE
-    /// LINEARISATION POINT of a compare-and-swap, so concurrent
-    /// reservations can never jointly overshoot: every admitted
-    /// reservation observed its own post-admission total.
+    /// admit only when the reservation fits under the ceiling at the
+    /// CAS-guarded aggregate-state linearization point. Pins take that
+    /// same guard, so a refusable admission can never validate against a
+    /// stale pinned total.
     ///
     /// A zero-byte reservation is always admitted and charges nothing.
     pub fn reserve(self: &Arc<Self>, class: ChargeClass, bytes: usize) -> RetentionAdmission {
@@ -434,58 +438,39 @@ impl SemanticRetentionAccount {
             self.admissions.fetch_add(1, Ordering::Relaxed);
             return RetentionAdmission::Admitted(self.mint_charge(class, 0));
         }
-        // The pinned total is read per attempt rather than folded into
-        // `refusable_bytes`: a pin may legitimately exceed the ceiling,
-        // and folding it in would let a pin release "credit" a refusable
-        // reservation that never observed the headroom it is spending.
-        let mut current = self.refusable_bytes.load(Ordering::Acquire);
-        loop {
-            let pinned = self.pinned_bytes.load(Ordering::Acquire);
-            let headroom = self
-                .limits
-                .aggregate_ceiling_bytes
-                .saturating_sub(current)
-                .saturating_sub(pinned);
-            if bytes > headroom {
-                self.refusals_pressure.fetch_add(1, Ordering::Relaxed);
-                verter_audit::attribute!(RetentionAdmitRefused);
-                return RetentionAdmission::Refused(RetentionRefusal::Pressure {
-                    requested: bytes,
-                    headroom,
-                });
-            }
-            match self.refusable_bytes.compare_exchange_weak(
-                current,
-                current + bytes,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
+        let _admission_lock = self.lock_aggregate_state();
+        let current = self.refusable_bytes.load(Ordering::Relaxed);
+        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+        let headroom = self
+            .limits
+            .aggregate_ceiling_bytes
+            .saturating_sub(current)
+            .saturating_sub(pinned);
+        if bytes > headroom {
+            self.refusals_pressure.fetch_add(1, Ordering::Relaxed);
+            verter_audit::attribute!(RetentionAdmitRefused);
+            return RetentionAdmission::Refused(RetentionRefusal::Pressure {
+                requested: bytes,
+                headroom,
+            });
         }
         if class == ChargeClass::Active {
-            // The active sub-limit is checked AFTER the aggregate
-            // reservation landed so the two never observe a torn total.
-            // A sub-limit rejection unwinds the aggregate charge it just
-            // took — the reservation never becomes visible as admitted.
-            let active = self.active_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
-            if active > self.limits.active_ceiling_bytes {
-                self.active_bytes.fetch_sub(bytes, Ordering::AcqRel);
-                self.refusable_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            let active = self.active_bytes.load(Ordering::Relaxed);
+            let active_headroom = self.limits.active_ceiling_bytes.saturating_sub(active);
+            if bytes > active_headroom {
                 self.refusals_active.fetch_add(1, Ordering::Relaxed);
                 verter_audit::attribute!(RetentionAdmitRefused);
                 return RetentionAdmission::Refused(RetentionRefusal::ActiveExhausted {
                     requested: bytes,
-                    headroom: self
-                        .limits
-                        .active_ceiling_bytes
-                        .saturating_sub(active - bytes),
+                    headroom: active_headroom,
                 });
             }
+            self.active_bytes.store(active + bytes, Ordering::Relaxed);
         }
+        self.refusable_bytes
+            .store(current + bytes, Ordering::Relaxed);
         self.admissions.fetch_add(1, Ordering::Relaxed);
-        self.note_peak();
+        self.note_peak_locked();
         RetentionAdmission::Admitted(self.mint_charge(class, bytes))
     }
 
@@ -493,11 +478,13 @@ impl SemanticRetentionAccount {
     /// charged. The single legitimate way to account a pin.
     #[must_use]
     pub fn pin(self: &Arc<Self>, bytes: usize) -> RetentionCharge {
+        let _admission_lock = self.lock_aggregate_state();
         if bytes > 0 {
-            self.pinned_bytes.fetch_add(bytes, Ordering::AcqRel);
+            let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+            self.pinned_bytes.store(pinned + bytes, Ordering::Relaxed);
         }
         self.admissions.fetch_add(1, Ordering::Relaxed);
-        self.note_peak();
+        self.note_peak_locked();
         self.mint_charge(ChargeClass::Pinned, bytes)
     }
 
@@ -510,7 +497,8 @@ impl SemanticRetentionAccount {
     /// recover the headroom.
     #[must_use]
     pub fn under_pin_pressure(&self) -> bool {
-        self.pinned_bytes.load(Ordering::Acquire) > self.limits.pin_threshold_bytes
+        let _admission_lock = self.lock_aggregate_state();
+        self.pinned_bytes.load(Ordering::Relaxed) > self.limits.pin_threshold_bytes
     }
 
     /// Headroom a refusable reservation would see right now. Advisory
@@ -519,21 +507,23 @@ impl SemanticRetentionAccount {
     /// check-then-reserve.
     #[must_use]
     pub fn refusable_headroom_bytes(&self) -> usize {
+        let _admission_lock = self.lock_aggregate_state();
         self.limits
             .aggregate_ceiling_bytes
-            .saturating_sub(self.refusable_bytes.load(Ordering::Acquire))
-            .saturating_sub(self.pinned_bytes.load(Ordering::Acquire))
+            .saturating_sub(self.refusable_bytes.load(Ordering::Relaxed))
+            .saturating_sub(self.pinned_bytes.load(Ordering::Relaxed))
     }
 
     /// Snapshot occupancy and decision counters.
     #[must_use]
     pub fn snapshot(&self) -> RetentionAccountSnapshot {
-        let active = self.active_bytes.load(Ordering::Acquire);
-        let refusable = self.refusable_bytes.load(Ordering::Acquire);
+        let _admission_lock = self.lock_aggregate_state();
+        let active = self.active_bytes.load(Ordering::Relaxed);
+        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
         RetentionAccountSnapshot {
             active_bytes: active,
             retained_bytes: refusable.saturating_sub(active),
-            pinned_bytes: self.pinned_bytes.load(Ordering::Acquire),
+            pinned_bytes: self.pinned_bytes.load(Ordering::Relaxed),
             peak_total_bytes: self.peak_total_bytes.load(Ordering::Relaxed),
             admissions: self.admissions.load(Ordering::Relaxed) as u64,
             refusals_oversized: self.refusals_oversized.load(Ordering::Relaxed) as u64,
@@ -555,32 +545,64 @@ impl SemanticRetentionAccount {
     /// `Drop`, which is why exactly-once release is structural rather
     /// than a discipline callers must remember.
     fn release(&self, class: ChargeClass, bytes: usize) {
+        let _admission_lock = self.lock_aggregate_state();
         match class {
             ChargeClass::Pinned => {
                 if bytes > 0 {
-                    self.pinned_bytes.fetch_sub(bytes, Ordering::AcqRel);
+                    let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+                    self.pinned_bytes.store(pinned - bytes, Ordering::Relaxed);
                 }
             }
             ChargeClass::Active => {
                 if bytes > 0 {
-                    self.active_bytes.fetch_sub(bytes, Ordering::AcqRel);
-                    self.refusable_bytes.fetch_sub(bytes, Ordering::AcqRel);
+                    let active = self.active_bytes.load(Ordering::Relaxed);
+                    let refusable = self.refusable_bytes.load(Ordering::Relaxed);
+                    self.active_bytes.store(active - bytes, Ordering::Relaxed);
+                    self.refusable_bytes
+                        .store(refusable - bytes, Ordering::Relaxed);
                 }
             }
             ChargeClass::Retained => {
                 if bytes > 0 {
-                    self.refusable_bytes.fetch_sub(bytes, Ordering::AcqRel);
+                    let refusable = self.refusable_bytes.load(Ordering::Relaxed);
+                    self.refusable_bytes
+                        .store(refusable - bytes, Ordering::Relaxed);
                 }
             }
         }
         self.releases.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn note_peak(&self) {
-        let total = self.refusable_bytes.load(Ordering::Acquire)
-            + self.pinned_bytes.load(Ordering::Acquire);
+    fn lock_aggregate_state(&self) -> AggregateStateLock<'_> {
+        loop {
+            if self
+                .admission_lock
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return AggregateStateLock(&self.admission_lock);
+            }
+            while self.admission_lock.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Called only while [`Self::lock_aggregate_state`] is held.
+    fn note_peak_locked(&self) {
+        let total = self.refusable_bytes.load(Ordering::Relaxed)
+            + self.pinned_bytes.load(Ordering::Relaxed);
         self.peak_total_bytes.fetch_max(total, Ordering::Relaxed);
         verter_audit::attribute_max!(StoreRetainedBytes, total);
+    }
+}
+
+/// Guard for one atomic aggregate-account transition.
+struct AggregateStateLock<'a>(&'a AtomicBool);
+
+impl Drop for AggregateStateLock<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -631,8 +653,12 @@ impl RetentionCharge {
     pub fn commit_retained(mut self) -> Self {
         if self.class == ChargeClass::Active {
             if let Some(account) = self.account.as_ref() {
+                let _admission_lock = account.lock_aggregate_state();
                 if self.bytes > 0 {
-                    account.active_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+                    let active = account.active_bytes.load(Ordering::Relaxed);
+                    account
+                        .active_bytes
+                        .store(active - self.bytes, Ordering::Relaxed);
                 }
             }
             self.class = ChargeClass::Retained;
