@@ -439,6 +439,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         if let Some(old) = guard.take() {
             old.stop();
         }
+        server.sync_coordinator.set_workspace_scan_in_progress(true);
         *guard = Some(scanner);
     }
 
@@ -462,7 +463,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             // has not yet been told the server is up reads as a stale-then-ready
             // flap. Holding here costs nothing — level 1 is already unblocked.
             if !await_scan_complete_after_ready(scanner_done_rx, ready_announced_rx).await {
-                return; // Scanner or this init generation was dropped/cancelled.
+                // Scanner or this init generation was dropped/cancelled. A newer
+                // generation re-arms the gate when it installs its own scanner;
+                // if there is none, nothing is scanning.
+                if init_generation.load(std::sync::atomic::Ordering::Acquire) == my_gen {
+                    server
+                        .sync_coordinator
+                        .set_workspace_scan_in_progress(false);
+                }
+                return;
             }
 
             // Check generation — bail if superseded
@@ -630,6 +639,8 @@ impl super::VerterLanguageServer {
         tracing::info!(
             "workspace scanner complete (gen={my_gen}), re-arming open-document diagnostics"
         );
+        // The scan is over BEFORE the re-arm, so the re-armed documents are pulled.
+        self.sync_coordinator.set_workspace_scan_in_progress(false);
 
         self.rearm_open_document_diagnostics();
 

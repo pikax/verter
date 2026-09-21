@@ -62,6 +62,8 @@ pub struct SyncCoordinatorHandle {
     changes: ChangeTracker,
     /// When the user last turned to each document WITHOUT editing it.
     touches: TouchTracker,
+    /// Whether a workspace scan is currently publishing into the provider.
+    scanning: Arc<std::sync::atomic::AtomicBool>,
     /// TEST-ONLY: the coordinator's own progress receipts.
     #[cfg(test)]
     pub(crate) receipts: CoordinatorReceipts,
@@ -125,6 +127,10 @@ struct PendingSignal {
     /// a replayed backlog keep overtaking the one document the user is
     /// actually looking at.
     user_received_at: Option<Instant>,
+    /// Whether an EDIT (a `did_change`) is behind this signal, as opposed to an
+    /// open. A restart replays every open editor as an open; only an edit says
+    /// the user is working in THIS document right now.
+    edited: bool,
 }
 
 impl SyncCoordinatorHandle {
@@ -134,6 +140,19 @@ impl SyncCoordinatorHandle {
     /// entry instant, never `Instant::now()` taken at some later point on the
     /// path. The debounce window is measured from it.
     pub fn signal(&self, canonical_id: String, uri_str: String, received_at: Instant) {
+        self.deposit_user_signal(canonical_id, uri_str, received_at, false);
+    }
+
+    /// The deposit behind [`Self::signal`]. `edited` is written in the SAME
+    /// locked step as the signal itself, so the coordinator can never drain the
+    /// signal without the fact that an edit is behind it.
+    fn deposit_user_signal(
+        &self,
+        canonical_id: String,
+        uri_str: String,
+        received_at: Instant,
+        edited: bool,
+    ) {
         if let Some(documents) = self.documents.upgrade() {
             documents.invalidate_diagnostics(&uri_str);
         }
@@ -151,6 +170,7 @@ impl SyncCoordinatorHandle {
                 // the sync while the user is still typing.
                 pending.received_at = pending.received_at.max(received_at);
                 pending.user_received_at = pending.user_received_at.max(Some(received_at));
+                pending.edited |= edited;
             })
             .or_insert(PendingSignal {
                 uri: uri_str,
@@ -159,6 +179,7 @@ impl SyncCoordinatorHandle {
                 sync_retries_remaining: 1,
                 received_at,
                 user_received_at: Some(received_at),
+                edited,
             });
         // Full means a wake is already queued, which is exactly the desired
         // coalescing behavior. Closed means the server is shutting down.
@@ -200,6 +221,7 @@ impl SyncCoordinatorHandle {
                 sync_retries_remaining: 0,
                 received_at,
                 user_received_at: None,
+                edited: false,
             });
         let _ = self.wake_tx.try_send(());
     }
@@ -223,6 +245,17 @@ impl SyncCoordinatorHandle {
         }
     }
 
+    /// A workspace scan started or ended. While one runs, only a document the
+    /// user is EDITING is pulled from the provider: the scan is publishing
+    /// hundreds of documents into the engine, every pull makes it rebuild its
+    /// program against that moving target, and the result is thrown away
+    /// anyway — every open document is re-armed when the scan completes.
+    pub fn set_workspace_scan_in_progress(&self, scanning: bool) {
+        self.scanning
+            .store(scanning, std::sync::atomic::Ordering::Release);
+        let _ = self.wake_tx.try_send(());
+    }
+
     /// The user turned to this document without editing it (an interactive
     /// request against it). It queues no work; it only moves the document to
     /// the front of whatever work is already owed to it.
@@ -244,6 +277,7 @@ impl SyncCoordinatorHandle {
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                scanning: Arc::default(),
                 receipts: CoordinatorReceipts::default(),
             },
             wake_rx,
@@ -378,7 +412,7 @@ impl ChangeInFlight {
     /// change was received rather than any later instant on the path.
     pub fn signal(&self, uri_str: String) {
         self.handle
-            .signal(self.canonical_id.clone(), uri_str, self.received_at);
+            .deposit_user_signal(self.canonical_id.clone(), uri_str, self.received_at, true);
     }
 
     /// Deposit a REPUBLISH-only signal for this change, stamped with the same
@@ -480,6 +514,7 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
     let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let touches: TouchTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let scanning: Arc<std::sync::atomic::AtomicBool> = Arc::default();
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     let diagnostics_refresh_rx = deps.documents.subscribe_diagnostics_refresh();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
@@ -493,6 +528,7 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
             inbox: Arc::clone(&pending),
             changes: Arc::clone(&changes),
             touches: Arc::clone(&touches),
+            scanning: Arc::clone(&scanning),
         },
         Arc::new(deps),
         #[cfg(test)]
@@ -504,6 +540,7 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
         pending,
         changes,
         touches,
+        scanning,
         #[cfg(test)]
         receipts,
     }
@@ -514,6 +551,7 @@ struct CoordinatorShared {
     inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     changes: ChangeTracker,
     touches: TouchTracker,
+    scanning: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One in-flight provider pull. Dropping it — on completion OR cancellation —
@@ -556,6 +594,7 @@ fn absorb_inbox(
                     .sync_retries_remaining
                     .max(signal.sync_retries_remaining);
                 pending.user_received_at = pending.user_received_at.max(signal.user_received_at);
+                pending.edited |= signal.edited;
             })
             .or_insert((received_at, signal));
     }
@@ -575,6 +614,7 @@ async fn coordinator_loop(
         inbox,
         changes,
         touches,
+        scanning,
     } = shared;
     let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
     // Map from canonical_id → (last_change_time, uri_str)
@@ -661,6 +701,7 @@ async fn coordinator_loop(
                             uri, requires_sync: false, force_diagnostics: true,
                             sync_retries_remaining: 0, received_at,
                             user_received_at: None,
+                            edited: false,
                         }));
                 }
             }
@@ -707,6 +748,7 @@ async fn coordinator_loop(
                                         sync_retries_remaining: 0,
                                         received_at,
                                         user_received_at: None,
+                                        edited: false,
                                     },
                                 ));
                         }
@@ -734,6 +776,7 @@ async fn coordinator_loop(
                                         sync_retries_remaining: 0,
                                         received_at,
                                         user_received_at: None,
+                                        edited: false,
                                     },
                                 ),
                             );
@@ -862,6 +905,7 @@ async fn coordinator_loop(
                                             .saturating_sub(1),
                                         received_at,
                                         user_received_at: signal.user_received_at,
+                                        edited: signal.edited,
                                     },
                                 ),
                             );
@@ -879,6 +923,14 @@ async fn coordinator_loop(
                             continue;
                         }
                         publish_diagnostics = true;
+                    }
+
+                    if publish_diagnostics
+                        && scanning.load(std::sync::atomic::Ordering::Acquire)
+                        && !signal.edited
+                    {
+                        // Synced above; pulled by the post-scan re-arm.
+                        publish_diagnostics = false;
                     }
 
                     if publish_diagnostics {
@@ -1040,6 +1092,7 @@ fn arm_open_importer_republish(
                         sync_retries_remaining: 0,
                         received_at,
                         user_received_at: None,
+                        edited: false,
                     },
                 ));
         }

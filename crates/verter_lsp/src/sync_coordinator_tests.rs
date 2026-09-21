@@ -3728,6 +3728,115 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
         .await;
 }
 
+/// While a workspace scan is publishing hundreds of documents into the provider,
+/// every background diagnostic pull makes the engine rebuild its program against
+/// a moving target — and buys nothing, because every open document is re-armed
+/// when the scan completes. A restart replays every open editor as an OPEN, so
+/// only a document the user is EDITING is pulled during a scan; the rest are
+/// still SYNCED, and are pulled once it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+    handle.set_workspace_scan_in_progress(true);
+
+    let overdue = Instant::now() - Duration::from_secs(60);
+    let names = ["ReplayedA", "ReplayedB", "Active"];
+    let docs: Vec<(String, Uri)> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let uri: Uri = format!("file:///workspace/src/{name}.vue")
+                .parse()
+                .expect("test uri");
+            let _ = documents.did_open(&TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: source(name),
+            });
+            let canonical_id = documents
+                .get_canonical_id(&uri)
+                .expect("the document must be open");
+            needs_provider_sync.insert(canonical_id.clone());
+            if *name == "Active" {
+                // The one document the user is typing in.
+                let change = handle.change_received(canonical_id.clone());
+                let _ = documents.did_change(&uri, 2, &source("Active edited"));
+                change.signal(uri.as_str().to_string());
+            } else {
+                handle.signal(
+                    canonical_id.clone(),
+                    uri.as_str().to_string(),
+                    overdue + Duration::from_millis(index as u64),
+                );
+            }
+            (canonical_id, uri)
+        })
+        .collect();
+
+    let synced = |calls: &[MockCall], name: &str| {
+        calls.iter().any(|call| match call {
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } => {
+                path.starts_with(&format!("/workspace/src/{name}.vue"))
+            }
+            _ => false,
+        })
+    };
+    let pulled = |calls: &[MockCall], name: &str| {
+        calls.iter().any(|call| {
+            matches!(call, MockCall::GetDiagnostics { path }
+                if path.starts_with(&format!("/workspace/src/{name}.vue")))
+        })
+    };
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| names.iter().all(|name| synced(calls, name))),
+    )
+    .await
+    .expect("every replayed document is still SYNCED during a scan");
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&docs[2].1) && handle.diag_tasks_live() == 0,
+            || panic!("the edited document must be certified during the scan"),
+        )
+        .await;
+    let calls = provider.calls();
+    assert!(pulled(&calls, "Active"));
+    assert!(
+        !pulled(&calls, "ReplayedA") && !pulled(&calls, "ReplayedB"),
+        "documents the user is not looking at are not pulled while the scan runs: {calls:?}"
+    );
+
+    // The scan ends and the open documents are re-armed: now they are pulled.
+    handle.set_workspace_scan_in_progress(false);
+    for (canonical_id, uri) in &docs[..2] {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+    }
+    handle
+        .await_until(
+            || {
+                docs.iter().all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("every open document is certified once the scan has ended"),
+        )
+        .await;
+}
+
 /// LSP notification handlers are dispatched concurrently, so an OLDER change
 /// can deposit its signal after a newer one has already deposited its own. The
 /// quiet window must take the LATEST receipt, never simply the last deposit —
