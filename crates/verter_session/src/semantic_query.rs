@@ -4254,7 +4254,7 @@ impl SurfaceView {
 /// surface's same-named method members. They agreed by CONVENTION, and
 /// the convention broke the moment the second one landed — the member
 /// carrier published all three contributors of a bodied group, so
-/// `select_signature_function` (which documents this filter as its
+/// signature-utility inference (which takes this filter as its
 /// PRECONDITION and reads the LAST overload) took the implementation:
 /// `ReturnType<C['m']>` became `any` and `Parameters<C['m']>` became
 /// `[x: any]`, cleanly and warm, where the checker answers `"MB"` and

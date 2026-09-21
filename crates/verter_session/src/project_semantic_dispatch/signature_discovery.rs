@@ -27,8 +27,8 @@ use crate::signature_kernel::{
     AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId, DeclarationParentId,
     DiscoveryError, DiscoveryTypes, ParamInput, RestInput, ResultDemand, ResultInput,
     SemanticReadView, SignatureCandidate, SignatureDescriptorId, SignatureInput, SignatureKind,
-    SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags, SignatureSetRef,
-    SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
+    SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags, SignatureStore,
+    SlotTypeFacts, SourceLocatorId, TypeToken,
 };
 use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 
@@ -240,6 +240,9 @@ struct Walk<'w, 'a, 'd> {
     context_id: SemanticContextId,
     context: Option<SemanticContext>,
     visiting: FxHashSet<SemanticNodeId>,
+    /// The authored node each leaf candidate was published from, first
+    /// publication wins within this walk.
+    authored: rustc_hash::FxHashMap<SignatureDescriptorId, SemanticNodeId>,
 }
 
 impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
@@ -660,7 +663,9 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 SourceLocatorId::from_raw(locator),
             ),
         };
-        publish_signature(self.types.store, &input).map(Some)
+        let candidate = publish_signature(self.types.store, &input)?;
+        self.authored.entry(candidate.signature).or_insert(node);
+        Ok(Some(candidate))
     }
 }
 
@@ -668,14 +673,34 @@ impl ProjectSemanticDispatch<'_> {
     /// `SignaturesOfType(subject, kind, context)`: the ordered call or
     /// construct candidates of `subject`. An empty set is a complete
     /// negative; every failure to settle the subject is an explicit
-    /// incomplete reason.
+    /// incomplete reason. The set alone; production reads
+    /// [`Self::signatures_of_type_with_authored`].
+    #[cfg(test)]
     pub(crate) fn signatures_of_type(
         &self,
         store: &SignatureStore,
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
         context: SemanticContextId,
-    ) -> QueryOutcome<SignatureSetRef> {
+    ) -> QueryOutcome<crate::signature_kernel::SignatureSetRef> {
+        match self.signatures_of_type_with_authored(store, subject, kind, context) {
+            QueryOutcome::Ready(Ready { value, evidence }) => QueryOutcome::Ready(Ready {
+                value: value.set,
+                evidence,
+            }),
+            QueryOutcome::Incomplete(reason) => QueryOutcome::Incomplete(reason),
+        }
+    }
+
+    /// [`Self::signatures_of_type`] with, per candidate, the authored node
+    /// this walk published it from.
+    pub(crate) fn signatures_of_type_with_authored(
+        &self,
+        store: &SignatureStore,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        context: SemanticContextId,
+    ) -> QueryOutcome<crate::signature_kernel::SignatureSetValue> {
         let types = GraphTypes {
             dispatch: self,
             store,
@@ -686,12 +711,23 @@ impl ProjectSemanticDispatch<'_> {
             context_id: context,
             context: context.lookup(),
             visiting: FxHashSet::default(),
+            authored: rustc_hash::FxHashMap::default(),
         };
         let _ = walk.context_id;
         let found = walk.discover(subject);
-        match found.and_then(|list| set_from_candidates(store, list)) {
-            Ok(set) => QueryOutcome::Ready(Ready {
-                value: set,
+        let published = found.and_then(|list| {
+            let authored: Vec<Option<SemanticNodeId>> = list
+                .iter()
+                .map(|candidate| walk.authored.get(&candidate.signature).copied())
+                .collect();
+            Ok((set_from_candidates(store, list)?, authored))
+        });
+        match published {
+            Ok((set, authored)) => QueryOutcome::Ready(Ready {
+                value: crate::signature_kernel::SignatureSetValue {
+                    set,
+                    authored: Arc::from(authored.into_boxed_slice()),
+                },
                 evidence: CONTEXT_FREE_EVIDENCE,
             }),
             Err(error) => QueryOutcome::Incomplete(error.incomplete_reason()),
@@ -970,7 +1006,12 @@ impl ProjectSemanticDispatch<'_> {
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
         let fence = self.project_generation_signature();
-        match self.signatures_of_type(self.graph().signature_store(), subject, kind, context) {
+        match self.signatures_of_type_with_authored(
+            self.graph().signature_store(),
+            subject,
+            kind,
+            context,
+        ) {
             QueryOutcome::Ready(Ready { value, .. }) => {
                 let (roots, complete) =
                     match self.transitive_self_roots_from_nodes(std::iter::once(subject)) {
@@ -978,9 +1019,7 @@ impl ProjectSemanticDispatch<'_> {
                         Err(_) => (Vec::new(), false),
                     };
                 let mut output = super::walk::QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::SignatureSet(
-                        crate::signature_kernel::SignatureSetValue { set: value },
-                    )),
+                    QueryResult::Value(SemanticQueryValue::SignatureSet(value)),
                     fence,
                 ))
                 .with_observed_self_roots(roots);

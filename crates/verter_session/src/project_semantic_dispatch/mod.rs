@@ -103,6 +103,7 @@ pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
+pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
@@ -2221,25 +2222,13 @@ pub(crate) fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
 /// See the utility-equivalence rule.
 pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
     match name {
-        "Partial"
-        | "Required"
-        | "Readonly"
-        | "NonNullable"
-        | "NoInfer"
-        | "ReturnType"
-        | "Parameters"
-        | "ConstructorParameters"
-        | "InstanceType"
-        | "ThisParameterType"
-        | "OmitThisParameter"
-        | "Uppercase"
-        | "Lowercase"
-        | "Capitalize"
-        | "Uncapitalize" => &["T"],
+        "Partial" | "Required" | "Readonly" | "NonNullable" | "NoInfer" | "Uppercase"
+        | "Lowercase" | "Capitalize" | "Uncapitalize" => &["T"],
         "Awaited" => &["P"],
         "Pick" | "Omit" => &["T", "K"],
         "Record" => &["K", "V"],
         "Extract" | "Exclude" => &["T", "U"],
+        _ if signature_utility::SignatureUtility::from_builtin_name(name).is_some() => &["T"],
         _ => &[],
     }
 }

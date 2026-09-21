@@ -1184,3 +1184,145 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
     assert_eq!(flagged("/ws/b.ts", any), Flags::NONE);
     assert_eq!(flagged("/ws/c.js", string), Flags::NONE);
 }
+
+/// A descriptor is content-interned, so two subjects that differ only in
+/// where they were authored publish ONE descriptor. Each read still reports
+/// the authored node ITS OWN subject carries — never the node the store saw
+/// first — and a composite candidate, which has representatives rather than
+/// a node of its own, reports none.
+#[test]
+fn each_read_reports_the_authored_node_its_own_subject_carries() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let string = prim(&d, PrimitiveKind::String);
+    let number = prim(&d, PrimitiveKind::Number);
+    let authored_at = |return_type_span: Option<verter_span::Span>, return_type| {
+        d.graph().intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(vec![param(string)].into_boxed_slice()),
+            return_type,
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            occurrence: Some(occurrence("f", 0)),
+            return_carrier: SignatureReturnCarrier::Declared(return_type),
+            signature_span: None,
+            return_type_span,
+        })
+    };
+    let first = authored_at(Some(verter_span::Span::new(1, 2)), string);
+    let second = authored_at(Some(verter_span::Span::new(7, 9)), string);
+    assert_ne!(first, second, "two authored positions are two nodes");
+
+    let store = d.graph().signature_store();
+    let read = |subject| match d.signatures_of_type_with_authored(
+        store,
+        subject,
+        SignatureKind::Call,
+        SemanticContextId::production(),
+    ) {
+        QueryOutcome::Ready(Ready { value, .. }) => value,
+        QueryOutcome::Incomplete(reason) => panic!("expected ready, got incomplete {reason:?}"),
+    };
+    let from_first = read(first);
+    let from_second = read(second);
+    assert_eq!(
+        candidates(from_first.set, store)[0].signature,
+        candidates(from_second.set, store)[0].signature,
+        "premise: both subjects publish the one content-interned descriptor"
+    );
+    assert_eq!(&*from_first.authored, &[Some(first)]);
+    assert_eq!(&*from_second.authored, &[Some(second)]);
+
+    let other = signature(
+        &d,
+        "g",
+        0,
+        SignatureKind::Call,
+        vec![param(string)],
+        vec![],
+        number,
+    );
+    let union = d.intern_normalized_union_or_intersection(&[first, other], true);
+    let composite = read(union);
+    assert!(matches!(
+        recipe_of(store, candidates(composite.set, store)[0]),
+        SignatureResultRecipe::UnionCommon { .. }
+    ));
+    assert_eq!(&*composite.authored, &[None]);
+}
+
+/// Signature-utility inference reads the LAST signature of the shared list —
+/// across an intersection's members too — while a union subject (the
+/// conditional distributes) and a type-parameter subject (the conditional
+/// defers) infer nothing, even though both HAVE call signatures.
+#[test]
+fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder() {
+    use super::signature_utility::SignatureUtility;
+
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let string = prim(&d, PrimitiveKind::String);
+    let number = prim(&d, PrimitiveKind::Number);
+    let boolean = prim(&d, PrimitiveKind::Boolean);
+    let sig = |name, param_ty, return_ty| {
+        signature(
+            &d,
+            name,
+            0,
+            SignatureKind::Call,
+            vec![param(param_ty)],
+            vec![],
+            return_ty,
+        )
+    };
+    let first = sig("ua", string, number);
+    let last = sig("ub", number, string);
+    let overloaded = callable(&d, vec![first, last], vec![]);
+    assert_eq!(
+        d.utility_inference_signature(overloaded, SignatureKind::Call),
+        Some(last)
+    );
+    assert_eq!(
+        d.resolve_signature_utility(SignatureUtility::ReturnType, overloaded),
+        Some(string)
+    );
+    assert_eq!(
+        d.utility_inference_signature(overloaded, SignatureKind::Construct),
+        None,
+        "a call-only subject has no construct signature to infer from"
+    );
+
+    let tail = sig("uc", boolean, boolean);
+    let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![overloaded, callable(&d, vec![tail], vec![])].into_boxed_slice(),
+        )),
+    ));
+    assert_eq!(
+        d.utility_inference_signature(intersection, SignatureKind::Call),
+        Some(tail)
+    );
+
+    let union = d.intern_normalized_union_or_intersection(&[sig("ud", string, number), tail], true);
+    let constrained = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Fn"),
+        param_index: 0,
+        constraint: Some(overloaded),
+        default: None,
+        display_name: Arc::from("Fn"),
+    });
+    for subject in [union, constrained] {
+        assert_ne!(
+            ready(discover(&d, subject, SignatureKind::Call)),
+            SignatureSetRef::Empty,
+            "premise: the subject does carry call signatures"
+        );
+        assert_eq!(
+            d.utility_inference_signature(subject, SignatureKind::Call),
+            None
+        );
+        assert_eq!(
+            d.resolve_signature_utility(SignatureUtility::ReturnType, subject),
+            None
+        );
+    }
+}

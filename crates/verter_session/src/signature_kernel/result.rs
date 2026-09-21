@@ -3,6 +3,10 @@
 
 use crate::semantic_query::{ResultEvaluationContextId, SemanticContextId};
 
+use std::sync::Arc;
+
+use crate::semantic_query::SemanticNodeId;
+
 use super::records::{AppliedResultId, CallSubstitutionId, SignatureDescriptorId, SignatureSetRef};
 
 /// Which half of a signature's result a read demands. A closed vocabulary,
@@ -41,9 +45,16 @@ pub struct ReadSignatureResultKey {
 }
 
 /// Value of a `SignaturesOfType` query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureSetValue {
     pub set: SignatureSetRef,
+    /// Per candidate, in set order: the authored signature node THIS read's
+    /// subject walk published it from, or `None` for a composite candidate
+    /// (it has representatives, not a node of its own). A descriptor is
+    /// content-interned, so one descriptor outlives the file version that
+    /// first published it; the node a consumer may read is the one this
+    /// subject carries, which only the walk knows.
+    pub authored: Arc<[Option<SemanticNodeId>]>,
 }
 
 /// Value of a `ReadSignatureResult` query.

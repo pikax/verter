@@ -13411,32 +13411,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             callee_node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         );
-        // An OVERLOADED callee is not answerable at a CALL site, whether
-        // or not the group has an implementation. TypeScript picks the
-        // FIRST signature whose parameters accept the arguments;
-        // `select_signature_function` deliberately selects the LAST
-        // (which is what the signature UTILITIES want — `ReturnType<typeof
-        // f>` over an overloaded `f` IS the last overload's return). For
-        // an AMBIENT group (`declare function f(…)` ×3) that hands back
-        // the last declaration's return as the call's value, cleanly and
-        // warm, with no visible signature the call would ever select.
-        //
-        // Picking the right overload needs argument-driven overload
-        // resolution, which this substrate does not perform; the answer is
-        // the `UnrepresentableCallee` degradation — the typed positional
-        // marker, `ReturnOnly` by contract.
-        if self
+        // The callee's call signatures come from the shared signature
+        // list. This sink carries no arguments, so it answers only a callee
+        // with exactly ONE call signature: a call takes the FIRST signature
+        // whose parameters accept the arguments, and choosing among several
+        // is argument-driven overload resolution. Handing back any fixed
+        // member of an overloaded group — for an AMBIENT group
+        // (`declare function f(…)` ×3), a declaration the call might never
+        // select — would publish it cleanly and warm; the answer is the
+        // `UnrepresentableCallee` degradation — the typed positional
+        // marker, `ReturnOnly` by contract. So is an unsettled callee.
+        let function_node = match self
             .dispatch
-            .signature_bucket_arity(resolved, super::build::SignatureBucket::Call)
-            > 1
+            .authored_signatures_of(resolved, crate::semantic_query::SignatureKind::Call)
         {
-            return self.degraded_unrepresentable_callee();
-        }
-        let Some(function_node) = self
-            .dispatch
-            .select_signature_function(resolved, super::build::SignatureBucket::Call)
-        else {
-            return self.degraded_unrepresentable_callee();
+            super::signature_utility::AuthoredSignatures::Nodes(signatures) => {
+                match signatures.as_slice() {
+                    [only] => *only,
+                    _ => return self.degraded_unrepresentable_callee(),
+                }
+            }
+            super::signature_utility::AuthoredSignatures::Undecided => {
+                return self.degraded_unrepresentable_callee()
+            }
         };
         // A resolved callee VALUE TYPE was composed from a DECLARED
         // signature, lowered in file owner scope where the callee's own
