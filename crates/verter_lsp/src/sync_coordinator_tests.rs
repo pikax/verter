@@ -3689,31 +3689,32 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
     }
     tokio::time::timeout(
         Duration::from_secs(20),
-        provider.wait_until_calls(|calls| pulled_docs(calls).len() >= cap.min(backlog_len)),
+        // Background work fills all but the one slot kept for the user.
+        provider.wait_until_calls(|calls| pulled_docs(calls).len() >= cap - 1),
     )
     .await
     .expect("the first pulls never reached the provider");
 
     // The user turns to the OLDEST document, the one a newest-first backlog
-    // would serve last, and exactly one slot is freed.
+    // would serve last. Nothing is released: it takes the slot kept for it.
     handle.touch(&docs[0].0);
-    gate.add_permits(1);
     tokio::time::timeout(
         Duration::from_secs(20),
-        provider.wait_until_calls(|calls| pulled_docs(calls).len() > cap),
+        provider.wait_until_calls(|calls| pulled_docs(calls).len() >= cap),
     )
     .await
-    .expect("a freed slot must admit the next pull");
+    .expect("the touched document must be admitted into the reserved slot");
 
     let pulled = pulled_docs(&provider.calls());
     assert_eq!(
         pulled.len(),
-        cap + 1,
-        "one freed slot admits exactly one more pull: {pulled:?}"
+        cap,
+        "the window is never exceeded: {pulled:?}"
     );
     assert_eq!(
-        pulled[cap], "Doc0",
-        "the freed slot goes to the document the user touched: {pulled:?}"
+        pulled[cap - 1],
+        "Doc0",
+        "the reserved slot goes to the document the user touched: {pulled:?}"
     );
 
     gate.add_permits(backlog_len * 4);
@@ -3833,6 +3834,119 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
                     && handle.diag_tasks_live() == 0
             },
             || panic!("every open document is certified once the scan has ended"),
+        )
+        .await;
+}
+
+/// Background re-arms (the post-scan sweep re-arms every open document at once)
+/// may never fill the whole in-flight window: a pull already handed to the
+/// provider cannot be overtaken, so the document the user opens next would wait
+/// behind a full window of them. One slot is always kept for user work.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_pulls_always_leave_a_slot_for_the_document_the_user_opens() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let cap = crate::sync_coordinator::max_inflight_diagnostics(&deps.type_provider_kind);
+    assert!(cap > 1, "a window of one cannot reserve anything");
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">
+const msg = '{marker}'
+</script>
+             <template><div>{{{{ msg }}}}</div></template>
+"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+    let open = |name: &str| {
+        let uri: Uri = format!("file:///workspace/src/{name}.vue")
+            .parse()
+            .expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source(name),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the document must be open");
+        needs_provider_sync.insert(canonical_id.clone());
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            Instant::now(),
+        );
+        (canonical_id, uri)
+    };
+    let background: Vec<(String, Uri)> = (0..cap + 2)
+        .map(|index| open(&format!("Bg{index}")))
+        .collect();
+    handle
+        .await_until(
+            || {
+                background
+                    .iter()
+                    .all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the documents never reached their first certified state"),
+        )
+        .await;
+
+    let pulls = |calls: &[MockCall], prefix: &str| -> usize {
+        calls
+            .iter()
+            .filter(|call| {
+                matches!(call, MockCall::GetDiagnostics { path }
+                    if path.starts_with(&format!("/workspace/src/{prefix}")))
+            })
+            .count()
+    };
+    let gate = provider.gate_diagnostics();
+    provider.clear_calls();
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in background.iter().enumerate() {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Bg") >= cap - 1),
+    )
+    .await
+    .expect("background pulls never started");
+
+    // The user opens a document while the background window is as full as it
+    // is allowed to get. Nothing has been released: its pull must start anyway.
+    let (_, active_uri) = open("Active");
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Active") == 1),
+    )
+    .await
+    .expect("the document the user opened must be pulled without waiting for a background pull");
+    assert_eq!(
+        pulls(&provider.calls(), "Bg"),
+        cap - 1,
+        "background work holds at most all-but-one of the window"
+    );
+
+    gate.add_permits(64);
+    handle
+        .await_until(
+            || {
+                documents.diagnostics_ready(&active_uri)
+                    && background
+                        .iter()
+                        .all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the whole backlog must still drain"),
         )
         .await;
 }

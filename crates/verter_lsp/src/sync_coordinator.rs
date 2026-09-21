@@ -643,12 +643,21 @@ async fn coordinator_loop(
         // parks until a slot frees or a signal arrives, instead of spinning on
         // an already-elapsed deadline.
         diagnostic_tasks.retain(|_, task| !task.is_finished());
+        // Background work may never fill the window: one slot is always kept
+        // for a document the user touched, which would otherwise wait behind
+        // pulls this side can no longer overtake.
+        let user_slots_only = max_inflight > 1 && diagnostic_tasks.len() + 1 >= max_inflight;
+        let dispatchable = |signal: &PendingSignal, id: &String| {
+            !user_slots_only || signal.user_received_at.is_some() || touches.lock().contains_key(id)
+        };
         let next_deadline = if diagnostic_tasks.len() >= max_inflight {
             None
         } else {
             pending_files
                 .iter()
-                .filter(|(canonical_id, _)| quiescent(canonical_id))
+                .filter(|(canonical_id, (_, signal))| {
+                    quiescent(canonical_id) && dispatchable(signal, canonical_id)
+                })
                 .map(|(_, (t, _))| *t + debounce)
                 .min()
         };
@@ -831,7 +840,13 @@ async fn coordinator_loop(
                 let now = Instant::now();
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
-                    .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
+                    .filter(|(id, (t, signal))| {
+                        now.duration_since(*t) >= debounce
+                            && quiescent(id)
+                            && (!user_slots_only
+                                || signal.user_received_at.is_some()
+                                || touches.contains_key(*id))
+                    })
                     .max_by(|(left_id, (left, left_signal)), (right_id, (right, right_signal))| {
                         // `None < Some(_)`: anything the user touched outranks
                         // purely background work, newest touch first. A touch
