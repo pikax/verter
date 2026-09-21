@@ -347,6 +347,29 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
   },
 };
 
+/**
+ * Route-specific CANARIES: known product gaps whose tests EXECUTE and are expected
+ * to fail. Unlike a skipped gap, a canary notices its own repair — the run summary
+ * oracle tolerates its failure, fails the route when it passes (the entry must then
+ * be removed so the case is a normal required test again), and fails an unfiltered
+ * run in which it never executed. Routes without canaries are simply absent. A test
+ * is never both a skipped gap and a canary on the same route.
+ */
+const KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> = {
+  "vue-parity@shared-tsgo": {
+    // On the editor-shared tsgo route a plain `.ts` file is served by the editor's own
+    // TypeScript, where Verter's TypeScript plugin does not exist, and generated
+    // component modules are (correctly) not injected into an editor-owned engine whose
+    // configured project does not admit them — so a `.ts` consumer cannot resolve
+    // `./X.vue`.
+    "ide.complete.import-path-carrier": "ISSUE-shared-tsgo-plain-ts-consumer",
+    "testing-api.vue.public-importer-hides-setup-bindings": "ISSUE-shared-tsgo-plain-ts-consumer",
+    "vue.public-surface.consumer-source-documents-negative": "ISSUE-shared-tsgo-plain-ts-consumer",
+    "vue.public-surface.no-secret-internal-on-component-hover":
+      "ISSUE-shared-tsgo-plain-ts-consumer",
+  },
+};
+
 export function knownProductGapsForRoute(
   fixture: string,
   typeProvider: string,
@@ -360,4 +383,16 @@ export function knownProductGapsForRoute(
 
 export const KNOWN_PRODUCT_GAP_ROUTE_KEYS = Object.freeze(
   Object.keys(KNOWN_PRODUCT_GAPS_BY_ROUTE).sort(),
+);
+
+/** The route's complete canary manifest; the run summary oracle narrows it to a selection. */
+export function knownProductGapCanariesForRoute(
+  fixture: string,
+  typeProvider: string,
+): ProductGapManifest {
+  return KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE[`${fixture}@${typeProvider}`] ?? {};
+}
+
+export const KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS = Object.freeze(
+  Object.keys(KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE).sort(),
 );

@@ -4,7 +4,13 @@ import { join } from "path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { clearRunArtifacts, enforceRunSummary, runSummaryPath } from "./runSummaryOracle";
+import {
+  classifyProductGapCanaries,
+  clearRunArtifacts,
+  enforceRunSummary,
+  readRunSummary,
+  runSummaryPath,
+} from "./runSummaryOracle";
 
 let dir: string;
 let logFile: string;
@@ -477,5 +483,192 @@ describe("enforceRunSummary result semantics", () => {
         requiredLoadedFiles: ["parity/svelte/matrix.test.js"],
       }),
     ).rejects.toThrow(/duplicate paths/i);
+  });
+});
+
+describe("enforceRunSummary product-gap canaries", () => {
+  const canaries = { "vue.consumer.resolves-component": "ISSUE-plain-ts-consumer" };
+  const requiredTestIds = ["vue.clean-diagnostics.daily", "vue.consumer.resolves-component"];
+  const canaryFailure = {
+    id: "vue.consumer.resolves-component",
+    err: "PRODUCT_GAP ISSUE-plain-ts-consumer: cannot resolve ./X.vue",
+    kind: "test",
+  };
+
+  it("tolerates a failing canary without counting it as a pass", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      failedTests: [canaryFailure],
+      failingProductGapCanaries: [
+        { id: "vue.consumer.resolves-component", issue: "ISSUE-plain-ts-consumer" },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGapCanaries: canaries,
+      }),
+    ).resolves.toBeUndefined();
+
+    const outcome = classifyProductGapCanaries(readRunSummary(logFile), canaries);
+    expect(outcome.stillFailing).toEqual([
+      { id: "vue.consumer.resolves-component", issue: "ISSUE-plain-ts-consumer" },
+    ]);
+    expect(outcome.unexpectedlyPassing).toEqual([]);
+    expect(outcome.blockingFailures).toEqual([]);
+  });
+
+  it("fails the route when a canary passes and names the entry to remove", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: requiredTestIds,
+      pendingTestIds: [],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGapCanaries: canaries,
+      }),
+    ).rejects.toThrow(
+      /vue\.consumer\.resolves-component \(ISSUE-plain-ts-consumer\).*fixed.*remove.*knownProductGapManifest\.ts/is,
+    );
+  });
+
+  it("fails an unfiltered run whose canary never executed", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+        allowedProductGapCanaries: canaries,
+      }),
+    ).rejects.toThrow(/stale canary.*vue\.consumer\.resolves-component.*never executed/is);
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGapCanaries: canaries,
+      }),
+    ).rejects.toThrow(/stale canary.*vue\.consumer\.resolves-component.*never executed/is);
+  });
+
+  it("does not evaluate a canary that a filtered selection excludes", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+        allowedProductGapCanaries: canaries,
+        selectionFiltered: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still evaluates a canary that a filtered selection includes", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: requiredTestIds,
+      pendingTestIds: [],
+      failedTests: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGapCanaries: canaries,
+        selectionFiltered: true,
+      }),
+    ).rejects.toThrow(/fixed.*remove/is);
+  });
+
+  it("does not let a canary failure mask another failure in the same run", async () => {
+    writeSummary({
+      failures: 2,
+      executed: 2,
+      passedTestIds: [],
+      pendingTestIds: [],
+      failedTests: [
+        canaryFailure,
+        { id: "vue.clean-diagnostics.daily", err: "boom", kind: "test" },
+      ],
+      failingProductGapCanaries: [
+        { id: "vue.consumer.resolves-component", issue: "ISSUE-plain-ts-consumer" },
+      ],
+    });
+
+    const run = enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+      pollMs: 0,
+      requiredTestIds,
+      allowedProductGapCanaries: canaries,
+    });
+    await expect(run).rejects.toThrow(/1 test\(s\) failed.*vue\.clean-diagnostics\.daily: boom/is);
+    await expect(run).rejects.not.toThrow(/cannot resolve/);
+  });
+
+  it("never tolerates a hook failure attributed to a canary", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      failedTests: [{ ...canaryFailure, kind: "hook" }],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGapCanaries: canaries,
+      }),
+    ).rejects.toThrow(/1 test\(s\) failed/);
+  });
+
+  it("refuses canary declarations that the route manifest does not back", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      failingProductGapCanaries: [
+        { id: "vue.consumer.resolves-component", issue: "ISSUE-plain-ts-consumer" },
+      ],
+    });
+    await expect(enforceRunSummary(logFile, "vue-parity@tsgo", { pollMs: 0 })).rejects.toThrow(
+      /canary.*without a route manifest/i,
+    );
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGaps: canaries,
+        allowedProductGapCanaries: canaries,
+      }),
+    ).rejects.toThrow(/both a skipped product gap and a canary/i);
   });
 });

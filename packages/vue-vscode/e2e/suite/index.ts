@@ -18,8 +18,16 @@ import { assertNotVacuousPassLog } from "../lib/vacuousPass";
 import { pollBudget, sequenceParent, setRunnableAccessor, SUITE_TIMEOUT_MS } from "../lib/timeouts";
 import { launchServerProfile, routeBaseServerProfile } from "../helpers";
 import { serverProfileForSuite } from "../lib/serverProfiles";
-import { productGapsForFixtureRoute } from "../lib/productGapRoute";
-import { type ProductGapSkip, type RunSummaryFailure } from "../../src/runSummaryOracle";
+import {
+  productGapCanariesForFixtureRoute,
+  productGapsForFixtureRoute,
+} from "../lib/productGapRoute";
+import {
+  classifyProductGapCanaries,
+  unexpectedCanaryPassMessage,
+  type ProductGapSkip,
+  type RunSummaryFailure,
+} from "../../src/runSummaryOracle";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -124,6 +132,8 @@ export async function run(): Promise<void> {
   const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
   const sourceRoot = path.resolve(testsRoot, "../../../e2e/suite");
   const productGapManifest = productGapsForFixtureRoute(FIXTURE_NAME, TYPE_PROVIDER);
+  // Canaries are never skipped: their bodies run, and the outcome is classified below.
+  const productGapCanaryManifest = productGapCanariesForFixtureRoute(FIXTURE_NAME, TYPE_PROVIDER);
 
   // A LAUNCH configures ONE server, and Verter's native lane is an initialization
   // option, so a suite that declares a different server profile belongs to a
@@ -243,6 +253,10 @@ export async function run(): Promise<void> {
 
       const stats = runner.stats ?? { passes: 0, failures: 0, pending: 0, tests: 0 };
       const executed = (stats.passes ?? 0) + (stats.failures ?? 0) + (stats.pending ?? 0);
+      const canaryOutcome = classifyProductGapCanaries(
+        { passedTestIds, failedTests },
+        productGapCanaryManifest,
+      );
       writeRunSummary({
         fixture: FIXTURE_NAME,
         typeProvider: TYPE_PROVIDER ?? null,
@@ -256,19 +270,27 @@ export async function run(): Promise<void> {
         pendingTestIds,
         failedTests,
         skippedProductGaps,
+        failingProductGapCanaries: canaryOutcome.stillFailing,
         rootHookError: rootHookError ?? null,
       });
 
-      const failed = failures > 0 || (stats.failures ?? 0) > 0;
-      if (failed) {
+      // A canary's own failure is expected and tolerated; every other failure, and any
+      // failure Mocha counted without a recorded canary row, still fails the run.
+      const blockingFailures =
+        Math.max(failures, stats.failures ?? 0) - canaryOutcome.stillFailing.length;
+      if (blockingFailures > 0) {
         const detail =
-          failedTests.length > 0
-            ? failedTests
+          canaryOutcome.blockingFailures.length > 0
+            ? canaryOutcome.blockingFailures
                 .slice(0, 5)
                 .map((f) => `${f.id}: ${f.err}`)
                 .join(" | ")
             : "see mocha output";
-        reject(new Error(`${Math.max(failures, stats.failures ?? 0)} tests failed — ${detail}`));
+        reject(new Error(`${blockingFailures} tests failed — ${detail}`));
+        return;
+      }
+      if (canaryOutcome.unexpectedlyPassing.length > 0) {
+        reject(new Error(unexpectedCanaryPassMessage(canaryOutcome.unexpectedlyPassing)));
         return;
       }
       if (executed === 0) {
@@ -285,7 +307,11 @@ export async function run(): Promise<void> {
     // Published as soon as the runner exists, BEFORE any test executes: the budget
     // registry consults it to check each claimed parent against the real deadline.
     activeRunner = runner;
-    runner.on("pass", (test) => passedTestIds.push(test.title));
+    runner.on("pass", (test) => {
+      passedTestIds.push(test.title);
+      const issue = productGapCanaryManifest[test.title];
+      if (issue) console.error(`  ✗ CANARY PASSED — REMOVE ITS ENTRY: ${test.title} (${issue})`);
+    });
     runner.on("pending", (test) => {
       pendingTestIds.push(test.title);
       const issue = productGapManifest[test.title];
@@ -299,6 +325,8 @@ export async function run(): Promise<void> {
         kind: test.type === "test" ? "test" : "hook",
       };
       failedTests.push(failure);
+      const issue = failure.kind === "test" ? productGapCanaryManifest[test.title] : undefined;
+      if (issue) console.warn(`  ⚠ CANARY STILL FAILING: ${test.title} (${issue})`);
     });
   });
 }
