@@ -53,9 +53,11 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, CallExpression, Class, ClassElement, Declaration, Expression,
-    Function, ImportDeclarationSpecifier, ObjectPropertyKind, Program, Statement, TSInferType,
-    TSInterfaceDeclaration, TSType, TSTypeName, TSTypeOperatorOperator, TSTypeParameterDeclaration,
-    TSTypeQuery, TSTypeQueryExprName, TSTypeReference,
+    Function, ImportDeclarationSpecifier, ObjectPropertyKind, Program, Statement,
+    TSCallSignatureDeclaration, TSConstructSignatureDeclaration, TSInferType,
+    TSInterfaceDeclaration, TSInterfaceHeritage, TSMethodSignature, TSType, TSTypeName,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName,
+    TSTypeReference,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -72,7 +74,8 @@ use super::script_setup::{
 use crate::utils::oxc::vue::parse_generic;
 
 /// The space a captured binding occupies at its reference site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DependencySpace {
     /// Referenced as a type (`Foo`, `Foo<T>`, `Foo["k"]`).
     Type,
@@ -81,7 +84,8 @@ pub enum DependencySpace {
 }
 
 /// Where a captured free binding resolves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DependencyOrigin {
     /// A parameter of the authored `generic` binder.
     BinderParam {
@@ -92,6 +96,11 @@ pub enum DependencyOrigin {
     LocalDeclaration {
         /// Index into [`BinderCapturePlan::declarations`].
         index: usize,
+    },
+    /// Multiple compatible local declarations, such as merged interfaces.
+    LocalDeclarations {
+        /// Indices into the source declaration inventory.
+        indices: Vec<usize>,
     },
     /// An imported binding, retained as an import rather than lifted.
     Import {
@@ -120,6 +129,7 @@ pub struct CapturedDependency {
 
 /// The public surface a dependency slice was captured from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PublicTypeRoot {
     /// `defineProps<T>()`.
     Props,
@@ -148,6 +158,7 @@ pub struct PublicTypeDependencySlice {
 
 /// Declaration form of a lifted source declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LiftedDeclarationKind {
     /// `type X = ...`.
     TypeAlias,
@@ -549,8 +560,7 @@ fn record_declaration<'a>(
     base: u32,
     out: &mut Vec<DeclRecord<'a>>,
 ) {
-    let span = range(declaration.span(), base);
-    let mut push = |name: String, kind, own_type_params, body| {
+    let mut push = |name: String, kind, span, own_type_params, body| {
         out.push(DeclRecord {
             name,
             kind,
@@ -577,6 +587,7 @@ fn record_declaration<'a>(
                     LiftedDeclarationKind::Variable {
                         unique_symbol: annotation.is_some_and(is_unique_symbol),
                     },
+                    range(declarator.span, base),
                     Vec::new(),
                     DeclBody::Annotation(annotation),
                 );
@@ -587,6 +598,7 @@ fn record_declaration<'a>(
                 push(
                     id.name.to_string(),
                     LiftedDeclarationKind::Function,
+                    range(function.span, base),
                     type_param_names(function.type_parameters.as_deref()),
                     DeclBody::Function(function),
                 );
@@ -597,6 +609,7 @@ fn record_declaration<'a>(
                 push(
                     id.name.to_string(),
                     LiftedDeclarationKind::Class,
+                    range(class.span, base),
                     type_param_names(class.type_parameters.as_deref()),
                     DeclBody::Class(class),
                 );
@@ -605,18 +618,21 @@ fn record_declaration<'a>(
         Declaration::TSTypeAliasDeclaration(alias) => push(
             alias.id.name.to_string(),
             LiftedDeclarationKind::TypeAlias,
+            range(alias.span, base),
             type_param_names(alias.type_parameters.as_deref()),
             DeclBody::Alias(&alias.type_annotation),
         ),
         Declaration::TSInterfaceDeclaration(interface) => push(
             interface.id.name.to_string(),
             LiftedDeclarationKind::Interface,
+            range(interface.span, base),
             type_param_names(interface.type_parameters.as_deref()),
             DeclBody::Interface(interface),
         ),
         Declaration::TSEnumDeclaration(enumeration) => push(
             enumeration.id.name.to_string(),
             LiftedDeclarationKind::Enum,
+            range(enumeration.span, base),
             Vec::new(),
             DeclBody::Opaque,
         ),
@@ -633,9 +649,10 @@ fn is_unique_symbol(ty: &TSType<'_>) -> bool {
 }
 
 /// What a module-scope name binds to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Binding {
     Declaration(usize),
+    MergedDeclarations(Vec<usize>),
     Import(usize),
     Duplicate,
 }
@@ -643,43 +660,98 @@ enum Binding {
 fn resolve_module_scope(
     declarations: &[DeclRecord<'_>],
     imports: &[RetainedImport],
-) -> (FxHashMap<String, Binding>, Vec<DuplicateDeclaration>) {
-    let observed: Vec<(&str, Binding, SourceRange)> = imports
-        .iter()
-        .enumerate()
-        .map(|(index, import)| (import.local.as_str(), Binding::Import(index), import.span))
-        .chain(declarations.iter().enumerate().map(|(index, declaration)| {
-            (
-                declaration.name.as_str(),
-                Binding::Declaration(index),
-                declaration.span,
-            )
-        }))
-        .collect();
-
-    let mut scope: FxHashMap<String, Binding> = FxHashMap::default();
+) -> (
+    FxHashMap<(String, DependencySpace), Binding>,
+    Vec<DuplicateDeclaration>,
+) {
+    let mut scope: FxHashMap<(String, DependencySpace), Binding> = FxHashMap::default();
     let mut origins: FxHashMap<String, Vec<SourceRange>> = FxHashMap::default();
-    let mut duplicated: Vec<String> = Vec::new();
-    for (name, binding, span) in observed {
-        origins.entry(name.to_string()).or_default().push(span);
-        match scope.insert(name.to_string(), binding) {
-            None => {}
-            Some(Binding::Duplicate) => {
-                scope.insert(name.to_string(), Binding::Duplicate);
+    let mut duplicated: FxHashSet<String> = FxHashSet::default();
+
+    let mut insert =
+        |name: &str, space, binding: Binding, span, kind: Option<LiftedDeclarationKind>| {
+            origins.entry(name.to_string()).or_default().push(span);
+            let key = (name.to_string(), space);
+            let Some(existing) = scope.get_mut(&key) else {
+                scope.insert(key, binding);
+                return;
+            };
+            if matches!(existing, Binding::Duplicate) {
+                return;
             }
-            Some(_) => {
-                scope.insert(name.to_string(), Binding::Duplicate);
-                duplicated.push(name.to_string());
+            let merges_interface = space == DependencySpace::Type
+                && kind == Some(LiftedDeclarationKind::Interface)
+                && match existing {
+                    Binding::Declaration(index) => {
+                        declarations[*index].kind == LiftedDeclarationKind::Interface
+                    }
+                    Binding::MergedDeclarations(indices) => indices
+                        .iter()
+                        .all(|index| declarations[*index].kind == LiftedDeclarationKind::Interface),
+                    Binding::Import(_) | Binding::Duplicate => false,
+                };
+            if merges_interface {
+                let Binding::Declaration(index) = binding else {
+                    unreachable!("only declarations merge");
+                };
+                match existing {
+                    Binding::Declaration(first) => {
+                        *existing = Binding::MergedDeclarations(vec![*first, index])
+                    }
+                    Binding::MergedDeclarations(indices) => indices.push(index),
+                    Binding::Import(_) | Binding::Duplicate => {
+                        unreachable!("checked interface merge")
+                    }
+                }
+                return;
+            }
+            *existing = Binding::Duplicate;
+            duplicated.insert(name.to_string());
+        };
+
+    for (index, import) in imports.iter().enumerate() {
+        insert(
+            &import.local,
+            DependencySpace::Type,
+            Binding::Import(index),
+            import.span,
+            None,
+        );
+        if !import.type_only {
+            insert(
+                &import.local,
+                DependencySpace::Value,
+                Binding::Import(index),
+                import.span,
+                None,
+            );
+        }
+    }
+    for (index, declaration) in declarations.iter().enumerate() {
+        for space in [DependencySpace::Type, DependencySpace::Value] {
+            let occupies_space = match space {
+                DependencySpace::Type => declaration.kind.occupies_type_space(),
+                DependencySpace::Value => declaration.kind.occupies_value_space(),
+            };
+            if occupies_space {
+                insert(
+                    &declaration.name,
+                    space,
+                    Binding::Declaration(index),
+                    declaration.span,
+                    Some(declaration.kind),
+                );
             }
         }
     }
-    duplicated.sort();
-    duplicated.dedup();
     let duplicates = duplicated
         .into_iter()
         .map(|name| {
-            let mut spans = origins.remove(&name).unwrap_or_default();
+            let mut spans = origins
+                .remove(&name)
+                .expect("every duplicate name has recorded origins");
             spans.sort_by_key(|span| span.start);
+            spans.dedup_by_key(|span| (span.start, span.end));
             DuplicateDeclaration {
                 name,
                 origins: spans,
@@ -690,27 +762,46 @@ fn resolve_module_scope(
 }
 
 struct Resolver<'r> {
-    scope: &'r FxHashMap<String, Binding>,
+    scope: &'r FxHashMap<(String, DependencySpace), Binding>,
     binder_names: &'r [&'r str],
 }
 
 impl Resolver<'_> {
     /// Resolve `name` as seen from a block. The binder scopes `<script setup>`
     /// only, and there shadows a module-scope binding of the same name.
-    fn resolve(&self, name: &str, binder_in_scope: bool) -> DependencyOrigin {
-        if binder_in_scope {
+    fn resolve(
+        &self,
+        name: &str,
+        space: DependencySpace,
+        binder_in_scope: bool,
+    ) -> DependencyOrigin {
+        if binder_in_scope && space == DependencySpace::Type {
             if let Some(ordinal) = self.binder_names.iter().position(|bound| *bound == name) {
                 return DependencyOrigin::BinderParam { ordinal };
             }
         }
-        match self.scope.get(name) {
+        match self.scope.get(&(name.to_string(), space)) {
             Some(Binding::Declaration(index)) => {
                 DependencyOrigin::LocalDeclaration { index: *index }
             }
+            Some(Binding::MergedDeclarations(indices)) => DependencyOrigin::LocalDeclarations {
+                indices: indices.clone(),
+            },
             Some(Binding::Import(index)) => DependencyOrigin::Import { index: *index },
             Some(Binding::Duplicate) => DependencyOrigin::Duplicate,
             None => DependencyOrigin::Unresolved,
         }
+    }
+}
+
+fn local_declaration_indices(origin: &DependencyOrigin) -> Vec<usize> {
+    match origin {
+        DependencyOrigin::LocalDeclaration { index } => vec![*index],
+        DependencyOrigin::LocalDeclarations { indices } => indices.clone(),
+        DependencyOrigin::BinderParam { .. }
+        | DependencyOrigin::Import { .. }
+        | DependencyOrigin::Duplicate
+        | DependencyOrigin::Unresolved => Vec::new(),
     }
 }
 
@@ -791,6 +882,11 @@ impl RefCollector {
         if let Some(arguments) = &class.super_type_arguments {
             self.visit_ts_type_parameter_instantiation(arguments);
         }
+        if let Some(super_class) = &class.super_class {
+            if let Some((name, span)) = leftmost_expression_identifier(super_class) {
+                self.note(name, DependencySpace::Value, span);
+            }
+        }
         for implemented in &class.implements {
             self.visit_ts_class_implements(implemented);
         }
@@ -837,6 +933,18 @@ fn leftmost_type_name<'n>(name: &'n TSTypeName<'_>) -> Option<(&'n str, oxc_span
     }
 }
 
+fn leftmost_expression_identifier<'n>(
+    expression: &'n Expression<'_>,
+) -> Option<(&'n str, oxc_span::Span)> {
+    match expression {
+        Expression::Identifier(identifier) => Some((identifier.name.as_str(), identifier.span)),
+        Expression::StaticMemberExpression(member) => {
+            leftmost_expression_identifier(&member.object)
+        }
+        _ => None,
+    }
+}
+
 impl<'a> Visit<'a> for RefCollector {
     fn visit_ts_type_reference(&mut self, it: &TSTypeReference<'a>) {
         if let Some((name, span)) = leftmost_type_name(&it.type_name) {
@@ -867,6 +975,69 @@ impl<'a> Visit<'a> for RefCollector {
         let depth = self.push_scope(type_param_names(it.type_parameters.as_deref()));
         walk::walk_ts_constructor_type(self, it);
         self.pop_scope(depth);
+    }
+
+    fn visit_ts_method_signature(&mut self, it: &TSMethodSignature<'a>) {
+        let depth = self.push_scope(type_param_names(it.type_parameters.as_deref()));
+        if let Some(parameters) = &it.type_parameters {
+            self.visit_ts_type_parameter_declaration(parameters);
+        }
+        if let Some(this_param) = &it.this_param {
+            self.visit_ts_this_parameter(this_param);
+        }
+        self.visit_formal_parameters(&it.params);
+        if let Some(return_type) = &it.return_type {
+            self.visit_ts_type_annotation(return_type);
+        }
+        self.pop_scope(depth);
+    }
+
+    fn visit_ts_call_signature_declaration(&mut self, it: &TSCallSignatureDeclaration<'a>) {
+        let depth = self.push_scope(type_param_names(it.type_parameters.as_deref()));
+        if let Some(parameters) = &it.type_parameters {
+            self.visit_ts_type_parameter_declaration(parameters);
+        }
+        if let Some(this_param) = &it.this_param {
+            self.visit_ts_this_parameter(this_param);
+        }
+        self.visit_formal_parameters(&it.params);
+        if let Some(return_type) = &it.return_type {
+            self.visit_ts_type_annotation(return_type);
+        }
+        self.pop_scope(depth);
+    }
+
+    fn visit_ts_construct_signature_declaration(
+        &mut self,
+        it: &TSConstructSignatureDeclaration<'a>,
+    ) {
+        let depth = self.push_scope(type_param_names(it.type_parameters.as_deref()));
+        if let Some(parameters) = &it.type_parameters {
+            self.visit_ts_type_parameter_declaration(parameters);
+        }
+        self.visit_formal_parameters(&it.params);
+        if let Some(return_type) = &it.return_type {
+            self.visit_ts_type_annotation(return_type);
+        }
+        self.pop_scope(depth);
+    }
+
+    fn visit_ts_interface_heritage(&mut self, it: &TSInterfaceHeritage<'a>) {
+        if let Some((name, span)) = leftmost_expression_identifier(&it.expression) {
+            self.note(name, DependencySpace::Type, span);
+        }
+        if let Some(arguments) = &it.type_arguments {
+            self.visit_ts_type_parameter_instantiation(arguments);
+        }
+    }
+
+    fn visit_ts_class_implements(&mut self, it: &oxc_ast::ast::TSClassImplements<'a>) {
+        if let Some((name, span)) = leftmost_type_name(&it.expression) {
+            self.note(name, DependencySpace::Type, span);
+        }
+        if let Some(arguments) = &it.type_arguments {
+            self.visit_ts_type_parameter_instantiation(arguments);
+        }
     }
 
     fn visit_ts_mapped_type(&mut self, it: &oxc_ast::ast::TSMappedType<'a>) {
@@ -904,7 +1075,7 @@ fn resolve_references(
     let mut dependencies: Vec<CapturedDependency> = Vec::new();
     let mut binder_references: Vec<BinderReference> = Vec::new();
     for reference in raw {
-        let origin = resolver.resolve(&reference.name, binder_in_scope);
+        let origin = resolver.resolve(&reference.name, reference.space, binder_in_scope);
         if let DependencyOrigin::BinderParam { ordinal } = origin {
             binder_references.push(BinderReference {
                 ordinal,
@@ -992,7 +1163,7 @@ impl RootMacroVisitor<'_, '_> {
             dependencies.push(CapturedDependency {
                 name: name.to_string(),
                 space: DependencySpace::Value,
-                origin: self.resolver.resolve(name, true),
+                origin: self.resolver.resolve(name, DependencySpace::Value, true),
                 reference: range(identifier.span, self.base),
             });
         }
@@ -1084,7 +1255,7 @@ fn close_over_declarations(
     let mut pending: Vec<usize> = Vec::new();
     for slice in slices {
         for dependency in &slice.dependencies {
-            if let DependencyOrigin::LocalDeclaration { index } = dependency.origin {
+            for index in local_declaration_indices(&dependency.origin) {
                 if queued.insert(index) {
                     pending.push(index);
                 }
@@ -1122,7 +1293,7 @@ fn close_over_declarations(
         binder_ordinals.sort_unstable();
         binder_ordinals.dedup();
         for dependency in &dependencies {
-            if let DependencyOrigin::LocalDeclaration { index } = dependency.origin {
+            for index in local_declaration_indices(&dependency.origin) {
                 if queued.insert(index) {
                     pending.push(index);
                 }
@@ -1154,10 +1325,8 @@ fn detect_cycles(lifted: &[PendingLift], declarations: &[DeclRecord<'_>]) -> Vec
             let mut targets: Vec<usize> = entry
                 .dependencies
                 .iter()
-                .filter_map(|dependency| match dependency.origin {
-                    DependencyOrigin::LocalDeclaration { index } => position.get(&index).copied(),
-                    _ => None,
-                })
+                .flat_map(|dependency| local_declaration_indices(&dependency.origin))
+                .filter_map(|index| position.get(&index).copied())
                 .collect();
             targets.dedup();
             targets
@@ -1218,14 +1387,42 @@ fn assign_binder_names(
     declarations: &[DeclRecord<'_>],
     binder: &UniversalSetupBinder,
     binder_param_dependencies: &[Vec<usize>],
-    scope: &FxHashMap<String, Binding>,
+    scope: &FxHashMap<(String, DependencySpace), Binding>,
 ) -> Vec<LiftedSourceDeclaration> {
-    let module_names: FxHashSet<&str> = scope.keys().map(String::as_str).collect();
+    let module_names: FxHashSet<&str> = scope.keys().map(|(name, _)| name.as_str()).collect();
+    let positions: FxHashMap<usize, usize> = lifted
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| (entry.index, position))
+        .collect();
+    let mut required: Vec<FxHashSet<usize>> = lifted
+        .iter()
+        .map(|entry| entry.binder_ordinals.iter().copied().collect())
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (position, entry) in lifted.iter().enumerate() {
+            let inherited: Vec<usize> = entry
+                .dependencies
+                .iter()
+                .flat_map(|dependency| local_declaration_indices(&dependency.origin))
+                .filter_map(|index| positions.get(&index).copied())
+                .flat_map(|target| required[target].iter().copied())
+                .collect();
+            for ordinal in inherited {
+                changed |= required[position].insert(ordinal);
+            }
+        }
+    }
     lifted
         .into_iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(position, entry)| {
             let record = &declarations[entry.index];
-            let ordinals = closure_over(&entry.binder_ordinals, binder_param_dependencies);
+            let mut direct: Vec<usize> = required[position].iter().copied().collect();
+            direct.sort_unstable();
+            let ordinals = closure_over(&direct, binder_param_dependencies);
             let mut taken: FxHashSet<String> = FxHashSet::default();
             let binder_params: Vec<LiftedBinderParam> = ordinals
                 .into_iter()

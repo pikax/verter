@@ -49,7 +49,7 @@ fn stp14_local_capture_keeps_binder_bound_local_selection_in_the_public_surface(
     let props = slice_of(&captured, PublicTypeRoot::Props);
     assert_eq!(names(&props.dependencies), ["Selection"]);
     assert_eq!(
-        props.dependencies[0].origin,
+        props.dependencies[0].origin.clone(),
         DependencyOrigin::LocalDeclaration { index: 0 }
     );
     assert_eq!(props.dependencies[0].space, DependencySpace::Type);
@@ -244,7 +244,7 @@ fn stp14_typeof_capture_keeps_imported_dependencies_as_imports() {
     let captured = plan(setup, None);
     let near = captured.declaration("Near").expect("lifted Near");
     assert_eq!(
-        near.dependencies[0].origin,
+        near.dependencies[0].origin.clone(),
         DependencyOrigin::Import { index: 0 }
     );
     assert_eq!(captured.imports[0].specifier, "./far");
@@ -472,7 +472,7 @@ fn stp14_local_capture_keeps_the_binder_out_of_scope_in_the_normal_script() {
     let wrapper = captured.declaration("Wrapper").expect("lifted Wrapper");
     assert!(!wrapper.from_setup);
     assert_eq!(
-        wrapper.dependencies[0].origin,
+        wrapper.dependencies[0].origin.clone(),
         DependencyOrigin::LocalDeclaration { index: 1 }
     );
     assert!(
@@ -481,4 +481,119 @@ fn stp14_local_capture_keeps_the_binder_out_of_scope_in_the_normal_script() {
     );
     assert!(wrapper.binder_references.is_empty());
     assert!(captured.declaration("T").is_some());
+}
+
+#[test]
+fn stp14_local_capture_propagates_binder_requirements_across_lifted_declarations() {
+    let setup = "type Inner = { item: T }\n\
+                 type Outer = { inner: Inner }\n\
+                 defineProps<{ outer: Outer }>()";
+    let captured = plan(setup, Some("T"));
+
+    for name in ["Inner", "Outer"] {
+        assert_eq!(
+            captured
+                .declaration(name)
+                .expect("lifted declaration")
+                .binder_params
+                .iter()
+                .map(|param| param.source_name.as_str())
+                .collect::<Vec<_>>(),
+            ["T"],
+            "{name} must be parameterized when it references a parameterized local declaration"
+        );
+    }
+}
+
+#[test]
+fn stp14_local_capture_uses_individual_variable_declarator_spans() {
+    let setup = "const helper = 0, marker: unique symbol = Symbol();\n\
+                 defineProps<{ marker: typeof marker }>()";
+    let captured = plan(setup, None);
+    assert_eq!(captured.declarations.len(), 1);
+    assert_eq!(captured.declarations[0].name, "marker");
+    assert_eq!(
+        text(setup, captured.declarations[0].span),
+        "marker: unique symbol = Symbol()"
+    );
+}
+
+#[test]
+fn stp14_local_capture_lifts_interface_heritage_dependencies() {
+    let setup = "interface Parent { id: number }\n\
+                 interface Child extends Parent { name: string }\n\
+                 defineProps<{ child: Child }>()";
+    let captured = plan(setup, None);
+    assert_eq!(
+        captured
+            .declarations
+            .iter()
+            .map(|declaration| declaration.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Child", "Parent"]
+    );
+}
+
+#[test]
+fn stp14_local_capture_lifts_class_heritage_and_implements_dependencies() {
+    let setup = "class Base {}\n\
+                 interface Contract { id: number }\n\
+                 class Derived extends Base implements Contract { id = 1 }\n\
+                 defineProps<{ derived: typeof Derived }>()";
+    let captured = plan(setup, None);
+    assert_eq!(
+        captured
+            .declarations
+            .iter()
+            .map(|declaration| declaration.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Derived", "Base", "Contract"]
+    );
+}
+
+#[test]
+fn stp14_local_capture_separates_type_and_value_namespaces_and_merges_interfaces() {
+    let setup = "interface User { name: string }\n\
+                 interface User { id: number }\n\
+                 const User = { id: 1, name: 'one' };\n\
+                 defineProps<{ type: User; value: typeof User }>()";
+    let captured = plan(setup, None);
+    let props = slice_of(&captured, PublicTypeRoot::Props);
+    assert!(captured.duplicates.is_empty());
+    assert_eq!(
+        props
+            .dependencies
+            .iter()
+            .map(|dependency| (
+                dependency.name.as_str(),
+                dependency.space,
+                dependency.origin.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "User",
+                DependencySpace::Type,
+                DependencyOrigin::LocalDeclarations {
+                    indices: vec![0, 1]
+                },
+            ),
+            (
+                "User",
+                DependencySpace::Value,
+                DependencyOrigin::LocalDeclaration { index: 2 },
+            ),
+        ]
+    );
+    assert_eq!(captured.declarations.len(), 3);
+}
+
+#[test]
+fn stp14_local_capture_keeps_signature_type_parameters_bound() {
+    let setup = "interface Service { run<T>(item: T): T; <T>(item: T): T; new <T>(item: T): T }\n\
+                 defineProps<{ service: Service }>()";
+    let captured = plan(setup, Some("T"));
+    let service = captured.declaration("Service").expect("lifted Service");
+    assert!(service.binder_params.is_empty());
+    assert!(service.binder_references.is_empty());
 }
