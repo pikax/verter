@@ -457,7 +457,10 @@ fn shard_index(key: &SnapshotKey, worker_count: usize) -> usize {
 /// demand (through [`DeclLoweringService::workers`]) for a lazy one.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_decl_workers(worker_count: usize) -> Vec<std::sync::mpsc::Sender<WorkerJob>> {
-    let worker_count = worker_count.max(1);
+    assert!(
+        worker_count > 0,
+        "decl-lowering worker count must be nonzero"
+    );
     let mut workers = Vec::with_capacity(worker_count);
     for index in 0..worker_count {
         let (tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
@@ -555,7 +558,10 @@ impl DeclLoweringService {
         worker_count: usize,
         account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
     ) -> Self {
-        let worker_count = worker_count.max(1);
+        assert!(
+            worker_count > 0,
+            "decl-lowering worker count must be nonzero"
+        );
         let workers = std::sync::OnceLock::new();
         if !lazy {
             // Eager policy: spawn the workers now. `set` on a fresh
@@ -1359,6 +1365,15 @@ mod tests {
             eager_explicit.workers_spawned(),
             "`new_with(false, …)` must spawn worker threads eagerly"
         );
+    }
+
+    /// A zero-sized pool is not a valid service configuration. Coercing it
+    /// to one worker would hide a broken resource-policy resolution.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[should_panic(expected = "decl-lowering worker count must be nonzero")]
+    fn service_rejects_zero_worker_count() {
+        let _ = DeclLoweringService::new_with(/* lazy = */ true, 0);
     }
 
     /// The handoff-stats aggregation is exact arithmetic over the four

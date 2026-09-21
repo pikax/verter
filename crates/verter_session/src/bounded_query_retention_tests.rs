@@ -94,6 +94,14 @@ fn budget_zero_cap_clamps_to_one() {
     );
 }
 
+/// A per-slot candidate cap of zero has no coherent retention semantics;
+/// accepting it as one would hide an invalid caller configuration.
+#[test]
+#[should_panic(expected = "per-slot candidate cap must be nonzero")]
+fn candidate_map_rejects_zero_per_slot_cap() {
+    let _: BoundedCandidateMap<u32, u8, u32> = BoundedCandidateMap::with_caps(0, 1);
+}
+
 /// `BoundedCandidateMap` keeps at most `per_slot_cap` candidates in
 /// one slot, evicting the oldest. DISCRIMINATES: an unbounded slot
 /// would retain all five.

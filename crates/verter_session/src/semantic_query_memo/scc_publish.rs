@@ -161,6 +161,14 @@ enum StagedFlight {
     ResolveCall(InlineResolveCallFlight),
 }
 
+/// One member prepared outside the entries lock. Its candidate has no
+/// retention charge until the whole component has been admitted.
+struct PreparedMember {
+    family: FamilyKey,
+    entry: MemoEntry,
+    flight: StagedFlight,
+}
+
 /// One member prepared for publication: everything computed OUTSIDE the
 /// `entries` lock, so the batch's single hold does no planning work.
 struct StagedMember {
@@ -241,9 +249,7 @@ impl SemanticGraphStore {
         //    same path as every other whole-batch refusal — never a
         //    partially-published component.
         let footprint = 1 + relation_members.len() + flow_members.len() + call_members.len();
-        let batch_charge = self.reserve_scc_batch(carrier, self_root_canonicals, footprint);
-        let inadmissible = batch_charge.is_err()
-            || footprint > self.memo_budget.cap()
+        let inadmissible = footprint > self.memo_budget.cap()
             || flow_members
                 .iter()
                 .any(|member| member.result.key() != &member.key)
@@ -266,9 +272,11 @@ impl SemanticGraphStore {
             }
             return false;
         }
-        let batch_charge = batch_charge.ok().flatten().map(std::sync::Arc::new);
 
-        let mut staged: Vec<StagedMember> =
+        // Pure candidate construction happens before byte admission so the
+        // component's charge is calculated from the MemoEntry owner, not a
+        // second approximation in this publisher.
+        let mut prepared: Vec<PreparedMember> =
             Vec::with_capacity(relation_members.len() + flow_members.len() + call_members.len());
         for member in relation_members {
             verter_debug_assert!(
@@ -279,7 +287,7 @@ impl SemanticGraphStore {
                 key: super::family_intern::InternedRelateKey::intern(member.key),
             };
             let entry = self.stage_entry(
-                batch_charge.clone(),
+                None,
                 SemanticQueryValue::Relation(member.payload),
                 relation_satisfied_projection(),
                 carrier,
@@ -287,12 +295,11 @@ impl SemanticGraphStore {
                 &dispatch_dep_signature,
                 validated_at_generation,
             );
-            staged.push(self.stage_member(
+            prepared.push(PreparedMember {
                 family,
                 entry,
-                StagedFlight::Relation(member.flight),
-                ctx,
-            ));
+                flight: StagedFlight::Relation(member.flight),
+            });
         }
         for member in flow_members {
             verter_debug_assert!(
@@ -305,7 +312,7 @@ impl SemanticGraphStore {
             // The published payload is extracted from the proof token —
             // the member's value is admissible only as the proven one.
             let entry = self.stage_entry(
-                batch_charge.clone(),
+                None,
                 SemanticQueryValue::FlowReturn(Arc::new(member.result.value().clone())),
                 member.materialized,
                 carrier,
@@ -313,7 +320,11 @@ impl SemanticGraphStore {
                 &dispatch_dep_signature,
                 validated_at_generation,
             );
-            staged.push(self.stage_member(family, entry, StagedFlight::Flow(member.flight), ctx));
+            prepared.push(PreparedMember {
+                family,
+                entry,
+                flight: StagedFlight::Flow(member.flight),
+            });
         }
         for member in call_members {
             verter_debug_assert!(
@@ -324,7 +335,7 @@ impl SemanticGraphStore {
                 key: super::family_intern::InternedResolveCallKey::intern(member.key),
             };
             let entry = self.stage_entry(
-                batch_charge.clone(),
+                None,
                 SemanticQueryValue::ResolveCall(Arc::new(member.result.into_inner())),
                 resolve_call_satisfied_projection(),
                 carrier,
@@ -332,12 +343,27 @@ impl SemanticGraphStore {
                 &dispatch_dep_signature,
                 validated_at_generation,
             );
-            staged.push(self.stage_member(
+            prepared.push(PreparedMember {
                 family,
                 entry,
-                StagedFlight::ResolveCall(member.flight),
-                ctx,
-            ));
+                flight: StagedFlight::ResolveCall(member.flight),
+            });
+        }
+
+        let batch_charge = self.reserve_scc_batch(&prepared);
+        let batch_charge = match batch_charge {
+            Ok(charge) => charge.map(std::sync::Arc::new),
+            Err(_) => {
+                for member in &prepared {
+                    self.abort_staged_flight(&member.flight);
+                }
+                return false;
+            }
+        };
+        let mut staged: Vec<StagedMember> = Vec::with_capacity(prepared.len());
+        for mut member in prepared {
+            member.entry.retention_charge = batch_charge.clone();
+            staged.push(self.stage_member(member.family, member.entry, member.flight, ctx));
         }
 
         // Test-only injection point — parked immediately before the
@@ -477,32 +503,17 @@ impl SemanticGraphStore {
     /// component the root-witness fence forbids.
     fn reserve_scc_batch(
         &self,
-        carrier: &crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: &Arc<[Arc<str>]>,
-        member_count: usize,
+        members: &[PreparedMember],
     ) -> Result<
         Option<crate::semantic_retention_account::RetentionCharge>,
         crate::semantic_retention_account::RetentionRefusal,
     > {
         use crate::semantic_retention_account::{ChargeClass, RetentionAdmission};
-        /// Estimated resident bytes of one staged component member: its
-        /// `MemoEntry` header plus the decided value it carries. The
-        /// batch's shared carrier and self-root list are counted once,
-        /// outside this per-member figure.
-        const MEMBER_BYTES: usize = 320;
-        /// One observed dependency fact on the shared validity rail.
-        const FACT_BYTES: usize = 64;
         let Some(account) = self.retention_account() else {
             return Ok(None);
         };
-        let shared: usize = carrier.facts.len() * FACT_BYTES
-            + self_root_canonicals
-                .iter()
-                .map(|canonical| canonical.len() + std::mem::size_of::<Arc<str>>())
-                .sum::<usize>();
-        let bytes = shared
-            + member_count
-                * (MEMBER_BYTES + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES);
+        let entries: Vec<&MemoEntry> = members.iter().map(|member| &member.entry).collect();
+        let bytes = MemoEntry::retained_footprint_bytes_for_shared_component(&entries);
         match account.reserve(ChargeClass::Retained, bytes) {
             RetentionAdmission::Admitted(charge) => Ok(Some(charge)),
             RetentionAdmission::Refused(refusal) => {

@@ -494,14 +494,16 @@ where
     K: Eq + std::hash::Hash + Clone,
     D: PartialEq + Clone,
 {
-    /// Construct with an explicit per-slot candidate cap and global
-    /// total-candidate cap. Both are clamped to at least `1`.
+    /// Construct with an explicit nonzero per-slot candidate cap and a
+    /// global total-candidate cap. The global cap is clamped to at least
+    /// `1`; a zero per-slot cap is an invalid configuration.
     #[must_use]
     pub fn with_caps(per_slot_cap: usize, global_cap: usize) -> Self {
+        assert!(per_slot_cap > 0, "per-slot candidate cap must be nonzero");
         Self {
             slots: DashMap::new(),
             budget: GlobalRetentionBudget::new(global_cap),
-            per_slot_cap: per_slot_cap.max(1),
+            per_slot_cap,
             retention_gate: parking_lot::RwLock::new(()),
             #[cfg(any(test, feature = "test-support"))]
             clear_midpoint_gate: parking_lot::Mutex::new(None),
