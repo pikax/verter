@@ -9,7 +9,10 @@
  * is omitted deliberately because it is a regression sentinel, not accepted debt.
  */
 
+import type { ProductGapCanaryManifest } from "../../src/runSummaryOracle";
+
 export type ProductGapManifest = Readonly<Record<string, string>>;
+export type { ProductGapCanaryManifest };
 
 const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> = {
   "ecosystem-parity@shared-tsgo": {
@@ -355,18 +358,35 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
  * run in which it never executed. Routes without canaries are simply absent. A test
  * is never both a skipped gap and a canary on the same route.
  */
-const KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> = {
+const PLAIN_TS_CONSUMER = "ISSUE-shared-tsgo-plain-ts-consumer";
+// The two shapes the unresolved `./ExposePublic.vue` import takes in the consumer.
+const UNRESOLVED_COMPONENT_IMPORT = /ts:2307:Cannot find module '\.\/ExposePublic\.vue'/;
+
+const KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE: Readonly<Record<string, ProductGapCanaryManifest>> = {
   "vue-parity@shared-tsgo": {
     // On the editor-shared tsgo route a plain `.ts` file is served by the editor's own
     // TypeScript, where Verter's TypeScript plugin does not exist, and generated
     // component modules are (correctly) not injected into an editor-owned engine whose
     // configured project does not admit them — so a `.ts` consumer cannot resolve
     // `./X.vue`.
-    "ide.complete.import-path-carrier": "ISSUE-shared-tsgo-plain-ts-consumer",
-    "testing-api.vue.public-importer-hides-setup-bindings": "ISSUE-shared-tsgo-plain-ts-consumer",
-    "vue.public-surface.consumer-source-documents-negative": "ISSUE-shared-tsgo-plain-ts-consumer",
-    "vue.public-surface.no-secret-internal-on-component-hover":
-      "ISSUE-shared-tsgo-plain-ts-consumer",
+    // Each entry names the failure the defect produces in THAT test; any other failure
+    // of the same test is a regression and fails the route.
+    "ide.complete.import-path-carrier": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: /^completion@src\/features\/ExposePublicConsumer\.ts:\d+ not ready within/,
+    },
+    "testing-api.vue.public-importer-hides-setup-bindings": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: UNRESOLVED_COMPONENT_IMPORT,
+    },
+    "vue.public-surface.consumer-source-documents-negative": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: UNRESOLVED_COMPONENT_IMPORT,
+    },
+    "vue.public-surface.no-secret-internal-on-component-hover": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: /^hover src\/features\/ExposePublicConsumer\.ts#ExposePublic not ready within/,
+    },
   },
 };
 
@@ -389,7 +409,7 @@ export const KNOWN_PRODUCT_GAP_ROUTE_KEYS = Object.freeze(
 export function knownProductGapCanariesForRoute(
   fixture: string,
   typeProvider: string,
-): ProductGapManifest {
+): ProductGapCanaryManifest {
   return KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE[`${fixture}@${typeProvider}`] ?? {};
 }
 

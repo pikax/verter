@@ -487,7 +487,12 @@ describe("enforceRunSummary result semantics", () => {
 });
 
 describe("enforceRunSummary product-gap canaries", () => {
-  const canaries = { "vue.consumer.resolves-component": "ISSUE-plain-ts-consumer" };
+  const canaries = {
+    "vue.consumer.resolves-component": {
+      issue: "ISSUE-plain-ts-consumer",
+      failure: /cannot resolve \.\/X\.vue/,
+    },
+  };
   const requiredTestIds = ["vue.clean-diagnostics.daily", "vue.consumer.resolves-component"];
   const canaryFailure = {
     id: "vue.consumer.resolves-component",
@@ -631,6 +636,24 @@ describe("enforceRunSummary product-gap canaries", () => {
     await expect(run).rejects.not.toThrow(/cannot resolve/);
   });
 
+  it("does not tolerate a canary test that fails some other way", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      failedTests: [{ ...canaryFailure, err: "Diagnostics did not complete within 12000ms" }],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds,
+        allowedProductGapCanaries: canaries,
+      }),
+    ).rejects.toThrow(/1 test\(s\) failed.*did not complete within/is);
+  });
+
   it("never tolerates a hook failure attributed to a canary", async () => {
     writeSummary({
       failures: 1,
@@ -666,7 +689,7 @@ describe("enforceRunSummary product-gap canaries", () => {
       enforceRunSummary(logFile, "vue-parity@tsgo", {
         pollMs: 0,
         requiredTestIds,
-        allowedProductGaps: canaries,
+        allowedProductGaps: { "vue.consumer.resolves-component": "ISSUE-plain-ts-consumer" },
         allowedProductGapCanaries: canaries,
       }),
     ).rejects.toThrow(/both a skipped product gap and a canary/i);

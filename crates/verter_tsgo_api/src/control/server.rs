@@ -523,8 +523,12 @@ impl ControlServer {
             }
         };
         let mut failures = Vec::new();
-        let mut sent: Vec<String> = Vec::new();
-        for op in &params.ops {
+        let mut sent: Vec<(usize, String)> = Vec::new();
+        // ONE budget for the whole batch: every send is awaited on the serial serve
+        // loop, so a per-op bound would let a wedged writer hold the loop for
+        // `ops × bound`. Once the budget is spent the remaining ops fail at once.
+        let deadline = tokio::time::Instant::now() + self.carrier_op_bound;
+        for (index, op) in params.ops.iter().enumerate() {
             let channel = self.relay.injection_channel();
             let send = async {
                 match op {
@@ -540,14 +544,15 @@ impl ControlServer {
                 }
             };
             let is_open = matches!(op, messages::CarrierBatchOp::Open { .. });
-            match tokio::time::timeout(self.carrier_op_bound, send).await {
+            match tokio::time::timeout_at(deadline, send).await {
                 Ok(Ok(())) => {
                     if is_open {
                         self.opened_carriers.insert(op.uri().to_string());
                     }
-                    sent.push(op.uri().to_string());
+                    sent.push((index, op.uri().to_string()));
                 }
                 Ok(Err(e)) => failures.push(messages::CarrierBatchFailure {
+                    index,
                     uri: op.uri().to_string(),
                     message: e.to_string(),
                     kind: messages::CarrierBatchFailureKind::SendFailed,
@@ -558,6 +563,7 @@ impl ControlServer {
                         self.opened_carriers.insert(op.uri().to_string());
                     }
                     failures.push(messages::CarrierBatchFailure {
+                        index,
                         uri: op.uri().to_string(),
                         message: carrier_send_timeout_error(self.carrier_op_bound).to_string(),
                         kind: messages::CarrierBatchFailureKind::SendFailed,
@@ -565,7 +571,7 @@ impl ControlServer {
                 }
             }
         }
-        if let Some(last) = sent.last() {
+        if let Some((_, last)) = sent.last() {
             if let Err(e) = self
                 .relay
                 .injection_channel()
@@ -573,11 +579,15 @@ impl ControlServer {
                 .await
             {
                 let message = e.to_string();
-                failures.extend(sent.iter().map(|uri| messages::CarrierBatchFailure {
-                    uri: uri.clone(),
-                    message: message.clone(),
-                    kind: messages::CarrierBatchFailureKind::SentUnconfirmed,
-                }));
+                failures.extend(
+                    sent.iter()
+                        .map(|(index, uri)| messages::CarrierBatchFailure {
+                            index: *index,
+                            uri: uri.clone(),
+                            message: message.clone(),
+                            kind: messages::CarrierBatchFailureKind::SentUnconfirmed,
+                        }),
+                );
             }
         }
         ok_frame(id, &messages::CarrierSyncBatchResult { failures })

@@ -179,6 +179,18 @@ pub fn decide_generated_unit_admission(
             _ => None,
         });
     let Some((owner_id, membership)) = owner else {
+        if units.is_empty() {
+            // Nothing is proposed, so nothing can be refused: a refusal always
+            // names the unit that caused it.
+            let mut hasher = FxHasher::default();
+            owning_tsconfig.as_str().hash(&mut hasher);
+            snapshot.generation.hash(&mut hasher);
+            return GeneratedUnitAdmission::Admitted(AdmittedGeneratedUnits {
+                tsconfig_path: owning_tsconfig.clone(),
+                units,
+                fingerprint: GeneratedUnitAdmissionFingerprint(hasher.finish()),
+            });
+        }
         return GeneratedUnitAdmission::NotAdmitted(GeneratedUnitNonAdmission {
             offending: units
                 .into_iter()

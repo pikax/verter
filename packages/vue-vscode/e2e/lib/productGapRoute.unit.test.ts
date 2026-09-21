@@ -25,7 +25,7 @@ describe("product-gap route selection", () => {
     expect(
       productGapCanariesForFixtureRoute("vue-parity", "shared-tsgo")[
         "ide.complete.import-path-carrier"
-      ],
+      ]?.issue,
     ).toBe("ISSUE-shared-tsgo-plain-ts-consumer");
     expect(productGapCanariesForFixtureRoute("vue-parity", "tsgo")).toEqual({});
     expect(productGapCanariesForFixtureRoute("vue-contract", "shared-tsgo")).toEqual({});

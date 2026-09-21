@@ -24,6 +24,7 @@ import {
 } from "../lib/productGapRoute";
 import {
   classifyProductGapCanaries,
+  isExpectedCanaryFailure,
   unexpectedCanaryPassMessage,
   type ProductGapSkip,
   type RunSummaryFailure,
@@ -309,7 +310,7 @@ export async function run(): Promise<void> {
     activeRunner = runner;
     runner.on("pass", (test) => {
       passedTestIds.push(test.title);
-      const issue = productGapCanaryManifest[test.title];
+      const issue = productGapCanaryManifest[test.title]?.issue;
       if (issue) console.error(`  ✗ CANARY PASSED — REMOVE ITS ENTRY: ${test.title} (${issue})`);
     });
     runner.on("pending", (test) => {
@@ -325,7 +326,8 @@ export async function run(): Promise<void> {
         kind: test.type === "test" ? "test" : "hook",
       };
       failedTests.push(failure);
-      const issue = failure.kind === "test" ? productGapCanaryManifest[test.title] : undefined;
+      const canary = productGapCanaryManifest[test.title];
+      const issue = isExpectedCanaryFailure(canary, failure) ? canary?.issue : undefined;
       if (issue) console.warn(`  ⚠ CANARY STILL FAILING: ${test.title} (${issue})`);
     });
   });

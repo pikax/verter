@@ -56,13 +56,33 @@ export interface ProductGapSkip {
   readonly issue: string;
 }
 
+/**
+ * One canary: the tracked defect, and the failure that defect produces in this test.
+ * Only that failure is tolerated — any other failure of the same test is a regression.
+ */
+export interface ProductGapCanary {
+  readonly issue: string;
+  readonly failure: RegExp;
+}
+
+/** `test ID` -> the canary declared for it. */
+export type ProductGapCanaryManifest = Readonly<Record<string, ProductGapCanary>>;
+
+/** Whether `failure` is the test-body failure `canary` is declared to expect. */
+export function isExpectedCanaryFailure(
+  canary: ProductGapCanary | undefined,
+  failure: RunSummaryFailure,
+): boolean {
+  return canary !== undefined && failure.kind === "test" && canary.failure.test(failure.err ?? "");
+}
+
 /** Where each canary of a route manifest landed in one run. */
 export interface ProductGapCanaryOutcome {
   /** Canaries whose test body ran and failed: tolerated, reported as degraded coverage. */
   readonly stillFailing: readonly ProductGapSkip[];
   /** Canaries whose test body ran and passed: the defect is fixed and the entry is stale. */
   readonly unexpectedlyPassing: readonly ProductGapSkip[];
-  /** Every recorded failure that is not a canary's own test-body failure. */
+  /** Every recorded failure that is not a canary's own expected test-body failure. */
   readonly blockingFailures: readonly RunSummaryFailure[];
 }
 
@@ -70,19 +90,20 @@ export interface ProductGapCanaryOutcome {
 export const PRODUCT_GAP_CANARY_MANIFEST = "e2e/lib/knownProductGapManifest.ts";
 
 /**
- * Classify a run against a canary manifest. Only a canary's own TEST-body failure is
- * tolerated; a hook failure attributed to the same title stays blocking.
+ * Classify a run against a canary manifest. Only a canary's own TEST-body failure that
+ * matches its declared failure is tolerated; a hook failure attributed to the same
+ * title, and any other failure of the canary's test, stays blocking.
  */
 export function classifyProductGapCanaries(
   summary: Pick<RunSummary, "passedTestIds" | "failedTests">,
-  canaries: Readonly<Record<string, string>>,
+  canaries: ProductGapCanaryManifest,
 ): ProductGapCanaryOutcome {
   const isCanaryFailure = (failure: RunSummaryFailure): boolean =>
-    failure.kind === "test" && failure.id !== undefined && canaries[failure.id] !== undefined;
+    failure.id !== undefined && isExpectedCanaryFailure(canaries[failure.id], failure);
   const failedTests = summary.failedTests ?? [];
   const failedIds = new Set(failedTests.filter(isCanaryFailure).map((failure) => failure.id));
   const passedIds = new Set(summary.passedTestIds ?? []);
-  const rows = Object.entries(canaries).map(([id, issue]) => ({ id, issue }));
+  const rows = Object.entries(canaries).map(([id, { issue }]) => ({ id, issue }));
   return {
     stillFailing: rows.filter((row) => failedIds.has(row.id)),
     unexpectedlyPassing: rows.filter((row) => passedIds.has(row.id)),
@@ -171,7 +192,7 @@ export interface EnforceRunSummaryOptions {
    * and are expected to fail. A failing canary is tolerated, a passing one fails the
    * run, and one that never executed is a stale entry. Requires `requiredTestIds`.
    */
-  allowedProductGapCanaries?: Readonly<Record<string, string>>;
+  allowedProductGapCanaries?: ProductGapCanaryManifest;
   /**
    * The run selected a subset of the route inventory. A canary outside
    * `requiredTestIds` is then not evaluated; in an unfiltered run it is stale.
@@ -251,12 +272,12 @@ export async function enforceRunSummary(
   }
   const allCanaries = opts.allowedProductGapCanaries ?? {};
   const invalidCanaries = Object.entries(allCanaries).filter(
-    ([, issue]) => !/^ISSUE-[A-Za-z0-9_-]+$/.test(issue),
+    ([, canary]) => !/^ISSUE-[A-Za-z0-9_-]+$/.test(canary.issue),
   );
   if (invalidCanaries.length > 0) {
     throw new Error(
       `${label}: canary manifest contains invalid rows: ` +
-        invalidCanaries.map(([id, issue]) => `${id}=${issue}`).join(", "),
+        invalidCanaries.map(([id, canary]) => `${id}=${canary.issue}`).join(", "),
     );
   }
   const gapAndCanary = Object.keys(allCanaries).filter(
@@ -303,14 +324,14 @@ export async function enforceRunSummary(
     throw new Error(
       `${label}: stale canary entr${staleCanaries.length === 1 ? "y" : "ies"} in ` +
         `${PRODUCT_GAP_CANARY_MANIFEST}: ` +
-        staleCanaries.map(([id, issue]) => `${id} (${issue})`).join(", ") +
+        staleCanaries.map(([id, canary]) => `${id} (${canary.issue})`).join(", ") +
         " never executed in this run; a canary must name a registered test that runs on its route",
     );
   }
   const declaredCanaryIds = declaredCanaries.map((row) => row.id).sort();
   if (
     declaredCanaryIds.join("\n") !== [...toleratedCanaryIds].sort().join("\n") ||
-    declaredCanaries.some((row) => evaluatedCanaries[row.id] !== row.issue)
+    declaredCanaries.some((row) => evaluatedCanaries[row.id]?.issue !== row.issue)
   ) {
     throw new Error(
       `${label}: canary failure manifest mismatch; runner declared: ` +

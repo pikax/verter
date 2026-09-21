@@ -112,11 +112,14 @@ describe("known product-gap manifest", () => {
       expect(KNOWN_PRODUCT_GAP_ROUTE_KEYS).toContain(route);
       const [fixture, provider] = route.split("@") as [(typeof PARITY_FIXTURES)[number], string];
       const required = new Set(inventory.testIdsByFixture[fixture]);
-      for (const [id, issue] of Object.entries(
+      for (const [id, canary] of Object.entries(
         knownProductGapCanariesForRoute(fixture, provider),
       )) {
         expect(required.has(id), `${route}: ${id}`).toBe(true);
-        expect(issue).toMatch(/^ISSUE-[A-Za-z0-9_-]+$/);
+        expect(canary.issue).toMatch(/^ISSUE-[A-Za-z0-9_-]+$/);
+        // A failure pattern that matches anything would tolerate any regression.
+        expect(canary.failure.test(""), `${route}: ${id}`).toBe(false);
+        expect(canary.failure.test("Diagnostics did not complete within 12000ms")).toBe(false);
       }
     }
   });
@@ -135,7 +138,10 @@ describe("known product-gap manifest", () => {
 
   it("runs the plain-TS consumer cases as canaries on the editor-shared tsgo route only", () => {
     const issue = "ISSUE-shared-tsgo-plain-ts-consumer";
-    expect(knownProductGapCanariesForRoute("vue-parity", "shared-tsgo")).toEqual({
+    const canaries = knownProductGapCanariesForRoute("vue-parity", "shared-tsgo");
+    expect(
+      Object.fromEntries(Object.entries(canaries).map(([id, row]) => [id, row.issue])),
+    ).toEqual({
       "ide.complete.import-path-carrier": issue,
       "testing-api.vue.public-importer-hides-setup-bindings": issue,
       "vue.public-surface.consumer-source-documents-negative": issue,

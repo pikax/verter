@@ -212,6 +212,9 @@ pub enum CarrierBatchFailureKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CarrierBatchFailure {
+    /// The zero-based position of the write in the batch's `ops`. The identity
+    /// of the failed write: a batch may carry more than one write for a URI.
+    pub index: usize,
     /// The carrier URI whose write is unconfirmed.
     pub uri: String,
     /// Why.

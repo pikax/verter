@@ -1537,6 +1537,52 @@ async fn wedged_relay_with_saturated_writer() -> (Arc<LspRelay>, DuplexStream, D
     (relay, editor_endpoint, server_endpoint)
 }
 
+/// A batch is served on the serial control loop, so the WHOLE batch shares one
+/// send budget: against a writer that never drains, a project's worth of writes
+/// must not hold the loop for one bound each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_against_a_wedged_writer_spends_one_send_budget() {
+    let (relay, _editor_endpoint, _server_endpoint) = wedged_relay_with_saturated_writer().await;
+    let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+    server.carrier_op_bound = Duration::from_millis(300);
+    let writes = 8;
+    let ops: Vec<serde_json::Value> = (0..writes)
+        .map(|index| {
+            serde_json::json!({
+                "kind": "open", "uri": format!("file:///w/src/Wedged{index}.vue.tsx"),
+                "languageId": "typescript", "version": 1, "text": "",
+            })
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let frame = tokio::time::timeout(
+        Duration::from_secs(10),
+        server.handle_carrier_sync_batch(&serde_json::json!(1), serde_json::json!({ "ops": ops })),
+    )
+    .await
+    .expect("the batch returns");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "{writes} wedged writes took {elapsed:?}: each spent its own 300ms bound"
+    );
+    let value = decode_frame(&frame);
+    let failures = value["result"]["failures"].as_array().expect("failures");
+    assert_eq!(
+        failures
+            .iter()
+            .map(|failure| failure["index"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        (0..writes as u64).collect::<Vec<_>>(),
+        "every write is reported, by position: {value}"
+    );
+    // A bounded-out open may have reached the engine: tracked for the session-end drain.
+    assert_eq!(server.opened_carriers.len(), writes);
+    relay.shutdown().await;
+}
+
 /// EVERY relay-round-trip control handler BOUNDS its relay send against a WEDGED writer (a full
 /// outbound mpsc whose server writer is parked on `write_all`), so a wedged writer can never PIN
 /// the serial read→dispatch serve loop inside a handler. An UNBOUNDED handler send would block the

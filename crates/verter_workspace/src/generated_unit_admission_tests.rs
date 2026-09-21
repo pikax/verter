@@ -233,6 +233,15 @@ fn unknown_owning_tsconfig_is_no_such_configured_project() {
     );
 }
 
+/// An empty proposal refuses nothing, whichever project it names: a refusal
+/// always carries the unit that caused it.
+#[test]
+fn empty_unit_set_is_admitted_even_for_an_unknown_tsconfig() {
+    let snap = snapshot(&[(TSCONFIG, r#"{ "include": ["src"] }"#)], &[]);
+    assert_eq!(verdict(&snap, "d:/ws/tsconfig.missing.json", &[]), Ok(()));
+    assert_eq!(verdict(&snap, TSCONFIG, &[]), Ok(()));
+}
+
 /// Project B owns the carrier and matches its companion, but project A — with
 /// different compiler options — also matches the companion and WINS the
 /// default-owner walk (name-least fallback). An engine would serve the companion

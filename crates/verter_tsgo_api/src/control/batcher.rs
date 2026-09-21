@@ -97,21 +97,10 @@ impl OverlayBatcher {
 
 async fn flush(control: &ControlClient, batch: Vec<Pending>) {
     let (ops, waiters): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
-    let uris: Vec<String> = ops.iter().map(|op| op.uri().to_string()).collect();
     match control.carrier_sync_batch(ops).await {
         Ok(result) => {
-            for (uri, waiter) in uris.iter().zip(waiters) {
-                let outcome = match result.failures.iter().find(|failure| &failure.uri == uri) {
-                    Some(failure) => Err(match failure.kind {
-                        CarrierBatchFailureKind::SentUnconfirmed => {
-                            TsgoApiError::Timeout(failure.message.clone())
-                        }
-                        CarrierBatchFailureKind::SendFailed => {
-                            TsgoApiError::Transport(failure.message.clone())
-                        }
-                    }),
-                    None => Ok(()),
-                };
+            let outcomes = outcomes(waiters.len(), &result.failures);
+            for (waiter, outcome) in waiters.into_iter().zip(outcomes) {
                 let _ = waiter.send(outcome);
             }
         }
@@ -121,5 +110,50 @@ async fn flush(control: &ControlClient, batch: Vec<Pending>) {
                 let _ = waiter.send(Err(TsgoApiError::Transport(message.clone())));
             }
         }
+    }
+}
+
+/// Each write's outcome, in batch order. A failure names its write by POSITION:
+/// one batch may carry several writes for a URI, and each caller must hear about
+/// its own.
+fn outcomes(
+    writes: usize,
+    failures: &[super::messages::CarrierBatchFailure],
+) -> Vec<TsgoApiResult<()>> {
+    let mut outcomes: Vec<TsgoApiResult<()>> = (0..writes).map(|_| Ok(())).collect();
+    for failure in failures {
+        let Some(outcome) = outcomes.get_mut(failure.index) else {
+            continue;
+        };
+        *outcome = Err(match failure.kind {
+            CarrierBatchFailureKind::SentUnconfirmed => {
+                TsgoApiError::Timeout(failure.message.clone())
+            }
+            CarrierBatchFailureKind::SendFailed => TsgoApiError::Transport(failure.message.clone()),
+        });
+    }
+    outcomes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::messages::CarrierBatchFailure;
+
+    #[test]
+    fn two_writes_for_one_uri_each_hear_their_own_outcome() {
+        let failure = CarrierBatchFailure {
+            index: 2,
+            uri: "file:///w/A.ts".to_string(),
+            message: "m".to_string(),
+            kind: CarrierBatchFailureKind::SendFailed,
+        };
+        let outcomes = outcomes(3, &[failure]);
+        assert!(
+            outcomes[0].is_ok(),
+            "the earlier write for the same URI succeeded"
+        );
+        assert!(outcomes[1].is_ok());
+        assert!(matches!(outcomes[2], Err(TsgoApiError::Transport(_))));
     }
 }

@@ -318,12 +318,14 @@ fn verify_hello_rejects_wrong_nonce_fail_closed() {
 /// failure — the conservative reading, which keeps the retract.
 #[test]
 fn a_batch_failure_without_a_kind_reads_as_send_failed() {
-    let failure: CarrierBatchFailure =
-        serde_json::from_value(serde_json::json!({ "uri": "file:///w/A.ts", "message": "m" }))
-            .expect("a kind-less failure decodes");
+    let failure: CarrierBatchFailure = serde_json::from_value(
+        serde_json::json!({ "index": 0, "uri": "file:///w/A.ts", "message": "m" }),
+    )
+    .expect("a kind-less failure decodes");
     assert_eq!(failure.kind, CarrierBatchFailureKind::SendFailed);
     assert_eq!(
         serde_json::to_value(CarrierBatchFailure {
+            index: 0,
             uri: "file:///w/A.ts".to_string(),
             message: "m".to_string(),
             kind: CarrierBatchFailureKind::SentUnconfirmed,

@@ -5,6 +5,7 @@ import {
 import {
   knownProductGapCanariesForRoute,
   knownProductGapsForRoute,
+  type ProductGapCanaryManifest,
   type ProductGapManifest,
 } from "./knownProductGapManifest";
 
@@ -28,7 +29,7 @@ export function productGapsForFixtureRoute(
 export function productGapCanariesForFixtureRoute(
   fixture: string,
   typeProvider: string | undefined,
-): ProductGapManifest {
+): ProductGapCanaryManifest {
   if (!fixture.endsWith("-parity") || !typeProvider) return {};
   return knownProductGapCanariesForRoute(fixture, typeProvider);
 }
