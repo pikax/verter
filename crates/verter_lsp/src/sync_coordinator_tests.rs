@@ -3995,6 +3995,124 @@ const msg = '{marker}'
         .await;
 }
 
+/// A follow-up the server owes a document — its receipt outdated by another
+/// document's pass, or native analysis landing — is work for a document the user
+/// may be looking at right now. Queued as anonymous background work it waits
+/// behind every re-armed open document (a restart re-arms all of them at once,
+/// and a throttled provider serves them one at a time), so the file the user is
+/// in stays uncertified for the length of the whole backlog. A follow-up keeps
+/// the attention its document last had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_for_the_document_the_user_is_in_is_not_queued_as_background() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let cap = crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind) + 1;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">
+const msg = '{marker}'
+</script>
+             <template><div>{{{{ msg }}}}</div></template>
+"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let client = deps.client.clone();
+    let handle = spawn_sync_coordinator(deps);
+    let open = |name: &str| {
+        let uri: Uri = format!("file:///workspace/src/{name}.vue")
+            .parse()
+            .expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source(name),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the document must be open");
+        needs_provider_sync.insert(canonical_id.clone());
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            Instant::now(),
+        );
+        (canonical_id, uri)
+    };
+    let background: Vec<(String, Uri)> = (0..cap + 2)
+        .map(|index| open(&format!("Bg{index}")))
+        .collect();
+    // The document the user is in: opened last, certified like the rest.
+    let (active_id, active_uri) = open("Active");
+    handle
+        .await_until(
+            || {
+                documents.diagnostics_ready(&active_uri)
+                    && background
+                        .iter()
+                        .all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the documents never reached their first certified state"),
+        )
+        .await;
+
+    let pulls = |calls: &[MockCall], prefix: &str| -> usize {
+        calls
+            .iter()
+            .filter(|call| {
+                matches!(call, MockCall::GetDiagnostics { path }
+                    if path.starts_with(&format!("/workspace/src/{prefix}")))
+            })
+            .count()
+    };
+    let gate = provider.gate_diagnostics();
+    provider.clear_calls();
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in background.iter().enumerate() {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Bg") >= cap - 1),
+    )
+    .await
+    .expect("background pulls never started");
+
+    // Another document's pass outdates the active document's receipt: the server
+    // now owes it a fresh publication, with no editor signal behind it.
+    documents.host().bump_diagnostics_generation(&active_id);
+    let (_, other_uri) = &background[cap + 1];
+    let publication = documents
+        .begin_diagnostics_publication(other_uri)
+        .expect("the other document is open");
+    documents
+        .publish_diagnostics(&client, other_uri, &publication, Vec::new(), false, None)
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Active") == 1),
+    )
+    .await
+    .expect(
+        "the follow-up for the document the user is in must not wait for the background backlog",
+    );
+
+    gate.add_permits(64);
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&active_uri) && handle.diag_tasks_live() == 0,
+            || panic!("the follow-up must certify the active document"),
+        )
+        .await;
+}
+
 /// LSP notification handlers are dispatched concurrently, so an OLDER change
 /// can deposit its signal after a newer one has already deposited its own. The
 /// quiet window must take the LATEST receipt, never simply the last deposit —

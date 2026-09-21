@@ -647,6 +647,14 @@ async fn coordinator_loop(
     // one: a full channel means a wake is already queued.
     let max_inflight = max_inflight_diagnostics(&deps.type_provider_kind);
     let max_background = max_background_diagnostics(&deps.type_provider_kind);
+    // When the user last turned to each document, kept PAST the service that
+    // consumed it. A follow-up the server owes a document (its receipt outdated by
+    // another document's pass, native analysis landing) has no editor signal of
+    // its own; without this it would queue as anonymous background work behind
+    // every re-armed open document, and the file the user is in would stay
+    // uncertified for the length of the whole backlog. Bounded by the open set:
+    // an entry leaves when its document is no longer open.
+    let mut last_attention: HashMap<String, Instant> = HashMap::new();
     // The in-flight pulls that are background work (see `max_background`).
     let mut background_inflight: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -717,6 +725,7 @@ async fn coordinator_loop(
                         stale.abort();
                     }
                     let received_at = Instant::now();
+                    let attended = last_attention.get(&canonical_id).copied();
                     pending_files.entry(canonical_id)
                         .and_modify(|(changed_at, pending)| {
                             *changed_at = (*changed_at).max(received_at);
@@ -725,7 +734,7 @@ async fn coordinator_loop(
                         .or_insert((received_at, PendingSignal {
                             uri, requires_sync: false, force_diagnostics: true,
                             sync_retries_remaining: 0, received_at,
-                            user_received_at: None,
+                            user_received_at: attended,
                             edited: false,
                         }));
                 }
@@ -757,6 +766,7 @@ async fn coordinator_loop(
                             // receipt to honour — the reason to republish arose
                             // exactly here, so the quiet window starts here.
                             let received_at = Instant::now();
+                            let attended = last_attention.get(&ready.canonical_id).copied();
                             pending_files
                                 .entry(ready.canonical_id)
                                 .and_modify(|(changed_at, pending)| {
@@ -772,7 +782,7 @@ async fn coordinator_loop(
                                         force_diagnostics: true,
                                         sync_retries_remaining: 0,
                                         received_at,
-                                        user_received_at: None,
+                                        user_received_at: attended,
                                         edited: false,
                                     },
                                 ));
@@ -889,8 +899,13 @@ async fn coordinator_loop(
 
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
-                    // The touch has done its job once its document is served.
-                    touch_tracker.lock().remove(&canonical_id);
+                    // The touch has done its job once its document is served; what
+                    // it said about the user's attention outlives the service.
+                    let touched = touch_tracker.lock().remove(&canonical_id);
+                    if let Some(attended) = signal.user_received_at.max(touched) {
+                        let latest = last_attention.entry(canonical_id.clone()).or_insert(attended);
+                        *latest = (*latest).max(attended);
+                    }
                     let mut publish_diagnostics = signal.force_diagnostics;
                     let will_sync = signal.requires_sync
                         && deps.needs_provider_sync.remove(&canonical_id).is_some();
@@ -1012,6 +1027,16 @@ async fn coordinator_loop(
                     }
                 }
                 arm_open_importer_republish(&deps, &settled_edits, &mut pending_files);
+                // Bounded by the open set: prune only once it has outgrown it.
+                let open_uris = deps.documents.open_uris();
+                if last_attention.len() > open_uris.len() {
+                    let open: std::collections::HashSet<String> = open_uris
+                        .iter()
+                        .filter_map(|uri| uri.parse::<Uri>().ok())
+                        .filter_map(|uri| deps.documents.get_canonical_id(&uri))
+                        .collect();
+                    last_attention.retain(|canonical_id, _| open.contains(canonical_id));
+                }
                 diagnostic_tasks.retain(|_, task| !task.is_finished());
                 #[cfg(test)]
                 receipts
