@@ -10,7 +10,13 @@ import {
   resolveVscodeExecutablePath,
   writeVsCodeUserSettings,
 } from "./sharedLaunch";
-import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
+import {
+  classifyProductGapCanaries,
+  clearRunArtifacts,
+  enforceRunSummary,
+  readRunSummary,
+  type ProductGapSkip,
+} from "../src/runSummaryOracle";
 import {
   knownFrameworkContractGapsForRoute,
   requiredFrameworkContractIds,
@@ -44,7 +50,10 @@ import {
   PROJECTLESS_CONTRACT_SUITE_GLOB,
   PROJECTLESS_CONTRACT_TEST_IDS,
 } from "./lib/projectlessContractManifest";
-import { knownProductGapsForRoute } from "./lib/knownProductGapManifest";
+import {
+  knownProductGapCanariesForRoute,
+  knownProductGapsForRoute,
+} from "./lib/knownProductGapManifest";
 import {
   BARREL_REGRESSION_LOADED_FILES,
   BARREL_REGRESSION_SUITE_GLOB,
@@ -74,41 +83,58 @@ const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework;
     "svelte-contract": { framework: "svelte", only: "frameworks/svelte/contract.test" },
   };
 
-function reportRouteResult(label: string, productGaps: Readonly<Record<string, string>>): number {
+/**
+ * Report a route that passed its oracle. Skipped gaps and still-failing canaries are
+ * both degraded coverage and are listed separately: neither is ever a pass.
+ */
+function reportRouteResult(
+  label: string,
+  productGaps: Readonly<Record<string, string>>,
+  failingCanaries: readonly ProductGapSkip[] = [],
+): { readonly skipped: number; readonly failingCanaries: number } {
   const gaps = Object.entries(productGaps).sort(([left], [right]) => left.localeCompare(right));
-  if (gaps.length === 0) {
+  const canaries = [...failingCanaries].sort((left, right) => left.id.localeCompare(right.id));
+  if (gaps.length === 0 && canaries.length === 0) {
     console.log(`  PASSED: ${label}`);
-    return 0;
+    return { skipped: 0, failingCanaries: 0 };
   }
 
   console.warn(
     `  DEGRADED: ${label} passed executable checks with ${gaps.length} known product-gap ` +
-      `test(s) skipped`,
+      `test(s) skipped and ${canaries.length} canary test(s) still failing`,
   );
   for (const [id, issue] of gaps) console.warn(`    - ${id} (${issue})`);
+  for (const { id, issue } of canaries) {
+    console.warn(`    ⚠ CANARY STILL FAILING: ${id} (${issue})`);
+  }
 
   if (process.env.GITHUB_ACTIONS === "true") {
     console.warn(
       `::warning title=VS Code E2E degraded::${label} skipped ${gaps.length} known ` +
-        "product-gap test(s); see the job summary for the exact inventory",
+        `product-gap test(s) and tolerated ${canaries.length} failing canary test(s); ` +
+        "see the job summary for the exact inventory",
     );
   }
   const stepSummary = process.env.GITHUB_STEP_SUMMARY;
   if (stepSummary) {
-    const rows = gaps.map(([id, issue]) => `| \`${id}\` | \`${issue}\` |`).join("\n");
+    const rows = [
+      ...gaps.map(([id, issue]) => `| \`${id}\` | skipped | \`${issue}\` |`),
+      ...canaries.map(({ id, issue }) => `| \`${id}\` | canary still failing | \`${issue}\` |`),
+    ].join("\n");
     try {
       fs.appendFileSync(
         stepSummary,
         `\n### ⚠️ ${label}: degraded by known product gaps\n\n` +
-          `${gaps.length} test(s) were skipped before execution. This route is not fully green.\n\n` +
-          "| Skipped test | Tracking issue |\n| --- | --- |\n" +
+          `${gaps.length} test(s) were skipped before execution and ${canaries.length} canary ` +
+          "test(s) ran and failed as expected. This route is not fully green.\n\n" +
+          "| Test | Outcome | Tracking issue |\n| --- | --- | --- |\n" +
           `${rows}\n`,
       );
     } catch (error) {
       console.warn(`  Could not append the degraded route report to ${stepSummary}: ${error}`);
     }
   }
-  return gaps.length;
+  return { skipped: gaps.length, failingCanaries: canaries.length };
 }
 /** Focused parity fixtures: only the parity suite tree runs. */
 const PARITY_FIXTURE_CONFIGS: Readonly<Record<ParityFixture, { only: string }>> = {
@@ -400,6 +426,7 @@ async function main() {
   let totalFailures = 0;
   let totalDegradedRoutes = 0;
   let totalSkippedProductGaps = 0;
+  let totalFailingCanaries = 0;
 
   for (const [index, route] of routesToRun.entries()) {
     const { fixture, typeProvider } = route;
@@ -634,6 +661,11 @@ async function main() {
           : contract
             ? knownFrameworkContractGapsForRoute(contract.framework, typeProvider)
             : undefined;
+        // Canaries exist on parity routes only. The oracle receives the route's whole
+        // manifest and narrows it itself, so an entry naming no test is caught as stale.
+        const allowedProductGapCanaries = parity
+          ? knownProductGapCanariesForRoute(fixture, typeProvider)
+          : undefined;
         const requiredLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
           : projectlessContract
@@ -654,6 +686,8 @@ async function main() {
                   ? BARREL_REGRESSION_TEST_IDS
                   : parity?.testIds,
             allowedProductGaps,
+            allowedProductGapCanaries,
+            selectionFiltered: onlyPattern !== undefined,
           });
         } catch (summaryError) {
           if (extensionHostError) {
@@ -670,10 +704,16 @@ async function main() {
               "contains no test failures and passed its exact inventory checks.",
           );
         }
-        const skippedProductGaps = reportRouteResult(label, allowedProductGaps ?? {});
-        if (skippedProductGaps > 0) {
+        const degraded = reportRouteResult(
+          label,
+          allowedProductGaps ?? {},
+          classifyProductGapCanaries(readRunSummary(logFile), allowedProductGapCanaries ?? {})
+            .stillFailing,
+        );
+        if (degraded.skipped > 0 || degraded.failingCanaries > 0) {
           totalDegradedRoutes++;
-          totalSkippedProductGaps += skippedProductGaps;
+          totalSkippedProductGaps += degraded.skipped;
+          totalFailingCanaries += degraded.failingCanaries;
         }
       } catch (err) {
         console.error(`  FAILED: ${label}`, err);
@@ -700,10 +740,13 @@ async function main() {
   if (totalDegradedRoutes > 0) {
     console.warn(
       `\nFixture E2E gates completed with ${totalDegradedRoutes} DEGRADED route(s) and ` +
-        `${totalSkippedProductGaps} known product-gap test(s) skipped; not fully green.`,
+        `${totalSkippedProductGaps} known product-gap test(s) skipped and ` +
+        `${totalFailingCanaries} canary test(s) still failing; not fully green.`,
     );
   } else {
-    console.log("\nAll fixture E2E tests passed with no known product-gap skips.");
+    console.log(
+      "\nAll fixture E2E tests passed with no known product-gap skips or failing canaries.",
+    );
   }
 }
 

@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use super::*;
 use crate::external_ts::eligibility::{
-    AttachFact, BindingFact, EditorBindingFact, EligibilityFacts, ProxyFact, VersionGateFact,
+    AttachFact, BindingFact, EditorBindingFact, EligibilityFacts, GeneratedUnitAdmissionFact,
+    ProxyFact, VersionGateFact,
 };
 use crate::external_ts::identity_resolver::ReferenceInput;
 use crate::external_ts::mode::{
@@ -18,6 +19,7 @@ use crate::external_ts::mode::{
 use crate::external_ts::warm_cache::{EngineWarmCache, WarmCacheKey};
 use crate::file_artifact_store::ProjectIdentity;
 use verter_span::path::InjectedPathKey;
+use verter_workspace::{GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmissionReason};
 
 fn folded_identity(canonical: &str) -> ProjectIdentity {
     let key = InjectedPathKey::new(canonical);
@@ -57,9 +59,14 @@ fn positive_facts(bound: ProjectIdentity) -> EligibilityFacts {
         },
         attach: AttachFact::Live(SharedSessionFacts::new(session("7.0.1", 7, 3))),
         binding: BindingFact::Bound(bound),
+        generated_units: GeneratedUnitAdmissionFact::Admitted(admission(1)),
         proxy: ProxyFact::Available,
         editor_binding: EditorBindingFact::Matched(bound),
     }
+}
+
+fn admission(raw: u64) -> GeneratedUnitAdmissionFingerprint {
+    GeneratedUnitAdmissionFingerprint::from_raw(raw)
 }
 
 const APP_TSCONFIG: &str = "c:/repo/app/tsconfig.json";
@@ -243,6 +250,7 @@ fn reconnect_renegotiation_is_always_cold_and_evicts_prior() {
         representative_tsconfig(&request_v1, v1.decision()),
         1,
         app_id(),
+        &[admission(1), admission(1)],
     );
     assert!(cache.get(&key_v1).is_some());
 
@@ -277,6 +285,7 @@ fn reconnect_renegotiation_is_always_cold_and_evicts_prior() {
         representative_tsconfig(&request_v2, v2.decision()),
         1,
         app_id(),
+        &[admission(1), admission(1)],
     );
     assert!(cache.get(&key_v2).is_some(), "the fresh entry is present");
     assert_eq!(cache.len(), 1, "exactly the fresh generation remains");
@@ -329,5 +338,99 @@ fn failover_live_moves_whole_component_and_discards_warm() {
     assert!(
         cache.is_empty(),
         "the failed-over component's SHARED warm state is discarded"
+    );
+}
+
+// ── Generated-unit admission gates SHARED ──
+
+/// A project that OWNS the carrier but whose generated units are not admitted —
+/// or not proven admitted — decides OWNED, each under its own reason, and warms
+/// nothing. Bound + every other fact positive, so admission alone decides.
+#[test]
+fn unadmitted_or_unproven_generated_units_decide_owned_with_distinct_reasons() {
+    let cases = [
+        (
+            GeneratedUnitAdmissionFact::NotAdmitted(
+                GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            ),
+            OwnedReason::GeneratedUnitsNotAdmitted(
+                GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            ),
+        ),
+        (
+            GeneratedUnitAdmissionFact::NotAdmitted(
+                GeneratedUnitNonAdmissionReason::OwnedByDifferentProject,
+            ),
+            OwnedReason::GeneratedUnitsNotAdmitted(
+                GeneratedUnitNonAdmissionReason::OwnedByDifferentProject,
+            ),
+        ),
+        (
+            GeneratedUnitAdmissionFact::Unproven,
+            OwnedReason::GeneratedUnitAdmissionUnproven,
+        ),
+    ];
+    for (fact, reason) in cases {
+        let mut facts = positive_facts(app_id());
+        facts.generated_units = fact;
+        let refs: [ReferenceInput; 0] = [];
+        let projects = [LiveProjectInput {
+            identity: app_id(),
+            tsconfig_dir: "c:/repo/app",
+            canonical_tsconfig: Arc::from(APP_TSCONFIG),
+            facts,
+            references: &refs,
+        }];
+        let engines = candidates(3);
+        let request = LiveDecisionRequest {
+            root: app_id(),
+            projects: &projects,
+            engines: &engines,
+            config_generation: 1,
+            editor_binding: app_id(),
+        };
+        let mut cache = EngineWarmCache::new();
+        let decision = decide_live(&request, &no_realpath, &folded_identity, &mut cache);
+        assert_eq!(decision.mode(), ServeMode::Owned, "{fact:?}");
+        assert_eq!(decision.serving(), ServingProvenance::Owned, "{fact:?}");
+        assert_eq!(decision.decision().owned_reason(), Some(reason), "{fact:?}");
+        assert!(cache.is_empty(), "an OWNED decision is never warmed");
+    }
+}
+
+/// The admission fingerprint is a warm-key dimension: the SAME project at the
+/// SAME config generation under a DIFFERENT admission (a changed include, a
+/// changed generated-unit set, a changed owner) re-decides COLD instead of
+/// reusing the SHARED serving state proven under the earlier admission.
+#[test]
+fn a_changed_admission_fingerprint_does_not_reuse_the_shared_decision() {
+    let decide_with = |fingerprint: u64, cache: &mut EngineWarmCache| {
+        let mut facts = positive_facts(app_id());
+        facts.generated_units = GeneratedUnitAdmissionFact::Admitted(admission(fingerprint));
+        let refs: [ReferenceInput; 0] = [];
+        let projects = [LiveProjectInput {
+            identity: app_id(),
+            tsconfig_dir: "c:/repo/app",
+            canonical_tsconfig: Arc::from(APP_TSCONFIG),
+            facts,
+            references: &refs,
+        }];
+        let engines = candidates(3);
+        let request = LiveDecisionRequest {
+            root: app_id(),
+            projects: &projects,
+            engines: &engines,
+            config_generation: 1,
+            editor_binding: app_id(),
+        };
+        decide_live(&request, &no_realpath, &folded_identity, cache).serving()
+    };
+    let mut cache = EngineWarmCache::new();
+    assert_eq!(decide_with(1, &mut cache), ServingProvenance::ColdShared);
+    assert_eq!(decide_with(1, &mut cache), ServingProvenance::WarmShared);
+    assert_eq!(
+        decide_with(2, &mut cache),
+        ServingProvenance::ColdShared,
+        "a different admission never reuses the earlier SHARED decision"
     );
 }

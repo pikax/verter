@@ -53,8 +53,8 @@ mod warm_cache;
 // module resolution.
 pub use carrier::{CarrierArtifact, CarrierRegistry, CarrierRole, InMemoryCarrierRegistry};
 pub use eligibility::{
-    compose_eligibility, AttachFact, BindingFact, EditorBindingFact, EligibilityFacts, ProxyFact,
-    VersionGateFact,
+    compose_eligibility, AttachFact, BindingFact, EditorBindingFact, EligibilityFacts,
+    GeneratedUnitAdmissionFact, ProxyFact, VersionGateFact,
 };
 pub use engine::{
     BoundProject, BoundProjectSeal, Diagnostics, DiagnosticsOutcome, EngineBackend,

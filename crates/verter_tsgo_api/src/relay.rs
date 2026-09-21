@@ -187,8 +187,8 @@ pub struct CarrierInjectionChannel<'a> {
     /// The private write sink. Never handed out.
     sink: &'a dyn GatedWireSink,
     /// The owner's ACTIVE-lifecycle overlay tracker (retraction state): URIs
-    /// [`Self::did_open`] successfully opened, retracted again by a
-    /// successful [`Self::did_close`]. A std Mutex: lock, mutate, drop the
+    /// [`Self::did_open`] opened or MAY have opened (tracked before the send),
+    /// retracted again by a successful [`Self::did_close`]. A std Mutex: lock, mutate, drop the
     /// guard — NEVER held across an `.await`.
     open_overlays: &'a StdMutex<HashSet<String>>,
     /// The owner's MONOTONIC egress-taint record: every URI a carrier
@@ -253,9 +253,11 @@ impl<'a> CarrierInjectionChannel<'a> {
     }
 
     /// Inject an off-disk carrier as an LSP `textDocument/didOpen` overlay.
-    /// The URI is tainted for egress BEFORE the wire send and tracked in the
-    /// owner's overlay set (after a successful notify) so a non-owning
-    /// teardown can retract exactly the overlays Verter opened.
+    /// The URI is tainted for egress AND tracked in the owner's overlay set
+    /// BEFORE the wire send, so a non-owning teardown can retract exactly the
+    /// overlays Verter opened — including one whose send was abandoned
+    /// mid-flight and so MAY have reached the engine. Only a DEFINITE send
+    /// failure untracks it again.
     pub async fn did_open(
         &self,
         uri: &str,
@@ -264,7 +266,7 @@ impl<'a> CarrierInjectionChannel<'a> {
         text: &str,
     ) -> TsgoApiResult<()> {
         // The overlay open is the ONLY path that sends `didOpen`: gate, taint,
-        // send, then track — bookkeeping is inseparable from the wire write.
+        // track, then send — bookkeeping is inseparable from the wire write.
         // The inline gate keeps deny-by-default UNIFORM (every wire write is
         // gated, even this fixed, always-allowlisted method).
         if !carrier_write_allowed("textDocument/didOpen", CarrierWriteKind::Notification) {
@@ -290,15 +292,19 @@ impl<'a> CarrierInjectionChannel<'a> {
                 "text": text,
             }
         });
-        self.sink
-            .send_notify("textDocument/didOpen", params)
-            .await?;
-        {
-            // Track for RETRACTION only AFTER the notify succeeded — a failed
-            // open must not leave a phantom overlay for retraction. Lock,
-            // insert, drop the guard — never held across the await above.
-            let mut overlays = self.open_overlays.lock().unwrap();
-            overlays.insert(uri.to_string());
+        // Track for RETRACTION BEFORE the send: `did_close` writes nothing for an
+        // untracked URI, so an overlay whose send is abandoned mid-flight (it MAY
+        // have reached the engine) must already be retractable. Lock, insert, drop
+        // the guard — never held across the await below.
+        let newly_tracked = self.open_overlays.lock().unwrap().insert(uri.to_string());
+        if let Err(error) = self.sink.send_notify("textDocument/didOpen", params).await {
+            // A DEFINITE send failure never reached the wire: a failed open must
+            // not leave a phantom overlay for retraction. An entry an earlier open
+            // established is left alone.
+            if newly_tracked {
+                self.open_overlays.lock().unwrap().remove(uri);
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -312,8 +318,11 @@ impl<'a> CarrierInjectionChannel<'a> {
         self.gated_notify("textDocument/didChange", params).await
     }
 
-    /// Retract a carrier overlay via `textDocument/didClose`. The URI leaves
-    /// the owner's overlay set only AFTER the notify succeeded. The egress
+    /// Retract a carrier overlay via `textDocument/didClose`. IDEMPOTENT: a URI
+    /// the owner's overlay set does not hold is already closed (or was never
+    /// opened), so nothing is written — the engine treats an overlay close as a
+    /// file delete and rebuilds its project for it. The URI leaves the
+    /// owner's overlay set only AFTER the notify succeeded. The egress
     /// taint is NOT touched — it is monotonic, so an in-flight server frame
     /// about the just-closed carrier still classifies as carrier-attributed.
     pub async fn did_close(&self, uri: &str) -> TsgoApiResult<()> {
@@ -325,6 +334,9 @@ impl<'a> CarrierInjectionChannel<'a> {
             return Err(TsgoApiError::WriteGateDenied {
                 method: "textDocument/didClose".to_string(),
             });
+        }
+        if !self.open_overlays.lock().unwrap().contains(uri) {
+            return Ok(());
         }
         let params = serde_json::json!({ "textDocument": { "uri": uri } });
         self.sink
@@ -807,6 +819,14 @@ impl LspRelay {
             stopped_rx,
             tasks,
         }
+    }
+
+    /// TEST-ONLY: track `uri` as an open overlay without a wire `didOpen`, so a
+    /// test can stage a retractable overlay on a relay whose writer cannot carry
+    /// the open (a wedged or saturated channel).
+    #[cfg(test)]
+    pub(crate) fn track_open_overlay(&self, uri: &str) {
+        self.open_overlays.lock().unwrap().insert(uri.to_string());
     }
 
     /// The gated write surface over the relay's injection port. The

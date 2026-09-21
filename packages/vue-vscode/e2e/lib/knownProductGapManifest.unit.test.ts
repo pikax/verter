@@ -3,7 +3,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { KNOWN_PRODUCT_GAP_ROUTE_KEYS, knownProductGapsForRoute } from "./knownProductGapManifest";
+import {
+  KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS,
+  KNOWN_PRODUCT_GAP_ROUTE_KEYS,
+  knownProductGapCanariesForRoute,
+  knownProductGapsForRoute,
+} from "./knownProductGapManifest";
 import { buildParityTestInventory, PARITY_FIXTURES } from "./parityTestInventory";
 import { TYPE_PROVIDER_ROUTES } from "./routeInventory";
 
@@ -95,5 +100,59 @@ describe("known product-gap manifest", () => {
     expect(vueTsserver["depth.rename.script-and-markup.min-two-edits"]).toBe(
       "ISSUE-depth-rename-apply",
     );
+  });
+
+  it("declares canaries only for required test IDs on declared routes", () => {
+    const inventory = buildParityTestInventory({
+      suiteRoot: resolve(libRoot, "../suite/parity"),
+      matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
+    });
+    expect(KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS.length).toBeGreaterThan(0);
+    for (const route of KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS) {
+      expect(KNOWN_PRODUCT_GAP_ROUTE_KEYS).toContain(route);
+      const [fixture, provider] = route.split("@") as [(typeof PARITY_FIXTURES)[number], string];
+      const required = new Set(inventory.testIdsByFixture[fixture]);
+      for (const [id, canary] of Object.entries(
+        knownProductGapCanariesForRoute(fixture, provider),
+      )) {
+        expect(required.has(id), `${route}: ${id}`).toBe(true);
+        expect(canary.issue).toMatch(/^ISSUE-[A-Za-z0-9_-]+$/);
+        // A failure pattern that matches anything would tolerate any regression.
+        expect(canary.failure.test(""), `${route}: ${id}`).toBe(false);
+        expect(canary.failure.test("Diagnostics did not complete within 12000ms")).toBe(false);
+      }
+    }
+  });
+
+  it("never declares one test as both a skipped gap and a canary on a route", () => {
+    for (const fixture of PARITY_FIXTURES) {
+      for (const provider of TYPE_PROVIDER_ROUTES) {
+        const skipped = knownProductGapsForRoute(fixture, provider);
+        const both = Object.keys(knownProductGapCanariesForRoute(fixture, provider)).filter(
+          (id) => skipped[id] !== undefined,
+        );
+        expect(both, `${fixture}@${provider}`).toEqual([]);
+      }
+    }
+  });
+
+  it("runs the plain-TS consumer cases as canaries on the editor-shared tsgo route only", () => {
+    const issue = "ISSUE-shared-tsgo-plain-ts-consumer";
+    const canaries = knownProductGapCanariesForRoute("vue-parity", "shared-tsgo");
+    expect(
+      Object.fromEntries(Object.entries(canaries).map(([id, row]) => [id, row.issue])),
+    ).toEqual({
+      "ide.complete.import-path-carrier": issue,
+      "testing-api.vue.public-importer-hides-setup-bindings": issue,
+      "vue.public-surface.consumer-source-documents-negative": issue,
+      "vue.public-surface.no-secret-internal-on-component-hover": issue,
+    });
+    expect(KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS).toEqual(["vue-parity@shared-tsgo"]);
+    for (const fixture of PARITY_FIXTURES) {
+      for (const provider of TYPE_PROVIDER_ROUTES) {
+        if (fixture === "vue-parity" && provider === "shared-tsgo") continue;
+        expect(knownProductGapCanariesForRoute(fixture, provider)).toEqual({});
+      }
+    }
   });
 });

@@ -62,6 +62,10 @@ fn owned_is_the_default_for_each_absent_precondition() {
         EligibilityFailure::VersionGateNotGreen,
         EligibilityFailure::AttachNotLive,
         EligibilityFailure::ProjectNotBound,
+        EligibilityFailure::GeneratedUnitsNotAdmitted(
+            verter_workspace::GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+        ),
+        EligibilityFailure::GeneratedUnitAdmissionUnproven,
         EligibilityFailure::ProxyUnavailable,
         EligibilityFailure::EditorBindingMismatch,
     ];

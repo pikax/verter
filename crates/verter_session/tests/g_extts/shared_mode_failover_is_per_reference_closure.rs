@@ -501,3 +501,31 @@ fn shared_mode_failover_is_per_reference_closure_self_test_discriminates() {
         "the plant and the real selector disagree on the target side — the predicate discriminates"
     );
 }
+
+/// A member whose generated units are not admitted to its configured project
+/// moves the WHOLE reference closure OWNED — a sibling that is fully eligible is
+/// never served SHARED beside it — and the decision names that reason.
+#[test]
+fn unadmitted_generated_units_move_the_whole_closure_owned() {
+    use verter_workspace::GeneratedUnitNonAdmissionReason;
+
+    let (a, b) = (pid(1), pid(2));
+    let failure = EligibilityFailure::GeneratedUnitsNotAdmitted(
+        GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+    );
+    let rows: GraphRows = vec![
+        (a, ProjectEligibility::Eligible, vec![b]),
+        (b, ProjectEligibility::Owned(failure), vec![]),
+    ];
+    for root in [a, b] {
+        let graph = build_graph(&rows);
+        let decision = select_component_mode(&graph, &root, &candidates());
+        assert_eq!(decision.mode(), ServeMode::Owned, "root {root:?}");
+        assert_eq!(decision.owned_reason(), Some(OwnedReason::from(failure)));
+        assert_eq!(
+            decision.members().members().collect::<Vec<_>>(),
+            vec![a, b],
+            "the whole closure moves together"
+        );
+    }
+}

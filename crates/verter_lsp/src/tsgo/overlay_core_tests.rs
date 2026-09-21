@@ -24,6 +24,7 @@ struct FakeTransport {
     inject_fails: AtomicBool,
     retract_hangs: AtomicBool,
     inject_gated: AtomicBool,
+    inject_yields: AtomicBool,
     inject_reached: Notify,
     inject_release: Notify,
     retract_gated: AtomicBool,
@@ -39,6 +40,7 @@ impl FakeTransport {
             inject_fails: AtomicBool::new(false),
             retract_hangs: AtomicBool::new(false),
             inject_gated: AtomicBool::new(false),
+            inject_yields: AtomicBool::new(false),
             inject_reached: Notify::new(),
             inject_release: Notify::new(),
             retract_gated: AtomicBool::new(false),
@@ -69,6 +71,12 @@ impl FakeTransport {
     /// Arm the inject GATE: the next injection signals `inject_reached` and BLOCKS until
     /// `release_inject` is called — models an inject that is mid-await while the transport
     /// is re-established underneath it (the reconnect split-brain window).
+    /// Make every inject take a few scheduler turns, as a real round-trip does, so
+    /// concurrent callers interleave instead of running one after another.
+    fn set_inject_yields(&self, yields: bool) {
+        self.inject_yields.store(yields, Ordering::SeqCst);
+    }
+
     fn arm_inject_gate(&self) {
         self.inject_gated.store(true, Ordering::SeqCst);
     }
@@ -96,8 +104,14 @@ impl OverlayTransport for FakeTransport {
     fn inject(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let fails = self.inject_fails.load(Ordering::SeqCst);
         let gated = self.inject_gated.load(Ordering::SeqCst);
+        let yields = self.inject_yields.load(Ordering::SeqCst);
         let entry = format!("{path}={content}");
         Box::pin(async move {
+            if yields {
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+            }
             if gated {
                 // Signal the injection is in-flight, then block until released — the
                 // transport may be re-established (a new epoch observed) meanwhile.
@@ -851,6 +865,46 @@ async fn stale_inflight_injection_cannot_mark_new_epoch_synced() {
         core.is_synced("/ws/Foo.vue.tsx"),
         "a genuine B-epoch injection syncs the carrier"
     );
+}
+
+/// An editor fires several requests at once for the file it just opened, and each
+/// one sweeps the SAME dirty set. The shadow-safety predicate resolves project
+/// ownership per carrier, so repeating it per request multiplied a project-wide
+/// sweep by the number of requests in flight — tens of seconds in which nothing was
+/// injected at all. Concurrent sweeps evaluate each carrier once between them.
+#[tokio::test]
+async fn concurrent_sweeps_evaluate_shadow_safety_once_per_carrier() {
+    let core = LazyOverlayCore::<FakeTransport>::new();
+    let carriers = 12;
+    for index in 0..carriers {
+        core.record_content(&format!("/ws/C{index}.vue.tsx"), "v1");
+    }
+    let established = establish_alive(&core, 1, "nonce-1").await;
+    established.transport.set_inject_yields(true);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let sweep = || {
+        let calls = Arc::clone(&calls);
+        core.inject_all_dirty(
+            &established,
+            1,
+            |_, _| true,
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+        )
+    };
+    tokio::join!(sweep(), sweep(), sweep(), sweep(), sweep(), sweep());
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        carriers,
+        "six concurrent sweeps must not each re-evaluate every carrier"
+    );
+    for index in 0..carriers {
+        assert!(core.is_synced(&format!("/ws/C{index}.vue.tsx")));
+    }
 }
 
 /// A content-clean carrier whose shadow-safety generation is unchanged
