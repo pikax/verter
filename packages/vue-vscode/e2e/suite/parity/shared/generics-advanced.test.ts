@@ -28,6 +28,7 @@ import {
   failParityGap,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
+import { SUITE_TIMEOUT_MS } from "../../../lib/timeouts";
 
 function parityFramework(): "vue" | "svelte" | null {
   if (FIXTURE_NAME === "vue-parity") return "vue";
@@ -134,7 +135,7 @@ suite(`Advanced generics [${FIXTURE_NAME}]`, function () {
     if (!fw) {
       throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     }
-    this.timeout(20_000);
+    this.timeout(SUITE_TIMEOUT_MS);
     await ensureParityReady(fw === "vue" ? "src/App.vue" : "src/App.svelte");
   });
 
