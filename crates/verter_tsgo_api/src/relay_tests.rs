@@ -209,6 +209,113 @@ async fn carrier_channel_allows_didopen_didchange_didclose_barrier_and_apisessio
     }
 }
 
+/// A `didClose` for a URI the channel does not track as open never reaches the wire:
+/// the engine treats an overlay close as a file delete and rebuilds its project, so a
+/// close of a never-opened (or already-closed) overlay is pure cost.
+#[tokio::test]
+async fn did_close_of_untracked_overlay_writes_nothing() {
+    let (conn, trace, join) = connection_to_recording_server();
+    let overlays = StdMutex::new(HashSet::new());
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
+
+    let uri = "file:///ws/Idem.vue.tsx";
+    channel
+        .did_close(uri)
+        .await
+        .expect("closing a never-opened overlay is a successful no-op");
+    channel
+        .did_open(uri, "typescriptreact", 1, "export {};")
+        .await
+        .expect("didOpen passes the gate");
+    channel.did_close(uri).await.expect("the tracked close");
+    channel
+        .did_close(uri)
+        .await
+        .expect("closing an already-closed overlay is a successful no-op");
+
+    conn.close().await.unwrap();
+    join.await.unwrap();
+    assert_eq!(
+        trace_methods(&trace),
+        vec![
+            "textDocument/didOpen".to_string(),
+            "textDocument/didClose".to_string()
+        ],
+        "only the close of the TRACKED overlay reaches the wire"
+    );
+}
+
+/// A sink whose notification send never completes (a wedged writer) — it records the
+/// method it was handed first.
+struct WedgedNotifySink {
+    wedge: &'static str,
+    seen: TestMutex<Vec<String>>,
+}
+
+impl GatedWireSink for WedgedNotifySink {
+    fn send_notify<'a>(
+        &'a self,
+        method: &'a str,
+        _params: serde_json::Value,
+    ) -> SinkFuture<'a, ()> {
+        self.seen.lock().unwrap().push(method.to_string());
+        if method == self.wedge {
+            Box::pin(std::future::pending())
+        } else {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn send_request<'a>(
+        &'a self,
+        _method: &'a str,
+        _params: serde_json::Value,
+    ) -> SinkFuture<'a, serde_json::Value> {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+}
+
+/// A `didOpen` whose send was abandoned mid-flight MAY have reached the engine, so the
+/// overlay must already be tracked as open: its retracting `didClose` has to reach the
+/// wire rather than be dropped as a close of an unknown overlay.
+#[tokio::test]
+async fn abandoned_did_open_send_stays_retractable() {
+    let sink = WedgedNotifySink {
+        wedge: "textDocument/didOpen",
+        seen: TestMutex::new(Vec::new()),
+    };
+    let overlays = StdMutex::new(HashSet::new());
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&sink, &overlays, &taint);
+
+    let uri = "file:///ws/Wedged.vue.tsx";
+    let abandoned = tokio::time::timeout(
+        Duration::from_millis(20),
+        channel.did_open(uri, "typescriptreact", 1, "export {};"),
+    )
+    .await;
+    assert!(abandoned.is_err(), "the wedged send is abandoned");
+    assert!(
+        overlays.lock().unwrap().contains(uri),
+        "a possibly-sent didOpen is tracked as open BEFORE its send completes"
+    );
+
+    channel
+        .did_close(uri)
+        .await
+        .expect("the retract reaches the sink");
+    assert_eq!(
+        *sink.seen.lock().unwrap(),
+        vec![
+            "textDocument/didOpen".to_string(),
+            "textDocument/didClose".to_string()
+        ],
+        "the possibly-open overlay's retract is written"
+    );
+    assert!(!overlays.lock().unwrap().contains(uri));
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Kind-correctness: an allowlisted method sent as the WRONG JSON-RPC kind is
 // refused before the wire (not just name-checked); the correctly-kinded op

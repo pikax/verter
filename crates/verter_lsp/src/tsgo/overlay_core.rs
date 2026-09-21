@@ -480,7 +480,16 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         generation: u64,
         carrier_gate: &Arc<AsyncMutex<()>>,
     ) {
+        let gate_wait = std::time::Instant::now();
         let _gate = carrier_gate.lock().await;
+        let gate_waited = gate_wait.elapsed();
+        if gate_waited > std::time::Duration::from_millis(500) {
+            tracing::debug!(
+                path,
+                waited_ms = gate_waited.as_millis() as u64,
+                "shared overlay: waited for the carrier gate"
+            );
+        }
         // DIRTY gate under a brief sync lock — never held across the inject await. A stale
         // A/EA invocation after B/EB is rejected before touching A.
         let (content, had_prior_overlay) = {
@@ -521,7 +530,17 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
             (Arc::clone(&rec.content), had_prior_overlay)
         };
         // Physical inject — carrier gate held, state lock dropped.
-        if transport.inject(path, &content).await.is_err() {
+        let inject_started = std::time::Instant::now();
+        let injected = transport.inject(path, &content).await;
+        if let Err(error) = &injected {
+            tracing::debug!(
+                path,
+                elapsed_ms = inject_started.elapsed().as_millis() as u64,
+                %error,
+                "shared overlay: injection failed"
+            );
+        }
+        if injected.is_err() {
             // The inject reported NO new landing. A FIRST injection (no prior overlay) needs no
             // retract — nothing landed. But if a prior overlay was physically landed for
             // `run_epoch` (its marker was cleared above), that overlay is STILL open in the
@@ -700,6 +719,30 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         S: Fn(&str, OverlayPriority) -> bool,
         F: Fn(&str) -> bool,
     {
+        self.inject_all_dirty_paced(established, generation, in_scope, should_inject, usize::MAX)
+            .await;
+    }
+
+    /// [`Self::inject_all_dirty`] issuing at most `at_once` carriers together, and
+    /// reporting how many carriers the pass had to consider.
+    ///
+    /// A REQUEST injects its whole scope together (`usize::MAX`): that is the work
+    /// it is waiting for. The background pre-injection paces itself instead — the
+    /// editor's engine absorbs an overlay in a few hundred milliseconds and the
+    /// relay's control channel is serial, so a request arriving mid-sweep waits for
+    /// at most one small group rather than for the rest of the project.
+    pub(crate) async fn inject_all_dirty_paced<S, F>(
+        &self,
+        established: &EstablishedTransport<T>,
+        generation: u64,
+        in_scope: S,
+        should_inject: F,
+        at_once: usize,
+    ) -> usize
+    where
+        S: Fn(&str, OverlayPriority) -> bool,
+        F: Fn(&str) -> bool,
+    {
         let run_epoch = established.identity.epoch;
         let transport = &established.transport;
         // Snapshot the candidate carriers under a brief lock — never held across the
@@ -748,30 +791,71 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                 "shared overlay: injecting dirty editor-demand carriers"
             );
         }
-        for path in candidates {
-            // The FRESH shadow-safety decision for THIS generation is recorded BEFORE the
-            // gated inject/retract (never held across it; monotonic, so an older-generation
-            // run cannot regress a newer decision). A concurrent in-flight injection then
-            // observes this generation's decision at ITS commit: a concurrent flip to
-            // `{safe:false}` VETOES the stale commit, while a genuine re-inject after a
-            // flip-back-to-safe (`{safe:true}`) is not spuriously vetoed by the PRIOR
-            // generation's cached-unsafe decision.
-            if should_inject(&path) {
-                // The single-carrier entry records the `{safe:true}` admission and runs the
-                // gated inject transaction against the bound epoch.
-                self.inject_dirty(established, &path, generation).await;
-            } else {
-                // Flip-to-unsafe: cache `{safe:false}` (so `is_synced` fails closed the
-                // instant it is observed) then retract the carrier's overlay so it leaves
-                // the SHARED Program (its `ContentRecord` is KEPT so it re-injects if it
-                // later flips back to safe), under the carrier gate so it is ordered
-                // w.r.t. any in-flight inject of the same carrier.
-                self.cache_shadow_decision(&path, run_epoch, generation, false);
-                let gate = self.carrier_gate(&path);
-                self.retract_unsafe_bound(transport, run_epoch, &path, generation, &gate)
-                    .await;
-            }
+        // CONCURRENT, not one after another: each carrier is ordered by its own gate,
+        // and writes issued together ride ONE sync barrier (the transport coalesces
+        // them), where a sequential sweep pays the editor's engine a program update
+        // per overlay — ~20 s for the import closure of one open file.
+        let should_inject = &should_inject;
+        let considered = candidates.len();
+        let sweep_started = std::time::Instant::now();
+        let predicate_micros = std::sync::atomic::AtomicU64::new(0);
+        let predicate_micros = &predicate_micros;
+        for group in candidates.chunks(at_once.max(1)) {
+            futures_util::future::join_all(group.iter().cloned().map(|path| async move {
+                // The FRESH shadow-safety decision for THIS generation is recorded BEFORE the
+                // gated inject/retract (never held across it; monotonic, so an older-generation
+                // run cannot regress a newer decision). A concurrent in-flight injection then
+                // observes this generation's decision at ITS commit: a concurrent flip to
+                // `{safe:false}` VETOES the stale commit, while a genuine re-inject after a
+                // flip-back-to-safe (`{safe:true}`) is not spuriously vetoed by the PRIOR
+                // generation's cached-unsafe decision.
+                // A decision already made for THIS generation stands: the generation is
+                // what a change of answer would have advanced. An editor fires several
+                // requests at once for the file it just opened, each sweeping the same
+                // dirty set, and the predicate resolves project ownership per carrier —
+                // repeating it per request multiplied a project-wide sweep by the number
+                // of requests in flight, before a single overlay was injected.
+                let decided = self.state.lock().content.get(&path).and_then(|rec| {
+                    rec.shadow_safety
+                        .as_ref()
+                        .filter(|cache| cache.generation == generation)
+                        .map(|cache| cache.safe)
+                });
+                if decided.unwrap_or_else(|| {
+                    let started = std::time::Instant::now();
+                    let safe = should_inject(&path);
+                    predicate_micros.fetch_add(
+                        started.elapsed().as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    safe
+                }) {
+                    // The single-carrier entry records the `{safe:true}` admission and runs the
+                    // gated inject transaction against the bound epoch.
+                    self.inject_dirty(established, &path, generation).await;
+                } else {
+                    // Flip-to-unsafe: cache `{safe:false}` (so `is_synced` fails closed the
+                    // instant it is observed) then retract the carrier's overlay so it leaves
+                    // the SHARED Program (its `ContentRecord` is KEPT so it re-injects if it
+                    // later flips back to safe), under the carrier gate so it is ordered
+                    // w.r.t. any in-flight inject of the same carrier.
+                    self.cache_shadow_decision(&path, run_epoch, generation, false);
+                    let gate = self.carrier_gate(&path);
+                    self.retract_unsafe_bound(transport, run_epoch, &path, generation, &gate)
+                        .await;
+                }
+            }))
+            .await;
         }
+        if considered > 0 {
+            tracing::debug!(
+                considered,
+                predicate_ms = predicate_micros.load(std::sync::atomic::Ordering::Relaxed) / 1000,
+                total_ms = sweep_started.elapsed().as_millis() as u64,
+                "shared overlay: sweep finished"
+            );
+        }
+        considered
     }
 
     /// Whether the carrier's CURRENT recorded content is confirmed synced into the

@@ -290,6 +290,12 @@ struct OverlayInner {
     /// `BoundProject` mint and the `--api` snapshot rail key on — is read FROM the
     /// established transport (the attach version gate), never a hardcoded literal.
     core: LazyOverlayCore<TsgoSharedProvider>,
+    /// The source-resolution half of [`SharedTsgoOverlay::injection_is_shadow_safe`],
+    /// per SOURCE for ONE workspace content generation. A carrier's companions (IDE,
+    /// API, testing, sidecar) share their source's answer, and resolving project
+    /// ownership is the expensive half; the generation is what any change of answer
+    /// advances, so an older generation's entries are dropped wholesale.
+    source_shadow_safety: parking_lot::Mutex<(u64, std::collections::HashMap<String, bool>)>,
 }
 
 impl SharedTsgoOverlay {
@@ -304,6 +310,7 @@ impl SharedTsgoOverlay {
                 host,
                 rendezvous,
                 core: LazyOverlayCore::new(),
+                source_shadow_safety: parking_lot::Mutex::default(),
             }),
         }
     }
@@ -566,15 +573,32 @@ impl SharedTsgoOverlay {
         let Some(source) = carrier_source_of(companion_path) else {
             return false;
         };
-        match project_binding::resolve_carrier(
+        let generation = ws_read.content_generation();
+        {
+            let mut memo = self.inner.source_shadow_safety.lock();
+            if memo.0 != generation {
+                *memo = (generation, std::collections::HashMap::new());
+            }
+            if let Some(safe) = memo.1.get(&source) {
+                return *safe;
+            }
+        }
+        let Some((resolution, _)) = project_binding::resolve_carrier(
             self.inner.host.as_ref(),
             &source,
             Arc::from(""),
             project_binding::OwnershipReadinessMode::PresentSnapshotAuthoritative,
-        ) {
-            Some((resolution, _)) => injection_shadow_safe(&resolution),
-            None => false,
+        ) else {
+            // No resolution yet is not an answer: never remembered.
+            return false;
+        };
+        let safe = injection_shadow_safe(&resolution);
+        let mut memo = self.inner.source_shadow_safety.lock();
+        // Only an answer for the generation it was computed under is kept.
+        if memo.0 == generation {
+            memo.1.insert(source, safe);
         }
+        safe
     }
 
     /// Lazily establish (once) the SHARED relay-attach transport for the carrier's

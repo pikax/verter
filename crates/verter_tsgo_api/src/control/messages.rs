@@ -31,6 +31,8 @@ pub const METHOD_CARRIER_DID_OPEN_SYNCED: &str = "verter/carrierDidOpenSynced";
 pub const METHOD_CARRIER_DID_CHANGE_SYNCED: &str = "verter/carrierDidChangeSynced";
 /// `verter/carrierDidClose` — retract a carrier overlay.
 pub const METHOD_CARRIER_DID_CLOSE: &str = "verter/carrierDidClose";
+/// Inject several carrier overlays behind ONE ordered sync barrier.
+pub const METHOD_CARRIER_SYNC_BATCH: &str = "verter/carrierSyncBatch";
 /// `verter/initializeApiSession` — mint an `--api` session, return its endpoint.
 pub const METHOD_INITIALIZE_API_SESSION: &str = "verter/initializeApiSession";
 /// `verter/featureRequest` — run one typed, read-only LSP feature request on the
@@ -53,6 +55,11 @@ pub const ERROR_NOT_AUTHENTICATED: i64 = -32012;
 pub const ERROR_MALFORMED_PAYLOAD: i64 = -32013;
 /// JSON-RPC error code: a control op failed against the relay (injection / session).
 pub const ERROR_CONTROL_OP_FAILED: i64 = -32014;
+/// JSON-RPC error code: a carrier overlay write was put on the wire, in order, but
+/// the sync barrier behind it failed or went unanswered — the single-op counterpart
+/// of [`CarrierBatchFailureKind::SentUnconfirmed`]. A server that predates it
+/// reports [`ERROR_CONTROL_OP_FAILED`] instead, which reads as a send failure.
+pub const ERROR_CARRIER_SENT_UNCONFIRMED: i64 = -32015;
 
 /// `verter/hello` params: the version + rendezvous nonce + a client label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +84,10 @@ pub struct ControlCapabilities {
     pub wait_initialized: bool,
     /// Typed, read-only LSP feature requests are available on the relayed editor session.
     pub feature_requests: bool,
+    /// [`METHOD_CARRIER_SYNC_BATCH`] is available. Absent from an older server's
+    /// hello, where it reads as `false` and the client keeps to per-overlay ops.
+    #[serde(default)]
+    pub carrier_batch: bool,
 }
 
 /// `verter/hello` result: the accepted version, session id, wire pin, editor
@@ -131,6 +142,91 @@ pub struct CarrierDidOpenSyncedParams {
     pub version: i64,
     /// The full carrier text.
     pub text: String,
+}
+
+/// One overlay write inside a [`CarrierSyncBatchParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CarrierBatchOp {
+    /// A first injection (`didOpen`).
+    #[serde(rename_all = "camelCase")]
+    Open {
+        /// The carrier URI (`file://…`).
+        uri: String,
+        /// The LSP language id.
+        language_id: String,
+        /// The document version.
+        version: i64,
+        /// The full carrier text.
+        text: String,
+    },
+    /// A full-content update of an already-open overlay (`didChange`).
+    #[serde(rename_all = "camelCase")]
+    Change {
+        /// The carrier URI (`file://…`).
+        uri: String,
+        /// The document version.
+        version: i64,
+        /// The full carrier text.
+        text: String,
+    },
+}
+
+impl CarrierBatchOp {
+    /// The carrier URI this op writes.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        match self {
+            Self::Open { uri, .. } | Self::Change { uri, .. } => uri,
+        }
+    }
+}
+
+/// `verter/carrierSyncBatch` params. The writes are sent in order, then ONE sync
+/// barrier is awaited: LSP consumes one connection in order, so a single completed
+/// request proves every write queued before it was registered. Paying a barrier per
+/// overlay makes the editor's engine rebuild its program per overlay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarrierSyncBatchParams {
+    /// The overlay writes, in send order.
+    pub ops: Vec<CarrierBatchOp>,
+}
+
+/// Why a batch write is not confirmed synced — a closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CarrierBatchFailureKind {
+    /// The write's send failed or did not complete: whether it reached the engine
+    /// is unknown. Also what a failure from a server that predates this field reads
+    /// as — the conservative reading.
+    #[default]
+    SendFailed,
+    /// The write was put on the wire, in order; only the sync barrier behind it
+    /// failed or went unanswered. The engine holds (or will hold) the write — it is
+    /// just not yet proven ordered ahead of an `--api` read.
+    SentUnconfirmed,
+}
+
+/// One write of a batch that is NOT confirmed synced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarrierBatchFailure {
+    /// The carrier URI whose write is unconfirmed.
+    pub uri: String,
+    /// Why.
+    pub message: String,
+    /// Which side of the wire the write stopped on.
+    #[serde(default)]
+    pub kind: CarrierBatchFailureKind,
+}
+
+/// `verter/carrierSyncBatch` result: every op NOT listed is confirmed synced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CarrierSyncBatchResult {
+    /// The unconfirmed writes.
+    pub failures: Vec<CarrierBatchFailure>,
 }
 
 /// `verter/carrierDidChangeSynced` params: a full-content carrier overlay update.

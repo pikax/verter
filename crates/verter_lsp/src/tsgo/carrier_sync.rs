@@ -7,6 +7,7 @@ use std::time::Duration;
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::Mutex as AsyncMutex;
 
+use verter_tsgo_api::error::TsgoApiError;
 use verter_tsgo_api::relay::CARRIER_SYNC_BARRIER_TIMEOUT;
 use verter_type_runtime::protocol::TypeProviderError;
 
@@ -20,11 +21,74 @@ pub(crate) enum CarrierWireOp {
     Change { version: i64, content: Arc<str> },
     /// Send `didClose` — remove the carrier's overlay from the shared Program. Issued in
     /// THREE roles (all end the doc): a top-level carrier close; the best-effort retract of a
-    /// possibly-open Program file after a first-open barrier failed (result ignored — the slot
-    /// is already marked `PossiblyOpenUnsynced`); and the BOUNDED reconcile that precedes a
+    /// possibly-open Program file after a first-open SEND failed (a confirmed retract drops the
+    /// slot; otherwise it stays the already-marked `PossiblyOpenUnsynced` shell); and the BOUNDED reconcile that precedes a
     /// fresh `didOpen` for a `PossiblyOpenUnsynced` shell (a reconcile-close FAILURE aborts the
     /// open and fails closed to OWNED).
     Close,
+}
+
+/// Which side of the wire a failed carrier write stopped on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CarrierWireFailure {
+    /// The write's send failed or did not complete — whether the shared Program received
+    /// it is unknown.
+    SendFailed,
+    /// The write was put on the wire, in order; only the sync barrier behind it failed or
+    /// went unanswered. The shared Program holds (or will hold) the write, but nothing
+    /// proves it is ordered ahead of an `--api` read — so it is never served from.
+    SentUnconfirmed,
+}
+
+/// A carrier wire sink's failure: the fail-closed error plus which side of the wire the
+/// write stopped on. A bare [`TypeProviderError`] converts as
+/// [`CarrierWireFailure::SendFailed`] — the conservative reading.
+#[derive(Debug)]
+pub(crate) struct CarrierWireError {
+    pub(crate) failure: CarrierWireFailure,
+    pub(crate) error: TypeProviderError,
+}
+
+impl CarrierWireError {
+    /// A write that reached the wire but whose barrier is unconfirmed.
+    pub(crate) fn sent_unconfirmed(error: TypeProviderError) -> Self {
+        Self {
+            failure: CarrierWireFailure::SentUnconfirmed,
+            error,
+        }
+    }
+}
+
+impl From<TypeProviderError> for CarrierWireError {
+    fn from(error: TypeProviderError) -> Self {
+        Self {
+            failure: CarrierWireFailure::SendFailed,
+            error,
+        }
+    }
+}
+
+/// Classify a shim control-channel failure of the carrier `op`. The control client reports a
+/// write the shim SENT but could not confirm behind its barrier as
+/// [`TsgoApiError::Timeout`] — on the single-op and the batched path alike; every other
+/// failure leaves the send itself in doubt.
+pub(crate) fn carrier_wire_error(op: &str, error: &TsgoApiError) -> CarrierWireError {
+    let fail_closed = TypeProviderError::new(format!("shared carrier {op}: {error}"));
+    match error {
+        TsgoApiError::Timeout(_) => CarrierWireError::sent_unconfirmed(fail_closed),
+        _ => fail_closed.into(),
+    }
+}
+
+/// How an injection's wire send + sync barrier resolved — the input to [`sync_commit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WireOutcome {
+    /// The barrier confirmed the write.
+    Synced,
+    /// See [`CarrierWireFailure::SentUnconfirmed`].
+    SentUnconfirmed,
+    /// See [`CarrierWireFailure::SendFailed`].
+    SendFailed,
 }
 
 /// Await a carrier `didClose` through `sink`, BOUNDED by `bound` — the caller passes
@@ -37,16 +101,17 @@ pub(crate) enum CarrierWireOp {
 /// retract is simply dropped — all fail closed to OWNED. `bound` is injectable so a test can
 /// prove the internal timeout FIRES (a never-answering `didClose` returns `Err` within a short
 /// bound) — removing the wrapper would leave that test to hang unbounded.
-async fn bounded_carrier_close_with_timeout<S, Fut>(
+async fn bounded_carrier_close_with_timeout<S, Fut, E>(
     sink: &S,
     bound: Duration,
 ) -> Result<(), TypeProviderError>
 where
     S: Fn(CarrierWireOp) -> Fut,
-    Fut: Future<Output = Result<(), TypeProviderError>>,
+    Fut: Future<Output = Result<(), E>>,
+    E: Into<CarrierWireError>,
 {
     match tokio::time::timeout(bound, sink(CarrierWireOp::Close)).await {
-        Ok(barrier) => barrier,
+        Ok(barrier) => barrier.map_err(|error| error.into().error),
         Err(_elapsed) => Err(TypeProviderError::new(
             "shared carrier didClose exceeded the sync-barrier bound (fail-closed to OWNED)",
         )),
@@ -282,9 +347,12 @@ impl CarrierSyncState {
     ///   (reserved under the gate — no TOCTOU). A `PossiblyOpenUnsynced` shell first sends a
     ///   BOUNDED reconcile `didClose` (fail closed to OWNED on failure), then sends the wire op,
     ///   awaits its barrier, and commits the local slot consistently. A first-open or
-    ///   reconcile-open barrier failure marks the slot `PossiblyOpenUnsynced` and best-effort
-    ///   retracts the possibly-open Program file; a `didChange` failure fails closed to the
-    ///   non-serveable `OpenUnsyncedContent` slot (the doc is open but its text is now uncertain).
+    ///   reconcile-open whose SEND failed marks the slot `PossiblyOpenUnsynced` and retracts the
+    ///   possibly-open Program file — a CONFIRMED retract then drops the slot (the retry is a
+    ///   plain `didOpen`), an unconfirmed one keeps the shell. An open that reached the wire with
+    ///   only its barrier unconfirmed, and any `didChange` failure, fail closed to the
+    ///   non-serveable `OpenUnsyncedContent` slot (the doc is open but its text is uncertain), so
+    ///   the retry is a fresh `didChange`.
     /// - [`PendingKind::Close`]: classify by slot state under the gate. Send `didClose` ONLY
     ///   when the carrier is currently reserved (open/uncertain in the Program), transitioning
     ///   the slot to the non-serveable `PossiblyOpenUnsynced` shell BEFORE the bounded barrier
@@ -295,7 +363,7 @@ impl CarrierSyncState {
     ///
     /// Returns the barrier `Result` (a broken connection is an `Err` the caller fails
     /// closed on).
-    pub(crate) async fn drive<S, Fut>(
+    pub(crate) async fn drive<S, Fut, E>(
         &self,
         carrier: &str,
         kind: PendingKind,
@@ -303,7 +371,8 @@ impl CarrierSyncState {
     ) -> Result<(), TypeProviderError>
     where
         S: Fn(CarrierWireOp) -> Fut,
-        Fut: Future<Output = Result<(), TypeProviderError>>,
+        Fut: Future<Output = Result<(), E>>,
+        E: Into<CarrierWireError>,
     {
         // 1. Record this submission as the carrier's latest pending op.
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
@@ -375,22 +444,40 @@ impl CarrierSyncState {
                 // refresh fails closed to `OpenUnsyncedContent`) THEN the gate guard, so a
                 // cancelled inject never strands a serveable slot, and a later op re-drives from a
                 // locally consistent slot view.
-                let result = sink(op).await;
+                let result = sink(op).await.map_err(Into::into);
+                let outcome = match &result {
+                    Ok(()) => WireOutcome::Synced,
+                    Err(CarrierWireError {
+                        failure: CarrierWireFailure::SentUnconfirmed,
+                        ..
+                    }) => WireOutcome::SentUnconfirmed,
+                    Err(CarrierWireError {
+                        failure: CarrierWireFailure::SendFailed,
+                        ..
+                    }) => WireOutcome::SendFailed,
+                };
+                let result = result.map_err(|failed: CarrierWireError| failed.error);
 
                 // The barrier COMPLETED (no cancellation): reconcile the local slot with the
                 // shared Program. This OWNS the committed slot, so the rollback is disarmed once
-                // it runs. A first-open / reconcile-open FAILURE marks the slot
+                // it runs. A first-open / reconcile-open SEND failure marks the slot
                 // `PossiblyOpenUnsynced` (stops SHARED serving) BEFORE the awaited best-effort
                 // retract `didClose`, so a wedged/cancelled retract can never leave serveable
-                // state and the next inject reconciles; a `didChange` failure marks the slot
-                // `OpenUnsyncedContent` (stops SHARED serving; the next inject retries a fresh
-                // `didChange`).
-                let commit = sync_commit(action, result.is_ok());
+                // state and the next inject reconciles; a sent-but-unconfirmed open and a
+                // `didChange` failure mark the slot `OpenUnsyncedContent` (stops SHARED serving;
+                // the next inject retries a fresh `didChange`).
+                let commit = sync_commit(action, outcome);
                 apply_local_sync_commit(&self.injected, carrier, drain_content, commit);
                 rollback.disarm();
-                if matches!(commit, SyncCommit::RetractOpen) {
-                    let _ =
-                        bounded_carrier_close_with_timeout(&sink, self.close_barrier_bound).await;
+                if matches!(commit, SyncCommit::RetractOpen)
+                    && bounded_carrier_close_with_timeout(&sink, self.close_barrier_bound)
+                        .await
+                        .is_ok()
+                {
+                    // The retract is CONFIRMED: the Program holds no overlay, so the carrier is
+                    // vacant again and the retry is a plain `didOpen`. Only an unconfirmed retract
+                    // keeps the open-uncertain shell (whose retry reconciles with a close first).
+                    remove_carrier_slot(&self.injected, carrier);
                 }
                 if result.is_ok() {
                     self.mark_committed(carrier, drain_seq);
@@ -466,7 +553,8 @@ pub(crate) enum CarrierSlot {
     Synced { content: Arc<str> },
     /// The doc is open-CERTAIN but its content is UNCERTAIN: a `didChange` refresh was
     /// dispatched onto an already-open doc, but its barrier FAILED / timed out / was cancelled,
-    /// so the shared Program MAY already hold the new text while the confirmation was lost.
+    /// so the shared Program MAY already hold the new text while the confirmation was lost — or
+    /// a `didOpen` reached the wire and only its barrier is unconfirmed.
     /// NEVER serveable ([`synced_content`] yields `None`) — serving the PRIOR synced text would
     /// misposition SHARED diagnostics against a stale basis (the correctness law is fail-closed
     /// under POSSIBLE mismatch, not the common case), and the unaccepted new text is never
@@ -475,9 +563,9 @@ pub(crate) enum CarrierSlot {
     /// [`Self::PossiblyOpenUnsynced`], where the doc's open state itself is unproven).
     OpenUnsyncedContent,
     /// The doc's OPEN state itself is UNCERTAIN — the general fail-closed shell reached by every
-    /// path that leaves the shared Program's open/closed state unproven: a cancelled/failed
+    /// path that leaves the shared Program's open/closed state unproven: a cancelled
     /// first-`didOpen` OR reconcile-then-`didOpen` (which MAY have reached the Program); a
-    /// first-open barrier failure's best-effort retract; and a CLOSE's up-front transition (an
+    /// first-open send failure whose best-effort retract was not confirmed; and a CLOSE's up-front transition (an
     /// open/change/close carrier all mark this shell BEFORE the close barrier), left in place by a
     /// cancelled / failed / timed-out `didClose`. NEVER serveable ([`synced_content`] yields
     /// `None`); because the open state is unproven, the next inject RECONCILES it (a bounded
@@ -669,14 +757,16 @@ pub(crate) enum SyncCommit {
     /// The barrier SYNCED — promote the reserved text to the slot's authoritative
     /// synced content (the only content served / positioned from).
     Promote,
-    /// A first `didOpen` (or a `didOpen` issued after a reconcile) barrier FAILED/timed out — the
+    /// A first `didOpen` (or a `didOpen` issued after a reconcile) whose SEND failed — the
     /// Program MAY hold the `didOpen`. Stop serving by marking the slot
     /// [`CarrierSlot::PossiblyOpenUnsynced`] (never destroy prior content — there is none)
-    /// and best-effort retract it (`didClose`); the uncertain state forces a reconcile on the
-    /// next inject. A failed retract leaves the fail-closed shell for that reconcile.
+    /// and best-effort retract it (`didClose`). A CONFIRMED retract drops the slot (the next
+    /// inject is a plain `didOpen`); a failed retract leaves the fail-closed shell, which
+    /// forces a reconcile on the next inject.
     RetractOpen,
-    /// A `didChange` (refresh) barrier FAILED/timed out — the `didChange` was dispatched onto
-    /// an already-open doc BEFORE its barrier, so the Program MAY already hold the new text
+    /// The doc is OPEN but its content is unconfirmed: a `didOpen` that reached the wire with
+    /// only its barrier failed/unanswered, or a `didChange` (refresh) failure — the write was
+    /// dispatched BEFORE its barrier, so the Program MAY already hold the new text
     /// while its confirmation was lost. Fail closed by marking the slot
     /// [`CarrierSlot::OpenUnsyncedContent`] (non-serveable): never serve the PRIOR synced text
     /// (a POSSIBLE mismatch against the Program's actual text) and never the
@@ -685,18 +775,31 @@ pub(crate) enum SyncCommit {
 }
 
 /// Map an injection's sync-barrier outcome to the local-slot action that keeps the
-/// local view consistent with the shared Program: any success promotes; a first-open
-/// failure retracts the possibly-open Program file; a `didChange` failure fails closed to
-/// the open-but-content-uncertain state.
-pub(crate) fn sync_commit(action: InjectAction, barrier_ok: bool) -> SyncCommit {
-    match (action, barrier_ok) {
-        (_, true) => SyncCommit::Promote,
-        // A first `Open` and a `ReconcileThenOpen` after a reconcile both end on a `didOpen`, so a
-        // failure retracts the possibly-open Program file.
-        (InjectAction::Open | InjectAction::ReconcileThenOpen, false) => SyncCommit::RetractOpen,
-        // A `Change` (refresh) failure fails closed to `OpenUnsyncedContent` — the doc is open
-        // but the refresh may already have applied, so the prior synced text is never re-served.
-        (InjectAction::Change, false) => SyncCommit::MarkOpenUnsyncedContent,
+/// local view consistent with the shared Program: any success promotes; a first-open SEND
+/// failure retracts the possibly-open Program file; a sent-but-unconfirmed open and a
+/// `didChange` failure fail closed to the open-but-content-uncertain state.
+pub(crate) fn sync_commit(action: InjectAction, outcome: WireOutcome) -> SyncCommit {
+    match (action, outcome) {
+        (_, WireOutcome::Synced) => SyncCommit::Promote,
+        // A first `Open` and a `ReconcileThenOpen` after a reconcile both end on a `didOpen`. One
+        // that REACHED the wire leaves the doc open with unconfirmed content — the same state a
+        // lost-confirmation refresh leaves — so it is kept, not retracted: a retract costs the
+        // shared Program a file delete and the retry a file create, where the kept overlay's retry
+        // is one full-text `didChange`.
+        (InjectAction::Open | InjectAction::ReconcileThenOpen, WireOutcome::SentUnconfirmed) => {
+            SyncCommit::MarkOpenUnsyncedContent
+        }
+        // A `didOpen` whose SEND failed may or may not have reached the Program: retract the
+        // possibly-open file.
+        (InjectAction::Open | InjectAction::ReconcileThenOpen, WireOutcome::SendFailed) => {
+            SyncCommit::RetractOpen
+        }
+        // A `Change` (refresh) failure of either kind fails closed to `OpenUnsyncedContent` — the
+        // doc is open but the refresh may already have applied, so the prior synced text is never
+        // re-served.
+        (InjectAction::Change, WireOutcome::SentUnconfirmed | WireOutcome::SendFailed) => {
+            SyncCommit::MarkOpenUnsyncedContent
+        }
     }
 }
 

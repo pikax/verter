@@ -43,8 +43,9 @@ use std::sync::Arc;
 use parking_lot::Mutex as SyncMutex;
 
 use verter_tsgo_api::api_attach::ApiAttachClient;
+use verter_tsgo_api::control::messages::CarrierBatchOp;
 use verter_tsgo_api::control::messages::FeatureRequestMethod;
-use verter_tsgo_api::control::{Advertisement, ControlClient};
+use verter_tsgo_api::control::{Advertisement, ControlClient, OverlayBatcher};
 use verter_tsgo_api::gate::{self, ObservedEngine};
 use verter_tsgo_api::jsonrpc::framing::{encode_message, MessageFramer};
 use verter_tsgo_api::jsonrpc::JsonRpcConnection;
@@ -385,6 +386,9 @@ pub struct TsgoSharedProvider {
     /// The relay-shim control client — the SOLE carrier-injection path (through
     /// the shim's gated injection channel; Verter never mutates leak policy).
     control: Arc<ControlClient>,
+    /// Coalesces concurrent overlay writes behind one sync barrier. `None` when the
+    /// relay predates `verter/carrierSyncBatch`; writes then go one request each.
+    batcher: Option<OverlayBatcher>,
     /// Full interactive TypeProvider facade over the SAME editor-owned LSP
     /// connection. It owns no process and sends no initialize/shutdown/exit; its
     /// requests are multiplexed through the relay's typed feature control method.
@@ -622,8 +626,13 @@ impl TsgoSharedProvider {
             establishment: decision,
         };
 
+        let batcher = hello
+            .capabilities
+            .carrier_batch
+            .then(|| OverlayBatcher::new(Arc::clone(&control)));
         Ok(Self {
             control,
+            batcher,
             features,
             api,
             controller,
@@ -754,6 +763,7 @@ impl TsgoSharedProvider {
         tsconfig: &str,
         include_syntactic: bool,
     ) -> Result<Option<Vec<TypeDiagnostic>>, TypeProviderError> {
+        let api_started = std::time::Instant::now();
         let snap = match self
             .api
             .update_snapshot_open_project(tsconfig, &self.observed_version)
@@ -767,6 +777,7 @@ impl TsgoSharedProvider {
                 return Ok(None);
             }
         };
+        let snapshot_ms = api_started.elapsed().as_millis() as u64;
         let Some((project_id, engine_carrier)) =
             select_configured_project_carrier(&snap, tsconfig, carrier)
         else {
@@ -809,6 +820,12 @@ impl TsgoSharedProvider {
             );
         }
 
+        tracing::debug!(
+            carrier,
+            snapshot_ms,
+            total_ms = api_started.elapsed().as_millis() as u64,
+            "shared --api carrier diagnostics"
+        );
         Ok(Some(position_carrier_diagnostics(
             &diags,
             Some(content),
@@ -830,8 +847,9 @@ impl TsgoSharedProvider {
     /// drains the newest pending). This method supplies the wire sink (the shim CONTROL
     /// channel: `carrier_did_open_synced` / `carrier_did_change_synced` /
     /// `carrier_did_close`); the ordering + local-slot consistency ([`reserve_carrier_capturing`] /
-    /// [`sync_commit`] — a first-open barrier failure marks the slot `PossiblyOpenUnsynced`
-    /// and best-effort retracts the possibly-open Program file; a `didChange` failure fails
+    /// [`sync_commit`] — a first-open SEND failure marks the slot `PossiblyOpenUnsynced`
+    /// and best-effort retracts the possibly-open Program file; an open that was sent but whose
+    /// barrier is unconfirmed, and a `didChange` failure, fail
     /// closed to the non-serveable `OpenUnsyncedContent` slot; a close transitions the slot to
     /// the non-serveable `PossiblyOpenUnsynced` shell BEFORE its barrier and removes it only on a
     /// SUCCESSFUL close — a failed/timed-out close leaves the shell to reconcile) live in the
@@ -844,25 +862,46 @@ impl TsgoSharedProvider {
         self.sync
             .drive(&carrier, kind, |op| async {
                 match op {
-                    CarrierWireOp::Open { version, content } => self
-                        .control
-                        .carrier_did_open_synced(&uri, language_id, version, &content)
-                        .await
-                        .map_err(|e| {
-                            TypeProviderError::new(format!("shared carrier didOpen: {e}"))
-                        }),
-                    CarrierWireOp::Change { version, content } => self
-                        .control
-                        .carrier_did_change_synced(&uri, version, &content)
-                        .await
-                        .map_err(|e| {
-                            TypeProviderError::new(format!("shared carrier didChange: {e}"))
-                        }),
-                    CarrierWireOp::Close => {
-                        self.control.carrier_did_close(&uri).await.map_err(|e| {
-                            TypeProviderError::new(format!("shared carrier didClose: {e}"))
-                        })
+                    CarrierWireOp::Open { version, content } => match &self.batcher {
+                        Some(batcher) => {
+                            batcher
+                                .submit(CarrierBatchOp::Open {
+                                    uri: uri.clone(),
+                                    language_id: language_id.to_string(),
+                                    version,
+                                    text: content.to_string(),
+                                })
+                                .await
+                        }
+                        None => {
+                            self.control
+                                .carrier_did_open_synced(&uri, language_id, version, &content)
+                                .await
+                        }
                     }
+                    .map_err(|e| carrier_wire_error("didOpen", &e)),
+                    CarrierWireOp::Change { version, content } => match &self.batcher {
+                        Some(batcher) => {
+                            batcher
+                                .submit(CarrierBatchOp::Change {
+                                    uri: uri.clone(),
+                                    version,
+                                    text: content.to_string(),
+                                })
+                                .await
+                        }
+                        None => {
+                            self.control
+                                .carrier_did_change_synced(&uri, version, &content)
+                                .await
+                        }
+                    }
+                    .map_err(|e| carrier_wire_error("didChange", &e)),
+                    CarrierWireOp::Close => self
+                        .control
+                        .carrier_did_close(&uri)
+                        .await
+                        .map_err(|e| carrier_wire_error("didClose", &e)),
                 }
             })
             .await
@@ -957,18 +996,30 @@ where
             let write = Arc::clone(&write);
             tokio::spawn(async move {
                 let response = match method {
-                    Some(method) => match control.feature_request(method, params).await {
-                        Ok(result) => serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": result,
-                        }),
-                        Err(error) => serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "error": { "code": -32014, "message": error.to_string() },
-                        }),
-                    },
+                    Some(method) => {
+                        let started = std::time::Instant::now();
+                        let result = control.feature_request(method, params).await;
+                        let elapsed = started.elapsed();
+                        if elapsed > std::time::Duration::from_millis(250) {
+                            tracing::debug!(
+                                method = method.as_lsp_method(),
+                                elapsed_ms = elapsed.as_millis() as u64,
+                                "shared feature request was slow"
+                            );
+                        }
+                        match result {
+                            Ok(result) => serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": result,
+                            }),
+                            Err(error) => serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": -32014, "message": error.to_string() },
+                            }),
+                        }
+                    }
                     None => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -1005,8 +1056,16 @@ impl TypeProvider for TsgoSharedProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
+            let started = std::time::Instant::now();
             self.inject_carrier(&path, &content).await?;
+            let injected = started.elapsed();
             self.features.load_file(&path, &content).await?;
+            tracing::debug!(
+                path,
+                inject_ms = injected.as_millis() as u64,
+                total_ms = started.elapsed().as_millis() as u64,
+                "shared overlay injected"
+            );
             Ok(())
         })
     }

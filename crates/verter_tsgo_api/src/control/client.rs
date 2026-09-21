@@ -22,9 +22,10 @@ use super::messages::{
     CarrierDidChangeSyncedParams, CarrierDidCloseParams, CarrierDidOpenSyncedParams, DetachParams,
     FeatureRequestMethod, FeatureRequestParams, FeatureRequestResult, HelloParams, HelloResult,
     InitializeApiSessionResult, StatusResult, WaitInitializedResult,
-    METHOD_CARRIER_DID_CHANGE_SYNCED, METHOD_CARRIER_DID_CLOSE, METHOD_CARRIER_DID_OPEN_SYNCED,
-    METHOD_DETACH, METHOD_FATAL, METHOD_FEATURE_REQUEST, METHOD_HELLO,
-    METHOD_INITIALIZE_API_SESSION, METHOD_STATUS, METHOD_WAIT_INITIALIZED, PROTOCOL_VERSION,
+    ERROR_CARRIER_SENT_UNCONFIRMED, METHOD_CARRIER_DID_CHANGE_SYNCED, METHOD_CARRIER_DID_CLOSE,
+    METHOD_CARRIER_DID_OPEN_SYNCED, METHOD_DETACH, METHOD_FATAL, METHOD_FEATURE_REQUEST,
+    METHOD_HELLO, METHOD_INITIALIZE_API_SESSION, METHOD_STATUS, METHOD_WAIT_INITIALIZED,
+    PROTOCOL_VERSION,
 };
 use super::transport::connect_control_endpoint;
 
@@ -156,10 +157,41 @@ impl ControlClient {
             version,
             text: text.to_string(),
         })?;
-        self.conn
-            .request(METHOD_CARRIER_DID_OPEN_SYNCED, params)
+        self.carrier_write_synced(METHOD_CARRIER_DID_OPEN_SYNCED, params)
+            .await
+    }
+
+    /// Run one synced carrier write. A write the shim SENT but could not confirm
+    /// behind its barrier ([`ERROR_CARRIER_SENT_UNCONFIRMED`]) is
+    /// [`TsgoApiError::Timeout`] — the overlay is on the wire, so the caller keeps it;
+    /// every other failure is [`TsgoApiError::Transport`], exactly as
+    /// [`JsonRpcConnection::request`] reports it.
+    async fn carrier_write_synced(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> TsgoApiResult<()> {
+        match self.conn.request_coded(method, params).await? {
+            Ok(_) => Ok(()),
+            Err(error) if error.code == Some(ERROR_CARRIER_SENT_UNCONFIRMED) => {
+                Err(TsgoApiError::Timeout(error.message))
+            }
+            Err(error) => Err(error.into_transport()),
+        }
+    }
+
+    /// Inject several carrier overlays behind ONE ordered sync barrier. Every op
+    /// the result does not list as a failure is confirmed synced.
+    pub async fn carrier_sync_batch(
+        &self,
+        ops: Vec<super::messages::CarrierBatchOp>,
+    ) -> TsgoApiResult<super::messages::CarrierSyncBatchResult> {
+        let params = to_params(&super::messages::CarrierSyncBatchParams { ops })?;
+        let value = self
+            .conn
+            .request(super::messages::METHOD_CARRIER_SYNC_BATCH, params)
             .await?;
-        Ok(())
+        from_result(value)
     }
 
     /// Update an open carrier overlay (didChange + barrier).
@@ -174,10 +206,8 @@ impl ControlClient {
             version,
             text: text.to_string(),
         })?;
-        self.conn
-            .request(METHOD_CARRIER_DID_CHANGE_SYNCED, params)
-            .await?;
-        Ok(())
+        self.carrier_write_synced(METHOD_CARRIER_DID_CHANGE_SYNCED, params)
+            .await
     }
 
     /// Retract a carrier overlay (didClose).
