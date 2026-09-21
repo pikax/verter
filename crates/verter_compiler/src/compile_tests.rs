@@ -3961,7 +3961,7 @@ fn empty_slot_with_v_if_dynamic() {
     );
 }
 
-// @ai-generated - TDD: empty slot mixed with non-empty (real-world pattern from avava)
+// @ai-generated - TDD: empty slot mixed with non-empty (real-world pattern)
 #[test]
 fn empty_slot_mixed_with_content_slots() {
     let code = compile_and_validate_template(
@@ -8584,7 +8584,7 @@ fn companion_script_type_only_import_not_in_returned() {
         r#"<script lang="ts">
 import { computed, defineComponent } from "vue";
 import { CurrencyCodes, isArray } from "vue-composable";
-import { CustomField as CustomFieldType } from "@judis/shared";
+import { CustomField as CustomFieldType } from "@acme/shared";
 
 function getDefaultValue(field: CustomFieldType) {
   return { currency: "EUR" as CurrencyCodes, value: 0 };
@@ -8593,7 +8593,7 @@ function getDefaultValue(field: CustomFieldType) {
 export default defineComponent({});
 </script>
 <script setup lang="ts">
-import { HButton } from "@judis/ui";
+import { HButton } from "@acme/ui";
 
 const props = defineProps<{ items: string[] }>();
 
