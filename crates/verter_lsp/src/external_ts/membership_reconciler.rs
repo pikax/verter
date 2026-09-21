@@ -777,9 +777,17 @@ impl MembershipReconciler {
                 lease,
             }) = self.ledger.record_snapshot(source)
             else {
+                tracing::debug!(
+                    "activation skipped for {}: no advertised ledger record",
+                    source.as_str()
+                );
                 continue;
             };
             if lease != current_session {
+                tracing::debug!(
+                    "activation skipped for {}: advertised under lease {lease:?}, current session is {current_session:?}",
+                    source.as_str()
+                );
                 continue;
             }
             let ide_members: Vec<_> = companions
@@ -793,6 +801,11 @@ impl MembershipReconciler {
                 })
                 .collect();
             if ide_members.is_empty() {
+                tracing::debug!(
+                    "activation skipped for {}: the advertisement carries no IDE companion ({} companion(s))",
+                    source.as_str(),
+                    companions.len()
+                );
                 continue;
             }
             advertised_sources += 1;

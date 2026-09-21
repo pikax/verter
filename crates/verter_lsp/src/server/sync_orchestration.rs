@@ -1063,6 +1063,25 @@ impl VerterLanguageServer {
         );
     }
 
+    /// Tell the provider what changed on disk. An engine that watches the disk
+    /// itself ignores this; an engine that is an LSP server (TSGO) has no other
+    /// way to learn that a file it does not hold open was created or deleted.
+    pub(super) async fn forward_watched_files_to_provider(
+        &self,
+        changes: &[verter_type_runtime::WatchedFileChange],
+    ) {
+        if changes.is_empty() {
+            return;
+        }
+        if let Some(provider) = &self.type_provider {
+            if let Err(error) = provider.notify_watched_files_changed(changes).await {
+                tracing::warn!(
+                    "did_change_watched_files: provider refused the disk changes: {error}"
+                );
+            }
+        }
+    }
+
     /// A dependency changed on disk underneath these importers. Every one of
     /// them re-records its import edges against the new filesystem facts;
     /// only the OPEN ones are owed diagnostics, so only they have their

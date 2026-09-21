@@ -93,6 +93,21 @@ pub enum CarrierScriptKind {
     Jsx,
 }
 
+/// What happened on disk to a file the provider does NOT hold open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WatchedFileChangeKind {
+    Created,
+    Changed,
+    Deleted,
+}
+
+/// One disk change, as the editor's file watcher reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedFileChange {
+    pub path: String,
+    pub kind: WatchedFileChangeKind,
+}
+
 /// One already-published framework source to promote into a provider's
 /// interactive/project working set. The descriptor contains control-plane
 /// identities only; generated carrier bytes remain store-owned.
@@ -332,6 +347,19 @@ pub trait TypeProvider: Send + Sync {
     /// the owning project's resolution cache, and reconciles authored-source
     /// roots through TypeScript's project API.
     fn notify_carrier_changed(&self, _companion_path: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Tell the engine that files it does not hold open changed on disk.
+    ///
+    /// An engine that watches the disk itself (tsserver) needs nothing and keeps
+    /// this default. An engine that is an LSP SERVER (TSGO) learns about disk
+    /// changes ONLY from its client: unless they are forwarded it keeps serving
+    /// a deleted module as present and a created one as missing.
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        _changes: &'a [WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 

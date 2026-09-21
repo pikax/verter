@@ -1731,6 +1731,13 @@ impl TypeProvider for TsgoCompositeProvider {
         self.managed.update_workspace_folders(added, removed)
     }
 
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [verter_type_runtime::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        self.managed.notify_watched_files_changed(changes)
+    }
+
     fn update_workspace_folders_background(
         &self,
         added: Vec<serde_json::Value>,

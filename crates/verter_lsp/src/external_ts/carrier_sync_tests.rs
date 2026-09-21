@@ -2117,6 +2117,104 @@ fn unresolved_carrier_emits_verter_project_diagnostic_bound_and_notready_silent(
     );
 }
 
+/// A publication that carries NO IDE companion has nothing to activate. Asking
+/// the provider to activate it anyway can only fail, and treating that failure
+/// as a pending retry keeps the carrier queued for the rest of the session — a
+/// retry cannot produce the missing IDE output; only a source change can, and
+/// that re-enters through the ordinary sync. One such open document used to keep
+/// provider-sync completion unannounced after every restart.
+#[tokio::test]
+async fn a_publication_without_an_ide_companion_is_not_a_pending_activation() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: source.clone(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">defineProps<{ label: string }>()</script><template><div>{{ label }}</div></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("load carrier");
+    // The IDE surface is deliberately NEVER compiled: the public API exists, the
+    // IDE output does not.
+    assert!(
+        host.get_ide(&source, &CompileProfile::default()).is_none(),
+        "precondition: no IDE output is available for this carrier"
+    );
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let (_ws, snap) = ws_and_snapshot(
+        &ws_root,
+        &[(tsconfig.as_str(), r#"["**/*"]"#)],
+        &[source.as_str()],
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: true,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+
+    assert!(
+        matches!(decision, CarrierSyncDecision::Published { .. }),
+        "the API companion WAS published; with no IDE member there is nothing left to retry"
+    );
+    let provider_calls = mock.calls();
+    assert!(
+        provider_calls
+            .iter()
+            .any(|call| matches!(call, MockCall::RegisterCarrierMetadata { .. })),
+        "precondition: the publication really reached the provider: {provider_calls:?}"
+    );
+    assert!(
+        provider_calls
+            .iter()
+            .all(|call| !matches!(call, MockCall::ActivateCarrierMembers { .. })),
+        "there is no IDE member to activate: {provider_calls:?}"
+    );
+}
+
 #[tokio::test]
 async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
     // A carrier claimed by MULTIPLE sibling tsconfigs with NO reference graph is NO

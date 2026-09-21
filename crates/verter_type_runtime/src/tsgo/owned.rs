@@ -851,6 +851,17 @@ impl TypeProvider for TsgoOwnedProvider {
         self.lsp.update_workspace_folders(added, removed)
     }
 
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [crate::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            self.lsp.notify_watched_files_changed(changes).await?;
+            self.note_lsp_write();
+            Ok(())
+        })
+    }
+
     fn child_pid(&self) -> Option<u32> {
         self.lsp.child_pid()
     }

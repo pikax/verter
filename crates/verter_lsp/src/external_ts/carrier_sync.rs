@@ -733,6 +733,14 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         None
     };
     let ide = req.ide.or(fetched_ide.as_ref());
+    if ide.is_none() || committed_state.ide_path.is_none() {
+        tracing::debug!(
+            "carrier-sync gateway: {} publishes without an IDE companion (ide output: {}, ide path: {})",
+            req.canonical_id,
+            ide.is_some(),
+            committed_state.ide_path.is_some()
+        );
+    }
 
     let mut companions = match build_carrier_companions(
         req.host,
@@ -816,7 +824,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         Ok(ReconcileOutcome::Advertised { receipt, .. }) => {
             match membership.provider_delivery {
                 CarrierProviderDelivery::StoreBacked => {
-                    if membership.activate_provider_member {
+                    // Activation promotes the IDE member. A publication that
+                    // carries none (no IDE output exists for this source right
+                    // now) has nothing to promote: asking anyway can only fail,
+                    // and a retry cannot produce the missing output — only a
+                    // source change can, and that re-enters through the
+                    // ordinary sync.
+                    let publishes_ide_member = companions.iter().any(|companion| {
+                        companion.role == verter_session::external_ts::SnapshotRole::CarrierIde
+                    });
+                    if membership.activate_provider_member && publishes_ide_member {
                         match membership
                             .coordinator
                             .activate_published_source(req.canonical_id)

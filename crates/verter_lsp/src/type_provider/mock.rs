@@ -124,6 +124,9 @@ mod inner {
             added: Vec<serde_json::Value>,
             removed: Vec<serde_json::Value>,
         },
+        WatchedFilesChanged {
+            changes: Vec<verter_type_runtime::WatchedFileChange>,
+        },
         NotifyCarrierChanged {
             companion_path: String,
         },
@@ -991,6 +994,21 @@ mod inner {
                 }
                 fail_or_ok(fail, "open_file")
             })
+        }
+
+        fn notify_watched_files_changed<'a>(
+            &'a self,
+            changes: &'a [verter_type_runtime::WatchedFileChange],
+        ) -> ProviderFuture<'a, ()> {
+            self.state
+                .lock()
+                .unwrap()
+                .calls
+                .push(MockCall::WatchedFilesChanged {
+                    changes: changes.to_vec(),
+                });
+            self.note_recorded();
+            Box::pin(async { Ok(()) })
         }
 
         fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {

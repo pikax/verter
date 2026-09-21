@@ -413,6 +413,20 @@ where
         })
     }
 
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [crate::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        // Not desired state: an engine that is down has nothing to be told, and
+        // the one that replaces it reads the disk as it is.
+        Box::pin(async move {
+            match self.get_inner().await {
+                Ok(provider) => provider.notify_watched_files_changed(changes).await,
+                Err(_) => Ok(()),
+            }
+        })
+    }
+
     fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
         // Resync does not change the desired-state set, so it bypasses the actor
         // and runs directly against the live provider. Concurrency with an

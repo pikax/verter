@@ -2652,7 +2652,11 @@ fn build_client_capabilities() -> serde_json::Value {
         // live). The read loop's `workspace/configuration` responder supplies
         // the preferences.
         "workspace": {
-            "configuration": true
+            "configuration": true,
+            // TSGO has no disk watcher of its own: it asks its client to watch
+            // and relies on `workspace/didChangeWatchedFiles`. Without this it
+            // never learns that a file was created or deleted on disk.
+            "didChangeWatchedFiles": { "dynamicRegistration": true }
         }
     })
 }
@@ -3847,6 +3851,38 @@ impl TypeProvider for TsgoTypeProvider {
                             "removed": removed,
                         }
                     }),
+                )
+                .await
+        })
+    }
+
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [crate::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        let transport = Arc::clone(&self.transport);
+        let changes: Vec<serde_json::Value> = changes
+            .iter()
+            .map(|change| {
+                serde_json::json!({
+                    "uri": Self::path_to_uri(&change.path),
+                    // LSP `FileChangeType`.
+                    "type": match change.kind {
+                        crate::WatchedFileChangeKind::Created => 1,
+                        crate::WatchedFileChangeKind::Changed => 2,
+                        crate::WatchedFileChangeKind::Deleted => 3,
+                    },
+                })
+            })
+            .collect();
+        Box::pin(async move {
+            if changes.is_empty() {
+                return Ok(());
+            }
+            transport
+                .notify(
+                    "workspace/didChangeWatchedFiles",
+                    serde_json::json!({ "changes": changes }),
                 )
                 .await
         })

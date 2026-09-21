@@ -29721,6 +29721,27 @@ async fn watched_ts_delete_republishes_only_open_importers() {
         .await;
     assert!(!workspace.file_exists(&helper));
     let calls = fixture.provider.calls();
+    // An engine that is an LSP server learns about the disk only from its
+    // client, so the event itself is forwarded — before anything is re-checked.
+    let forwarded = calls
+        .iter()
+        .position(|call| {
+            matches!(
+                call,
+                MockCall::WatchedFilesChanged { changes }
+                    if changes.as_slice() == [verter_type_runtime::WatchedFileChange {
+                        path: helper.clone(),
+                        kind: verter_type_runtime::WatchedFileChangeKind::Deleted,
+                    }]
+            )
+        })
+        .expect("the provider must be told the dependency was deleted");
+    assert!(
+        calls.iter().enumerate().all(|(index, call)| {
+            !matches!(call, MockCall::GetDiagnostics { .. }) || index > forwarded
+        }),
+        "the importer is re-checked only after the provider knows about the disk: {calls:?}"
+    );
     let close = calls
         .iter()
         .position(|call| matches!(call, MockCall::CloseFile { path } if path == &helper))

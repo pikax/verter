@@ -656,3 +656,46 @@ async fn the_api_side_settles_pending_writes_with_exactly_one_barrier() {
         "no new write means no new frame on the --lsp transport"
     );
 }
+
+/// TSGO has no disk watcher of its own; the forwarded event is the only way it
+/// learns that a file it does not hold open was created or deleted.
+#[tokio::test]
+async fn disk_changes_reach_the_engine_as_a_watched_files_notification() {
+    let (provider, mut lsp_peer, _api_peer) = owned_over_duplex();
+    let path = if cfg!(windows) {
+        "D:/w/helper.ts"
+    } else {
+        "/w/helper.ts"
+    };
+    TypeProvider::notify_watched_files_changed(
+        &provider,
+        &[crate::WatchedFileChange {
+            path: path.to_string(),
+            kind: crate::WatchedFileChangeKind::Deleted,
+        }],
+    )
+    .await
+    .expect("forward the disk change");
+
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    let mut chunk = [0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(5), lsp_peer.read(&mut chunk))
+        .await
+        .expect("the notification must reach the --lsp transport")
+        .expect("read");
+    framer.push(&chunk[..n]);
+    let message = framer
+        .next_message()
+        .expect("decode")
+        .expect("one complete frame");
+    assert_eq!(message["method"], "workspace/didChangeWatchedFiles");
+    assert!(message.get("id").is_none(), "a notification carries no id");
+    let change = &message["params"]["changes"][0];
+    assert_eq!(change["type"], 3, "LSP FileChangeType::Deleted");
+    assert!(
+        change["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.starts_with("file://") && uri.ends_with("/w/helper.ts")),
+        "the change names the file by URI: {change}"
+    );
+}

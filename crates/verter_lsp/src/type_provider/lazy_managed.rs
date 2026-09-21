@@ -957,6 +957,20 @@ impl TypeProvider for LazyManagedTypeProvider {
         Box::pin(self.record_workspace_folders(added, removed, false))
     }
 
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [verter_type_runtime::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        // An engine that was never started has nothing to be told: it reads the
+        // disk as it is when it activates.
+        Box::pin(async move {
+            match self.current() {
+                Some(provider) => provider.notify_watched_files_changed(changes).await,
+                None => Ok(()),
+            }
+        })
+    }
+
     fn update_workspace_folders_background(
         &self,
         added: Vec<serde_json::Value>,
