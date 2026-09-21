@@ -126,7 +126,10 @@ pub struct SetupMacroCall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupStatementKind {
     /// `import ...`; hoists to module scope.
-    Import,
+    Import {
+        /// Imported local names.
+        names: Vec<String>,
+    },
     /// Type-only declaration (`type`, `interface`); hoists to module scope.
     TypeDeclaration {
         /// Declared type name.
@@ -509,7 +512,18 @@ fn project_setup(
 
 fn classify(statement: &Statement<'_>) -> SetupStatementKind {
     match statement {
-        Statement::ImportDeclaration(_) => SetupStatementKind::Import,
+        Statement::ImportDeclaration(import) => SetupStatementKind::Import {
+            names: import
+                .specifiers
+                .as_ref()
+                .map(|specifiers| {
+                    specifiers
+                        .iter()
+                        .map(|s| s.local().name.to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
         Statement::TSTypeAliasDeclaration(decl) => SetupStatementKind::TypeDeclaration {
             name: decl.id.name.to_string(),
         },

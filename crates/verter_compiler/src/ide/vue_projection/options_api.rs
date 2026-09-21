@@ -161,11 +161,6 @@ pub enum OptionsBindingKind {
     Directive,
     /// Setup top-level value declaration.
     SetupLocal,
-    /// Template-visible product of a setup macro call.
-    SetupMacro {
-        /// Macro that exposes the binding.
-        macro_name: &'static str,
-    },
 }
 
 /// One template-visible binding.
@@ -195,6 +190,22 @@ impl OptionsTemplateBindingView {
     pub fn build(combined: &CombinedScriptProjection) -> Self {
         let mut bindings = Vec::new();
         let mut opaque_sources = Vec::new();
+        if let Some(setup) = &combined.facts.setup {
+            for statement in &setup.statements {
+                match &statement.kind {
+                    SetupStatementKind::Declaration { names }
+                    | SetupStatementKind::Import { names } => {
+                        for name in names {
+                            bindings.push(TemplateBinding {
+                                name: name.clone(),
+                                kind: OptionsBindingKind::SetupLocal,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         if let Some(options) = &combined.options {
             for member in &options.members {
                 let kind = match member.kind {
@@ -223,28 +234,6 @@ impl OptionsTemplateBindingView {
                 opaque_sources.push("extends".to_string());
             }
         }
-        if let Some(setup) = &combined.facts.setup {
-            for statement in &setup.statements {
-                if let SetupStatementKind::Declaration { names } = &statement.kind {
-                    for name in names {
-                        bindings.push(TemplateBinding {
-                            name: name.clone(),
-                            kind: OptionsBindingKind::SetupLocal,
-                        });
-                    }
-                }
-            }
-            for macro_call in &setup.macros {
-                if let Some(name) = setup_macro_binding(macro_call.name) {
-                    bindings.push(TemplateBinding {
-                        name: name.to_string(),
-                        kind: OptionsBindingKind::SetupMacro {
-                            macro_name: macro_call.name,
-                        },
-                    });
-                }
-            }
-        }
         Self {
             bindings,
             opaque_sources,
@@ -271,16 +260,6 @@ impl OptionsTemplateBindingView {
 /// Template-visible product name of a setup macro, if any. `withDefaults`
 /// wraps `defineProps` (no new binding); `defineOptions` carries no template
 /// binding of its own.
-fn setup_macro_binding(name: &str) -> Option<&'static str> {
-    match name {
-        "defineProps" => Some("props"),
-        "defineEmits" => Some("emit"),
-        "defineSlots" => Some("slots"),
-        "defineExpose" => Some("expose"),
-        "defineModel" => Some("model"),
-        _ => None,
-    }
-}
 
 fn source_type_of(lang: Option<ScriptLanguage>) -> (SourceType, OptionsDialect) {
     match lang {
@@ -627,6 +606,13 @@ fn collect_option_members(
             "mixins" => {
                 if let Expression::ArrayExpression(array) = &property.value {
                     for element in &array.elements {
+                        if matches!(
+                            element,
+                            oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                        ) {
+                            projection.has_nonstatic_mixins = true;
+                            continue;
+                        }
                         match element.as_expression() {
                             Some(Expression::Identifier(identifier)) => {
                                 projection.mixins.push(identifier.name.to_string());

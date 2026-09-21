@@ -208,12 +208,7 @@ fn stp13_vue_macro_import_stays_a_macro() {
         view.lookup("properties"),
         Some(&OptionsBindingKind::SetupLocal)
     );
-    assert_eq!(
-        view.lookup("props"),
-        Some(&OptionsBindingKind::SetupMacro {
-            macro_name: "defineProps"
-        })
-    );
+    assert_eq!(view.lookup("props"), None);
 }
 
 #[test]
