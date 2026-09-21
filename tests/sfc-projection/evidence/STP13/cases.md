@@ -6,12 +6,12 @@ Selected case IDs: `STP13-options-this`, `STP13-mixins`, `STP13-combined`, `STP1
 
 Commands (run on the candidate; this file is not an execution transcript):
 
-- `node scripts/sfc-projection/verify-node.mjs --node STP13 --engine all --require-all --json` — ok, qualified, zero errors, both engines
-- `cargo test -p verter_compiler --lib ide::vue_projection::options_api` — 13 passed, 0 failed
-- `cargo fmt --all -- --check` — clean
-- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+- `node scripts/sfc-projection/verify-node.mjs --node STP13 --engine all --require-all --json`
+- `cargo test -p verter_compiler --lib ide::vue_projection::options_api`
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 
-Probe outcomes: hover `stp13HoverTarget` is exactly `number`; `Instance` is exactly `Comp`; definition `stp13DefinitionTarget` with references and edit participation; negative probe carries exactly one diagnostic (TS2551 misspelled-member suggestion for `instance.cout`).
+Probe expectations: hover `stp13HoverTarget` is exactly `number`; `Instance` is exactly `Comp`; definition `stp13DefinitionTarget` with references and edit participation; negative probe carries exactly one diagnostic (TS2551 misspelled-member suggestion for `instance.cout`).
 
 Products: `OptionsComponentProjection`, `CombinedScriptProjection`, `OptionsTemplateBindingView`.
 

@@ -42,8 +42,9 @@ use rustc_hash::FxHashSet;
 use crate::cursor::ScriptLanguage;
 use crate::utils::oxc::vue::parse_generic;
 
-/// Vue macros recognised at setup scope.
-pub(super) const MACRO_NAMES: [&str; 7] = [
+/// Vue macros recognised at setup scope. Shared with the Options/combined
+/// projection for shadow reporting; macro resolution itself stays here.
+pub(crate) const MACRO_NAMES: [&str; 7] = [
     "defineProps",
     "defineEmits",
     "defineExpose",
@@ -263,8 +264,9 @@ const PURE_TYPE_SPACE: SymbolFlags = SymbolFlags::Interface
 
 /// Root-scope names bound to a runtime value, for macro-shadow checks. A
 /// type-only declaration (`interface`, `type`, `import type`) of the same
-/// name as a macro must not suppress the macro.
-pub(super) fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
+/// name as a macro must not suppress the macro. Shared with the
+/// Options/combined projection; the rule itself stays here.
+pub(crate) fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
     scoping
         .get_bindings(scoping.root_scope_id())
         .iter()
