@@ -744,7 +744,14 @@ impl ProjectSemanticDispatch<'_> {
         let template = *view.template(desc.template)?;
         let recipe = *view.recipe(template.result_recipe)?;
         let return_type = if demand.reads_return() {
-            let node = self.recipe_return(types, &view, descriptor, call_substitution, &recipe)?;
+            let node = self.recipe_return(
+                types,
+                &view,
+                descriptor,
+                call_substitution,
+                evaluation,
+                &recipe,
+            )?;
             Some(store.intern_type_token(node, None)?)
         } else {
             None
@@ -829,6 +836,7 @@ impl ProjectSemanticDispatch<'_> {
         view: &SemanticReadView,
         descriptor: SignatureDescriptorId,
         call: crate::signature_kernel::CallSubstitutionId,
+        evaluation: ResultEvaluationContextId,
         recipe: &SignatureResultRecipe,
     ) -> Result<SemanticNodeId, DiscoveryError> {
         let store = types.store;
@@ -901,10 +909,11 @@ impl ProjectSemanticDispatch<'_> {
                             .unwrap_or(unknown)
                     })
                     .collect();
-                let key = self.flow_return_key_for_instantiation(
+                let key = self.flow_return_key_for_instantiation_with_evaluation(
                     &identity,
                     Arc::from(args.into_boxed_slice()),
                     map,
+                    evaluation,
                 );
                 match self.execute_flow_return(key) {
                     crate::semantic_query::FlowReturnStep::Complete(result) => {
@@ -931,7 +940,14 @@ impl ProjectSemanticDispatch<'_> {
                     let desc = view.descriptor(edge.residual)?;
                     let template = view.template(desc.template)?;
                     let recipe = *view.recipe(template.result_recipe)?;
-                    returns.push(self.recipe_return(types, view, edge.residual, call, &recipe)?);
+                    returns.push(self.recipe_return(
+                        types,
+                        view,
+                        edge.residual,
+                        call,
+                        evaluation,
+                        &recipe,
+                    )?);
                 }
                 let is_union =
                     !matches!(recipe, SignatureResultRecipe::IntersectionConstruct { .. });

@@ -122,6 +122,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 type_env_hash: [0; 16],
                 lib_env_hash: [0; 16],
                 project_identity: [0; 16],
+                result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {},
             },

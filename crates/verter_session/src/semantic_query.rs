@@ -1487,6 +1487,8 @@ pub struct FlowReturnContext {
     pub lib_env_hash: HashValue,
     /// Project-identity dimension (`J`).
     pub project_identity: HashValue,
+    /// Context identity for demand-driven body evaluation.
+    pub result_evaluation: ResultEvaluationContextId,
     /// The active TYPE-ONLY substitution environment (type-parameter →
     /// node). Value bindings, locals, and `this` never enter it.
     pub type_substitution: CanonicalTypeSubstitution,

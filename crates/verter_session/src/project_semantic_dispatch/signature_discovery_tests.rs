@@ -849,6 +849,11 @@ fn read_signature_result_distinct_demands_do_not_alias() {
         semantic_context: SemanticContextId::production(),
     };
     assert_ne!(key(ResultDemand::Return), key(ResultDemand::Both));
+    let identified = crate::signature_kernel::ReadSignatureResultKey {
+        evaluation: crate::semantic_query::ResultEvaluationContextId::from_raw(1),
+        ..key(ResultDemand::Return)
+    };
+    assert_ne!(key(ResultDemand::Return), identified);
     let run = |projection| {
         let result = d.execute(SemanticQueryKey::ReadSignatureResult(key(projection)));
         assert!(matches!(result, QueryResult::Value(_)), "got {result:?}");

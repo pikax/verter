@@ -10910,6 +10910,7 @@ mod prepared_identity_bijection {
                 type_env_hash: h16(0),
                 lib_env_hash: h16(0),
                 project_identity: h16(0),
+                result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
                 policy: crate::semantic_query::FlowReturnPolicy {},
             },

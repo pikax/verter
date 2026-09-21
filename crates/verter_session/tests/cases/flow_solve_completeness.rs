@@ -128,6 +128,7 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             type_env_hash: [env_tag; 16],
             lib_env_hash: [env_tag; 16],
             project_identity: [env_tag; 16],
+            result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {},
         },
