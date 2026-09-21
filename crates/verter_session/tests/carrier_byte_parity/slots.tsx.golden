@@ -7,7 +7,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
   default(props: { item: number }): any
 }>;const ___VERTER___slots=defineSlots<___VERTER___defineSlots_Type>()
 
-let ___VERTER___instance!: Omit<InstanceType<typeof import('./Slots.vue.verter.js')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<typeof import("./Slots.vue.verter.js")['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -37,6 +37,6 @@ void (___VERTER___instance).valueOf;
 return {};
 } // close templateBindingFN
 
-export { default } from './Slots.vue.verter.js';
+export { default } from "./Slots.vue.verter.js";
 
 type ___VERTER___attributes = {};
