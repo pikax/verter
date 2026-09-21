@@ -442,12 +442,15 @@ test("manifest schema probes contract matches the runner and every node manifest
     "cleanTwin",
     "definitionNeedle",
     "expectedHoverType",
-    "expectedInstanceType",
     "expectedNegativeCode",
     "hoverNeedle",
     "negative",
     "positive",
     "tsconfig",
+  ]);
+  assert.deepEqual(probesSchema.anyOf, [
+    { required: ["expectedInstanceType"] },
+    { required: ["expectedInstanceMembers"] },
   ]);
   const root = loadRootManifest(REPO_ROOT);
   assert.equal(root.errors.length, 0, JSON.stringify(root.errors));
@@ -466,6 +469,12 @@ test("manifest schema probes contract matches the runner and every node manifest
     for (const key of Object.keys(probes)) {
       assert.ok(known.has(key), `${entry.id} probes.${key} is outside the schema`);
     }
+    assert.ok(
+      (typeof probes.expectedInstanceType === "string" && probes.expectedInstanceType.length > 0) ||
+        (Array.isArray(probes.expectedInstanceMembers) &&
+          probes.expectedInstanceMembers.length > 0),
+      `${entry.id} probes lacks an instance expectation`,
+    );
     assert.equal(probesAreRunnable(probes), true, `${entry.id} probes are not runnable`);
   }
   // A manifest the schema rejects (empty probes) is one the runner rejects too.

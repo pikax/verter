@@ -254,7 +254,7 @@ const count = ref(0)
         code
     );
     assert!(
-        code.contains("import('./App.vue.verter.js')"),
+        code.contains("import(\"./App.vue.verter.js\")"),
         "Should use TypeScript's .js-to-.ts substitution for the component's own PUBLIC-API carrier. Got: {}",
         code
     );
@@ -280,7 +280,7 @@ const count = ref(0)
 <template><div>{{ count }}</div></template>"#,
     );
     assert!(
-        code.contains("export { default } from './App.vue.verter.js';"),
+        code.contains("export { default } from \"./App.vue.verter.js\";"),
         "script-setup IDE carrier must re-export the public default from the API carrier. Got: {code}"
     );
     // Template internals stay LOCAL — the binding fn is a helper, never the
@@ -305,7 +305,7 @@ fn facade_reexport_and_self_import_use_basename_not_full_canonical_path() {
 
     let reexport = public_facade_reexport(full_path);
     assert!(
-        reexport.contains("export { default } from './Comp.vue.verter.js';"),
+        reexport.contains("export { default } from \"./Comp.vue.verter.js\";"),
         "re-export must use the basename-relative API specifier. Got: {reexport}"
     );
     assert!(
@@ -315,12 +315,30 @@ fn facade_reexport_and_self_import_use_basename_not_full_canonical_path() {
 
     let self_import = instance_declaration(full_path, false, false);
     assert!(
-        self_import.contains("InstanceType<typeof import('./Comp.vue.verter.js')"),
+        self_import.contains("InstanceType<typeof import(\"./Comp.vue.verter.js\")"),
         "self-import must use the basename-relative API specifier. Got: {self_import}"
     );
     assert!(
         !self_import.contains("./d:/") && !self_import.contains("/src/components/"),
         "self-import must NOT embed the absolute canonical path. Got: {self_import}"
+    );
+}
+
+#[test]
+fn public_api_specifiers_escape_filename_quotes() {
+    use crate::ide::script::wrapper::{instance_declaration, public_facade_reexport};
+
+    let filename = "Kid's.vue";
+    let self_import = instance_declaration(filename, false, false);
+    assert!(
+        self_import.contains("import(\"./Kid's.vue.verter.js\")"),
+        "self-import must serialize the full specifier as a JavaScript string. Got: {self_import}"
+    );
+
+    let reexport = public_facade_reexport(filename);
+    assert!(
+        reexport.contains("from \"./Kid's.vue.verter.js\""),
+        "re-export must serialize the full specifier as a JavaScript string. Got: {reexport}"
     );
 }
 
