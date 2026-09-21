@@ -254,7 +254,7 @@ const count = ref(0)
         code
     );
     assert!(
-        code.contains("import('./App.vue.verter.js')"),
+        code.contains("import(\"./App.vue.verter.js\")"),
         "Should use TypeScript's .js-to-.ts substitution for the component's own PUBLIC-API carrier. Got: {}",
         code
     );
@@ -280,7 +280,7 @@ const count = ref(0)
 <template><div>{{ count }}</div></template>"#,
     );
     assert!(
-        code.contains("export { default } from './App.vue.verter.js';"),
+        code.contains("export { default } from \"./App.vue.verter.js\";"),
         "script-setup IDE carrier must re-export the public default from the API carrier. Got: {code}"
     );
     // Template internals stay LOCAL — the binding fn is a helper, never the

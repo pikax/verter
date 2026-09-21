@@ -15929,7 +15929,7 @@ const count = ref(0)
     // Positive: JSDoc carries the public constructor instance type.
     assert!(
         tsx.code.contains(
-            "/** @type {InstanceType<typeof import('./App.vue.verter.js')['default']>} */"
+            "/** @type {InstanceType<typeof import(\"./App.vue.verter.js\")['default']>} */"
         ),
         "JS SFC should use the JSDoc public-instance bridge, got:\n{}",
         tsx.code
@@ -15958,7 +15958,7 @@ const count = ref(0)
     // Positive: JSDoc carries the public constructor instance type.
     assert!(
         tsx.code.contains(
-            "/** @type {InstanceType<typeof import('./App.vue.verter.js')['default']>} */"
+            "/** @type {InstanceType<typeof import(\"./App.vue.verter.js\")['default']>} */"
         ),
         "lang='js' SFC should use the JSDoc public-instance bridge, got:\n{}",
         tsx.code
@@ -18123,7 +18123,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 
 const msg = 'hi'
 
-let ___VERTER___instance!: Omit<InstanceType<typeof import('./App.vue.verter.js')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<typeof import("./App.vue.verter.js")['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -18159,7 +18159,7 @@ void (___VERTER___instance).valueOf;
 return {};
 } // close templateBindingFN
 
-export { default } from './App.vue.verter.js';
+export { default } from "./App.vue.verter.js";
 
 type ___VERTER___attributes = {};
 "#
@@ -18223,11 +18223,11 @@ fn template_expression_overlay_pins_absolute_output_bytes() {
     // `.d.vue.ts` declaration carrier; the self-import that types
     // `___VERTER___instance` targets the API carrier, NOT the IDE output.
     assert!(
-        tsx.contains("export { default } from './App.vue.verter.js';"),
+        tsx.contains("export { default } from \"./App.vue.verter.js\";"),
         "IDE carrier must re-export the public default from the API carrier:\n{tsx}"
     );
     assert!(
-        tsx.contains("import('./App.vue.verter.js')"),
+        tsx.contains("import(\"./App.vue.verter.js\")"),
         "instance self-import must target the .verter.ts API carrier:\n{tsx}"
     );
     // Template internals stay LOCAL (non-exported): the binding fn is a plain

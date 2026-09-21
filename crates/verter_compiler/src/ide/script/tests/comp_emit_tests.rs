@@ -873,7 +873,7 @@ const count = ref(0)
         code
     );
     assert!(
-        code.contains("InstanceType<typeof import('./App.vue.verter.js')['default']>"),
+        code.contains("InstanceType<typeof import(\"./App.vue.verter.js\")['default']>"),
         "JSX mode must bridge the self-instance through the public constructor:\n{}",
         code
     );
@@ -885,7 +885,7 @@ const count = ref(0)
     // Positive: JSDoc carries the public instance type.
     assert!(
         code.contains(
-            "/** @type {InstanceType<typeof import('./App.vue.verter.js')['default']>} */"
+            "/** @type {InstanceType<typeof import(\"./App.vue.verter.js\")['default']>} */"
         ),
         "JSX mode should use a JSDoc public-instance declaration:\n{}",
         code

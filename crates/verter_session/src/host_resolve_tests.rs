@@ -562,7 +562,7 @@ fn javascript_setup_companions_match_the_published_consumer_carriers() {
     );
     assert!(
         ide.code
-            .contains("InstanceType<typeof import('./JSDocGeneric.vue.verter.js')['default']>"),
+            .contains("InstanceType<typeof import(\"./JSDocGeneric.vue.verter.js\")['default']>"),
         "the IDE companion must resolve its instance through the published public API: {}",
         ide.code
     );
