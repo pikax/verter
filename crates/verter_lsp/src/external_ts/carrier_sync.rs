@@ -727,7 +727,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     let fetched_ide = if req.ide.is_none() {
         req.documents.and_then(|documents| {
             let profile = documents.tsx_profile.read().clone();
-            block_in_place_if_available(|| documents.host.get_ide(req.canonical_id, &profile))
+            // COMPILE, never a cache-only read: a cold IDE cache is not "this
+            // carrier has no IDE surface". Publishing the API companion alone
+            // would REPLACE the advertised set with a smaller one, and the
+            // engine would fall back to parsing the raw carrier as TypeScript.
+            block_in_place_if_available(|| {
+                let _ = documents
+                    .host
+                    .ensure_ide_compiled(req.canonical_id, &profile);
+                documents.host.get_ide(req.canonical_id, &profile)
+            })
         })
     } else {
         None
