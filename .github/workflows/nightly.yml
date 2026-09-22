@@ -180,3 +180,58 @@ jobs:
         with:
           name: rust-coverage
           path: lcov.info
+
+  # ---------------------------------------------------------------------------
+  # Svelte compiler benchmark: Verter against the official compiler on the
+  # pinned corpus, with the 1.10x wall-time and RSS fences. Moved off the PR
+  # path: a p50/p95 fence measured on a shared GitHub-hosted VM is not a
+  # per-PR correctness signal, and it cost a runner plus the release native
+  # build on every compiler change. The PR side (`svelte-compiler-benchmark`
+  # in ci.yml) still proves the benchmark contract, the corpus against the
+  # official goldens and the manifest's oracle proof; this job measures.
+  # ---------------------------------------------------------------------------
+  svelte-compiler-benchmark:
+    name: Svelte Compiler Benchmark (Verter vs official)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: svelte-compiler-benchmark
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify benchmark corpus against official Svelte goldens
+        run: node scripts/gen-svelte-goldens.mjs --check
+      - name: Build native binding (release)
+        run: pnpm run build:native
+      - name: Compare Verter and official Svelte compilers
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          pnpm --filter @verter/benchmark bench:svelte:compiler -- \
+            --json \
+            --require-immutable \
+            --out="$GITHUB_WORKSPACE/artifacts/svelte-compiler-benchmark.json"
+      - name: Ensure benchmark artifact exists
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          result="$GITHUB_WORKSPACE/artifacts/svelte-compiler-benchmark.json"
+          if [ ! -f "$result" ]; then
+            printf '{"schemaVersion":3,"generatedAt":"%s","pass":false,"error":"Svelte compiler benchmark did not run to completion"}\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$result"
+          fi
+      - name: Upload Svelte compiler benchmark
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: svelte-compiler-benchmark
+          path: artifacts/svelte-compiler-benchmark.json
+          if-no-files-found: error

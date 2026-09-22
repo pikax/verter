@@ -205,3 +205,15 @@ test("classifyChangedFile: escape hatch takes priority over crate mapping", () =
   assert.equal(result.kind, "escape-hatch");
   assert.equal(result.id, "proc-macro-crate");
 });
+
+test("local actions, the toolchain pin and .cargo/ are escape hatches, not ignored dotfiles", () => {
+  const { index } = buildFixture();
+  assert.equal(
+    matchEscapeHatch(".github/actions/download-artifact/action.yml", index)?.id,
+    "ci-actions",
+  );
+  assert.equal(matchEscapeHatch("rust-toolchain.toml", index)?.id, "toolchain");
+  assert.equal(matchEscapeHatch(".cargo/config.toml", index)?.id, "toolchain");
+  // A sibling dotfile under .github that is neither stays a known non-Rust path.
+  assert.deepEqual(classifyChangedFile(index, ".github/CODEOWNERS"), { kind: "ignored" });
+});

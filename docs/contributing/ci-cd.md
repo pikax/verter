@@ -10,18 +10,22 @@ Verter uses GitHub Actions for continuous integration, testing, and releases.
 
 ### CI (`ci.yml`)
 
-Runs on push to `main` and on pull requests. Uses [dorny/paths-filter](https://github.com/dorny/paths-filter) for change detection to only run relevant jobs:
+Runs on push to `main` and on pull requests. The `detect-changes` job decides which jobs run from two halves composed by `scripts/ci-impact.mjs`: a [dorny/paths-filter](https://github.com/dorny/paths-filter) filter per lane owns every non-crate input, and the crate-graph classifier owns `crates/**`. A consumer lane (the native binding, the wasm32 artifact, the debug and release LSP builds and everything behind them, the compile contracts, BF2, the provider suites, Svelte conformance) runs when a changed crate is in the transitive dependency closure of that lane's root crates as `cargo metadata --all-features` reports it, so a change to a crate an artifact does not link no longer rebuilds it. Workspace manifests, the lockfile, the toolchain pin, `scripts/`, the workflows, the local actions, proc-macro crates and any path the classifier cannot place force every impact-bearing lane on; a stale lane root fails the job. The lane roots live in `LANE_ROOTS` and the gate composition in `LANE_GATES`, both unit-tested by `scripts/ci-impact.test.mjs`.
 
-- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`, plus independent serial `rust-tsserver-live` and `rust-tsgo-live` provider jobs, the standalone `compiler-contracts` lane, and the Svelte conformance lane
+- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the closure-gated `rust-providers-live` job (serial tsserver then tsgo libtest lanes in one job, compiled once), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
-- **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`
-- **WASM changes** (`crates/verter_compiler/**`, `crates/verter_wasm/**`) -- `wasm-build`
+- **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`; its script self-tests run `test:scripts:ci`, which omits the tests another required lane already owns (the ARH dirty twins in `architecture-health`, the lane self-tests in their lanes, the aggregate test in its own step)
+- **WASM changes** (verter_wasm's crate closure plus `packages/wasm/**`, `packages/browser-host/**`) -- `wasm-build`
 - **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build`: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
 - **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.
-Real tsserver/tsgo provider tests run serially with libtest in their own jobs so
-third-party engines have explicit initialization and lifecycle ownership.
+Real tsserver/tsgo provider tests run serially with libtest in their own job so
+third-party engines have explicit initialization and lifecycle ownership. The
+Svelte compiler benchmark's measurement (the 1.10x wall-time and RSS fences)
+runs nightly; the PR-side `svelte-compiler-benchmark` job proves only the
+benchmark contract, the corpus against the official goldens and the manifest's
+oracle proof.
 Compile-fail fixtures run through `node scripts/compile-contracts.mjs`, outside
 Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
@@ -153,18 +157,18 @@ share (see [Publishing locally](#publishing-locally)):
 name before `gh release create` runs, and the step writes the full list -- name
 and size -- to the workflow run summary:
 
-| Family                        | Count | Asset names                              |
-| ----------------------------- | ----- | ---------------------------------------- |
-| Native bindings               | 7     | `verter-native.<triple>.node`            |
-| LSP server                    | 7     | `verter-lsp-<platform>[.exe]`            |
-| MCP server                    | 7     | `verter-mcp-<platform>[.exe]`            |
-| VS Code extension             | 5     | `verter-vscode-<target>.vsix`            |
-| WASM                          | 2     | `verter_wasm_bg.wasm`, `verter_wasm.js`  |
+| Family            | Count | Asset names                             |
+| ----------------- | ----- | --------------------------------------- |
+| Native bindings   | 7     | `verter-native.<triple>.node`           |
+| LSP server        | 7     | `verter-lsp-<platform>[.exe]`           |
+| MCP server        | 7     | `verter-mcp-<platform>[.exe]`           |
+| VS Code extension | 5     | `verter-vscode-<target>.vsix`           |
+| WASM              | 2     | `verter_wasm_bg.wasm`, `verter_wasm.js` |
 
 Staging **fails the job** on a missing source, a duplicate asset name, or a
 family whose count is short -- a partial release is a failed release. The summary
 is written before that check, so a failed run still shows what it managed to
-stage. Two things deliberately do *not* ship as assets: the `native-loader`
+stage. Two things deliberately do _not_ ship as assets: the `native-loader`
 artifact (`index.js`, an npm-only file that a blanket extension sweep used to
 attach as an opaque asset) and the relay shim inside the LSP artifacts (a VSIX
 internal). `verter-tsc` is npm-only -- its only consumption path is `npx` inside
@@ -235,10 +239,10 @@ triggers that lane's release workflow. The **scope** of the release commit names
 the lane; `scripts/release-lanes.mjs` is the table of them, and the workflow
 itself is lane-agnostic:
 
-| Commit subject                | Tag                 | Version source                     | Workflow             |
-| ----------------------------- | ------------------- | ---------------------------------- | -------------------- |
-| `release: v<version>`         | `v<version>`        | `Cargo.toml [workspace.package]`   | `release.yml`        |
-| `release(ide): v<version>`    | `ide/v<version>`    | the editor manifests               | `release-ide.yml`    |
+| Commit subject             | Tag              | Version source                   | Workflow          |
+| -------------------------- | ---------------- | -------------------------------- | ----------------- |
+| `release: v<version>`      | `v<version>`     | `Cargo.toml [workspace.package]` | `release.yml`     |
+| `release(ide): v<version>` | `ide/v<version>` | the editor manifests             | `release-ide.yml` |
 
 1. Exits cleanly unless the HEAD commit subject matches `release: v<version>` or
    `release(<lane>): v<version>`
@@ -440,25 +444,25 @@ native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 
 **Common rebuild sequences:**
 
-| What changed                   | Rebuild commands                                                     |
-| ------------------------------ | ---------------------------------------------------------------------|
-| Rust crate (`verter_compiler`)     | `pnpm run build:native` then rebuild downstream consumers        |
-| Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host              |
-| Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                                   |
+| What changed                   | Rebuild commands                                                        |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| Rust crate (`verter_compiler`) | `pnpm run build:native` then rebuild downstream consumers               |
+| Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host                |
+| Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                                     |
 | WASM, developer iteration      | `pnpm run build:wasm` (bindgen only, no `wasm-opt`, no playground copy) |
-| WASM, publication-ready        | `pnpm --filter @verter/wasm build` (bindgen + cached `wasm-opt`)      |
-| Host developer build           | `pnpm build` (native + lsp + ts, in order)                            |
-| Publication-ready artifacts    | `pnpm dist` (native + lsp + wasm + ts, in order)                      |
+| WASM, publication-ready        | `pnpm --filter @verter/wasm build` (bindgen + cached `wasm-opt`)        |
+| Host developer build           | `pnpm build` (native + lsp + ts, in order)                              |
+| Publication-ready artifacts    | `pnpm dist` (native + lsp + wasm + ts, in order)                        |
 
 ## Required GitHub Secrets
 
-| Secret                  | Purpose                                                     |
-| ----------------------- | ----------------------------------------------------------- |
-| `NETLIFY_AUTH_TOKEN`    | Netlify playground deployment                               |
-| `NETLIFY_SITE_ID`       | Netlify site identification                                 |
-| `CARGO_REGISTRY_TOKEN`  | crates.io publishing                                        |
-| `NPM_TOKEN`             | npm publishing (with `--provenance`)                        |
-| `VSCE_PAT`              | VS Code Marketplace publishing (`verter.verter-vscode`)      |
-| `RELEASE_TAG_SSH_KEY`   | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
+| Secret                 | Purpose                                                                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `NETLIFY_AUTH_TOKEN`   | Netlify playground deployment                                                                                                             |
+| `NETLIFY_SITE_ID`      | Netlify site identification                                                                                                               |
+| `CARGO_REGISTRY_TOKEN` | crates.io publishing                                                                                                                      |
+| `NPM_TOKEN`            | npm publishing (with `--provenance`)                                                                                                      |
+| `VSCE_PAT`             | VS Code Marketplace publishing (`verter.verter-vscode`)                                                                                   |
+| `RELEASE_TAG_SSH_KEY`  | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.
