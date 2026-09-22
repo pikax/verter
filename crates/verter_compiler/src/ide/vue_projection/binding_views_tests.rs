@@ -234,3 +234,206 @@ fn stp15_destructured_reactive_props_read_directly() {
         );
     }
 }
+
+#[test]
+fn stp15_setup_row_wins_over_options_prop() {
+    let normal = block("export default { props: ['count'] };");
+    let setup = block("import { ref } from 'vue';\nconst count = ref(0);\n");
+    let projection = project_binding_views(Some(normal), Some(setup), None).expect("projects");
+    let count = projection.read.lookup("count").expect("count");
+    assert_eq!(
+        count.kind,
+        BindingKind::Ref,
+        "the setup `ref` wins over the Options prop of the same name"
+    );
+    assert!(count.unwrapped);
+    assert_eq!(
+        projection
+            .write
+            .write_target("count")
+            .expect("count")
+            .domain,
+        WriteDomain::RefValue
+    );
+    assert_eq!(
+        projection
+            .read
+            .bindings
+            .iter()
+            .filter(|binding| binding.name == "count")
+            .count(),
+        1,
+        "one earliest row is kept, not an Options shadow plus a setup row"
+    );
+}
+
+#[test]
+fn stp15_functions_and_imports_are_not_writable_targets() {
+    let content = r#"import { ref } from 'vue';
+import { store } from './store';
+function increment(step: number) { return step + 1; }
+const count = ref(0);
+"#;
+    let projection = project_setup(content);
+    for name in ["increment", "ref", "store"] {
+        assert!(
+            projection.read.lookup(name).is_some(),
+            "{name} stays a template-visible read"
+        );
+        assert_eq!(
+            projection.write.write_target(name),
+            Err(WriteRejection::UnknownBinding),
+            "{name} is immutable in scope, never a writable assignment target"
+        );
+    }
+    assert!(projection.write.write_target("count").is_ok());
+}
+
+#[test]
+fn stp15_partially_bound_pattern_keeps_earliest_row() {
+    let content = r#"import { ref, toRefs } from 'vue';
+const { title } = defineProps<{ title: string }>();
+const { title: _again, extra } = toRefs(state);
+const count = ref(0);
+"#;
+    let projection = project_setup(content);
+    let title_rows: Vec<_> = projection
+        .read
+        .bindings
+        .iter()
+        .filter(|binding| binding.name == "title")
+        .collect();
+    assert_eq!(title_rows.len(), 1, "no duplicate read row for title");
+    assert_eq!(title_rows[0].kind, BindingKind::Readonly);
+    assert_eq!(
+        projection.write.write_target("title"),
+        Err(WriteRejection::ReadonlyProp),
+        "the earlier readonly classification is not overridden by the later pattern"
+    );
+    assert!(projection.read.lookup("extra").is_some());
+    assert!(projection.read.lookup("count").is_some());
+}
+
+#[test]
+fn stp15_renamed_destructured_props_register_locals() {
+    let content = r#"const { title: heading, count } = defineProps<{ title: string; count: number }>();
+"#;
+    let projection = project_setup(content);
+    let heading = projection.read.lookup("heading").expect("heading");
+    assert_eq!(heading.kind, BindingKind::Readonly);
+    assert_eq!(
+        content[heading.range.start as usize..heading.range.end as usize],
+        *"heading",
+        "the range points at the bound local, not the prop key"
+    );
+    assert_eq!(
+        projection.write.write_target("heading"),
+        Err(WriteRejection::ReadonlyProp)
+    );
+    assert!(projection.read.lookup("count").is_some());
+}
+
+#[test]
+fn stp15_standalone_define_props_binds_template_rows() {
+    let content = "defineProps<{ title: string; count: number }>();\n";
+    let projection = project_setup(content);
+    for name in ["title", "count"] {
+        let read = projection.read.lookup(name).expect(name);
+        assert_eq!(read.kind, BindingKind::Readonly);
+        assert_eq!(
+            projection.write.write_target(name),
+            Err(WriteRejection::ReadonlyProp)
+        );
+    }
+}
+
+#[test]
+fn stp15_with_defaults_keeps_inner_type_arguments() {
+    let content = r#"const { title, extra } = withDefaults(defineProps<{ title: string }>(), {});
+"#;
+    let projection = project_setup(content);
+    let title = projection.read.lookup("title").expect("title");
+    assert_eq!(title.kind, BindingKind::Readonly);
+    assert_eq!(
+        content[title.range.start as usize..title.range.end as usize],
+        *"title"
+    );
+    assert_eq!(
+        projection.write.write_target("title"),
+        Err(WriteRejection::ReadonlyProp)
+    );
+    assert!(
+        projection.read.lookup("extra").is_none(),
+        "only declared props become rows, not sibling pattern names"
+    );
+}
+
+/// The `Counter.vue.d.ts` tsc fixture pins the contract shape exercised
+/// by the STP15 probes; this test ties that static file to the live
+/// compiler projection so fixture drift fails here instead of passing
+/// silently against a stale copy.
+#[test]
+fn stp15_counter_fixture_matches_projection() {
+    const FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/sfc-projection/STP15/probes/components/Counter.vue.d.ts"
+    ));
+    for pinned in [
+        "countRef",
+        "CounterProps",
+        "setLabel",
+        "doubled",
+        "modelValue",
+        "ComponentPublicInstance",
+    ] {
+        assert!(
+            FIXTURE.contains(pinned),
+            "fixture still pins the probed shape {pinned:?}"
+        );
+    }
+    let content = r#"import { ref, computed } from 'vue';
+const count = ref(0);
+const doubled = computed(() => count.value * 2);
+const label = computed({
+  get: (): number => count.value,
+  set: (v: string) => { count.value = Number(v); },
+});
+const modelValue = defineModel<string>();
+const { title } = defineProps<{ title: string }>();
+function increment(step?: number) { count.value += step ?? 1; }
+"#;
+    let projection = project_setup(content);
+    let count = projection.read.lookup("count").expect("count");
+    assert_eq!(count.kind, BindingKind::Ref);
+    assert!(count.unwrapped && count.script_wraps_ref);
+    assert_eq!(
+        projection.write.write_target("doubled"),
+        Err(WriteRejection::GetterOnlyComputed)
+    );
+    match &projection
+        .write
+        .write_target("label")
+        .expect("label")
+        .domain
+    {
+        WriteDomain::SetterParam(domain) => assert_eq!(domain, "string"),
+        other => panic!("setter domain must be the declared type, got {other:?}"),
+    }
+    assert_eq!(
+        projection
+            .write
+            .write_target("modelValue")
+            .expect("model")
+            .domain,
+        WriteDomain::ModelValue
+    );
+    assert_eq!(
+        projection.write.write_target("title"),
+        Err(WriteRejection::ReadonlyProp)
+    );
+    assert!(projection.read.lookup("increment").is_some());
+    assert_eq!(
+        projection.write.write_target("increment"),
+        Err(WriteRejection::UnknownBinding)
+    );
+}

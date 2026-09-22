@@ -1,8 +1,10 @@
-// Contract-shape pin for the STP15 tsc probes: the live template
-// read/write views `VueProjectionBackend::binding_views` must preserve
-// (checked by `binding_views_reads_admitted_carrier_blocks` over real
-// carrier bytes; full carrier-to-declaration generation is STP58-owned).
-// Not compiler output.
+// Contract-shape pin for the STP15 tsc probes, not compiler output
+// (full carrier-to-declaration generation is STP58-owned). Every member
+// pinned here has a live-projection counterpart asserted by the
+// `stp15_counter_fixture_matches_projection` Rust test over equivalent
+// setup bytes plus `binding_views_reads_admitted_carrier_blocks` over
+// real carrier bytes: fixture drift fails there instead of passing
+// silently here.
 import type { ComponentPublicInstance, Ref } from "vue";
 
 // Script-side Ref wrapper: `<script setup>` still sees `Ref` (`.value`)
@@ -35,13 +37,12 @@ export declare class Comp {
   increment(step?: number): void;
 }
 
-export interface Comp
-  extends ComponentPublicInstance<
-    CounterProps,
-    { count: number; label: number; modelValue: string },
-    {},
-    { doubled: number; title: string },
-    { increment(step?: number): void; setLabel(value: string): void }
-  > {}
+export interface Comp extends ComponentPublicInstance<
+  CounterProps,
+  { count: number; label: number; modelValue: string },
+  {},
+  { doubled: number; title: string },
+  { increment(step?: number): void; setLabel(value: string): void }
+> {}
 
 export default Comp;

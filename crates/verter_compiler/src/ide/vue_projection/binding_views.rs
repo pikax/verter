@@ -300,8 +300,9 @@ pub struct BindingViewsProjection {
 }
 
 /// Vue reactivity factories recognised at setup scope by binding (not by
-/// bare spelling). `defineProps` is a macro under the same rule.
-const FACTORY_EXPORTS: [&str; 7] = [
+/// bare spelling). `defineProps` and `withDefaults` are macros under the
+/// same rule.
+const FACTORY_EXPORTS: [&str; 8] = [
     "ref",
     "computed",
     "reactive",
@@ -309,6 +310,7 @@ const FACTORY_EXPORTS: [&str; 7] = [
     "defineModel",
     "toRefs",
     "defineProps",
+    "withDefaults",
 ];
 
 /// Runtime (non-type-only) `'vue'` imports as local name to exported symbol.
@@ -462,7 +464,10 @@ fn pattern_names(pattern: &BindingPattern<'_>, base: u32) -> Vec<(String, Source
 /// Push one read row plus its write shape. `computed_domain` carries the
 /// declared setter domain for writable computed values; other kinds ignore
 /// it. Writable computed rows always record the declared domain (empty
-/// when unannotated), never the read type.
+/// when unannotated), never the read type. A name that already has a read
+/// row is left untouched: the earliest row wins, so a later partially
+/// bound destructuring pattern cannot duplicate or override an earlier
+/// readonly classification with a conflicting writable row.
 fn push_binding(
     projection: &mut BindingViewsProjection,
     name: String,
@@ -470,6 +475,9 @@ fn push_binding(
     range: SourceRange,
     computed_domain: Option<String>,
 ) {
+    if projection.read.lookup(&name).is_some() {
+        return;
+    }
     let (unwrapped, script_wraps_ref) = match &kind {
         BindingKind::Ref | BindingKind::Model => (true, true),
         BindingKind::Computed { .. }
@@ -510,6 +518,50 @@ fn push_binding(
     }
 }
 
+/// Push one read row with no write shape. Function declarations and ES
+/// module imports are template-visible reads but immutable in scope
+/// (TS2588/TS2630): they resolve through [`TemplateWriteTarget`] as
+/// [`WriteRejection::UnknownBinding`], never as a writable assignment
+/// target.
+fn push_read_only(projection: &mut BindingViewsProjection, name: String, range: SourceRange) {
+    if projection.read.lookup(&name).is_some() {
+        return;
+    }
+    projection.read.bindings.push(TemplateReadBinding {
+        name,
+        kind: BindingKind::Plain,
+        unwrapped: false,
+        script_wraps_ref: false,
+        range,
+    });
+}
+
+/// Resolve a `defineProps` call, unwrapping the `withDefaults(...)`
+/// outer call to the inner `defineProps<Props>()` call that carries the
+/// type arguments. Returns `None` for any other initializer.
+fn resolve_props_call<'a>(
+    call: &'a oxc_ast::ast::CallExpression<'a>,
+    values: &FxHashSet<String>,
+    vue_imports: &FxHashMap<&str, &str>,
+) -> Option<&'a oxc_ast::ast::CallExpression<'a>> {
+    if factory_export(&call.callee, values, vue_imports) == Some("withDefaults") {
+        // `withDefaults(defineProps<Props>(), ...)` binds props: return
+        // the inner call so its type arguments stay visible.
+        first_argument(call).and_then(|first| match first {
+            Expression::CallExpression(inner)
+                if factory_export(&inner.callee, values, vue_imports) == Some("defineProps") =>
+            {
+                Some(inner.as_ref())
+            }
+            _ => None,
+        })
+    } else if factory_export(&call.callee, values, vue_imports) == Some("defineProps") {
+        Some(call)
+    } else {
+        None
+    }
+}
+
 /// Classify one setup declarator initializer into read/write rows.
 fn classify_declarator(
     projection: &mut BindingViewsProjection,
@@ -520,7 +572,15 @@ fn classify_declarator(
     values: &FxHashSet<String>,
     vue_imports: &FxHashMap<&str, &str>,
 ) {
-    let names = pattern_names(id, base);
+    // Names already carrying a read row keep it: a partially bound
+    // destructuring pattern only adds its unbound members.
+    let names: Vec<(String, SourceRange)> = pattern_names(id, base)
+        .into_iter()
+        .filter(|(name, _)| projection.read.lookup(name).is_none())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
     let Some(Expression::CallExpression(call)) = init else {
         // Object literals (possibly holding nested refs), arrays and every
         // other initializer read directly: only top-level `ref` unwraps.
@@ -530,25 +590,8 @@ fn classify_declarator(
         return;
     };
     // `withDefaults(defineProps<...>(), ...)` binds props, not a plain.
-    let props_call = if factory_export(&call.callee, values, vue_imports) == Some("withDefaults") {
-        first_argument(call)
-            .and_then(|first| match first {
-                Expression::CallExpression(inner)
-                    if factory_export(&inner.callee, values, vue_imports)
-                        == Some("defineProps") =>
-                {
-                    Some(inner)
-                }
-                _ => None,
-            })
-            .map(|_| call)
-    } else if factory_export(&call.callee, values, vue_imports) == Some("defineProps") {
-        Some(call)
-    } else {
-        None
-    };
-    if let Some(call) = props_call {
-        collect_props_call(projection, base, call, &names);
+    if let Some(props_call) = resolve_props_call(call, values, vue_imports) {
+        collect_props_call(projection, base, props_call, &names, id);
         return;
     }
     match factory_export(&call.callee, values, vue_imports) {
@@ -619,16 +662,10 @@ fn classify_declarator(
     }
 }
 
-/// Record `defineProps` rows: array-form and type-literal members as
-/// readonly prop rows; a whole-object `props` binding as one readonly
-/// object row; an aliased props type (`defineProps<Props>()`) as direct
-/// readonly reads of the destructured names (TypeScript owns the members).
-fn collect_props_call(
-    projection: &mut BindingViewsProjection,
-    base: u32,
-    call: &oxc_ast::ast::CallExpression<'_>,
-    bound: &[(String, SourceRange)],
-) {
+/// Declared prop names with their source ranges: array-form string
+/// literals plus type-literal members. Empty for an aliased props type
+/// (`defineProps<Props>()`), whose members TypeScript owns.
+fn extract_props(base: u32, call: &oxc_ast::ast::CallExpression<'_>) -> Vec<(String, SourceRange)> {
     let mut props: Vec<(String, SourceRange)> = Vec::new();
     if let Some(Expression::ArrayExpression(array)) = first_argument(call) {
         for element in &array.elements {
@@ -674,6 +711,69 @@ fn collect_props_call(
             }
         }
     }
+    props
+}
+
+/// Declared prop key to bound local name: `const { title: heading }`
+/// maps `title` to the local `heading`; shorthand members map to
+/// themselves. Non-object patterns contribute identity pairs.
+fn props_aliases(id: &BindingPattern<'_>, base: u32) -> Vec<(String, String, SourceRange)> {
+    let BindingPattern::ObjectPattern(object) = id else {
+        return pattern_names(id, base)
+            .into_iter()
+            .map(|(name, range)| (name.clone(), name, range))
+            .collect();
+    };
+    let mut aliases = Vec::new();
+    for property in &object.properties {
+        if property.computed {
+            continue;
+        }
+        let key = match &property.key {
+            PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+            PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+            _ => None,
+        };
+        let Some(key) = key else {
+            continue;
+        };
+        if let BindingPattern::BindingIdentifier(local) = &property.value {
+            aliases.push((
+                key,
+                local.name.to_string(),
+                SourceRange {
+                    start: base + local.span.start,
+                    end: base + local.span.end,
+                },
+            ));
+        } else {
+            for (name, range) in pattern_names(&property.value, base) {
+                aliases.push((name.clone(), name, range));
+            }
+        }
+    }
+    if let Some(rest) = &object.rest {
+        for (name, range) in pattern_names(&rest.argument, base) {
+            aliases.push((name.clone(), name, range));
+        }
+    }
+    aliases
+}
+
+/// Record `defineProps` rows: array-form and type-literal members as
+/// readonly prop rows under their bound local names (renamed members
+/// like `title: heading` register `heading`); a whole-object `props`
+/// binding as one readonly object row; an aliased props type
+/// (`defineProps<Props>()`) as direct readonly reads of the destructured
+/// names (TypeScript owns the members).
+fn collect_props_call(
+    projection: &mut BindingViewsProjection,
+    base: u32,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    bound: &[(String, SourceRange)],
+    id: &BindingPattern<'_>,
+) {
+    let props = extract_props(base, call);
     if props.is_empty() {
         for (name, range) in bound {
             push_binding(
@@ -696,10 +796,30 @@ fn collect_props_call(
         );
         return;
     }
+    let aliases = props_aliases(id, base);
     for (name, _) in props {
-        if let Some((_, range)) = bound.iter().find(|(known, _)| known == &name) {
-            push_binding(projection, name, BindingKind::Readonly, *range, None);
+        if let Some((_, local, range)) = aliases.iter().find(|(key, _, _)| key == &name) {
+            push_binding(
+                projection,
+                local.clone(),
+                BindingKind::Readonly,
+                *range,
+                None,
+            );
         }
+    }
+}
+
+/// Record a standalone `defineProps<...>();` (or
+/// `withDefaults(defineProps<...>(), ...);`) expression statement: with
+/// no declarator the declared props themselves are the template rows.
+fn collect_standalone_props_call(
+    projection: &mut BindingViewsProjection,
+    base: u32,
+    call: &oxc_ast::ast::CallExpression<'_>,
+) {
+    for (name, range) in extract_props(base, call) {
+        push_binding(projection, name, BindingKind::Readonly, range, None);
     }
 }
 
@@ -728,28 +848,30 @@ pub fn project_binding_views(
     }
     let combined = project_options_pair(normal, setup, generic)?;
     let mut projection = BindingViewsProjection::default();
-    project_options_members(&mut projection, &combined);
-    let Some(block) = setup else {
-        return Ok(projection);
-    };
-    let source_type = setup_source_type(block.lang)?;
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, block.content, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
+    // Setup rows win over Options rows for the same name (setup-first
+    // order, earliest row kept): classify `<script setup>` before
+    // recording Options members, which skip names already bound.
+    if let Some(block) = setup {
+        let source_type = setup_source_type(block.lang)?;
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, block.content, source_type).parse();
+        if parsed.panicked || !parsed.errors.is_empty() {
+            return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
+        }
+        let program = &parsed.program;
+        let semantic = oxc_semantic::SemanticBuilder::new().build(program).semantic;
+        let values = value_bindings(semantic.scoping());
+        let vue_imports = vue_runtime_imports(program);
+        classify_setup_body(
+            &mut projection,
+            block.content,
+            block.content_start,
+            program,
+            &values,
+            &vue_imports,
+        );
     }
-    let program = &parsed.program;
-    let semantic = oxc_semantic::SemanticBuilder::new().build(program).semantic;
-    let values = value_bindings(semantic.scoping());
-    let vue_imports = vue_runtime_imports(program);
-    classify_setup_body(
-        &mut projection,
-        block.content,
-        block.content_start,
-        program,
-        &values,
-        &vue_imports,
-    );
+    project_options_members(&mut projection, &combined);
     Ok(projection)
 }
 
@@ -835,18 +957,14 @@ fn classify_setup_body(
             }
             Statement::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
-                    if projection.read.lookup(id.name.as_str()).is_none() {
-                        push_binding(
-                            projection,
-                            id.name.to_string(),
-                            BindingKind::Plain,
-                            SourceRange {
-                                start: base + id.span.start,
-                                end: base + id.span.end,
-                            },
-                            None,
-                        );
-                    }
+                    push_read_only(
+                        projection,
+                        id.name.to_string(),
+                        SourceRange {
+                            start: base + id.span.start,
+                            end: base + id.span.end,
+                        },
+                    );
                 }
             }
             Statement::ImportDeclaration(import) => {
@@ -865,17 +983,23 @@ fn classify_setup_body(
                             (spec.local.name.as_str(), spec.local.span)
                         }
                     };
-                    if projection.read.lookup(local).is_none() {
-                        push_binding(
-                            projection,
-                            local.to_string(),
-                            BindingKind::Plain,
-                            SourceRange {
-                                start: base + span.start,
-                                end: base + span.end,
-                            },
-                            None,
-                        );
+                    push_read_only(
+                        projection,
+                        local.to_string(),
+                        SourceRange {
+                            start: base + span.start,
+                            end: base + span.end,
+                        },
+                    );
+                }
+            }
+            Statement::ExpressionStatement(statement) => {
+                // Idiomatic `<script setup>` declares props without a
+                // script-side reference: a standalone
+                // `defineProps<...>();` still binds template rows.
+                if let Expression::CallExpression(call) = &statement.expression {
+                    if let Some(props_call) = resolve_props_call(call, values, vue_imports) {
+                        collect_standalone_props_call(projection, base, props_call);
                     }
                 }
             }

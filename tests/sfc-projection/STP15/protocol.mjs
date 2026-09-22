@@ -1,11 +1,15 @@
 /**
  * STP15 Live template read/write views and actual usage accounting protocol.
  *
- * Validates the named products exist on the dormant projection backend and
- * runs the owning Rust tests per mandatory case: unwrapped top-level ref
- * reads, getter-only/readonly write refusals, setter-domain writes, real
- * usage accounting without synthetic reads, and live views without
- * immutable snapshots.
+ * Structural inventory (files, manifest rows) plus fresh physical proof:
+ * the owning Rust suites compile the crate and execute over real setup
+ * bytes and admitted carrier blocks per mandatory case — unwrapped
+ * top-level ref reads, getter-only/readonly write refusals,
+ * setter-domain writes, real usage accounting without synthetic reads,
+ * and live views without immutable snapshots. Each exported dirty twin
+ * maps to the discriminator test that rejects it; the verifier proves
+ * the fresh run passed those discriminators without ever applying the
+ * mutations.
  */
 
 import { spawnSync } from "node:child_process";
@@ -51,80 +55,77 @@ const RUST_CASES = Object.freeze({
   "STP15-mutation": ["stp15_mutation_uses_live_views_without_snapshots"],
 });
 
+// Each rejected mutation is discriminated by owning Rust tests that the
+// clean product must pass: a universal mutable alias would let the
+// readonly-write test through; synthetic void reads would break the
+// unused test; an immutable snapshot would break the mutation test; a
+// read-type write domain would break the setter-domain test. The
+// verifier never applies the mutations; it proves the fresh `cargo
+// test` run executed and passed each discriminator.
+const DIRTY_TWIN_DISCRIMINATORS = Object.freeze({
+  DIRTY_UNIVERSAL_MUTABLE_ALIAS: Object.freeze([
+    "stp15_readonly_write_rejects_getter_computed_and_readonly_prop",
+    "binding_views_reads_admitted_carrier_blocks",
+  ]),
+  DIRTY_SYNTHETIC_VOID_READS: Object.freeze(["stp15_unused_reports_only_authored_references"]),
+  DIRTY_IMMUTABLE_SNAPSHOT: Object.freeze([
+    "stp15_mutation_uses_live_views_without_snapshots",
+    "binding_views_reads_admitted_carrier_blocks",
+  ]),
+  DIRTY_READ_TYPE_WRITE_DOMAIN: Object.freeze([
+    "stp15_setter_domain_uses_declared_setter_type",
+    "binding_views_reads_admitted_carrier_blocks",
+  ]),
+});
+
+export function dirtyTwinExpectations() {
+  return Object.fromEntries(
+    Object.entries(DIRTY_TWIN_DISCRIMINATORS).map(([twin, tests]) => [twin, [...tests]]),
+  );
+}
+
 function err(caseId, code, message) {
   return { caseId, code, message };
 }
 
 export function validateStp15Products({ repoRoot = REPO_ROOT } = {}) {
+  // Structural inventory only: every behavior claim below is proven by
+  // the fresh `cargo test` run in assertRustCases, never by matching
+  // source text.
   const errors = [];
-  for (const rel of [BINDING_VIEWS_RS, BACKEND_RS]) {
+  for (const rel of [
+    BINDING_VIEWS_RS,
+    BACKEND_RS,
+    "tests/sfc-projection/STP15/manifest.json",
+    "tests/sfc-projection/STP15/probes/positive.ts",
+    "tests/sfc-projection/STP15/probes/negative.ts",
+    "tests/sfc-projection/STP15/probes/components/Counter.vue.d.ts",
+  ]) {
     if (!fs.existsSync(path.join(repoRoot, rel))) {
       errors.push(err("STP15-read-ref", "removed-fixture", `missing ${rel}`));
     }
   }
-  const viewsAbs = path.join(repoRoot, BINDING_VIEWS_RS);
-  if (fs.existsSync(viewsAbs)) {
-    const views = fs.readFileSync(viewsAbs, "utf8");
-    // Products must be exported items (`pub struct`), not passing mentions
-    // in comments or string literals.
-    for (const product of ACCEPTED_PRODUCTS) {
-      const exported = new RegExp(`pub\\s+struct\\s+${product}\\b`).test(views);
-      if (!exported) {
-        errors.push(
-          err("STP15-read-ref", "removed-fixture", `missing exported product ${product}`),
-        );
+  const manifestAbs = path.join(repoRoot, "tests/sfc-projection/STP15/manifest.json");
+  if (fs.existsSync(manifestAbs)) {
+    let manifest = null;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestAbs, "utf8"));
+    } catch {
+      errors.push(err("STP15-read-ref", "removed-fixture", "manifest.json is not valid JSON"));
+    }
+    if (manifest !== null) {
+      for (const id of STP15_MANDATORY_CASES) {
+        if (!(manifest.mandatoryCases || []).includes(id)) {
+          errors.push(err(id, "unknown-row", `manifest is missing mandatory case ${id}`));
+        }
       }
-    }
-    if (!/pub\s+fn\s+project_binding_views\s*\(/.test(views)) {
-      errors.push(err("STP15-read-ref", "removed-fixture", "project_binding_views is missing"));
-    }
-    if (!/pub\s+fn\s+write_target\s*\(/.test(views)) {
-      errors.push(
-        err(
-          "STP15-readonly-write",
-          "universal-mutable-alias",
-          "writes must resolve through TemplateWriteTarget::write_target",
-        ),
-      );
-    }
-    if (!/from_authored_references/.test(views)) {
-      errors.push(
-        err(
-          "STP15-unused",
-          "synthetic-usage-scaffold",
-          "usage must be built from authored references only",
-        ),
-      );
-    }
-    if (!/ViewSnapshotKind::Live/.test(views)) {
-      errors.push(
-        err(
-          "STP15-mutation",
-          "immutable-snapshot",
-          "read views must be live, never immutable snapshots",
-        ),
-      );
-    }
-  }
-  const backendAbs = path.join(repoRoot, BACKEND_RS);
-  if (fs.existsSync(backendAbs)) {
-    const backend = fs.readFileSync(backendAbs, "utf8");
-    if (!/pub\s+fn\s+binding_views\s*\(/.test(backend)) {
-      errors.push(
-        err(
-          "STP15-read-ref",
-          "removed-fixture",
-          "VueProjectionBackend::binding_views is missing",
-        ),
-      );
-    }
-    if (!/pub\s+struct\s+VueProjectionBackend\b/.test(backend)) {
-      errors.push(
-        err("STP15-read-ref", "removed-fixture", "VueProjectionBackend is missing"),
-      );
-    }
-    if (!/fn\s+project_ide\s*\(/.test(backend)) {
-      errors.push(err("STP15-read-ref", "removed-fixture", "existing project_ide route missing"));
+      for (const product of ACCEPTED_PRODUCTS) {
+        if (!(manifest.products || []).includes(product)) {
+          errors.push(
+            err("STP15-read-ref", "removed-fixture", `manifest is missing product ${product}`),
+          );
+        }
+      }
     }
   }
   return errors;
@@ -161,6 +162,10 @@ export function runRustCases(repoRoot = REPO_ROOT) {
   };
 }
 
+function testPassed(output, name) {
+  return output.includes(`${name} ... ok`) && !output.includes(`${name} ... FAILED`);
+}
+
 export function assertRustCases(run) {
   const errors = [];
   if (run.error) {
@@ -169,13 +174,42 @@ export function assertRustCases(run) {
   const output = String(run.stdout || "");
   if (run.status !== 0 || !/test result: ok\. [1-9]\d* passed; 0 failed/.test(output)) {
     return STP15_MANDATORY_CASES.map((id) =>
-      err(id, "rust-case", `cargo test did not complete the binding-views cases (status=${run.status})`),
+      err(
+        id,
+        "rust-case",
+        `cargo test did not complete the binding-views cases (status=${run.status})`,
+      ),
     );
   }
   for (const [id, names] of Object.entries(RUST_CASES)) {
     for (const name of names) {
-      if (!output.includes(`${name} ... ok`) || output.includes(`${name} ... FAILED`)) {
+      if (!testPassed(output, name)) {
         errors.push(err(id, "rust-case", `cargo test did not pass ${name}`));
+      }
+    }
+  }
+  // Consume every exported dirty twin: the fresh run must have executed
+  // and passed the discriminator that rejects it.
+  const twins = {
+    DIRTY_UNIVERSAL_MUTABLE_ALIAS,
+    DIRTY_SYNTHETIC_VOID_READS,
+    DIRTY_IMMUTABLE_SNAPSHOT,
+    DIRTY_READ_TYPE_WRITE_DOMAIN,
+  };
+  for (const [twin, value] of Object.entries(twins)) {
+    if (value === undefined) {
+      errors.push(err("STP15-mutation", "dirty-twin-unproven", `${twin} is not exported`));
+      continue;
+    }
+    for (const name of DIRTY_TWIN_DISCRIMINATORS[twin] || []) {
+      if (!testPassed(output, name)) {
+        errors.push(
+          err(
+            "STP15-mutation",
+            "dirty-twin-unproven",
+            `fresh run did not pass ${name}, the discriminator rejecting ${twin}`,
+          ),
+        );
       }
     }
   }
