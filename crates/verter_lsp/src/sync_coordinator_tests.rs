@@ -3733,17 +3733,19 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
             .collect()
     };
 
-    // The re-arm: background receipts, oldest document first by receipt.
-    // Deposited NEWEST first: the coordinator may wake between two deposits and
-    // absorb a partial batch, and it serves whatever it absorbed newest-first.
-    // Deposited oldest first, a partial batch of one is the oldest document,
-    // which then takes a background slot and is no longer pending when the user
-    // turns to it below — the touch has nothing to admit and the wait runs out.
-    // Newest first, every partial batch is a newest-first prefix of the whole,
-    // so the oldest document never enters the window on its own.
+    // The re-arm: every open document is owed a pull AT ONCE. The coordinator
+    // may wake between two deposits and dispatch from a partial batch, so the
+    // batch is made atomic the way an in-flight change is: a change ticket per
+    // document holds it off dispatch, and dropping them all releases the whole
+    // backlog together. Deposited newest first, as the real re-arm does (most
+    // recently used first), with the oldest document carrying the oldest receipt.
     let gate = provider.gate_diagnostics();
     provider.clear_calls();
     let overdue = Instant::now() - Duration::from_secs(60);
+    let held: Vec<_> = docs
+        .iter()
+        .map(|(canonical_id, _)| handle.change_received(canonical_id.clone()))
+        .collect();
     for (index, (canonical_id, uri)) in docs.iter().enumerate().rev() {
         handle.signal_diagnostics_only(
             canonical_id.clone(),
@@ -3751,6 +3753,7 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
             overdue + Duration::from_millis(index as u64),
         );
     }
+    drop(held);
     tokio::time::timeout(
         Duration::from_secs(20),
         // Background work fills all but the one slot kept for the user.
