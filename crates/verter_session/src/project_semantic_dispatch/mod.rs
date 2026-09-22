@@ -25,7 +25,7 @@
 //!   `IndexedAccess { base, index, mode }` admission-canonicalise to the
 //!   length-1 `ProjectPath` form **before** memo hashing so sugar and
 //!   canonical share one warm entry and one in-flight wait graph.
-//! - `NormalizeUnion` / `ReduceIntersection` — structural dedup over the
+//! - `ReduceUnion` / `ReduceIntersection` — structural dedup over the
 //!   supplied members with stable ordering.
 //! - `KeyOf` / `MappedType` / `Conditional` — navigation operations that
 //!   walk the base node's shared-graph payload. Paths that do not reach a
@@ -878,7 +878,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // The normalize-query SUBJECT representation: the
             // pre-normalization member list interned verbatim (the query's
             // subject must stay distinct from its canonical result).
-            SemanticQueryKey::NormalizeUnion { members } => {
+            SemanticQueryKey::ReduceUnion { members } => {
                 graph.intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
                         members,
@@ -1804,7 +1804,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Build a dep-signature fragment that records only the project
     /// generation. Used by derived semantic operations (e.g. `Instantiate`,
-    /// `NormalizeUnion`) where no single canonical scope owns the result —
+    /// `ReduceUnion`) where no single canonical scope owns the result —
     /// dep signatures flow in through the warm memo hits of the bases the
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
@@ -2502,7 +2502,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //     entry and one in-flight wait graph.
         //   - `IndexedAccess { base, index, mode }` rewrites the same way to
         //     `ProjectPath { base, path: [Index(index)], mode }`.
-        //   - `NormalizeUnion` / `ReduceIntersection` get structural
+        //   - `ReduceUnion` / `ReduceIntersection` get structural
         //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
         //   - Symmetric `Relate` operands get the same ordering as typed
         //     relation callers before the family memo or wait graph sees them.
@@ -2546,7 +2546,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
-            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKey::ReduceUnion { members } => SemanticQueryKey::ReduceUnion {
                 members: canonicalize_node_list(self.graph(), &members),
             },
             SemanticQueryKey::ReduceIntersection {
@@ -2634,7 +2634,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the aggregate work-budget gate: the projection operators PLUS
         // `Instantiate` / `Conditional` (the generic-expansion-storm
         // kinds) and the demand-bearing `TypeOf`. Kinds outside that
-        // set (ResolveDecl, NormalizeUnion, …) bypass the early-exit —
+        // set (ResolveDecl, ReduceUnion, …) bypass the early-exit —
         // their cost is not what the work budget bounds.
         if !exact_same_path && semantic_query_counts_toward_projection_budget(&key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
@@ -2867,7 +2867,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     *distributive,
                     pending.clone(),
                 ),
-                SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
+                SemanticQueryKey::ReduceUnion { members } => self.build_reduce_union(members),
                 SemanticQueryKey::ReduceIntersection {
                     input,
                     purpose,
@@ -3269,7 +3269,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(AuditEvent::SemanticQueryProjectPathWarm)
                     }
                 }
-                // ResolveDecl, NormalizeUnion, ReduceIntersection,
+                // ResolveDecl, ReduceUnion, ReduceIntersection,
                 // Relate, ResolveMacroPayload — not in the focused
                 // counter set.
                 _ => None,

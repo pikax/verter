@@ -7418,7 +7418,7 @@ impl UnionMemberAccum {
             // disposition boundary.
             values => {
                 let composite =
-                    crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+                    crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
                         graph, values,
                     );
                 evidence.absorb(composite.evidence);

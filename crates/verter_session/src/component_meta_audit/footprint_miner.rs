@@ -656,7 +656,7 @@ fn node_kind_discriminant(kind: &SemanticNodeKind) -> u32 {
         SemanticNodeKind::TypeOf => 14,
         SemanticNodeKind::Mapped => 15,
         SemanticNodeKind::TemplateLiteral => 16,
-        SemanticNodeKind::NormalizeUnion => 17,
+        SemanticNodeKind::ReduceUnion => 17,
         SemanticNodeKind::ReduceIntersection => 18,
         SemanticNodeKind::Other { .. } => 19,
         // `SemanticNodeKind` is `#[non_exhaustive]`; the catch-all

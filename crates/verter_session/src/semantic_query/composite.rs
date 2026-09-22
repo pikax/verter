@@ -49,7 +49,7 @@
 //!   carrier semantics the rebuild site could not prove safe to re-decide.
 //!   The rebuilt list inherits the original carrier's semantics verbatim.
 //! * [`CompositeCarrierCategory::QuerySubject`] — a query-argument
-//!   representation: the `NormalizeUnion` / `ReduceIntersection`
+//!   representation: the `ReduceUnion` / `ReduceIntersection`
 //!   SUBJECT (the pre-normalization member list interned verbatim so the
 //!   query's subject stays distinct from its canonical result), and the
 //!   uniform arity-1 key-domain `Union` shell that carries a `Pick` /
@@ -454,7 +454,7 @@ pub(crate) enum CompositeCarrierCategory {
     /// composite whose carrier semantics were not proven re-decidable: the
     /// rebuilt list inherits the original's semantics verbatim.
     PreservingRebuild(PreservingRebuildMint),
-    /// A query-argument representation: the `NormalizeUnion` /
+    /// A query-argument representation: the `ReduceUnion` /
     /// `ReduceIntersection` subject, or the uniform arity-1 key-domain
     /// argument shell — the member list, verbatim.
     QuerySubject(QuerySubjectMint),

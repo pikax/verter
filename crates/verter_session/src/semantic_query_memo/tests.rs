@@ -10708,11 +10708,11 @@ mod prepared_identity_bijection {
                     ),
                 },
             ),
-            SemanticQueryKeyTag::NormalizeUnion => (
-                SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKeyTag::ReduceUnion => (
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 2]),
                 },
-                SemanticQueryKey::NormalizeUnion {
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 3]),
                 },
             ),

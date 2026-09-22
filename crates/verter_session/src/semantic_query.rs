@@ -7031,7 +7031,7 @@ pub enum InferencePassKind {
 /// Content-free identity of the set of inferable (open) type parameters in an
 /// inference session (§4.2). Realised as the interned set of graph node ids —
 /// the same content-free realisation the graph uses for node sets elsewhere
-/// (e.g. [`SemanticQueryKey::NormalizeUnion`]) — never a content/version hash
+/// (e.g. [`SemanticQueryKey::ReduceUnion`]) — never a content/version hash
 /// (R6). `Default` / [`empty`](Self::empty) is the empty set (no open
 /// parameters). SHAPE only: the interning substrate is the relation-inference
 /// reducer (not yet implemented).
@@ -7629,7 +7629,7 @@ pub enum SemanticQueryKey {
         path: Arc<[Arc<str>]>,
         context: TypeOfContext,
     },
-    NormalizeUnion {
+    ReduceUnion {
         members: Arc<[SemanticNodeId]>,
     },
     /// Ordered intersection reduction over an explicit construction input.
@@ -7930,7 +7930,7 @@ pub enum SemanticQueryKey {
     /// (the alternating literal text spans) and `args` mirrors its
     /// `expressions` (the interpolated type nodes). `args` is ORDER-
     /// SIGNIFICANT — it is part of semantic identity and is NEVER reordered
-    /// (concatenation order matters, unlike `NormalizeUnion`'s
+    /// (concatenation order matters, unlike `ReduceUnion`'s
     /// order-insensitive members). `context` carries the `{R, T, L, J}` env
     /// (NO `P`; substitution rides on `args` — see
     /// [`TemplateLiteralReduceContext`]).
@@ -7941,7 +7941,7 @@ pub enum SemanticQueryKey {
     /// shared deferred evaluator, then forms the CARTESIAN PRODUCT of those
     /// choices. An all-single-literal template folds to one
     /// [`SemanticNodeData::Literal`] string; a finite union of choices
-    /// renormalises through `NormalizeUnion`; any non-finite expression — or a
+    /// renormalises through `ReduceUnion`; any non-finite expression — or a
     /// finite product whose width exceeds the keyspace budget — carrier-stops
     /// to the `TemplateLiteral` shell (an over-budget product is additionally
     /// non-cacheable / budget-tainted). Value domain:
@@ -8286,7 +8286,7 @@ pub enum SemanticQueryKeyTag {
     MappedType,
     Conditional,
     TypeOf,
-    NormalizeUnion,
+    ReduceUnion,
     ReduceIntersection,
     ProjectObjectSpread,
     ProjectPath,
@@ -8325,7 +8325,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::MappedType,
         SemanticQueryKeyTag::Conditional,
         SemanticQueryKeyTag::TypeOf,
-        SemanticQueryKeyTag::NormalizeUnion,
+        SemanticQueryKeyTag::ReduceUnion,
         SemanticQueryKeyTag::ReduceIntersection,
         SemanticQueryKeyTag::ProjectObjectSpread,
         SemanticQueryKeyTag::ProjectPath,
@@ -8366,7 +8366,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::MappedType => "MappedType",
             SemanticQueryKeyTag::Conditional => "Conditional",
             SemanticQueryKeyTag::TypeOf => "TypeOf",
-            SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
+            SemanticQueryKeyTag::ReduceUnion => "ReduceUnion",
             SemanticQueryKeyTag::ReduceIntersection => "ReduceIntersection",
             SemanticQueryKeyTag::ProjectObjectSpread => "ProjectObjectSpread",
             SemanticQueryKeyTag::ProjectPath => "ProjectPath",
@@ -8459,7 +8459,7 @@ impl SemanticQueryKey {
             SemanticQueryKey::MappedType { .. } => SemanticQueryKeyTag::MappedType,
             SemanticQueryKey::Conditional { .. } => SemanticQueryKeyTag::Conditional,
             SemanticQueryKey::TypeOf { .. } => SemanticQueryKeyTag::TypeOf,
-            SemanticQueryKey::NormalizeUnion { .. } => SemanticQueryKeyTag::NormalizeUnion,
+            SemanticQueryKey::ReduceUnion { .. } => SemanticQueryKeyTag::ReduceUnion,
             SemanticQueryKey::ReduceIntersection { .. } => SemanticQueryKeyTag::ReduceIntersection,
             SemanticQueryKey::ProjectObjectSpread { .. } => {
                 SemanticQueryKeyTag::ProjectObjectSpread

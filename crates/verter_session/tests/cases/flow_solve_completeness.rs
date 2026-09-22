@@ -1685,7 +1685,7 @@ fn unused_flow_runtime_reserves_no_demand_storage() {
     let ordinary = {
         let graph = host.project_type_store().semantic_graph();
         let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        SemanticQueryKey::NormalizeUnion {
+        SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
         }
     };

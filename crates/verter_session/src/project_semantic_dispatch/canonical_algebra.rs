@@ -27,7 +27,7 @@
 //!    missing payload or an exhausted work budget) preserves both arms and
 //!    suppresses canonical warm admission.
 //!
-//! 2. **The canonical builders** ([`canonical_union`] /
+//! 2. **The canonical builders** ([`intern_ordered_union`] /
 //!    [`intern_ordered_intersection`]): recursive same-kind flattening, the §22
 //!    lattice absorption laws (`X | never = X`, `X | any = any`,
 //!    `X | unknown = unknown`, `X & never = never`, `X & any = any`,
@@ -107,7 +107,7 @@ mod literal_provenance_tests {
             .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
             .collect();
         SUBSUMPTION_READS.set(0);
-        let result = canonical_union(&graph, &members);
+        let result = intern_ordered_union(&graph, &members);
         assert!(!result.evidence.incomplete);
         let data = graph.node_data(result.node).unwrap();
         let SemanticNodeData::Union(arms) = data.as_ref() else {
@@ -161,7 +161,7 @@ mod literal_provenance_tests {
             let graph = SemanticGraphStore::new();
             let left = scoped_literal(&graph, left, "/fresh.ts");
             let right = scoped_literal(&graph, right, "/pinned.ts");
-            let result = canonical_union(&graph, &[left, right]).node;
+            let result = intern_ordered_union(&graph, &[left, right]).node;
             let (membership, evidence) = inspect_literal_provenance(
                 &graph,
                 &[
@@ -182,8 +182,8 @@ mod literal_provenance_tests {
         let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
         let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
         let c = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("c".into())));
-        let root = canonical_union(&graph, &[c, b, a]).node;
-        let partial = canonical_union(&graph, &[c, a]).node;
+        let root = intern_ordered_union(&graph, &[c, b, a]).node;
+        let partial = intern_ordered_union(&graph, &[c, a]).node;
         let members = [partial; 32];
         let (membership, evidence) = inspect_literal_provenance(
             &graph,
@@ -252,7 +252,7 @@ mod literal_provenance_tests {
         let bigint = graph.intern_node(SemanticNodeData::Literal(LiteralValue::BigInt(
             "7".repeat(4096),
         )));
-        let root = canonical_union(&graph, &[string, bigint]).node;
+        let root = intern_ordered_union(&graph, &[string, bigint]).node;
         let partial = [string];
         let inputs: Vec<_> = (0..32)
             .map(|index| {
@@ -772,7 +772,7 @@ pub(crate) fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
 }
 
 /// Canonical union construction over `members`.
-pub(crate) fn canonical_union(
+pub(crate) fn intern_ordered_union(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {

@@ -342,7 +342,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// A node kind keyed by already-interned input nodes (`ProjectPath` /
     /// `ProjectMember` / `IndexedAccess` rooted at `base`; `KeyOf` /
-    /// `MappedType` / `Conditional` / `NormalizeUnion` /
+    /// `MappedType` / `Conditional` / `ReduceUnion` /
     /// `ReduceIntersection` over their input nodes) produces a result
     /// whose identity transitively depends on the file content each
     /// file-derived input was lowered from. The input node's origin scope
@@ -7138,7 +7138,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// reduction for `Obj[A | B]`. Resolves the index node; when it is a FINITE
     /// union whose every arm normalises to a literal key (`string` / `number`),
     /// projects `Obj[arm]` per arm through the shared `IndexedAccess` query and
-    /// renormalises the results through `NormalizeUnion`. Returns `None` (fall
+    /// renormalises the results through `ReduceUnion`. Returns `None` (fall
     /// through to the path walker) for a non-`TypeNode` index, a non-union
     /// resolved index, an open/generic union arm, or any per-arm projection
     /// miss — so symbolic / partial cases keep their carrier.
@@ -7238,7 +7238,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => return None,
             }
         }
-        let norm = self.execute_read(SemanticQueryKey::NormalizeUnion {
+        let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
             members: Arc::from(projected.into_boxed_slice()),
         });
         match norm.value {
@@ -9260,7 +9260,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   check: member, extends, true_branch, false_branch,
     ///   distributive: false })` for every member, then combines the
     ///   per-member results through
-    ///   `SemanticQueryApi::execute(SemanticQueryKey::NormalizeUnion {
+    ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
     ///   members: per_member_results })`. Termination is guaranteed by
     ///   the `distributive: false` flag on each sub-query (no re-
     ///   distribution), the family memo's per-member dedup, and the
@@ -9498,7 +9498,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        let normalized = self.conditional_query_output(SemanticQueryKey::NormalizeUnion {
+        let normalized = self.conditional_query_output(SemanticQueryKey::ReduceUnion {
             members: Arc::from(per_member),
         });
         output.cache_suppress |= normalized.cache_suppress;
@@ -10006,7 +10006,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false
     }
 
-    /// Union normalization — the `NormalizeUnion` query builder. Routes
+    /// Ordered union reduction — the `ReduceUnion` query builder. Routes
     /// through the canonical algebra (recursive flattening, §22 lattice
     /// absorption, literal subsumption, structural `T | T = T`), threading
     /// the canonicalization's freshness evidence onto the memo entry
@@ -10024,17 +10024,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Edges landing on a shared `Global` primitive are accepted growth:
     /// the derivation store deduplicates identical edges, and each edge is
     /// a true "some normalization folded these contributors here" fact.
-    pub(super) fn build_normalize_union(
+    pub(super) fn build_reduce_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        verter_audit::attribute!(NormalizeUnion);
+        verter_audit::attribute!(ReduceUnion);
         self.build_normalize_composite(members, /* is_union */ true)
     }
 
     /// Ordered intersection reduction — the `ReduceIntersection` query
     /// builder. Same evidence threading and origin-edge discipline as
-    /// [`Self::build_normalize_union`]; the algebra additionally applies
+    /// [`Self::build_reduce_union`]; the algebra additionally applies
     /// the intersection lattice laws and the PROVEN-disjoint scalar
     /// collapse (`string & number = never`). Operand order is preserved.
     pub(super) fn build_reduce_intersection(
@@ -10084,7 +10084,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         is_union: bool,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let composite = if is_union {
-            super::canonical_algebra::canonical_union(self.graph(), members)
+            super::canonical_algebra::intern_ordered_union(self.graph(), members)
         } else {
             super::canonical_algebra::intern_ordered_intersection(self.graph(), members)
         };
@@ -10131,7 +10131,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// (the caller evaluates it ONCE through the shared deferred evaluator), then:
     ///
     /// - a string literal ⇒ the case-transformed literal;
-    /// - a union ⇒ per-arm transform + `NormalizeUnion` (each arm is resolved
+    /// - a union ⇒ per-arm transform + `ReduceUnion` (each arm is resolved
     ///   before transforming);
     /// - `never` ⇒ `never` (empty domain);
     /// - a broad `string` / unresolved / non-string shape ⇒ fail closed to the
@@ -10165,7 +10165,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.apply_string_intrinsic(intrinsic, resolved_member, context)
                     })
                     .collect();
-                let read = self.execute_read(SemanticQueryKey::NormalizeUnion {
+                let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(mapped.into_boxed_slice()),
                 });
                 match read.value {
@@ -10194,7 +10194,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// ([`Self::reduce_template_literal_nodes`]). An all-single-literal
     /// template folds to one [`SemanticNodeData::Literal`] string; a finite
     /// union of choices renormalises through
-    /// [`SemanticQueryKey::NormalizeUnion`]; any non-finite expression
+    /// [`SemanticQueryKey::ReduceUnion`]; any non-finite expression
     /// carrier-stops to the `TemplateLiteral` shell. There is no second
     /// walker — the deferred evaluator's `TemplateLiteral` arm and the
     /// mapped key-remap path both reach this reducer THROUGH this query.
@@ -10208,7 +10208,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Self-version rooting: the reduction depends on every interpolated
     /// arg node, so the memo entry roots on the file content version each
-    /// file-derived arg was lowered from (mirrors `build_normalize_union`).
+    /// file-derived arg was lowered from (mirrors `build_reduce_union`).
     /// `args` is consumed in ORDER — concatenation order is semantic and is
     /// never reordered.
     pub(super) fn build_template_literal_reduce(
@@ -11340,7 +11340,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// per-arg choice-set cardinalities BEFORE any string is allocated.
     ///
     /// The multi-result case renormalises through
-    /// [`SemanticQueryKey::NormalizeUnion`] so the union is canonical. Used by
+    /// [`SemanticQueryKey::ReduceUnion`] so the union is canonical. Used by
     /// [`Self::build_template_literal_reduce`] (the live query producer); the
     /// deferred evaluator's `TemplateLiteral` arm and the mapped key-remap path
     /// both reach this helper THROUGH that query, never a second walker.
@@ -11417,7 +11417,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .into_iter()
                     .map(|s| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(s))))
                     .collect();
-                let read = self.execute_read(SemanticQueryKey::NormalizeUnion {
+                let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(members.into_boxed_slice()),
                 });
                 match read.value {
@@ -11776,7 +11776,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The dispatch-level canonical-composite funnel: every dispatch-context
     /// union / intersection CONSTRUCTION routes here, and this routes through
     /// the canonical algebra
-    /// ([`canonical_algebra::canonical_union`] /
+    /// ([`canonical_algebra::intern_ordered_union`] /
     /// [`canonical_algebra::intern_ordered_intersection`]) — recursive flattening,
     /// lattice absorption, structural `T | T = T`, proven-disjoint scalar
     /// intersection collapse. The canonicalization's freshness evidence is
@@ -11791,7 +11791,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         is_union: bool,
     ) -> SemanticNodeId {
         if is_union {
-            let composite = super::canonical_algebra::canonical_union(self.graph(), members);
+            let composite = super::canonical_algebra::intern_ordered_union(self.graph(), members);
             self.deposit_canonical_evidence(composite.evidence);
             composite.node
         } else {

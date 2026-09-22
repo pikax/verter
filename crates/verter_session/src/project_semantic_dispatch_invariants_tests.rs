@@ -133,7 +133,7 @@ fn evaluate_deferred_has_no_iteration_cap_beyond_graph_size() {
 /// `PathWalker::walk_path` is iterative (worklist) and
 /// terminates on deeply nested acyclic unions without hitting a
 /// stack limit. Verified by public-API exercise — build a deeply
-/// nested chain of singleton unions via `NormalizeUnion` and project
+/// nested chain of singleton unions via `ReduceUnion` and project
 /// through it.
 #[test]
 fn walk_path_terminates_on_deeply_nested_acyclic_union() {
@@ -149,13 +149,13 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
         let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(i as f64)));
         let next_nodes: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
             std::sync::Arc::from(vec![current, literal].into_boxed_slice());
-        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
             members: next_nodes,
         }) {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryOutput { value: id, .. },
             ) => current = id,
-            other => panic!("NormalizeUnion iteration {i} failed: {other:?}"),
+            other => panic!("ReduceUnion iteration {i} failed: {other:?}"),
         }
     }
     let empty_path: std::sync::Arc<[crate::semantic_query::PathSegment]> =
@@ -3067,7 +3067,7 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
 }
 
 /// Normalization invariant: union / intersection normalization
-/// lives on dispatch via `NormalizeUnion` / `ReduceIntersection`.
+/// lives on dispatch via `ReduceUnion` / `ReduceIntersection`.
 #[test]
 fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     let host = host_for_relation_tests();
@@ -3078,10 +3078,9 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     // A single-element "union" should fold to the element itself.
     let members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a].into_boxed_slice());
-    let result =
-        dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
-            members: members.clone(),
-        });
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
+        members: members.clone(),
+    });
     match result {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
             value: id,
@@ -3098,7 +3097,7 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     let ab: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a, b].into_boxed_slice());
     let ab_result = dispatch
-        .execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion { members: ab });
+        .execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion { members: ab });
     match ab_result {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
             value: id,

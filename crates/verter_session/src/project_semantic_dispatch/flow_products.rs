@@ -1079,7 +1079,7 @@ impl FlowSemanticAlgebra for super::ProjectSemanticDispatch<'_> {
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
-        let composite = super::canonical_algebra::canonical_union(self.graph(), members);
+        let composite = super::canonical_algebra::intern_ordered_union(self.graph(), members);
         let incomplete = composite.evidence.incomplete;
         self.deposit_canonical_evidence(composite.evidence);
         FlowAlgebraComposite {
@@ -1112,7 +1112,7 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
-        let composite = super::canonical_algebra::canonical_union(self.0, members);
+        let composite = super::canonical_algebra::intern_ordered_union(self.0, members);
         FlowAlgebraComposite {
             node: composite.node,
             incomplete: composite.evidence.incomplete,

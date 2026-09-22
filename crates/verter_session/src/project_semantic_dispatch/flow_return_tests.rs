@@ -5861,7 +5861,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
                 .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
                     crate::semantic_query::PrimitiveKind::Number,
                 ));
-        let _ = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+        let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
         });
 

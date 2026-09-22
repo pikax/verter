@@ -147,10 +147,10 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     // Canonical semantic union / intersection construction owns the §22
-    // absorption arms inside `canonical_algebra::canonical_union` /
+    // absorption arms inside `canonical_algebra::intern_ordered_union` /
     // `canonical_algebra::intern_ordered_intersection`; the former per-reducer `absorb_union` /
     // `absorb_intersection` entry hooks are deleted. Raw structural carriers
-    // remain intentional: the `NormalizeUnion` / `ReduceIntersection`
+    // remain intentional: the `ReduceUnion` / `ReduceIntersection`
     // query-key nodes, the arity-1 key-domain carrier in `mod.rs`, and the
     // structural rebuilds in `walk.rs` intern their ordered payloads directly.
 
@@ -242,7 +242,7 @@ impl ProjectSemanticDispatch<'_> {
     /// 2. `any extends T ? X : Y` ⇒ `X | Y` — the union of BOTH branches,
     ///    mode-INDEPENDENT (distributive and non-distributive alike). Built
     ///    via [`intern_normalized_union_or_intersection`](Self::intern_normalized_union_or_intersection)
-    ///    (the `NormalizeUnion` intern) so `X | X` folds to `X` with canonical
+    ///    (the `ReduceUnion` intern) so `X | X` folds to `X` with canonical
     ///    dedup/order — NOT a raw `Union`. The relation engine would instead
     ///    pick the TRUE branch for an `any` check, so this row MUST live here.
     ///    SKIPPED when `extends` is an `infer` pattern: the true branch would

@@ -491,7 +491,7 @@ fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit
         };
         let first = graph.intern_node_with_scope(shell.clone(), scope("first"));
         let second = graph.intern_node_with_scope(shell, scope("second"));
-        let key = SemanticQueryKey::NormalizeUnion {
+        let key = SemanticQueryKey::ReduceUnion {
             members: Arc::from([first, second]),
         };
         for _ in 0..2 {
@@ -2707,21 +2707,21 @@ fn member_value(
         .unwrap_or_else(|| panic!("member '{member}' not found on {node:?}"))
 }
 
-/// `NormalizeUnion` is structural: `[A, B]` and `[B, A]` normalize to the
+/// `ReduceUnion` is structural: `[A, B]` and `[B, A]` normalize to the
 /// same canonical node. Duplicate members dedup; a singleton folds to
 /// the only member.
 #[test]
-fn normalize_union_is_structurally_canonical() {
+fn reduce_union_is_structurally_canonical() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
-    let ab = dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let ab = dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![a, b].into_boxed_slice()),
     });
-    let ba = dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let ba = dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![b, a].into_boxed_slice()),
     });
 
@@ -2738,7 +2738,7 @@ fn normalize_union_is_structurally_canonical() {
     );
 
     // Singleton folds to the only member.
-    let single = dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let single = dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![a].into_boxed_slice()),
     });
     match single {
@@ -2758,7 +2758,7 @@ fn normalize_union_is_structurally_canonical() {
 /// longer appears in the result. A derived multi-arm composite interns
 /// under `Global`.
 #[test]
-fn normalize_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
+fn reduce_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -2780,7 +2780,7 @@ fn normalize_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
     );
 
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![kept, discarded].into_boxed_slice());
-    let output = dispatch.build_normalize_union(&members);
+    let output = dispatch.build_reduce_union(&members);
     let QueryResult::Value(node) = output.result else {
         panic!(
             "normalization must produce a value, got {:?}",
@@ -2822,7 +2822,7 @@ fn normalize_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
     assert_ne!(obj_a, obj_b);
     assert_eq!(graph.node_scope(obj_a), Some(NodeScopeId::Global));
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
-    let output = dispatch.build_normalize_union(&members);
+    let output = dispatch.build_reduce_union(&members);
     let QueryResult::Value(node) = output.result else {
         panic!(
             "normalization must produce a value, got {:?}",
@@ -2846,7 +2846,7 @@ fn normalize_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
     // A derived multi-arm composite interns under `Global`.
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![kept, number].into_boxed_slice());
-    let output = dispatch.build_normalize_union(&members);
+    let output = dispatch.build_reduce_union(&members);
     let QueryResult::Value(node) = output.result else {
         panic!(
             "normalization must produce a value, got {:?}",
@@ -2870,7 +2870,7 @@ fn normalize_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
 /// Both `Incomplete` classes are exercised: a missing node payload and an
 /// exhausted comparison work budget.
 #[test]
-fn normalize_union_incomplete_comparison_is_return_only_with_zero_warm_candidates() {
+fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates() {
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
@@ -2913,7 +2913,7 @@ fn normalize_union_incomplete_comparison_is_return_only_with_zero_warm_candidate
         ("missing payload", missing_payload),
         ("budget exhaustion", over_budget),
     ] {
-        let key = SemanticQueryKey::NormalizeUnion {
+        let key = SemanticQueryKey::ReduceUnion {
             members: Arc::clone(&members),
         };
         let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
@@ -2971,7 +2971,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
     ));
 
     // Distinct literal arms stay a two-arm union.
-    let union = canonical_algebra::canonical_union(&graph, &[lit_a, lit_b]);
+    let union = canonical_algebra::intern_ordered_union(&graph, &[lit_a, lit_b]);
     assert!(
         matches!(graph.node_data(union.node).as_deref(), Some(SemanticNodeData::Union(m)) if m.len() == 2),
         "\"a\" | \"b\" must not collapse"
@@ -3007,7 +3007,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
             vec![lit_a, string].into_boxed_slice(),
         )),
     ));
-    let flattened = canonical_algebra::canonical_union(&graph, &[inner, number]);
+    let flattened = canonical_algebra::intern_ordered_union(&graph, &[inner, number]);
     match graph.node_data(flattened.node).as_deref() {
         Some(SemanticNodeData::Union(m)) => {
             // `\"a\"` is subsumed by its base primitive `string` (checker
@@ -3082,7 +3082,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     // Derived-composite constituent identity is span-insensitive: the union
     // of the two collapses to the first retained arm, complete and
     // warm-eligible.
-    let union = canonical_algebra::canonical_union(&graph, &[at_62, at_94]);
+    let union = canonical_algebra::intern_ordered_union(&graph, &[at_62, at_94]);
     assert_eq!(
         union.node,
         at_62,
@@ -3105,7 +3105,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     // exclusion must not widen into value identity.
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let number_at_62 = member_span_object(62, number);
-    let distinct = canonical_algebra::canonical_union(&graph, &[at_62, number_at_62]);
+    let distinct = canonical_algebra::intern_ordered_union(&graph, &[at_62, number_at_62]);
     assert!(
         matches!(
             graph.node_data(distinct.node).as_deref(),
@@ -3143,7 +3143,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
         index_a, index_b,
         "index-signature spans stay arena identity"
     );
-    let index_union = canonical_algebra::canonical_union(&graph, &[index_a, index_b]);
+    let index_union = canonical_algebra::intern_ordered_union(&graph, &[index_a, index_b]);
     assert_eq!(
         index_union.node, index_a,
         "index-signature-span-only arms collapse"
@@ -3177,7 +3177,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     let sig_a = signature_node(30);
     let sig_b = signature_node(300);
     assert_ne!(sig_a, sig_b, "signature spans stay arena identity");
-    let sig_union = canonical_algebra::canonical_union(&graph, &[sig_a, sig_b]);
+    let sig_union = canonical_algebra::intern_ordered_union(&graph, &[sig_a, sig_b]);
     assert_eq!(
         sig_union.node, sig_a,
         "signature-span-only arms collapse under T | T = T"
@@ -3270,7 +3270,7 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
         equal_arguments[0], equal_arguments[1],
         "distinct argument ids keep the shells arena-distinct"
     );
-    let collapsed = canonical_algebra::canonical_union(&graph, &equal_arguments);
+    let collapsed = canonical_algebra::intern_ordered_union(&graph, &equal_arguments);
     assert_eq!(
         collapsed.node, equal_arguments[0],
         "deep-equal pending arguments collapse; first occurrence survives"
@@ -3280,7 +3280,7 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
     let distinct_parameters = [equal_arguments[0], conditional(type_param(1), argument_a)];
     assert!(
         matches!(
-            graph.node_data(canonical_algebra::canonical_union(&graph, &distinct_parameters).node)
+            graph.node_data(canonical_algebra::intern_ordered_union(&graph, &distinct_parameters).node)
                 .as_deref(),
             Some(SemanticNodeData::Union(members)) if members.len() == 2
         ),
@@ -3345,7 +3345,7 @@ fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
     assert_ne!(arms[0], duplicate, "the duplicate differs only by spans");
     arms.push(duplicate);
 
-    let union = canonical_algebra::canonical_union(&graph, &arms);
+    let union = canonical_algebra::intern_ordered_union(&graph, &arms);
     match graph.node_data(union.node).as_deref() {
         Some(SemanticNodeData::Union(members)) => {
             assert_eq!(
@@ -3405,7 +3405,7 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     );
 
     // `0 | -0` folds to ONE arm.
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[zero, neg_zero],
     );
@@ -3477,7 +3477,7 @@ fn tier1_payload_equal_discard_roots_descendant_files() {
     assert_ne!(g, f, "scope is arena identity — the fixture needs two ids");
 
     let union =
-        crate::project_semantic_dispatch::canonical_algebra::canonical_union(&graph, &[g, f]);
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(&graph, &[g, f]);
     assert_eq!(union.node, g, "tier-1 keeps the first payload-equal arm");
     let roots: Vec<&str> = union
         .evidence
@@ -3516,8 +3516,10 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         SemanticNodeData::Primitive(PrimitiveKind::Any),
         file_scope("/w/any_owner.ts"),
     );
-    let union =
-        crate::project_semantic_dispatch::canonical_algebra::canonical_union(&graph, &[scoped_any]);
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        &graph,
+        &[scoped_any],
+    );
     assert_eq!(
         union.node, scoped_any,
         "singleton union of a file-scoped `any` returns the INPUT node, not the Global primitive"
@@ -3527,7 +3529,7 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         SemanticNodeData::Primitive(PrimitiveKind::Never),
         file_scope("/w/never_owner.ts"),
     );
-    let never_union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let never_union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[scoped_never],
     );
@@ -3590,7 +3592,7 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
     // Union lattice-extreme fold (`X | any = any`) records too.
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![string, any].into_boxed_slice());
-    let output = dispatch.build_normalize_union(&members);
+    let output = dispatch.build_reduce_union(&members);
     let QueryResult::Value(node) = output.result else {
         panic!("normalization must produce a value");
     };
@@ -3638,7 +3640,7 @@ fn comparator_object_arm_discriminates_diverged_positive_members() {
         "the arena interns the diverged surface as a DISTINCT node"
     );
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[base, diverged],
     );
@@ -3667,7 +3669,7 @@ fn over_deep_alias_peek_marks_evidence_incomplete() {
     }
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[aliased, string],
     );
@@ -3704,7 +3706,8 @@ fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
         })
         .collect();
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(&graph, &arms);
+    let union =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(&graph, &arms);
     assert!(
         matches!(
             graph.node_data(union.node).as_deref(),
@@ -3739,7 +3742,7 @@ fn frameless_incomplete_canonical_evidence_marks_request_partial() {
         aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
     }
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[aliased, string],
     );
@@ -3793,7 +3796,7 @@ fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed
         aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
     }
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[aliased, string],
     );
@@ -7414,7 +7417,7 @@ fn distinct_projections_into_same_open_conditional_materialise_only_visited_sube
 /// Distributive-conditional contract: when a distributive conditional
 /// sees a union `check`, `build_conditional` must distribute the
 /// conditional per-member via `SemanticQueryApi::execute` (NOT
-/// private recursion) and combine via `NormalizeUnion`. Termination
+/// private recursion) and combine via `ReduceUnion`. Termination
 /// relies on each per-member sub-query carrying `distributive: false`
 /// so the memo dedups and the dispatch layer's same-path sentinel
 /// catches any accidental self-recursion. The test drives a
@@ -7434,7 +7437,7 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
     // check = string | number ; extends = string ;
-    // distributive = true → expect NormalizeUnion([ true_branch (for
+    // distributive = true → expect ReduceUnion([ true_branch (for
     // string), false_branch (for number) ]).
     let union_check = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
@@ -7454,11 +7457,11 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
         other => panic!("expected distributed union value, got {other:?}"),
     };
 
-    // The expected shape is `NormalizeUnion([true_branch,
-    // false_branch])`. Call `NormalizeUnion` directly and compare: the
+    // The expected shape is `ReduceUnion([true_branch,
+    // false_branch])`. Call `ReduceUnion` directly and compare: the
     // memo must dedup onto the same node id since the per-member
     // sub-queries canonicalised identically.
-    let expected = match dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let expected = match dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![true_branch, false_branch].into_boxed_slice()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -7575,7 +7578,7 @@ fn build_conditional_distributive_union_behind_alias_carrier_distributes_per_mem
         other => panic!("expected distributed union value, got {other:?}"),
     };
 
-    let expected = match dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let expected = match dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![true_branch, false_branch].into_boxed_slice()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -7654,7 +7657,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected deferred conditional for B, got {other:?}"),
     };
-    let expected_union = match dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let expected_union = match dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![expected_a, expected_b].into_boxed_slice()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8145,7 +8148,7 @@ fn mutual_alias_cycle_x_y_x_returns_opaque_with_chain_of_length_2() {
 // C5 — Normalize + KeyOf origin edges ( C5)
 // ──────────────────────────────────────────────────────────────────
 
-/// `NormalizeUnion` / `ReduceIntersection` emit one `Normalize`
+/// `ReduceUnion` / `ReduceIntersection` emit one `Normalize`
 /// origin edge from the result back to each pre-canonical source
 /// member. Walkers can recover the original input set even after
 /// dedup / sorting.
@@ -8158,7 +8161,7 @@ fn normalize_records_sources() {
     let b = primitive(&graph, PrimitiveKind::Number);
     let c = primitive(&graph, PrimitiveKind::Boolean);
     let members = Arc::from(vec![a, b, c].into_boxed_slice());
-    let result = match dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+    let result = match dispatch.execute_type_node(SemanticQueryKey::ReduceUnion {
         members: Arc::clone(&members),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -22759,7 +22762,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             MappedType { .. } => "MappedType",
             Conditional { .. } => "Conditional",
             TypeOf { .. } => "TypeOf",
-            NormalizeUnion { .. } => "NormalizeUnion",
+            ReduceUnion { .. } => "ReduceUnion",
             ReduceIntersection { .. } => "ReduceIntersection",
             ProjectObjectSpread { .. } => "ProjectObjectSpread",
             ProjectPath { .. } => "ProjectPath",
@@ -30675,7 +30678,10 @@ fn oracle_value_union(
         // ratified VerterStableV1 order and the carrier-qualified canonical
         // mint ARE the intended semantics of this step, so the reference
         // delegates the intern while keeping its own dedup/singleton logic.
-        _ => crate::project_semantic_dispatch::canonical_algebra::canonical_union(graph, &ids).node,
+        _ => {
+            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(graph, &ids)
+                .node
+        }
     }
 }
 
@@ -31830,7 +31836,7 @@ fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close
         aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
     }
     let string_node = primitive(&graph, PrimitiveKind::String);
-    let union = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         &graph,
         &[aliased, string_node],
     );

@@ -400,7 +400,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     );
 }
 
-/// Non-projection-op queries (ResolveDecl, NormalizeUnion,
+/// Non-projection-op queries (ResolveDecl, ReduceUnion,
 /// ReduceIntersection, Relate,
 /// ResolveMacroPayload) MUST be unaffected by the post-trip
 /// fast-path early-exit — the projection-op fuse only bounds the
@@ -409,7 +409,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
 /// non-budgeted work on its way to publishing a partial result.
 ///
 /// Discriminator: trip the projection-op budget, then dispatch a
-/// `NormalizeUnion` query on the post-trip request. The query MUST
+/// `ReduceUnion` query on the post-trip request. The query MUST
 /// enter cooperative admission (the budget-gate is keyed on
 /// `semantic_query_counts_toward_projection_budget` only) and MUST
 /// produce a non-error value.
@@ -457,27 +457,27 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     let coop_at_trip = crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    // A non-projection query (NormalizeUnion) on the post-trip request
+    // A non-projection query (ReduceUnion) on the post-trip request
     // MUST enter cooperative admission and produce a non-error value.
     // The query is structurally trivial (a single-member union
     // normalises to that member), so an error result here would mean
     // the early-exit incorrectly widened its gate.
     let single_member: Arc<[SemanticNodeId]> = Arc::from(vec![base_a].into_boxed_slice());
-    let normalize_key = SemanticQueryKey::NormalizeUnion {
+    let normalize_key = SemanticQueryKey::ReduceUnion {
         members: single_member,
     };
     let normalize_result = dispatch.execute_read(normalize_key);
     assert!(
         matches!(normalize_result.value, QueryResult::Value(_))
             && !normalize_result.result_is_partial,
-        "post-trip NormalizeUnion must dispatch normally; \
+        "post-trip ReduceUnion must dispatch normally; \
          widening the early-exit gate to non-projection queries would \
          break partial-result assembly (got {normalize_result:?})"
     );
 
-    // Cooperative admission MUST have run for the NormalizeUnion call —
+    // Cooperative admission MUST have run for the ReduceUnion call —
     // the gate is keyed on `semantic_query_counts_toward_projection_budget`,
-    // which excludes NormalizeUnion. Delta should be >= 1.
+    // which excludes ReduceUnion. Delta should be >= 1.
     let coop_after_normalize = crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(

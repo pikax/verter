@@ -189,7 +189,7 @@ fn canonicalise_for_digest(
             path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
-        SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+        SemanticQueryKey::ReduceUnion { members } => SemanticQueryKey::ReduceUnion {
             members: Arc::clone(members),
         },
         SemanticQueryKey::ReduceIntersection {
@@ -280,7 +280,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::MappedType { .. } => "MappedType",
         SemanticQueryKey::Conditional { .. } => "Conditional",
         SemanticQueryKey::TypeOf { .. } => "TypeOf",
-        SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
+        SemanticQueryKey::ReduceUnion { .. } => "ReduceUnion",
         SemanticQueryKey::ReduceIntersection { .. } => "ReduceIntersection",
         SemanticQueryKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
         SemanticQueryKey::ProjectPath { .. } => "ProjectPath",

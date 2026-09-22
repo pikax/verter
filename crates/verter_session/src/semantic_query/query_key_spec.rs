@@ -667,10 +667,10 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "typeof_same_root_different_env_or_context_do_not_warm_hit, typeof_queries_differing_only_by_provenance_do_not_warm_hit, typeof_published_and_transit_contexts_do_not_warm_hit, vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
-        // NormalizeUnion { members } — structural union normalization over
+        // ReduceUnion { members } — structural union normalization over
         // already-resolved member nodes; no demand payload.
         SemanticQueryKeySpec {
-            variant: SemanticQueryKeyTag::NormalizeUnion,
+            variant: SemanticQueryKeyTag::ReduceUnion,
             lifecycle: KeyLifecycle::Live,
             context_shape: "(members)",
             value_domain: SemanticQueryValueTag::TypeNode,

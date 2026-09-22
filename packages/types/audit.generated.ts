@@ -2517,7 +2517,7 @@ indexed_ready_built: boolean, };
  * `#[non_exhaustive]` + `Other` catchall future-proofs against new
  * semantic-node-data variants without breaking the audit.
  */
-export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Conditional" | "Union" | "Intersection" | "Tuple" | "Object" | "Array" | "Primitive" | "TypeParam" | "Opaque" | "IndexedAccess" | "KeyOf" | "TypeOf" | "Mapped" | "TemplateLiteral" | "NormalizeUnion" | "ReduceIntersection" | { "Other": {
+export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Conditional" | "Union" | "Intersection" | "Tuple" | "Object" | "Array" | "Primitive" | "TypeParam" | "Opaque" | "IndexedAccess" | "KeyOf" | "TypeOf" | "Mapped" | "TemplateLiteral" | "ReduceUnion" | "ReduceIntersection" | { "Other": {
 /**
  * Name of the unrecognized variant — preserved verbatim for
  * human inspection.
