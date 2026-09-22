@@ -257,10 +257,6 @@ impl OptionsTemplateBindingView {
     }
 }
 
-/// Template-visible product name of a setup macro, if any. `withDefaults`
-/// wraps `defineProps` (no new binding); `defineOptions` carries no template
-/// binding of its own.
-
 fn source_type_of(lang: Option<ScriptLanguage>) -> (SourceType, OptionsDialect) {
     match lang {
         Some(ScriptLanguage::TypeScript) => (
