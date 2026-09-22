@@ -232,13 +232,16 @@ pub struct UsedBinding {
 
 /// Root identifier references in binding-bearing template positions:
 /// `{{ ... }}` interpolation expressions and bound attribute values
-/// (`:prop`, `@event`, `#slot`, `v-...`). Each snippet parses as a
-/// freestanding program, so only resolved root references are collected:
+/// (`:prop`, `@event`, `#slot`, `v-...`). Expression positions parse
+/// as parenthesized expressions (object literals included); only
+/// `v-on` handlers parse as freestanding programs, since those can
+/// contain statements. Only resolved root references are collected:
 /// static markup text never counts, member properties (`user.foo`
 /// contributes `user`, never `foo`), and static attribute strings
 /// (`class="accent"`) are skipped outright. HTML comments are removed
-/// first. Undeclared words are ignored downstream, never invented into
-/// the population.
+/// first. References shadowed by an enclosing `v-for`/`v-slot` alias
+/// scope never count as root uses. Undeclared words are ignored
+/// downstream, never invented into the population.
 fn template_mentions(template: &str) -> FxHashSet<String> {
     let mut visible = String::with_capacity(template.len());
     let mut rest = template;
@@ -254,11 +257,15 @@ fn template_mentions(template: &str) -> FxHashSet<String> {
     let mut scan = ScriptReferenceScan {
         names: FxHashSet::default(),
     };
-    // Interpolation expressions with brace-depth matching so object
+    // One document-order pass over interpolations and tags so `v-for`
+    // and `v-slot` aliases scope their whole element subtree: a child
+    // use of a locally bound alias never marks a top-level binding as
+    // used. Interpolation expressions use brace-depth matching so object
     // literals (`{{ { a: 1 }.a }}`) do not truncate the snippet. The
     // boundary scan tracks JavaScript lexical state, so a `}` inside a
     // string, template literal, regular expression or comment
     // (`{{ ok ? '}' : count }}`) never closes the interpolation early.
+    let mut scopes: Vec<ElementScope> = Vec::new();
     let bytes = visible.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -266,23 +273,157 @@ fn template_mentions(template: &str) -> FxHashSet<String> {
             let Some(j) = interpolation_end(bytes, i + 2) else {
                 break;
             };
-            collect_snippet_references(&allocator, &visible[i + 2..j - 2], &mut scan);
+            let mut local = ScriptReferenceScan {
+                names: FxHashSet::default(),
+            };
+            collect_expression_references(&allocator, &visible[i + 2..j - 2], &mut local);
+            insert_unaliased(&mut scan, local.names, &scopes);
             i = j;
+            continue;
+        }
+        if bytes[i] == b'<' {
+            let Some(close) = find_tag_end(&visible[i..]) else {
+                break;
+            };
+            let tag = &visible[i..i + close];
+            if let Some(name) = close_tag_name(tag) {
+                pop_element_scope(&mut scopes, name);
+            } else if let Some(name) = open_tag_name(tag) {
+                // The tag's own aliases scope its own bound attributes
+                // (`v-for="todo in items" :key="todo.id"`): push before
+                // collecting so the alias never counts as a root use.
+                scopes.push(ElementScope {
+                    name: name.to_string(),
+                    aliases: tag_aliases(&allocator, tag),
+                });
+                let mut local = ScriptReferenceScan {
+                    names: FxHashSet::default(),
+                };
+                collect_bound_attribute_references(&allocator, tag, &mut local);
+                insert_unaliased(&mut scan, local.names, &scopes);
+                if tag.trim_end().ends_with("/>") || is_void_element(name) {
+                    scopes.pop();
+                }
+            }
+            i += close;
             continue;
         }
         i += 1;
     }
-    // Bound attribute values inside tags; static attributes are skipped.
-    let mut tag = 0;
-    while let Some(open) = visible[tag..].find('<') {
-        let start = tag + open;
-        let Some(close) = find_tag_end(&visible[start..]) else {
-            break;
-        };
-        collect_bound_attribute_references(&allocator, &visible[start..start + close], &mut scan);
-        tag = start + close;
-    }
     scan.names
+}
+
+/// One open element's template-local alias scope (`v-for` aliases,
+/// `v-slot` slot-prop aliases): names bound here, never root uses.
+struct ElementScope {
+    name: String,
+    aliases: FxHashSet<String>,
+}
+
+/// Move collected references into the shared scan, dropping any name
+/// shadowed by an active element alias scope.
+fn insert_unaliased(
+    scan: &mut ScriptReferenceScan,
+    names: FxHashSet<String>,
+    scopes: &[ElementScope],
+) {
+    for name in names {
+        if scopes
+            .iter()
+            .all(|scope| !scope.aliases.contains(name.as_str()))
+        {
+            scan.names.insert(name);
+        }
+    }
+}
+
+/// Pop the innermost open element called `name` plus anything opened
+/// after it; an unmatched close tag changes nothing.
+fn pop_element_scope(scopes: &mut Vec<ElementScope>, name: &str) {
+    if let Some(position) = scopes.iter().rposition(|scope| scope.name == name) {
+        scopes.truncate(position);
+    }
+}
+
+/// Name of an open tag (`<li ...>`, `<template ...>`); `None` for close
+/// tags, comments, doctypes and processing instructions.
+fn open_tag_name(tag: &str) -> Option<&str> {
+    let rest = tag.strip_prefix('<')?;
+    if rest.starts_with(['/', '!', '?']) {
+        return None;
+    }
+    let end = rest
+        .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Name of a close tag (`</li>`); `None` for anything else.
+fn close_tag_name(tag: &str) -> Option<&str> {
+    let rest = tag.strip_prefix("</")?;
+    let end = rest
+        .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// True for HTML void elements, which never have a close tag or a
+/// subtree; their aliases (none in practice) pop immediately.
+fn is_void_element(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+/// Template-local aliases declared by one open tag: the `v-for` alias
+/// side plus `v-slot`/`#` values (slot-prop declarations, never root
+/// uses). A malformed `v-for` without a top-level `in`/`of` separator
+/// declares nothing.
+fn tag_aliases(allocator: &Allocator, tag: &str) -> FxHashSet<String> {
+    let mut aliases = FxHashSet::default();
+    for (name, value) in tag_attributes(tag) {
+        match directive_kind(name) {
+            DirectiveKind::For => {
+                if let Some((alias_side, _)) = value.and_then(split_v_for) {
+                    aliases.extend(v_for_alias_names(allocator, alias_side));
+                }
+            }
+            DirectiveKind::Slot => {
+                if let Some(value) = value {
+                    aliases.extend(pattern_alias_names(allocator, value));
+                }
+            }
+            DirectiveKind::Bind
+            | DirectiveKind::On
+            | DirectiveKind::Other
+            | DirectiveKind::Static => {}
+        }
+    }
+    aliases
 }
 
 /// End of an interpolation opened at `bytes[start - 2..start] == "{{"`:
@@ -490,18 +631,40 @@ fn find_tag_end(text: &str) -> Option<usize> {
 
 /// Identifier references inside bound attribute positions
 /// (`:prop="..."`, `@event="..."`, `#slot="..."`, `v-...="..."`); static
-/// attributes contribute nothing. Values parse as freestanding programs so
-/// statement handlers (`bump(); count++`) and expressions both contribute.
-/// Vue directive syntax is honoured, not just `name="value"` pairs:
-/// same-name shorthand (`:count`), dynamic arguments (`:[key]="value"`),
-/// `v-for` aliases (locally bound, never root uses) and `v-slot` bindings
-/// (slot-prop declarations, never root uses).
+/// attributes contribute nothing. `v-on` values parse as freestanding
+/// programs so statement handlers (`bump(); count++`) contribute; every
+/// other value position parses as an expression. Vue directive syntax is
+/// honoured, not just `name="value"` pairs: same-name shorthand
+/// (`:count`, kebab-case `:text-content` binding `textContent`),
+/// dynamic arguments (`:[key]="value"`), `v-for` aliases (locally
+/// bound, never root uses) and `v-slot` bindings (slot-prop
+/// declarations, never root uses).
 fn collect_bound_attribute_references(
     allocator: &Allocator,
     tag: &str,
     scan: &mut ScriptReferenceScan,
 ) {
+    for (name, value) in tag_attributes(tag) {
+        let Some(value) = value else {
+            // Valueless attribute: only bound same-name shorthand
+            // (`<div :count>`, `<div v-bind:count>`) names a binding.
+            collect_shorthand_reference(name, scan);
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        collect_directive_references(allocator, name, value, scan);
+    }
+}
+
+/// One tag's attributes as `(name, value)` pairs in authored order; a
+/// valueless attribute yields `None`. The name scan absorbs the
+/// tag-closing `>` (and `/`), so those are stripped from valueless
+/// names before classification.
+fn tag_attributes(tag: &str) -> Vec<(&str, Option<&str>)> {
     let bytes = tag.as_bytes();
+    let mut attributes = Vec::new();
     let mut i = 1;
     while i < bytes.len() {
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
@@ -520,11 +683,7 @@ fn collect_bound_attribute_references(
             i += 1;
         }
         if i >= bytes.len() || bytes[i] != b'=' {
-            // Valueless attribute: only bound same-name shorthand
-            // (`<div :count>`, `<div v-bind:count>`) names a binding. The
-            // name scan above also absorbs the tag-closing `>` (and `/`),
-            // so strip those before classifying the shorthand.
-            collect_shorthand_reference(name.trim_end_matches(['>', '/']), scan);
+            attributes.push((name.trim_end_matches(['>', '/']), None));
             continue;
         }
         i += 1;
@@ -548,11 +707,9 @@ fn collect_bound_attribute_references(
             }
             &tag[value_start..i]
         };
-        if value.is_empty() {
-            continue;
-        }
-        collect_directive_references(allocator, name, value, scan);
+        attributes.push((name, Some(value)));
     }
+    attributes
 }
 
 /// Vue directive class of one attribute name: which positions name root
@@ -624,11 +781,16 @@ fn collect_directive_references(
     // A dynamic argument (`:[key]`, `@[event]`, `#[name]`, `v-slot:[name]`)
     // is itself a root expression, whatever the directive class.
     if let Some(argument) = dynamic_argument(name) {
-        collect_snippet_references(allocator, argument, scan);
+        collect_expression_references(allocator, argument, scan);
     }
     match kind {
-        DirectiveKind::Bind | DirectiveKind::On | DirectiveKind::Other => {
+        // `v-on` handlers can contain statements; every other value
+        // position is an expression (object literals included).
+        DirectiveKind::On => {
             collect_snippet_references(allocator, value, scan);
+        }
+        DirectiveKind::Bind | DirectiveKind::Other => {
+            collect_expression_references(allocator, value, scan);
         }
         DirectiveKind::For => collect_v_for_source(allocator, value, scan),
         // A slot value (`v-slot="props"`, `#default="{ item }"`) declares
@@ -655,14 +817,37 @@ fn collect_shorthand_reference(name: &str, scan: &mut ScriptReferenceScan) {
     if argument.starts_with('[') {
         if let Some(inner) = dynamic_argument(name) {
             let allocator = Allocator::default();
-            collect_snippet_references(&allocator, inner, scan);
+            collect_expression_references(&allocator, inner, scan);
         }
         return;
     }
     let plain = argument.split(['.', '[']).next().unwrap_or("");
-    if is_plain_identifier(plain) {
-        scan.names.insert(plain.to_string());
+    // A valueless `:text-content` binds the camelCase local.
+    let camelized = camelize_shorthand(plain);
+    if is_plain_identifier(&camelized) {
+        scan.names.insert(camelized);
     }
+}
+
+/// Vue `camelize` for same-name shorthand: `text-content` binds
+/// `textContent`. A name without `-` round-trips unchanged.
+fn camelize_shorthand(name: &str) -> String {
+    if !name.contains('-') {
+        return name.to_string();
+    }
+    let mut camelized = String::with_capacity(name.len());
+    let mut upper = false;
+    for c in name.chars() {
+        if c == '-' {
+            upper = true;
+        } else if upper {
+            camelized.push(c.to_ascii_uppercase());
+            upper = false;
+        } else {
+            camelized.push(c);
+        }
+    }
+    camelized
 }
 
 /// The `[expression]` dynamic argument inside a directive name, if any.
@@ -706,7 +891,7 @@ fn collect_v_for_source(allocator: &Allocator, value: &str, scan: &mut ScriptRef
     let mut source_scan = ScriptReferenceScan {
         names: FxHashSet::default(),
     };
-    collect_snippet_references(allocator, source, &mut source_scan);
+    collect_expression_references(allocator, source, &mut source_scan);
     let alias_names = v_for_alias_names(allocator, aliases);
     for name in source_scan.names {
         if !alias_names.contains(name.as_str()) {
@@ -815,7 +1000,16 @@ fn split_v_for(value: &str) -> Option<(&str, &str)> {
 /// Falls back to no aliases (collect the source whole) when the probe
 /// does not parse.
 fn v_for_alias_names(allocator: &Allocator, aliases: &str) -> FxHashSet<String> {
-    let trimmed = aliases.trim();
+    pattern_alias_names(allocator, aliases)
+}
+
+/// Names declared by one destructuring pattern (`props`, `{ item }`,
+/// `(row, index)`): parsed as an array-destructuring probe so nested
+/// patterns resolve through the real grammar instead of word-splitting.
+/// Used for `v-for` alias sides and `v-slot` values alike. Falls back
+/// to no aliases when the probe does not parse.
+fn pattern_alias_names(allocator: &Allocator, pattern: &str) -> FxHashSet<String> {
+    let trimmed = pattern.trim();
     let inner = trimmed
         .strip_prefix('(')
         .and_then(|rest| rest.strip_suffix(')'))
@@ -878,6 +1072,22 @@ fn collect_snippet_references(
         return;
     };
     scan.visit_program(&program);
+}
+
+/// Collect references from one expression-position snippet
+/// (interpolations, bound values, dynamic arguments, `v-for` sources).
+/// Object literals (`{ active: isActive, ... }`) parse as statement
+/// blocks under program grammar, so the snippet is wrapped in
+/// parentheses to force expression parsing. Statement positions
+/// (`v-on` handlers) keep program parsing via
+/// [`collect_snippet_references`].
+fn collect_expression_references(
+    allocator: &Allocator,
+    expression: &str,
+    scan: &mut ScriptReferenceScan,
+) {
+    let wrapped = format!("({expression});");
+    collect_snippet_references(allocator, &wrapped, scan);
 }
 
 /// Script references resolved to the projected top-level declarations.

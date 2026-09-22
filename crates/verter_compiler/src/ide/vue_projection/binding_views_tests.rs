@@ -833,6 +833,65 @@ fn stp15_usage_supports_vue_directive_forms() {
 }
 
 #[test]
+fn stp15_usage_reads_multi_key_class_object() {
+    // A two-key object literal is an expression, never a statement block:
+    // both values count as uses.
+    let declared = [
+        "isActive".to_string(),
+        "isDisabled".to_string(),
+        "other".to_string(),
+    ];
+    let template = r#"<div :class="{ active: isActive, disabled: isDisabled }"></div>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("isActive"));
+    assert!(usage.is_used("isDisabled"));
+    assert!(!usage.is_used("other"));
+    // The same holds for object literals in interpolations.
+    let template = r#"<div>{{ { active: isActive, disabled: isDisabled }.active }}</div>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("isActive"));
+    assert!(usage.is_used("isDisabled"));
+}
+
+#[test]
+fn stp15_usage_scopes_v_for_alias_to_subtree() {
+    // The alias is locally bound: a child use never marks a top-level
+    // binding of the same name as used.
+    let declared = ["items".to_string(), "todo".to_string()];
+    let template = r#"<li v-for="todo in items">{{ todo.title }}</li>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("items"), "the `v-for` source counts as a use");
+    assert!(
+        !usage.is_used("todo"),
+        "a child use of the `v-for` alias never marks a top-level binding as used"
+    );
+}
+
+#[test]
+fn stp15_usage_scopes_v_slot_alias_to_subtree() {
+    let declared = ["props".to_string()];
+    let template = r#"<template #default="props">{{ props.x }}</template>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(
+        !usage.is_used("props"),
+        "a child use of the `v-slot` alias never marks a top-level binding as used"
+    );
+}
+
+#[test]
+fn stp15_usage_camelizes_kebab_shorthand() {
+    // A valueless `:text-content` binds the camelCase local.
+    let declared = ["textContent".to_string(), "other".to_string()];
+    let usage =
+        BindingUsageSet::from_region_text(&declared, r#"<div :text-content></div>"#, "", "");
+    assert!(
+        usage.is_used("textContent"),
+        "kebab-case shorthand counts as a use of the camelCase binding"
+    );
+    assert!(!usage.is_used("other"));
+}
+
+#[test]
 fn stp15_usage_parses_tsx_script_blocks() {
     let declared = ["count".to_string()];
     let script = "import { ref } from 'vue';\nconst count = ref(0);\nconst node = <div />;\nfunction bump() { count.value++; }\n";
