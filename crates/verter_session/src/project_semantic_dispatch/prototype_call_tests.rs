@@ -146,6 +146,7 @@ fn call_candidates(
         dispatch,
         SemanticQueryKey::ResolveOverloadSet {
             callee: member,
+            kind: crate::semantic_query::SignatureKind::Call,
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::OverloadSetContext {
                 resolve_env_hash: env.resolve_env_hash,

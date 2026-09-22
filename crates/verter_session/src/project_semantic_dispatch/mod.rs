@@ -2926,19 +2926,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.build_async_return_payload(*operand, *context)
                 }
                 // ResolveOverloadSet — LIVE producer. Projects the callee's
-                // ordered VISIBLE signature group (build_typeof's visibility
-                // rule already hid trailing implementations where the callee
-                // node was produced); explicit `type_args` instantiate per
-                // candidate, dropping candidates that cannot accept the
-                // argument list; a callee with no signature group is an
-                // honest Miss. The inner pipeline carries the group-bearing
-                // NODE; the public `execute` boundary below converts it into
-                // the `OverloadSet(Arc<[SignatureRef]>)` value domain.
+                // ordered VISIBLE signatures of the requested bucket
+                // (build_typeof's visibility rule already hid trailing
+                // implementations where the callee node was produced);
+                // explicit `type_args` instantiate per candidate, dropping
+                // candidates that cannot accept the argument list; a bucket
+                // with no signature is an honest Miss. The inner pipeline
+                // carries the group-bearing NODE; the public `execute`
+                // boundary below converts it into the
+                // `OverloadSet(Arc<[SignatureRef]>)` value domain.
                 SemanticQueryKey::ResolveOverloadSet {
                     callee,
+                    kind,
                     type_args,
                     context: _,
-                } => self.build_resolve_overload_set(*callee, type_args),
+                } => self.build_resolve_overload_set(*callee, *kind, type_args),
                 SemanticQueryKey::ClassifyBroadRuntime { .. } => {
                     unreachable!("typed classifier returned before node-domain build")
                 }
