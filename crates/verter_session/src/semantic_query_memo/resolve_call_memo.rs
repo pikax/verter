@@ -35,8 +35,11 @@ impl SemanticGraphStore {
             ModeSlot::Single,
             &ProjectionPath::empty(),
         ));
+        // Miss-neutral probe: a miss falls through to the owning
+        // cooperative dispatch, which records the single miss (see
+        // `get_validated_value_impl`'s `record_miss` contract).
         let hit = self
-            .get_validated_value_impl(&family, ModeSlot::Single, &requested, ctx, None)?
+            .get_validated_value_impl(&family, ModeSlot::Single, &requested, ctx, None, false)?
             .value;
         match hit {
             QueryResult::Value(SemanticQueryValue::ResolveCall(result)) => {
