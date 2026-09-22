@@ -1958,20 +1958,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ))
     }
 
-    /// `ResolveOverloadSet` — the ordered candidates of one callee.
+    /// `ResolveOverloadSet` — the ordered candidates of ONE of a callee's
+    /// signature buckets.
     ///
-    /// The candidates are the callee's shared signature list
-    /// (`SignaturesOfType`), call bucket first, then construct; the public
-    /// `execute` boundary converts the produced group node into the
-    /// `OverloadSet(Arc<[SignatureRef]>)` value domain. Carrier settlement,
-    /// alias and constraint hops, apparent globals, and the union and
-    /// intersection procedures all belong to the list: a union callee
-    /// arrives as its common or synthesized union signatures, never as
-    /// per-arm buckets. Visibility is `build_typeof`'s projection rule,
-    /// applied upstream where the callee node was produced.
+    /// The candidates are the callee's shared signature list of `kind`
+    /// (`SignaturesOfType`); the public `execute` boundary converts the
+    /// produced group node into the `OverloadSet(Arc<[SignatureRef]>)`
+    /// value domain. Carrier settlement, alias and constraint hops,
+    /// apparent globals, and the union and intersection procedures all
+    /// belong to the list: a union callee arrives as its common or
+    /// synthesized union signatures, never as per-arm buckets. Visibility
+    /// is `build_typeof`'s projection rule, applied upstream where the
+    /// callee node was produced. The OTHER bucket is never read: a call
+    /// site demands exactly its own bucket, so that bucket's settlement is
+    /// the only settlement that gates the set.
     ///
-    /// - A callee whose list is complete and empty is an honest `Miss`.
-    /// - A list that did not settle is a `Miss` that is never admitted.
+    /// - A callee whose bucket is complete and empty is an honest `Miss`.
+    /// - A bucket that did not settle is a `Miss` that is never admitted.
     /// - Non-empty `type_args` instantiate each candidate positionally; a
     ///   candidate that cannot accept the argument list DROPS from the set
     ///   (TS overload resolution under explicit type arguments);
@@ -1986,29 +1989,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_resolve_overload_set(
         &self,
         callee: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
         type_args: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             (QueryResult::Error(QueryError::Miss), empty_signature()).into()
         };
-        // The candidates ARE the shared signature list of the callee, call
-        // bucket first, then construct. The list owns carrier settlement,
-        // alias and constraint hops, apparent globals, and the union and
-        // intersection procedures; this reducer chooses nothing.
-        let Ok((call_sigs, construct_sigs)) = self.shared_signature_buckets(callee) else {
-            // An unsettled list is never a proven-empty one: the miss is
-            // not admitted, so the next read settles it again.
-            let mut output = miss();
-            output.cache_suppress = true;
-            return output;
+        // The candidates ARE the shared signature list of the callee's
+        // requested bucket. The list owns carrier settlement, alias and
+        // constraint hops, apparent globals, and the union and intersection
+        // procedures; this reducer chooses nothing.
+        let sigs = match self.shared_signature_nodes(callee, kind) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => nodes,
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
+                // An unsettled list is never a proven-empty one: the miss
+                // is not admitted, so the next read settles it again.
+                let mut output = miss();
+                output.cache_suppress = true;
+                return output;
+            }
         };
-        if call_sigs.is_empty() && construct_sigs.is_empty() {
+        if sigs.is_empty() {
             return miss();
         }
         let result_node = if type_args.is_empty() {
-            self.overload_group_node(call_sigs, construct_sigs)
+            self.overload_group_node(kind, sigs)
         } else {
-            match self.instantiate_overload_group(&call_sigs, &construct_sigs, type_args) {
+            match self.instantiate_overload_group(kind, &sigs, type_args) {
                 Some(node) => node,
                 None => return miss(),
             }
@@ -2032,48 +2039,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output
     }
 
-    /// The group-bearing node of one ordered candidate list: a lone
-    /// signature IS its group, anything else is a signature-only surface.
+    /// The group-bearing node of one ordered candidate list of `kind`: a
+    /// lone signature IS its group, anything else is a signature-only
+    /// surface carrying that one bucket.
     fn overload_group_node(
         &self,
-        call_sigs: Vec<SemanticNodeId>,
-        construct_sigs: Vec<SemanticNodeId>,
+        kind: crate::semantic_query::SignatureKind,
+        sigs: Vec<SemanticNodeId>,
     ) -> SemanticNodeId {
-        match (call_sigs.as_slice(), construct_sigs.as_slice()) {
-            ([lone], []) | ([], [lone]) => *lone,
-            _ => self.graph().intern_node(SemanticNodeData::Object(
-                crate::semantic_query::surface_view! {
-                    members: Arc::from(Vec::new().into_boxed_slice()),
-                    call_signatures: Arc::from(call_sigs.into_boxed_slice()),
-                    construct_signatures: Arc::from(construct_sigs.into_boxed_slice()),
-                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature: false,
-                },
-            )),
+        if let [lone] = sigs.as_slice() {
+            return *lone;
         }
+        let sigs: Arc<[SemanticNodeId]> = Arc::from(sigs.into_boxed_slice());
+        let empty: Arc<[SemanticNodeId]> = Arc::from(Vec::new().into_boxed_slice());
+        let (call_signatures, construct_signatures) = match kind {
+            crate::semantic_query::SignatureKind::Call => (sigs, empty),
+            crate::semantic_query::SignatureKind::Construct => (empty, sigs),
+        };
+        self.graph().intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures,
+                construct_signatures,
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
     }
 
-    /// Apply explicit type arguments to an ordered overload group:
-    /// instantiate per candidate; a candidate that cannot accept the
-    /// argument list DROPS from the set; all-dropped is `None`.
+    /// Apply explicit type arguments to an ordered overload group of
+    /// `kind`: instantiate per candidate; a candidate that cannot accept
+    /// the argument list DROPS from the set; all-dropped is `None`.
     fn instantiate_overload_group(
         &self,
-        call_sigs: &[SemanticNodeId],
-        construct_sigs: &[SemanticNodeId],
+        kind: crate::semantic_query::SignatureKind,
+        sigs: &[SemanticNodeId],
         type_args: &Arc<[SemanticNodeId]>,
     ) -> Option<SemanticNodeId> {
-        let instantiate = |sigs: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
-            sigs.iter()
-                .filter_map(|sig| self.instantiate_call_candidate(*sig, type_args))
-                .collect()
-        };
-        let instantiated_calls = instantiate(call_sigs);
-        let instantiated_constructs = instantiate(construct_sigs);
-        if instantiated_calls.is_empty() && instantiated_constructs.is_empty() {
+        let instantiated: Vec<SemanticNodeId> = sigs
+            .iter()
+            .filter_map(|sig| self.instantiate_call_candidate(*sig, type_args))
+            .collect();
+        if instantiated.is_empty() {
             return None;
         }
-        Some(self.overload_group_node(instantiated_calls, instantiated_constructs))
+        Some(self.overload_group_node(kind, instantiated))
     }
 
     /// Lower the class's OWN constructor-object surface — the prepared
