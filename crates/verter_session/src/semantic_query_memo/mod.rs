@@ -345,10 +345,15 @@ pub struct SemanticGraphStore {
     /// and held time on `MetaProvenance`.
     provenance: Option<Arc<crate::types::MetaProvenance>>,
     /// The aggregate retained-byte account every candidate this memo
-    /// publishes charges. `None` for a `Default`-built fixture store,
-    /// which retains nothing past the fixture; host-built stores always
-    /// carry the project's account.
-    retention_account: Option<Arc<crate::semantic_retention_account::SemanticRetentionAccount>>,
+    /// publishes charges.
+    ///
+    /// There is no account-less memo store: the field carries a
+    /// [`StoreAccount`](crate::semantic_retention_account::StoreAccount),
+    /// whose `Default` is the ONE process-local account. A store built by
+    /// `Default` / [`Self::new`] therefore charges the same ceiling a
+    /// host-built store does, instead of retaining candidates that consume
+    /// no aggregate headroom.
+    retention_account: crate::semantic_retention_account::StoreAccount,
     /// Per-store test trigger for the cold-abort sweep path. When a test
     /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
     /// cold-winner re-check in [`Self::warm_publish_one`] marks its own
@@ -3435,7 +3440,7 @@ impl SemanticGraphStore {
         // `Skipped`, which returns this winner's COMPLETE value to its
         // caller uncached — never a stale candidate, never a partial.
         match self.reserve_memo_candidate(&entry) {
-            Ok(charge) => entry.retention_charge = charge.map(Arc::new),
+            Ok(charge) => entry.retention_charge = Some(Arc::new(charge)),
             Err(_) => return WarmPublishOutcome::Skipped,
         }
         // Per-family bounded retention: plan the cap eviction against the
@@ -3673,7 +3678,7 @@ impl SemanticGraphStore {
         // it would have been cloned from stays warm and a later narrow
         // request recomputes.
         match self.reserve_memo_candidate(&entry) {
-            Ok(charge) => entry.retention_charge = charge.map(Arc::new),
+            Ok(charge) => entry.retention_charge = Some(Arc::new(charge)),
             Err(_) => return false,
         }
         // Per-family bounded retention: plan the cap eviction against the

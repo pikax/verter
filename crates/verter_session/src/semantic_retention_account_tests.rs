@@ -662,3 +662,35 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
     assert_eq!(*resident.payload, 1, "no stale substitution");
     assert_eq!(account.snapshot().refusals_pressure, 1);
 }
+
+/// Every constructor that can produce a candidate-retaining store binds an
+/// account, so no reachable store retains semantic bytes off the aggregate
+/// ceiling.
+///
+/// The boundary: the memo store and the component-meta result cache both
+/// used to carry an OPTIONAL account, and their account-less constructors
+/// are public. A store built through one of them published candidates that
+/// consumed no aggregate headroom — the process could therefore retain more
+/// than the ratified ceiling while every individual admission looked legal.
+/// Binding the one process-local account at construction is what makes an
+/// off-account retaining store unrepresentable; this pins that the
+/// account-less constructors really do resolve to THAT account rather than
+/// to a private per-store quota.
+#[test]
+fn no_reachable_candidate_store_retains_off_the_aggregate_account() {
+    let process_local = SemanticRetentionAccount::process_local();
+
+    let memo = crate::semantic_query_memo::SemanticGraphStore::new();
+    assert!(
+        Arc::ptr_eq(memo.retention_account(), &process_local),
+        "a memo store built without an explicit account must charge the one \
+         process-local account, not retain candidates off-account"
+    );
+
+    let results = crate::component_meta_result_db::ComponentMetaResultDb::<u32>::new();
+    assert!(
+        Arc::ptr_eq(results.retention_account(), &process_local),
+        "a component-meta result cache built without an explicit account must \
+         charge the one process-local account"
+    );
+}
