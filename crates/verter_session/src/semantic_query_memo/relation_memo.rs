@@ -3,8 +3,8 @@
 //! (design `.claude/skills/type-resolution/SKILL.md` Decision 4).
 //!
 //! Writes land through the batched SCC member publish in
-//! [`super::scc_publish`] — the one store-owned admission path both
-//! domains ride.
+//! [`super::scc_publish`] — the one store-owned admission path every
+//! deferred domain rides.
 //!
 //! Storage is the family memo's [`FamilyKey::Relate`] family in the
 //! [`ModeSlot::Single`] slot. The stored value is the PUBLIC
@@ -24,36 +24,15 @@
 //! backing, OFF the type-values surface.
 
 use super::*;
-/// The `satisfied_projection` every relation entry carries: the modeless
-/// [`ModeSlot::Single`] identity point at the empty path, so the family
-/// materialisation gates treat relation entries exactly like any other
-/// modeless family's (the gate never blocks a modeless hit).
+
 /// Test-observer name for a relation family's published candidate.
 #[cfg(test)]
 pub(crate) type RelationPublishedCarrier = PublishedMemoCandidate;
 
-/// Store-owned admission token for a relation member computed inline by
-/// another relation's transaction. Registering the token in the ordinary
-/// relation-family flight table lets a concurrent top-level request join the
-/// inline compute instead of starting duplicate cold work.
-#[derive(Clone)]
-pub(crate) struct InlineRelationFlight {
-    pub(super) prepared: PreparedKeyHandle,
-    pub(super) inflight: Arc<FlightCell>,
-    /// Present only when an inline flight starts outside an existing
-    /// semantic execution stack. Production nested relations reuse the
-    /// active owner; direct callers hold this detached RAII lease.
-    _owner_registration: Option<wait_cycle::ExecutionOwnerRegistration>,
-}
-
-impl std::fmt::Debug for InlineRelationFlight {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InlineRelationFlight")
-            .field("key", self.prepared.key())
-            .finish_non_exhaustive()
-    }
-}
-
+/// The `satisfied_projection` every relation entry carries: the modeless
+/// [`ModeSlot::Single`] identity point at the empty path, so the family
+/// materialisation gates treat relation entries exactly like any other
+/// modeless family's (the gate never blocks a modeless hit).
 pub(super) fn relation_satisfied_projection() -> MaterializedSet {
     MaterializedSet::single(MaterializedPoint::new(family::point_for_slot(
         ModeSlot::Single,
@@ -65,59 +44,20 @@ impl SemanticGraphStore {
     /// Claim the ordinary family flight for a non-binding relation member
     /// that will be computed inline. `None` means another cold owner already
     /// owns this exact full relation key.
+    ///
+    /// Binding relation roots are refused here rather than in the shared
+    /// claim: they run on independently-owned cooperative flights, so
+    /// claiming the ordinary family flight for one would collide with the
+    /// root's own admission.
     pub(crate) fn begin_inline_relation_flight(
         &self,
         key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<InlineRelationFlight> {
+    ) -> Option<InlineMemberFlight> {
         verter_debug_assert!(
             key.inference_context.is_none(),
             "binding relation roots use independently-owned cooperative flights"
         );
-        let prepared = PreparedKeyHandle::prepare(key.to_query_key());
-        let inflight = Arc::new(FlightCell::new());
-        let (owner, owner_registration) =
-            if let Some(owner) = wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph) {
-                (owner, None)
-            } else {
-                let registration = self.wait_for_graph.register_owner();
-                (registration.owner(), Some(registration))
-            };
-        {
-            let mut state = inflight.state.lock();
-            state.claimed = true;
-            state.owner = Some(owner);
-        }
-        let mut table = self.inflight.lock();
-        if table.contains_key(&prepared) {
-            return None;
-        }
-        table.insert(prepared.clone(), Arc::clone(&inflight));
-        Some(InlineRelationFlight {
-            prepared,
-            inflight,
-            _owner_registration: owner_registration,
-        })
-    }
-
-    /// Release an inline flight that cannot publish a decided member. Waiting
-    /// top-level callers wake on the abort sentinel and retry admission.
-    pub(crate) fn abort_inline_relation_flight(&self, flight: &InlineRelationFlight) {
-        {
-            let mut state = flight.inflight.state.lock();
-            state.aborted = true;
-            if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "inline relation flight abandoned",
-                ))));
-                state.dep_signature = Some(empty_signature());
-            }
-            state.graph_carrier = None;
-            state.walker_diagnostics = None;
-            state.cache_suppress = true;
-            state.result_is_partial = true;
-        }
-        flight.inflight.ready.notify_all();
-        self.retire_inflight(&flight.prepared, &flight.inflight, false);
+        self.begin_inline_member_flight(key.to_query_key())
     }
 
     /// Intern a relation proof, returning its opaque
@@ -200,26 +140,10 @@ impl SemanticGraphStore {
         let family = FamilyKey::Relate {
             key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
-        // Snapshot the candidate list under the `entries` lock, then
-        // validate OUTSIDE the lock (the family warm-read discipline:
-        // validation may re-enter the memo through the resolver view).
-        let snapshot: CandidateList = {
-            let entries = self.entries_lock_diagnosed();
-            entries
-                .get(&family)
-                .map(|slots| slots.snapshot_slot(ModeSlot::Single))?
-        };
-        let hit = snapshot.into_iter().find(|entry| entry.validate(ctx))?;
-        // Brief LRU bookkeeping — promote the hit candidate in the slot's
-        // recency order (a concurrent invalidation makes this a no-op).
-        {
-            let mut entries = self.entries_lock_diagnosed();
-            if let Some(slots) = entries.get_mut(&family) {
-                slots.mark_validated_freshest(ModeSlot::Single, &hit);
-            }
-        }
-        hit.read_set_signature.bubble(ctx);
-        match hit.result {
+        // A relation entry always materialises the modeless identity
+        // point, so it takes no §3.4 point gate — only carrier validation.
+        let hit = self.modeless_family_warm_hit(ctx, &family, None)?;
+        match hit {
             QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(payload),
             // Structural invariant: the relation authority only ever
             // stores `Relation` payloads in `Relate` family entries.
@@ -255,9 +179,6 @@ impl SemanticGraphStore {
         })
     }
 
-    /// Publish a decided inline relation member through the same store-owned
-    /// admission fence as an ordinary family cold winner. On success any
-    /// concurrent top-level joiner receives this exact payload and carrier;
     /// Test-support enumeration of every published `Relate` family entry as
     /// `(key, outcome)` (freshest candidate per slot). Lets relation tests
     /// assert over the ACTUAL published set instead of probing guessed keys.

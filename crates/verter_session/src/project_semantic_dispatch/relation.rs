@@ -96,7 +96,7 @@ use crate::semantic_query::{
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     SemanticQueryValue, SubRelationPosition, SubRelationRef, SurfaceView, VariancePhase,
 };
-use crate::semantic_query_memo::InlineRelationFlight;
+use crate::semantic_query_memo::InlineMemberFlight;
 
 #[cfg(test)]
 std::thread_local! {
@@ -338,7 +338,7 @@ pub(super) type DischargedMember = (
     bool,
     bool,
     Option<super::dispatch_txn::SessionId>,
-    Option<InlineRelationFlight>,
+    Option<InlineMemberFlight>,
 );
 
 /// A relation-domain view over a drained tagged pending member: the SCC
@@ -350,7 +350,7 @@ pub(super) struct DrainedRelationMember {
     pub(super) verdict: PendingVerdict,
     pub(super) session_delta: bool,
     pub(super) opened_session: Option<super::dispatch_txn::SessionId>,
-    pub(super) inline_flight: Option<InlineRelationFlight>,
+    pub(super) inline_flight: Option<InlineMemberFlight>,
 }
 
 /// A flow-return-domain view over a drained tagged pending member. The
@@ -365,7 +365,7 @@ pub(super) struct DrainedFlowReturnMember {
     /// planned — the batch reports it so the root classifies by the
     /// cause that actually refused, not by its own clean preparation.
     pub(super) plan_refusal: Option<super::dispatch_txn::flow_obligation_state::FlowPlanRefusal>,
-    pub(super) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    pub(super) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     /// The coinductive hold targets the member's evaluation met — the SCC
     /// close discharges an empty-cycle member on its targets' admitted
     /// returns.
@@ -1601,13 +1601,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) {
             Ok(ok) => ok,
             Err(failure) => {
-                self.relation_abort_inline_flight(inline_flight.as_ref());
+                self.abort_inline_flight(inline_flight.as_ref());
                 for member in &members {
-                    self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                    self.abort_inline_flight(member.inline_flight.as_ref());
                 }
                 self.flow_return_abort_drained_flights(&flow_members);
                 for (_, member) in &call_members {
-                    self.resolve_call_abort_inline_flight(member.inline_flight.as_ref());
+                    self.abort_inline_flight(member.inline_flight.as_ref());
                     if let Some(session) = member.staged_session {
                         self.abandon_session(session);
                     }
@@ -1667,9 +1667,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             });
         if poisoned {
-            self.relation_abort_inline_flight(inline_flight.as_ref());
+            self.abort_inline_flight(inline_flight.as_ref());
             for member in &members {
-                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                self.abort_inline_flight(member.inline_flight.as_ref());
             }
             self.flow_return_abort_drained_flights(&flow_members);
             self.resolve_call_abort_drained_flights(&call_results);
@@ -1810,7 +1810,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bool,
             bool,
             Option<super::dispatch_txn::SessionId>,
-            Option<InlineRelationFlight>,
+            Option<InlineMemberFlight>,
         )>,
         members: Vec<DrainedRelationMember>,
         flow_members: Vec<DrainedFlowReturnMember>,
@@ -2086,7 +2086,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if session_delta {
                     // Admission row 7: a session-local delta never
                     // publishes — the caller gets the computed step.
-                    self.relation_abort_inline_flight(inline_flight.as_ref());
+                    self.abort_inline_flight(inline_flight.as_ref());
                     self_step = Some(relation_step_from_payload(&payload));
                 } else if machinery_root {
                     // The machinery root publishes through the family
@@ -2110,7 +2110,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     inline_flight,
                 });
             } else {
-                self.relation_abort_inline_flight(inline_flight.as_ref());
+                self.abort_inline_flight(inline_flight.as_ref());
             }
         }
         // The call sessions commit before the flow members finalize: the
@@ -2127,7 +2127,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .collect::<Vec<_>>();
         if !self.commit_call_sessions(&staged_call_sessions) {
             for member in &completed {
-                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                self.abort_inline_flight(member.inline_flight.as_ref());
             }
             self.flow_return_abort_drained_flights(&flow_members);
             self.resolve_call_abort_drained_flights(&call_members);
@@ -2262,16 +2262,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                     };
                     flow_batch_partial_reasons = flow_batch_partial_reasons.union(member_reasons);
-                    self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+                    self.abort_inline_flight(member.inline_flight.as_ref());
                 }
             }
         }
         if flow_batch_unproven {
             for member in &completed {
-                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                self.abort_inline_flight(member.inline_flight.as_ref());
             }
             for member in &proven_flow_members {
-                self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+                self.abort_inline_flight(member.inline_flight.as_ref());
             }
             self.resolve_call_abort_drained_flights(&call_members);
             return Ok(RelationDischargeOutcome {
@@ -2305,7 +2305,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         for flight in rootless_flights {
-            self.resolve_call_abort_inline_flight(flight.as_ref());
+            self.abort_inline_flight(flight.as_ref());
         }
         Ok(RelationDischargeOutcome {
             self_publish,
@@ -2398,30 +2398,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    pub(super) fn relation_abort_inline_flight(&self, flight: Option<&InlineRelationFlight>) {
+    /// Release one claimed inline member flight, in any domain. `None`
+    /// means the member was never deferred and has no flight to release.
+    pub(super) fn abort_inline_flight(&self, flight: Option<&InlineMemberFlight>) {
         if let Some(flight) = flight {
-            self.graph().abort_inline_relation_flight(flight);
+            self.graph().abort_inline_member_flight(flight);
         }
     }
 
     pub(super) fn relation_abort_discharged_flights(&self, discharged: &[DischargedMember]) {
         for (_, _, _, _, _, _, flight) in discharged {
-            self.relation_abort_inline_flight(flight.as_ref());
-        }
-    }
-
-    pub(super) fn flow_return_abort_inline_flight(
-        &self,
-        flight: Option<&crate::semantic_query_memo::InlineFlowReturnFlight>,
-    ) {
-        if let Some(flight) = flight {
-            self.graph().abort_inline_flow_return_flight(flight);
+            self.abort_inline_flight(flight.as_ref());
         }
     }
 
     pub(super) fn flow_return_abort_drained_flights(&self, members: &[DrainedFlowReturnMember]) {
         for member in members {
-            self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+            self.abort_inline_flight(member.inline_flight.as_ref());
         }
     }
 
@@ -2688,7 +2681,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )],
     ) {
         for (_, state, _) in members {
-            self.resolve_call_abort_inline_flight(state.inline_flight.as_ref());
+            self.abort_inline_flight(state.inline_flight.as_ref());
             if let Some(session) = state.staged_session {
                 self.abandon_session(session);
             }
@@ -2706,13 +2699,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
         };
         for member in &members {
-            self.relation_abort_inline_flight(member.inline_flight.as_ref());
+            self.abort_inline_flight(member.inline_flight.as_ref());
         }
         for member in &flow_members {
-            self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+            self.abort_inline_flight(member.inline_flight.as_ref());
         }
         for member in &call_members {
-            self.resolve_call_abort_inline_flight(member.inline_flight.as_ref());
+            self.abort_inline_flight(member.inline_flight.as_ref());
         }
     }
 
