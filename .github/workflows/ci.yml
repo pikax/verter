@@ -855,6 +855,14 @@ jobs:
         #
         # Quarantined: none.
         run: pnpm vitest run packages/vue-vscode/src
+      - name: Public type contracts (@verter/component-meta)
+        # `test/*.test-d.ts` compiles nowhere else: the package build excludes
+        # spec files and vitest does not evaluate type-level assertions, so
+        # these are the only assertions that fail when a published helper
+        # signature widens to `any` or a documented-optional field becomes
+        # required. Needs the `Build TS packages` step above — the fixtures
+        # assert the built `dist` declarations as well as the source ones.
+        run: pnpm --filter @verter/component-meta run test:types
       - name: Carrier-routing no-Vue-gate guard (typescript-plugin)
         # The full native-free plugin suite runs in rust-tsserver-live. Keep
         # this focused duplicate as an early JS-only carrier-routing signal;
