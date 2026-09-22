@@ -27,10 +27,10 @@ export declare class Comp {
   count: number;
   // Getter-only computed: readable, never assignable.
   readonly doubled: number;
-  // Writable computed: reads `number`, accepts the setter domain.
-  label: number;
-  // Setter-domain entry point: accepts `string`, not merely `number`.
-  setLabel(value: string): void;
+  // Writable computed: reads `number`, accepts the setter domain
+  // (`string`) through direct assignment, not merely the read type.
+  get label(): number;
+  set label(value: string);
   // Two-way model ref: readable and writable.
   modelValue: string;
   readonly title: string;
@@ -42,7 +42,7 @@ export interface Comp extends ComponentPublicInstance<
   { count: number; label: number; modelValue: string },
   {},
   { doubled: number; title: string },
-  { increment(step?: number): void; setLabel(value: string): void }
+  { increment(step?: number): void }
 > {}
 
 export default Comp;

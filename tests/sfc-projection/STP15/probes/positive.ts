@@ -15,7 +15,7 @@ export const scriptSide: number = countRef.value;
 // domain (`string`), not merely its read type (`number`).
 export const readLabel: number = instance.label;
 export function renameLabel(next: string): void {
-  instance.setLabel(next);
+  instance.label = next;
 }
 
 // Model refs and plain members stay writable through the write target.

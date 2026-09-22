@@ -381,7 +381,8 @@ fn stp15_counter_fixture_matches_projection() {
     for pinned in [
         "countRef",
         "CounterProps",
-        "setLabel",
+        "set label",
+        "get label",
         "doubled",
         "modelValue",
         "ComponentPublicInstance",
@@ -436,4 +437,86 @@ function increment(step?: number) { count.value += step ?? 1; }
         projection.write.write_target("increment"),
         Err(WriteRejection::UnknownBinding)
     );
+}
+
+#[test]
+fn stp15_non_literal_computed_getter_stays_getter_only() {
+    let content = r#"import { computed } from 'vue';
+declare function getDoubled(): number;
+declare function createGetter(): () => number;
+const fromRef = computed(getDoubled);
+const fromCall = computed(createGetter());
+"#;
+    let projection = project_setup(content);
+    for name in ["fromRef", "fromCall"] {
+        let read = projection.read.lookup(name).expect(name);
+        assert_eq!(
+            read.kind,
+            BindingKind::Computed { setter: false },
+            "{name} is a getter-only computed, never a plain writable row"
+        );
+        assert_eq!(
+            projection.write.write_target(name),
+            Err(WriteRejection::GetterOnlyComputed)
+        );
+    }
+    assert!(
+        !projection
+            .write
+            .writable
+            .iter()
+            .any(|w| w.name == "fromRef" || w.name == "fromCall"),
+        "non-literal computed getters must not appear in the writable rows"
+    );
+}
+
+#[test]
+fn stp15_renamed_prop_with_default_binds_local() {
+    let content = "const { title: heading = \"Default\" } = defineProps<{ title?: string }>();\n";
+    let projection = project_setup(content);
+    let heading = projection.read.lookup("heading").expect("heading");
+    assert_eq!(heading.kind, BindingKind::Readonly);
+    assert_eq!(
+        content[heading.range.start as usize..heading.range.end as usize],
+        *"heading",
+        "the range points at the bound local, not the prop key"
+    );
+    assert_eq!(
+        projection.write.write_target("heading"),
+        Err(WriteRejection::ReadonlyProp)
+    );
+}
+
+#[test]
+fn stp15_options_methods_are_reads_not_write_targets() {
+    let normal = block("export default { methods: { increment() {} } };");
+    let projection = project_binding_views(Some(normal), None, None).expect("projects");
+    assert!(
+        projection.read.lookup("increment").is_some(),
+        "an Options method stays a template-visible read"
+    );
+    assert_eq!(
+        projection.write.write_target("increment"),
+        Err(WriteRejection::UnknownBinding),
+        "an Options method is callable, never a writable assignment target"
+    );
+}
+
+#[test]
+fn stp15_standalone_runtime_object_props_bind_template_rows() {
+    let content = "defineProps({ title: String, count: { type: Number, required: true } });\n";
+    let projection = project_setup(content);
+    for name in ["title", "count"] {
+        let read = projection.read.lookup(name).expect(name);
+        assert_eq!(read.kind, BindingKind::Readonly);
+        assert_eq!(
+            content[read.range.start as usize..read.range.end as usize],
+            *name,
+            "the range points at the declared runtime prop key"
+        );
+        assert_eq!(
+            projection.write.write_target(name),
+            Err(WriteRejection::ReadonlyProp)
+        );
+    }
 }

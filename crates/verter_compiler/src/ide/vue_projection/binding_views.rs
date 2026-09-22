@@ -377,14 +377,6 @@ fn first_argument<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<&'a 
     })
 }
 
-/// True for a function-typed expression (getter-style computed).
-fn is_function(expression: &Expression<'_>) -> bool {
-    matches!(
-        expression,
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-    )
-}
-
 /// Property value for `key` in an object expression, when the property is
 /// a plain (non-computed) entry.
 fn object_property<'a>(
@@ -616,7 +608,10 @@ fn classify_declarator(
                     );
                 }
             }
-            Some(getter) if is_function(getter) => {
+            // Any `computed(...)` without an options object is a
+            // getter-only `ComputedRef`: non-literal getters (identifier
+            // references, call results) are never plain writable rows.
+            _ => {
                 for (name, range) in names {
                     push_binding(
                         projection,
@@ -625,11 +620,6 @@ fn classify_declarator(
                         range,
                         None,
                     );
-                }
-            }
-            _ => {
-                for (name, range) in names {
-                    push_binding(projection, name, BindingKind::Plain, range, None);
                 }
             }
         },
@@ -662,11 +652,40 @@ fn classify_declarator(
     }
 }
 
-/// Declared prop names with their source ranges: array-form string
-/// literals plus type-literal members. Empty for an aliased props type
-/// (`defineProps<Props>()`), whose members TypeScript owns.
+/// Declared prop names with their source ranges: runtime object entries,
+/// array-form string literals, plus type-literal members. Empty for an
+/// aliased props type (`defineProps<Props>()`), whose members TypeScript
+/// owns.
 fn extract_props(base: u32, call: &oxc_ast::ast::CallExpression<'_>) -> Vec<(String, SourceRange)> {
     let mut props: Vec<(String, SourceRange)> = Vec::new();
+    // Runtime object syntax (`defineProps({ title: String, ... })`):
+    // each entry key is a declared prop, mirroring the Options
+    // `props: {...}` object entries.
+    if let Some(Expression::ObjectExpression(object)) = first_argument(call) {
+        for property in &object.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                continue;
+            };
+            if property.computed {
+                continue;
+            }
+            let name = match &property.key {
+                PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+                PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                let span = property.key.span();
+                props.push((
+                    name,
+                    SourceRange {
+                        start: base + span.start,
+                        end: base + span.end,
+                    },
+                ));
+            }
+        }
+    }
     if let Some(Expression::ArrayExpression(array)) = first_argument(call) {
         for element in &array.elements {
             let Some(element) = element.as_expression() else {
@@ -737,7 +756,14 @@ fn props_aliases(id: &BindingPattern<'_>, base: u32) -> Vec<(String, String, Sou
         let Some(key) = key else {
             continue;
         };
-        if let BindingPattern::BindingIdentifier(local) = &property.value {
+        // Renamed members with defaults (`{ title: heading = "x" }`) nest
+        // the local inside an assignment pattern: unwrap to the target so
+        // the declared prop key still maps to the bound local.
+        let mut target = &property.value;
+        while let BindingPattern::AssignmentPattern(assignment) = target {
+            target = &assignment.left;
+        }
+        if let BindingPattern::BindingIdentifier(local) = target {
             aliases.push((
                 key,
                 local.name.to_string(),
@@ -909,14 +935,10 @@ fn project_options_members(
                     None,
                 );
             }
+            // Options methods are callable reads, never writable
+            // assignment targets (mirrors setup function declarations).
             OptionsMemberKind::Method => {
-                push_binding(
-                    projection,
-                    member.name.clone(),
-                    BindingKind::Plain,
-                    range,
-                    None,
-                );
+                push_read_only(projection, member.name.clone(), range);
             }
             OptionsMemberKind::Emit
             | OptionsMemberKind::Component
