@@ -313,7 +313,7 @@ warm-read validator decides how strictly that self-root is checked:
   `ResolveMacroPayload`, or the file-derived origin of every input node for the
   node kinds keyed by interned `SemanticNodeId`s (`ProjectPath` /
   `ProjectMember` / `IndexedAccess` / `KeyOf` / `MappedType` / `Conditional` /
-  `NormalizeUnion` / `NormalizeIntersection`). The carrier is built by the
+  `ReduceUnion` / `ReduceIntersection`). The carrier is built by the
   provenance-pure producer `semantic_graph_read_set_signature` (prepends a
   self-root `FileWholeHash` per observed self-root, merges the traced fact set,
   returns `None` — non-cacheable — on a conflicting self-root hash or a traced
@@ -1051,7 +1051,7 @@ closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
    `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `keyof any/never =
    string|number|symbol`, `keyof unknown = never`; mapped over `never`=`{}`,
    direct mapped over `unknown`=error; conditional `any extends T ? X : Y = X|Y`
-   (union of BOTH branches via `NormalizeUnion`, mode-independent, except when
+   (union of BOTH branches via `ReduceUnion`, mode-independent, except when
    `extends` is an `infer` pattern → fall through to the infer-binding path),
    DISTRIBUTIVE `never extends T = never`, NON-distributive `never extends T = `
    true branch (the fast-reject gates the collapse on `distributive`),

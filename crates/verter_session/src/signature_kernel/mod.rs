@@ -1,9 +1,10 @@
 //! Signature records, substitutions, and epoch-safe interned storage.
 //!
-//! No consumer is cut over here. Handles are epoch-qualified; published
-//! records are fully initialized before a handle is returned. Warm positional
-//! reads borrow through a request-pinned view: no per-candidate `Arc` clone
-//! and no intern-shard lock.
+//! `ProjectSemanticDispatch::signature_discovery` is the consumer: it discovers,
+//! matches and instantiates signature sets through these records. Handles are
+//! epoch-qualified; published records are fully initialized before a handle is
+//! returned. Warm positional reads borrow through a request-pinned view: no
+//! per-candidate `Arc` clone and no intern-shard lock.
 
 #![allow(dead_code)]
 

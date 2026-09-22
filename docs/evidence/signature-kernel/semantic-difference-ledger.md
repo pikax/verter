@@ -1,4 +1,4 @@
-# Semantic-difference ledger — Verter Semantic Signature Kernel (V0 registration)
+# Semantic-difference ledger — Verter Semantic Signature Kernel
 
 The four-class release authority of `docs/arch/signature-kernel.md` §5.8.
 Every row recorded here is executable evidence: each names its subject,
@@ -16,8 +16,15 @@ both sides of the difference, and where the recorded bytes live. Classes:
    else, including checker-version-to-checker-version differences and
    Verter's typed gaps. Rows stay here until classified.
 
-V0 registers the ledger with the port evidence. Later blocks
-re-classify rows; a row never silently disappears.
+A row is re-classified only by moving it, never by deleting it. The
+corpus driver's flip law (`signature_corpus_flip_law_fires_in_both_
+directions`) makes the re-classification deliberate: a `MatchesChecker`
+row fails when the live answer stops matching, and an owed row fails
+when the live answer STARTS matching.
+
+Companion evidence: [`determinism-matrix.md`](determinism-matrix.md)
+(the §5.9 replay status) and [`performance-gates.md`](performance-gates.md)
+(the §12 structural gates and what is not measured).
 
 ## Class 1 — exact agreement
 
@@ -29,25 +36,26 @@ re-classify rows; a row never silently disappears.
 
 ## Class 2 — presentation-only
 
-No rows at registration. The class opens when a row's printed forms
-differ while the binding/callable effects provably agree.
+No rows. The class opens when a row's printed forms differ while the
+binding/callable effects provably agree.
 
 ## Class 3 — `VerterStableV1` order-induced (causal proof required)
 
-No rows at registration, and none are possible before `VerterStableV1`
-exists (V4). An admission needs the §5.8 counterfactual: only semantic
-union traversal order changed, in an isolated cache namespace, and
+No rows. `VerterStableV1` exists (`semantic_query/stable_key.rs`), so
+the class is open, but nothing has been admitted to it. An admission
+needs the §5.8 counterfactual: only semantic union traversal order
+changed, in an isolated cache namespace (parents included), and
 restoring the stable order recovers the recorded observation.
 
 ## Class 4 — independent semantic difference / incompleteness
 
 | ID | Subject | Both sides | Disposition |
 |---|---|---|---|
-| SDL-1 | Conditional labeled-break join (`flow_return_lexical_tests::flow_return_conditional_labeled_break_joins_the_write`) | tsgo `7.0.0-dev.20260526.1` printed `number | boolean`; TypeScript 7.0.2 `tsc` prints `number | true` (the `boolean` arm assignment-reduced to its `true` constituent). The Verter substrate still publishes the `boolean` arm. | Checker-version difference, recorded as `independent semantic difference` until classified. The test's oracle note records both strings; the Verter answer is re-pinned when the flow lattice models constituent reduction (V4 lattice work owns the re-pin). |
+| SDL-1 | Conditional labeled-break join (`flow_return_lexical_tests::flow_return_conditional_labeled_break_joins_the_write`) | tsgo `7.0.0-dev.20260526.1` printed `number | boolean`; TypeScript 7.0.2 `tsc` prints `number | true` (the `boolean` arm assignment-reduced to its `true` constituent). The Verter substrate still publishes the `boolean` arm. | Checker-version difference, recorded as `independent semantic difference` until classified. The test's oracle note records both strings; the Verter answer is re-pinned when the flow lattice models constituent reduction. |
 | SDL-2 | Intersection grouping witness `L` (`type L<T extends string> = (number & T) & { x: 1 }`) | TypeScript 5.8.3 (the contract's historical probe): `L<"a">` is `never`. TypeScript 7.0.2: `L<"a">` is `never`. | Agreement across versions; recorded because the contract's §6.2 recheck clause requires the oracle answer to be re-established, not assumed. Corpus row `SV12_grouping_witness_L`. |
-| SDL-3 | Intersection grouping witness `R` (`type R<T extends string> = number & (T & { x: 1 })`) | TypeScript 5.8.3: `R<"a">` remained an UNREDUCED intersection representation. TypeScript 7.0.2: `R<"a">` reduces to `never`. | A checker-version semantic difference in reduction state: on 7.0.2 BOTH groupings agree. `independent semantic difference` until classified; the reduction-state witness binds V4's ReduceIntersection grouping rules (corpus row `SV13_grouping_witness_R`; the pair is pinned as a pair by `signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair`). |
+| SDL-3 | Intersection grouping witness `R` (`type R<T extends string> = number & (T & { x: 1 })`) | TypeScript 5.8.3: `R<"a">` remained an UNREDUCED intersection representation. TypeScript 7.0.2: `R<"a">` reduces to `never`. | A checker-version semantic difference in reduction state: on 7.0.2 BOTH groupings agree. `independent semantic difference` until classified; the reduction-state witness binds the `ReduceIntersection` grouping rules (corpus row `SV13_grouping_witness_R`; the pair is pinned as a pair by `signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair`). |
 | SDL-4 | Recursive thenable (`interface Rec { then(onfulfilled: (v: Rec) => void): void }`) | TypeScript 7.0.2 refuses and recovers with `any`: the authored `Awaited<Rec>` is `any` under diagnostic TS2589 (`Type instantiation is excessively deep and possibly infinite.`), and the async position is `Promise<any>` under TS1062 (`Type is referenced directly or indirectly in the fulfillment callback of its own 'then' method`). No type is printed for the corpus probe. | Recorded as the observation itself (corpus row `SV21_awaited_recursive_thenable` carries the diagnostic as the checker column). DISPOSITION: the runtime protocol TERMINATES through the shared family cycle guard and publishes the typed gap with zero candidates; the lib conditional keeps the authored `Awaited<Rec>` application unreduced. An error recovery is not a type this substrate fabricates clean and warm, so the recorded diagnostic-only observation stands. Acceptance: `flow_return_coverage_tests::recursive_thenable_terminates_without_fabricating_a_type`. |
-| SDL-5..27 | The signature corpus's twenty-three `KnownOwed` rows beyond SDL-2/3/4 | Recorded 7.0.2 observation vs. the current implementation's honest non-answer to the RECORDED PROBE (the type-position lane defers each probe's outer operator; the six formerly `MatchesChecker` rows — SV09/SV10/SV14/SV15/SV16/SV17 — are re-pinned here with the basis change, their recorded observations unchanged). | `independent difference/incompleteness` by construction — Verter's typed gaps, each row naming its owning successor block (V4/V5/V6/V7) in `crates/verter_session/src/signature_corpus_rows_tests.rs`. A row flips out of this class only through the corpus driver's re-pin rail (`signature_corpus_live_answers_follow_their_verdicts`; both flip directions are proven by `signature_corpus_flip_law_fires_in_both_directions`). |
+| SDL-5..27 | The signature corpus's twenty-three `KnownOwed` rows beyond SDL-2/3/4 | Recorded 7.0.2 observation vs. the current implementation's honest non-answer to the RECORDED PROBE (the type-position lane defers each probe's outer operator; the six formerly `MatchesChecker` rows — SV09/SV10/SV14/SV15/SV16/SV17 — are re-pinned here with the basis change, their recorded observations unchanged). | `independent difference/incompleteness` by construction — Verter's typed gaps. Each row's `Verdict::KnownOwed` note in `crates/verter_session/src/signature_corpus_rows_tests.rs` names the MISSING CAPABILITY (the `SignaturesOfType` type-position instantiation, the runtime/lib `Awaited` lane, the constrained-substitution stage, `ReduceUnion` authored-precedence ordering), not a coordination identifier. A row flips out of this class only through the corpus driver's re-pin rail (`signature_corpus_live_answers_follow_their_verdicts`; both flip directions are proven by `signature_corpus_flip_law_fires_in_both_directions`). |
 
 ## Unrecovered evidence
 

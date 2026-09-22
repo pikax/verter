@@ -1,6 +1,6 @@
 //! The §5.9 mandatory determinism matrix and the §5.4 stable-key
 //! variant/encoding table — the signature kernel's evidence-lock
-//! registration (acceptance V0-AC4): both tables are ENUMERATED against
+//! registration: both tables are ENUMERATED against
 //! their authorities (the checked-in contract's §5.9 table; the live
 //! `pub enum SemanticNodeData` declaration) and CONSUMED by executable
 //! replay drivers that perturb the CURRENT implementation and compare
@@ -11,10 +11,8 @@
 //! * Every §5.9 perturbation has exactly ONE row. A row is `Ready` only
 //!   when its driver drives EVERY axis of the §5.9 row; any axis the
 //!   current runtime cannot drive makes the whole row `Ignored` with
-//!   the successor block that owns the missing axis named in the
-//!   reason (the contract stages the combined vertical at V8, and the
-//!   storage vertical at V2 — a row may not claim `Ready` while part
-//!   of its axis set is only documented).
+//!   the missing PUBLIC SURFACE named in the reason — a row may not
+//!   claim `Ready` while part of its axis set is only documented.
 //! * An `Ignored` row's body asserts the KNOWN state — the typed
 //!   failure or the closest drivable clause of the row — never an
 //!   empty body, a vacuous non-empty check, or a bare `unreachable!`.
@@ -434,43 +432,44 @@ struct StableKeyRow {
     domain: &'static str,
     /// The identity inputs the domain requires for THIS variant.
     inputs: &'static str,
-    /// `None` — encoding exists under the current content-free key
-    /// rails; `Some(block)` — the `VerterStableV1` encoding is owed to
-    /// the named block.
-    owed: Option<&'static str>,
+    /// `None` — the `VerterStableV1` encoder consumes exactly the
+    /// identity inputs above. `Some(residual)` — it consumes an
+    /// APPROXIMATION of one of them, named here, so the row's identity
+    /// claim is weaker than its `inputs` column reads.
+    residual: Option<&'static str>,
 }
 
 const STABLE_KEY_TABLE: &[StableKeyRow] = &[
-    StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", owed: None },
-    StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", owed: None },
-    StableKeyRow { variant: "Object", domain: "authored carriers", inputs: "owner/role anchor plus member-name-keyed child stable keys (declared order where authored order is semantic)", owed: None },
-    StableKeyRow { variant: "ObjectSpreadProgram", domain: "synthetic", inputs: "closed spread-program recipe with stable arm references and authored member anchors", owed: None },
-    StableKeyRow { variant: "Union", domain: "synthetic", inputs: "set of member stable keys under the carrier category mint (first-occurrence dedup per the composite identity discipline)", owed: None },
-    StableKeyRow { variant: "Intersection", domain: "synthetic", inputs: "ORDERED member stable keys preserving the authored reduction grouping", owed: None },
-    StableKeyRow { variant: "Primitive", domain: "intrinsics/sentinels", inputs: "fixed distinct primitive tag; no source or allocation ordinal", owed: None },
-    StableKeyRow { variant: "Literal", domain: "literals", inputs: "canonical scalar value plus literal kind with explicit scalar edge-case handling", owed: None },
-    StableKeyRow { variant: "Opaque", domain: "intrinsics/sentinels", inputs: "typed error tag; a refusal identity, never an allocation ordinal", owed: None },
-    StableKeyRow { variant: "Array", domain: "synthetic", inputs: "readonly flag plus element stable-key reference", owed: None },
-    StableKeyRow { variant: "Tuple", domain: "synthetic", inputs: "ordered element stable keys with label/optionality/rest metadata", owed: None },
-    StableKeyRow { variant: "TemplateLiteral", domain: "synthetic", inputs: "ordered quasi text spans plus expression stable-key references", owed: None },
-    StableKeyRow { variant: "KeyOf", domain: "synthetic", inputs: "operand stable-key reference under the closed keyof recipe", owed: None },
-    StableKeyRow { variant: "IndexedAccess", domain: "synthetic", inputs: "object and index stable-key references under the closed indexed-access recipe", owed: None },
-    StableKeyRow { variant: "Mapped", domain: "synthetic", inputs: "source stable-key reference plus mapper key-space anchor", owed: None },
-    StableKeyRow { variant: "TypeOf", domain: "authored carriers", inputs: "value-root owner anchor plus remaining member path roles", owed: None },
-    StableKeyRow { variant: "TypeOfNominal", domain: "authored carriers", inputs: "the declaring value-declaration identity parts (nominal by construction)", owed: None },
-    StableKeyRow { variant: "TypeParam", domain: "binders", inputs: "declaration identity (owner anchor plus declaration-local ordinal only where the language needs disambiguation) and binder role", owed: None },
-    StableKeyRow { variant: "Infer", domain: "binders", inputs: "owner/recursive-region anchor plus infer binder position/role", owed: None },
-    StableKeyRow { variant: "InferRef", domain: "binders", inputs: "referenced infer binder's stable anchor", owed: None },
-    StableKeyRow { variant: "Conditional", domain: "synthetic", inputs: "closed conditional recipe: check/extrema/default arm stable-key references", owed: None },
-    StableKeyRow { variant: "Signature", domain: "authored carriers", inputs: "owner/role anchor plus the positional model (binder anchors, optionality, rest/receiver/predicate layout)", owed: Some("V5") },
-    StableKeyRow { variant: "DeferredCallable", domain: "authored carriers", inputs: "the deferred callable's closed carrier recipe with stable subject reference", owed: Some("V5") },
-    StableKeyRow { variant: "DeclRef", domain: "authored carriers", inputs: "logical source-unit identity plus declaration identity (content hashes stay freshness evidence, R6 content-free key rails)", owed: None },
-    StableKeyRow { variant: "InstantiationRef", domain: "synthetic", inputs: "base declaration's stable anchor plus ordered argument stable keys (content-free slot rails, R6)", owed: None },
-    StableKeyRow { variant: "MergedDecl", domain: "authored carriers", inputs: "merged declaration population: per-symbol logical membership and precedence before publication (V3 populations)", owed: Some("V3") },
-    StableKeyRow { variant: "BareRef", domain: "authored carriers", inputs: "owner scope anchor plus the unresolved head name (an authored-unresolved carrier, never a discovery ordinal)", owed: Some("V4") },
-    StableKeyRow { variant: "ImportType", domain: "authored carriers", inputs: "resolved module logical identity plus the imported anchor and qualifier path", owed: Some("V4") },
-    StableKeyRow { variant: "RawFallback", domain: "synthetic", inputs: "closed fallback recipe over the failed input's stable reference", owed: Some("V4") },
-    StableKeyRow { variant: "SyntheticBinding", domain: "binders", inputs: "stable owner/role anchor of the synthesizing operation plus binder position", owed: Some("V4") },
+    StableKeyRow { variant: "IntrinsicApplication", domain: "synthetic", inputs: "closed intrinsic op tag plus ordered argument stable-key references", residual: None },
+    StableKeyRow { variant: "Alias", domain: "authored carriers", inputs: "owner/role anchor of the aliasing declaration plus the aliased stable-key reference", residual: None },
+    StableKeyRow { variant: "Object", domain: "authored carriers", inputs: "owner/role anchor plus member-name-keyed child stable keys (declared order where authored order is semantic)", residual: None },
+    StableKeyRow { variant: "ObjectSpreadProgram", domain: "synthetic", inputs: "closed spread-program recipe with stable arm references and authored member anchors", residual: None },
+    StableKeyRow { variant: "Union", domain: "synthetic", inputs: "set of member stable keys under the carrier category mint (first-occurrence dedup per the composite identity discipline)", residual: None },
+    StableKeyRow { variant: "Intersection", domain: "synthetic", inputs: "ORDERED member stable keys preserving the authored reduction grouping", residual: None },
+    StableKeyRow { variant: "Primitive", domain: "intrinsics/sentinels", inputs: "fixed distinct primitive tag; no source or allocation ordinal", residual: None },
+    StableKeyRow { variant: "Literal", domain: "literals", inputs: "canonical scalar value plus literal kind with explicit scalar edge-case handling", residual: None },
+    StableKeyRow { variant: "Opaque", domain: "intrinsics/sentinels", inputs: "typed error tag; a refusal identity, never an allocation ordinal", residual: None },
+    StableKeyRow { variant: "Array", domain: "synthetic", inputs: "readonly flag plus element stable-key reference", residual: None },
+    StableKeyRow { variant: "Tuple", domain: "synthetic", inputs: "ordered element stable keys with label/optionality/rest metadata", residual: None },
+    StableKeyRow { variant: "TemplateLiteral", domain: "synthetic", inputs: "ordered quasi text spans plus expression stable-key references", residual: None },
+    StableKeyRow { variant: "KeyOf", domain: "synthetic", inputs: "operand stable-key reference under the closed keyof recipe", residual: None },
+    StableKeyRow { variant: "IndexedAccess", domain: "synthetic", inputs: "object and index stable-key references under the closed indexed-access recipe", residual: None },
+    StableKeyRow { variant: "Mapped", domain: "synthetic", inputs: "source stable-key reference plus mapper key-space anchor", residual: None },
+    StableKeyRow { variant: "TypeOf", domain: "authored carriers", inputs: "value-root owner anchor plus remaining member path roles", residual: None },
+    StableKeyRow { variant: "TypeOfNominal", domain: "authored carriers", inputs: "the declaring value-declaration identity parts (nominal by construction)", residual: None },
+    StableKeyRow { variant: "TypeParam", domain: "binders", inputs: "declaration identity (owner anchor plus declaration-local ordinal only where the language needs disambiguation) and binder role", residual: None },
+    StableKeyRow { variant: "Infer", domain: "binders", inputs: "owner/recursive-region anchor plus infer binder position/role", residual: None },
+    StableKeyRow { variant: "InferRef", domain: "binders", inputs: "referenced infer binder's stable anchor", residual: None },
+    StableKeyRow { variant: "Conditional", domain: "synthetic", inputs: "closed conditional recipe: check/extrema/default arm stable-key references", residual: None },
+    StableKeyRow { variant: "Signature", domain: "authored carriers", inputs: "owner/role anchor plus the positional model (binder anchors, optionality, rest/receiver/predicate layout)", residual: None },
+    StableKeyRow { variant: "DeferredCallable", domain: "authored carriers", inputs: "the deferred callable's closed carrier recipe with stable subject reference", residual: Some("the encoder walks the carrier type arguments only; the deferred SUBJECT reference is not an encoding input, so two deferred callables over different subjects with equal arguments share a stable key") },
+    StableKeyRow { variant: "DeclRef", domain: "authored carriers", inputs: "logical source-unit identity plus declaration identity (content hashes stay freshness evidence, R6 content-free key rails)", residual: None },
+    StableKeyRow { variant: "InstantiationRef", domain: "synthetic", inputs: "base declaration's stable anchor plus ordered argument stable keys (content-free slot rails, R6)", residual: None },
+    StableKeyRow { variant: "MergedDecl", domain: "authored carriers", inputs: "merged declaration population: per-symbol logical membership and precedence before publication", residual: None },
+    StableKeyRow { variant: "BareRef", domain: "authored carriers", inputs: "owner scope anchor plus the unresolved head name (an authored-unresolved carrier, never a discovery ordinal)", residual: None },
+    StableKeyRow { variant: "ImportType", domain: "authored carriers", inputs: "resolved module logical identity plus the imported anchor and qualifier path", residual: Some("the encoder consumes the AUTHORED specifier text, not a resolved module logical identity, so two files reaching one module through different relative specifiers encode differently") },
+    StableKeyRow { variant: "RawFallback", domain: "synthetic", inputs: "closed fallback recipe over the failed input's stable reference", residual: Some("the encoder serialises the opaque payload's Debug form rather than a stable reference to the failed input") },
+    StableKeyRow { variant: "SyntheticBinding", domain: "binders", inputs: "stable owner/role anchor of the synthesizing operation plus binder position", residual: Some("the encoder serialises the content-free binding id's Debug form; the synthesizing operation's owner/role anchor is not an encoding input") },
 ];
 
 /// Extract the live variant list from the `pub enum SemanticNodeData`
@@ -505,7 +504,7 @@ fn live_semantic_node_data_variants() -> Vec<String> {
     variants
 }
 
-/// V0-AC4 (5.4 half): the stable-key table enumerates EVERY
+/// Stable-key registration: the table enumerates EVERY
 /// `SemanticNodeData` category — exactly the live declaration's variant
 /// set, no more, no less — with a non-empty domain and inputs for each,
 /// and every not-yet-encoded row naming the successor block that owns
@@ -535,10 +534,11 @@ fn stable_key_table_enumerates_every_semantic_node_data_category() {
              an unverified registration",
             row.variant
         );
-        if let Some(block) = row.owed {
+        if let Some(residual) = row.residual {
             assert!(
-                block.starts_with('V') && block.len() <= 3,
-                "{}: the owing block is a train block id (found `{block}`)",
+                residual.len() > 40 && residual.contains("encoder"),
+                "{}: a residual names what the ENCODER actually consumes instead of the \
+                 declared identity input (found `{residual}`)",
                 row.variant
             );
         }
@@ -589,10 +589,10 @@ const MATRIX: &[MatrixRow] = &[
         id: "DET-05",
         perturbation: "Cold, warm, partial persisted cache, edit/revert, cancelled/retried work, epoch rebuild",
         driver: Driver::Ignored {
-            reason: "V2 owns the epoch-safe storage vertical (partial persisted cache, \
-                     cancelled/retried work, epoch rebuild): those axes have no public \
-                     drivable surface today; the cold/warm/edit-revert subset is asserted \
-                     in the ignored body",
+            reason: "the partial-persisted-cache, cancelled/retried-work and epoch-rebuild \
+                     axes have no public drivable surface: nothing published exposes cache \
+                     persistence, a request-cancellation drive, or an epoch-rebuild entry \
+                     point; the cold/warm/edit-revert subset is asserted in the ignored body",
         },
     },
     MatrixRow {
@@ -609,19 +609,20 @@ const MATRIX: &[MatrixRow] = &[
         id: "DET-08",
         perturbation: "Contextual body demands with the same descriptor/type arguments",
         driver: Driver::Ignored {
-            reason: "V1 owns complete body/result demand identity: only the canonical \
-                     whole-return demand point is answerable today (a narrower demand fails \
-                     closed with UnmodeledDemandPoint), so distinct coexisting result memo \
-                     entries under one descriptor cannot be replayed yet",
+            reason: "a narrower (contextual) return demand fails closed with \
+                     UnmodeledDemandPoint — only the canonical whole-return demand point is \
+                     answerable — so distinct coexisting result memo entries under one \
+                     descriptor cannot be replayed",
         },
     },
     MatrixRow {
         id: "DET-09",
         perturbation: "Policy changes with resident parent caches",
         driver: Driver::Ignored {
-            reason: "V1 owns real effective tsconfig option plumbing: changing semantic policy \
-                     with resident parent caches is un-drivable until effective options and \
-                     their parent-cache invalidation exist",
+            reason: "no public surface mutates effective semantic policy on a live host, so \
+                     changing an option with resident parent caches cannot be driven until \
+                     effective options and their parent-cache invalidation are reachable \
+                     from a consumer",
         },
     },
     MatrixRow {
@@ -681,7 +682,7 @@ fn assert_ready(id: &str, test: &str) {
     }
 }
 
-/// V0-AC4 (5.9 half): the matrix enumerates EVERY §5.9 perturbation
+/// Perturbation registration: the matrix enumerates EVERY §5.9 perturbation
 /// exactly once, each with a non-empty driver or a block-named ignore
 /// reason, and the driver names are unique.
 #[test]
@@ -718,8 +719,10 @@ fn determinism_matrix_enumerates_every_5_9_row() {
             }
             Driver::Ignored { reason } => {
                 assert!(
-                    reason.starts_with('V') && reason.contains(" owns "),
-                    "{}: the ignore reason names the successor block that un-ignores the row",
+                    reason.contains("no public") || reason.contains("fails closed"),
+                    "{}: the ignore reason names the MISSING PUBLIC SURFACE that keeps the \
+                     row undrivable — never a coordination identifier, which tells a reader \
+                     nothing about what has to be built",
                     row.id
                 );
             }
@@ -914,17 +917,16 @@ fn det_04_worker_counts_1_2_4_8() {
 /// DET-05 (ignored) — the cold/warm/edit-revert axes ARE driven below
 /// (cold equals warm on both bases; an authored edit changes both; the
 /// revert restores the original observation), but the row's remaining
-/// axes have no drivable surface today: the partial PERSISTED cache and
-/// the epoch rebuild need the epoch-safe storage vertical (no public
-/// persistence or epoch-rebuild API exists yet), and cancelled/retried
-/// work has no deterministic public drive. The row stays ignored naming
-/// the owning block; the driven axes stay asserted so the un-ignoring
-/// change inherits a real body, not a stub.
+/// axes have no drivable surface: the partial PERSISTED cache and the
+/// epoch rebuild have no public persistence or epoch-rebuild entry
+/// point, and cancelled/retried work has no deterministic public drive.
+/// The row stays ignored naming the missing surface; the driven axes
+/// stay asserted so the un-ignoring change inherits a real body, not a
+/// stub.
 #[test]
-#[ignore = "V2 owns the epoch-safe storage vertical (partial persisted cache, \
-            cancelled/retried work, epoch rebuild): those axes have no public \
-            drivable surface today, so the row cannot honestly claim Ready; the \
-            cold/warm/edit-revert axes below are the drivable subset"]
+#[ignore = "the partial-persisted-cache, cancelled/retried-work and epoch-rebuild axes \
+            have no public drivable surface, so the row cannot honestly claim Ready; \
+            the cold/warm/edit-revert axes below are the drivable subset"]
 fn det_05_cold_warm_edit_revert() {
     match matrix_row("DET-05").driver {
         Driver::Ignored { .. } => {}
@@ -968,7 +970,7 @@ fn det_05_cold_warm_edit_revert() {
 /// loss (both duplicates answer), and BOTH bases give the SAME
 /// shape-normalized content because they are same-shaped authored
 /// facts. The virtual-unit and recursive-binder anchor axes stage with
-/// V3/V4 (the row's staging note).
+/// the virtual-unit and recursive-binder registration (the row's staging note).
 #[test]
 fn det_07_duplicate_origins_and_anonymous_units() {
     assert_ready("DET-07", "det_07_duplicate_origins_and_anonymous_units");
@@ -1142,10 +1144,9 @@ export function witness(v: "a" | "ab" | "abc" | "b") { return v; }
 /// replayed yet. When the owning block lands, this body's refusal
 /// assertion FAILS (the demand answers), which is the un-ignore signal.
 #[test]
-#[ignore = "V1 owns complete body/result demand identity: only the canonical whole-return \
-            demand point is answerable today (a narrower demand fails closed with \
-            UnmodeledDemandPoint), so distinct coexisting result memo entries under one \
-            descriptor cannot be replayed yet"]
+#[ignore = "a narrower (contextual) return demand fails closed with UnmodeledDemandPoint — \
+            only the canonical whole-return demand point is answerable — so distinct \
+            coexisting result memo entries under one descriptor cannot be replayed"]
 fn det_08_contextual_body_demands() {
     match matrix_row("DET-08").driver {
         Driver::Ignored { .. } => {}
@@ -1200,9 +1201,9 @@ fn det_08_contextual_body_demands() {
 /// no drivable surface (the host owns no mid-flight effective-options
 /// mutation), which is what the ignore reason names.
 #[test]
-#[ignore = "V1 owns real effective tsconfig option plumbing: changing semantic policy with \
-            resident parent caches is un-drivable until effective options and their \
-            parent-cache invalidation exist"]
+#[ignore = "no public surface mutates effective semantic policy on a live host, so changing \
+            an option with resident parent caches cannot be driven until effective options \
+            and their parent-cache invalidation are reachable"]
 fn det_09_policy_change_with_resident_parents() {
     match matrix_row("DET-09").driver {
         Driver::Ignored { .. } => {}

@@ -779,7 +779,7 @@ a distinct responsibility:
 
 `SemanticGraphStore` (crate `verter_session::semantic_query_memo`) owns all reusable semantic identity via two parallel memos:
 
-- **Node memo** — mode-erased `FamilyKey` → `FamilySlots` map for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
+- **Node memo** — mode-erased `FamilyKey` → `FamilySlots` map for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `ReduceUnion`, `ReduceIntersection`, `ResolvedNamedType`).
 - **Relation memo** — keyed by the full-identity `RelateMemoKey` (source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements. Admission is decided-only: only the binary `Assignable { bindings }` / `NotAssignable` payloads publish (cache-with-fence); `Unknown`, `BudgetExceeded` (public payload, `cache_suppress`), session-local inference deltas, and abandoned sessions publish NOTHING — no memo entry, no fact signature, no reverse index.
 
 ### Object-literal spreads: canonical construction programs

@@ -1,5 +1,5 @@
-//! The signature corpus DRIVER — the executable half of the V0 evidence
-//! lock (`docs/arch/signature-kernel.md` §13 V0, acceptance V0-AC3).
+//! The signature corpus DRIVER — the executable half of the pinned-oracle
+//! evidence lock (`docs/arch/signature-kernel.md` §14).
 //!
 //! Every row in [`signature_corpus_rows_tests::CORPUS`] is a recorded
 //! 7.0.2 observation. This driver:
@@ -80,10 +80,10 @@ fn corpus_digest_input() -> Vec<u8> {
     buf
 }
 
-/// V0-AC3 (parse): every recorded observation is non-empty, carries
+/// Observation well-formedness: every recorded observation is non-empty, carries
 /// exactly one observation form, its `decl_emit` bytes PARSE as a
 /// TypeScript declarations module through the tree's own parser, and
-/// the table covers every contract V0-gate family — including exactly
+/// the table covers every observation family — including exactly
 /// ten distinct Awaited residual rows.
 #[test]
 fn signature_corpus_observations_parse_and_families_are_covered() {
@@ -168,11 +168,22 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
         match row.verdict {
             Verdict::MatchesChecker => {}
             Verdict::KnownOwed { note } | Verdict::Degraded { note } => {
-                if note.trim().is_empty() || !note.contains("V") {
+                // An owed verdict must explain what the substrate does NOT
+                // do, in terms a reader can act on: WHICH CAPABILITY is
+                // missing, never a coordination identifier. A bare
+                // identifier rots into an unresolvable reference the moment
+                // the coordination state moves, and tells a reader nothing
+                // about what has to be built for the row to flip.
+                let lower = note.to_ascii_lowercase();
+                let names_a_gap = ["owed", "defer", "not yet", "gap"]
+                    .iter()
+                    .any(|phrase| lower.contains(phrase));
+                if note.trim().len() < 60 || !names_a_gap {
                     failures.push(format!(
-                        "{}: an owed/degraded verdict names its owing successor block in the \
-                         note",
-                        row.id
+                        "{}: an owed/degraded verdict names the MISSING CAPABILITY in its \
+                         note (found {} chars: {note:?})",
+                        row.id,
+                        note.trim().len()
                     ));
                 }
             }
@@ -199,7 +210,7 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
             .unwrap_or(0);
         if count == 0 {
             failures.push(format!(
-                "family `{}` has no row — the contract's V0 gate requires it",
+                "family `{}` has no row — the mandatory matrix requires it",
                 family.id()
             ));
         }
@@ -432,7 +443,7 @@ fn recorded_signature_return<'a>(decl_emit: &'a str, fn_name: &str) -> Option<&'
     (!ret.is_empty()).then_some(ret)
 }
 
-/// V0-AC3 (compare): the live answer to the RECORDED PROBE follows
+/// Verdict fidelity: the live answer to the RECORDED PROBE follows
 /// every row's recorded verdict. The observation lane is the probe lane
 /// above (the probe in type position through the public flow-return
 /// boundary); the comparison bases are STRUCTURAL ONLY — the typed
@@ -542,7 +553,7 @@ fn signature_corpus_live_answers_follow_their_verdicts() {
 /// `MatchesChecker` verdict and CONTRADICTS a `KnownOwed` one, a
 /// diagnostic row whose probe reduces loses its refusal pin, and a
 /// DISPLAY-ONLY row flips through its declared-return basis alone (the
-/// rail the V4 ordering rows ride) while a live answer matching ONLY
+/// rail the union-ordering rows ride) while a live answer matching ONLY
 /// the display text never satisfies or flips one. This is the control
 /// that keeps the
 /// corpus driver's row-flip mechanism honest — a later block implementing
@@ -610,7 +621,7 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
     );
     assert_eq!(verdict_failure(&display, &live), None);
     // ...and CONTRADICTS KnownOwed through that same declared basis
-    // (the flip signal fires on the rail the V4 ordering rows ride).
+    // (the flip signal fires on the rail the union-ordering rows ride).
     let owed_display = Row {
         verdict: Verdict::KnownOwed {
             note: "control: the declared answer is implemented",
@@ -651,7 +662,7 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
     );
 }
 
-/// V0-AC3 (identity): the recorded observations digest to the corpus
+/// Corpus identity: the recorded observations digest to the corpus
 /// entry locked in the evidence manifest, and the manifest names THIS
 /// corpus identity — an edited observation, or a manifest edit that
 /// does not recompute the digest, fails here.
