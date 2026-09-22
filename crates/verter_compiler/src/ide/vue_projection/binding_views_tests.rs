@@ -520,3 +520,116 @@ fn stp15_standalone_runtime_object_props_bind_template_rows() {
         );
     }
 }
+
+#[test]
+fn stp15_const_plain_bindings_refuse_template_writes() {
+    let content = r#"import { ref } from 'vue';
+const count = ref(0);
+const nested = { c: ref(0) };
+const frozen = 1;
+let loose = 2;
+"#;
+    let projection = project_setup(content);
+    // Immutable lexical plains keep their direct read row ...
+    for name in ["nested", "frozen"] {
+        let read = projection.read.lookup(name).expect(name);
+        assert_eq!(read.kind, BindingKind::Plain);
+        assert!(!read.unwrapped);
+        // ... but template reassignment of a `const` name must not typecheck.
+        assert_eq!(
+            projection.write.write_target(name),
+            Err(WriteRejection::ConstBinding),
+            "{name} is immutable in scope"
+        );
+    }
+    // The mutable twin stays writable: mutability follows the declaration.
+    assert!(projection.write.write_target("loose").is_ok());
+    // Refs are unaffected by declaration mutability: the wrapper is mutable.
+    assert!(projection.write.write_target("count").is_ok());
+}
+
+#[test]
+fn stp15_whole_torefs_result_reads_directly() {
+    let content = r#"import { reactive, toRefs } from 'vue';
+const state = reactive({ count: 0 });
+const refs = toRefs(state);
+const { count } = toRefs(state);
+"#;
+    let projection = project_setup(content);
+    // The whole `toRefs(...)` object is not itself a ref: direct read, and
+    // (declared `const`) refused as a write target.
+    let refs = projection.read.lookup("refs").expect("refs");
+    assert_eq!(
+        refs.kind,
+        BindingKind::Plain,
+        "the whole toRefs result is an object of refs, not an unwrapped ref"
+    );
+    assert!(!refs.unwrapped);
+    assert!(!refs.script_wraps_ref);
+    assert_eq!(
+        projection.write.write_target("refs"),
+        Err(WriteRejection::ConstBinding)
+    );
+    // Control twin: destructured `toRefs` members stay unwrapped refs.
+    let count = projection.read.lookup("count").expect("count");
+    assert_eq!(count.kind, BindingKind::Ref);
+    assert!(count.unwrapped && count.script_wraps_ref);
+    assert!(projection.write.write_target("count").is_ok());
+}
+
+#[test]
+fn stp15_usage_collects_authored_region_references() {
+    let script = r#"import { ref, computed } from 'vue';
+const count = ref(0);
+const doubled = computed(() => count.value * 2);
+const nested = { c: ref(0) };
+const theme = ref('red');
+function bump() { count.value++; }
+"#;
+    let template = r#"<button @click="bump(); count++">{{ doubled }}</button>"#;
+    let style = r#".accent { color: v-bind(theme); }"#;
+    let projection = project_setup(script);
+    let declared: Vec<String> = read_names(&projection)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    // No caller-supplied slices: regions come from authored bytes only.
+    let usage = BindingUsageSet::from_region_text(&declared, template, script, style);
+    let count = usage
+        .used
+        .iter()
+        .find(|u| u.name == "count")
+        .expect("count");
+    assert!(
+        count.regions.template && count.regions.script,
+        "count is referenced in authored template and script"
+    );
+    let doubled = usage
+        .used
+        .iter()
+        .find(|u| u.name == "doubled")
+        .expect("doubled");
+    assert!(
+        doubled.regions.template && !doubled.regions.script && !doubled.regions.style,
+        "doubled is a template-only reference"
+    );
+    let theme = usage
+        .used
+        .iter()
+        .find(|u| u.name == "theme")
+        .expect("theme");
+    assert!(
+        theme.regions.style && !theme.regions.template,
+        "theme is a style v-bind reference"
+    );
+    // Declarations never count as uses and nothing is seeded: a binding
+    // unreferenced in every region stays visible as unused.
+    assert!(
+        usage.unused().contains(&"nested"),
+        "nested has no authored reference in any region"
+    );
+    assert!(
+        !usage.used.iter().any(|u| u.name == "ghost"),
+        "unmentioned names never join the population"
+    );
+}

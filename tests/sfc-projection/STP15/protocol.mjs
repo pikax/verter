@@ -7,9 +7,10 @@
  * top-level ref reads, getter-only/readonly write refusals,
  * setter-domain writes, real usage accounting without synthetic reads,
  * and live views without immutable snapshots. Each exported dirty twin
- * maps to the discriminator test that rejects it; the verifier proves
- * the fresh run passed those discriminators without ever applying the
- * mutations.
+ * maps to the discriminator test that rejects it; the verifier applies
+ * every twin as a source patch against the owned product, requires the
+ * discriminator run to fail while it is applied, then restores the clean
+ * source — the rejection is reproduced, not asserted from clean passes.
  */
 
 import { spawnSync } from "node:child_process";
@@ -48,20 +49,86 @@ export const DIRTY_IMMUTABLE_SNAPSHOT = { read: { snapshotKind: "immutable" } };
 export const DIRTY_READ_TYPE_WRITE_DOMAIN = { write: { setterDomain: "readType" } };
 
 const RUST_CASES = Object.freeze({
-  "STP15-read-ref": ["stp15_read_ref_unwraps_top_level_ref_only"],
-  "STP15-readonly-write": ["stp15_readonly_write_rejects_getter_computed_and_readonly_prop"],
+  "STP15-read-ref": [
+    "stp15_read_ref_unwraps_top_level_ref_only",
+    "stp15_whole_torefs_result_reads_directly",
+  ],
+  "STP15-readonly-write": [
+    "stp15_readonly_write_rejects_getter_computed_and_readonly_prop",
+    "stp15_const_plain_bindings_refuse_template_writes",
+  ],
   "STP15-setter-domain": ["stp15_setter_domain_uses_declared_setter_type"],
-  "STP15-unused": ["stp15_unused_reports_only_authored_references"],
+  "STP15-unused": [
+    "stp15_unused_reports_only_authored_references",
+    "stp15_usage_collects_authored_region_references",
+  ],
   "STP15-mutation": ["stp15_mutation_uses_live_views_without_snapshots"],
 });
 
-// Each rejected mutation is discriminated by owning Rust tests that the
-// clean product must pass: a universal mutable alias would let the
-// readonly-write test through; synthetic void reads would break the
-// unused test; an immutable snapshot would break the mutation test; a
-// read-type write domain would break the setter-domain test. The
-// verifier never applies the mutations; it proves the fresh `cargo
-// test` run executed and passed each discriminator.
+// Each rejected mutation is a source patch against the owned product plus
+// the discriminator tests that must FAIL while it is applied. The
+// verifier writes the patch into `binding_views.rs`, runs the owning
+// `cargo test` subset, requires the failure for the stated reason, then
+// restores the clean source — every twin is reproduced physically.
+const DIRTY_TWIN_PATCHES = Object.freeze({
+  DIRTY_UNIVERSAL_MUTABLE_ALIAS: Object.freeze({
+    patches: Object.freeze([
+      Object.freeze({
+        find: "BindingKind::Computed { setter: false } => projection.write.getter_only.push(name),",
+        replace: `BindingKind::Computed { setter: false } => projection.write.writable.push(WritableBinding {
+            name,
+            domain: WriteDomain::PlainAssign,
+        }),`,
+      }),
+    ]),
+    discriminators: Object.freeze([
+      "stp15_readonly_write_rejects_getter_computed_and_readonly_prop",
+    ]),
+  }),
+  DIRTY_SYNTHETIC_VOID_READS: Object.freeze({
+    patches: Object.freeze([
+      Object.freeze({
+        find: "if regions.template || regions.script || regions.style {",
+        replace: "if true {",
+      }),
+    ]),
+    discriminators: Object.freeze(["stp15_unused_reports_only_authored_references"]),
+  }),
+  DIRTY_IMMUTABLE_SNAPSHOT: Object.freeze({
+    patches: Object.freeze([
+      Object.freeze({
+        find: `pub enum ViewSnapshotKind {
+    /// The view names the live binding; authored mutations stay visible.
+    Live,
+}`,
+        replace: `pub enum ViewSnapshotKind {
+    /// The view names the live binding; authored mutations stay visible.
+    Live,
+    /// Rejected twin: an immutable snapshot copy masking authored mutations.
+    Snapshot,
+}`,
+      }),
+      Object.freeze({
+        find: `    pub fn snapshot_kind(&self) -> ViewSnapshotKind {
+        ViewSnapshotKind::Live
+    }`,
+        replace: `    pub fn snapshot_kind(&self) -> ViewSnapshotKind {
+        ViewSnapshotKind::Snapshot
+    }`,
+      }),
+    ]),
+    discriminators: Object.freeze(["stp15_mutation_uses_live_views_without_snapshots"]),
+  }),
+  DIRTY_READ_TYPE_WRITE_DOMAIN: Object.freeze({
+    patches: Object.freeze([
+      Object.freeze({
+        find: "domain: WriteDomain::SetterParam(computed_domain.unwrap_or_default()),",
+        replace: "domain: WriteDomain::SetterParam(String::new()),",
+      }),
+    ]),
+    discriminators: Object.freeze(["stp15_setter_domain_uses_declared_setter_type"]),
+  }),
+});
 const DIRTY_TWIN_DISCRIMINATORS = Object.freeze({
   DIRTY_UNIVERSAL_MUTABLE_ALIAS: Object.freeze([
     "stp15_readonly_write_rejects_getter_computed_and_readonly_prop",
@@ -188,8 +255,8 @@ export function assertRustCases(run) {
       }
     }
   }
-  // Consume every exported dirty twin: the fresh run must have executed
-  // and passed the discriminator that rejects it.
+  // Consume every exported dirty twin so an unused export fails loudly;
+  // physical rejection is proven separately by assertDirtyTwinsRejected.
   const twins = {
     DIRTY_UNIVERSAL_MUTABLE_ALIAS,
     DIRTY_SYNTHETIC_VOID_READS,
@@ -201,17 +268,112 @@ export function assertRustCases(run) {
       errors.push(err("STP15-mutation", "dirty-twin-unproven", `${twin} is not exported`));
       continue;
     }
-    for (const name of DIRTY_TWIN_DISCRIMINATORS[twin] || []) {
-      if (!testPassed(output, name)) {
-        errors.push(
-          err(
-            "STP15-mutation",
-            "dirty-twin-unproven",
-            `fresh run did not pass ${name}, the discriminator rejecting ${twin}`,
-          ),
-        );
-      }
+    if (DIRTY_TWIN_PATCHES[twin] === undefined) {
+      errors.push(err("STP15-mutation", "dirty-twin-unproven", `${twin} has no applied patch`));
     }
+  }
+  return errors;
+}
+
+export function runDiscriminatorTests(repoRoot, names) {
+  const result = spawnSync(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "verter_compiler",
+      "--lib",
+      "ide::vue_projection::binding_views",
+      "--",
+      "--test-threads=1",
+      ...names,
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 300000,
+      env: process.env,
+    },
+  );
+  return {
+    status: result.status,
+    error: result.error,
+    stdout: `${result.stdout || ""}${result.stderr || ""}`,
+  };
+}
+
+export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
+  const errors = [];
+  const abs = path.join(repoRoot, BINDING_VIEWS_RS);
+  let original = null;
+  try {
+    original = fs.readFileSync(abs, "utf8");
+  } catch {
+    return [err("STP15-mutation", "missing-check", `${BINDING_VIEWS_RS} is unreadable`)];
+  }
+  for (const [twin, spec] of Object.entries(DIRTY_TWIN_PATCHES)) {
+    let mutated = original;
+    let missingAnchor = null;
+    for (const patch of spec.patches) {
+      if (!mutated.includes(patch.find)) {
+        missingAnchor = patch.find.slice(0, 80);
+        break;
+      }
+      mutated = mutated.replace(patch.find, patch.replace);
+    }
+    if (missingAnchor !== null) {
+      errors.push(
+        err(
+          "STP15-mutation",
+          "dirty-twin-unproven",
+          `${twin} patch anchor is missing from the owned product: ${missingAnchor}`,
+        ),
+      );
+      continue;
+    }
+    fs.writeFileSync(abs, mutated);
+    let run = null;
+    try {
+      run = runDiscriminatorTests(repoRoot, spec.discriminators);
+    } finally {
+      fs.writeFileSync(abs, original);
+    }
+    if (run.error) {
+      errors.push(
+        err("STP15-mutation", "missing-check", `${twin} run failed to spawn: ${run.error.message}`),
+      );
+      continue;
+    }
+    const output = String(run.stdout || "");
+    const ran = spec.discriminators.some((name) => output.includes(name));
+    if (!ran) {
+      errors.push(
+        err(
+          "STP15-mutation",
+          "missing-check",
+          `${twin} run did not execute its discriminators (status=${run.status})`,
+        ),
+      );
+      continue;
+    }
+    const cleanPass =
+      run.status === 0 && spec.discriminators.every((name) => testPassed(output, name));
+    if (cleanPass) {
+      errors.push(
+        err(
+          "STP15-mutation",
+          "dirty-twin-unproven",
+          `${twin} applied but its discriminators still passed: the mutation is not discriminated`,
+        ),
+      );
+    }
+    // Otherwise the applied twin failed its discriminators: rejected for
+    // the stated reason, as required.
+  }
+  if (fs.readFileSync(abs, "utf8") !== original) {
+    fs.writeFileSync(abs, original);
+    errors.push(err("STP15-mutation", "missing-check", "mutated source was not restored to clean"));
   }
   return errors;
 }
@@ -224,6 +386,11 @@ export async function evaluateStp15({ repoRoot = REPO_ROOT } = {}) {
       errors.push(err("STP15-read-ref", "unknown-row", `unowned mandatory case ${id}`));
     }
   }
+  const before = errors.length;
   errors.push(...assertRustCases(runRustCases(repoRoot)));
+  if (errors.length === before) {
+    // Clean discriminators pass: now prove each dirty twin fails them.
+    errors.push(...assertDirtyTwinsRejected(repoRoot));
+  }
   return { errors };
 }

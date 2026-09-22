@@ -48,6 +48,7 @@ use oxc_ast::ast::{
     Argument, BindingPattern, Expression, ImportDeclarationSpecifier, ObjectPropertyKind, Program,
     PropertyKey, Statement, TSSignature, TSType,
 };
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -167,6 +168,8 @@ pub enum WriteRejection {
     GetterOnlyComputed,
     /// Assignment to a readonly prop or `readonly(...)` object.
     ReadonlyProp,
+    /// Assignment to an immutable lexical (`const`) binding.
+    ConstBinding,
     /// The name is not a known binding at all.
     UnknownBinding,
 }
@@ -182,12 +185,14 @@ pub struct TemplateWriteTarget {
     pub getter_only: Vec<String>,
     /// Names refused as readonly writes.
     pub readonly: Vec<String>,
+    /// Names refused as `const` reassignment writes.
+    pub immutable: Vec<String>,
 }
 
 impl TemplateWriteTarget {
     /// Resolve a template assignment target: `Ok` for writable bindings,
-    /// `Err` for getter-only computed values, readonly props/objects, and
-    /// unknown names.
+    /// `Err` for getter-only computed values, readonly props/objects,
+    /// immutable `const` bindings, and unknown names.
     pub fn write_target(&self, name: &str) -> Result<&WritableBinding, WriteRejection> {
         if let Some(binding) = self.writable.iter().find(|binding| binding.name == name) {
             return Ok(binding);
@@ -197,6 +202,9 @@ impl TemplateWriteTarget {
         }
         if self.readonly.iter().any(|known| known == name) {
             return Err(WriteRejection::ReadonlyProp);
+        }
+        if self.immutable.iter().any(|known| known == name) {
+            return Err(WriteRejection::ConstBinding);
         }
         Err(WriteRejection::UnknownBinding)
     }
@@ -220,6 +228,72 @@ pub struct UsedBinding {
     pub name: String,
     /// Regions with an authored reference.
     pub regions: UsageRegions,
+}
+
+/// Lexical identifier mentions in template markup: ASCII word scan over
+/// authored bytes. Words that cannot start an identifier (leading digit)
+/// are dropped; everything else is a candidate the accounting core matches
+/// against declared names.
+fn template_mentions(template: &str) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
+    for word in template.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+        if word.is_empty() || word.as_bytes()[0].is_ascii_digit() {
+            continue;
+        }
+        names.insert(word.to_string());
+    }
+    names
+}
+
+/// Identifier references (never declarations) in one setup script.
+struct ScriptReferenceScan {
+    names: FxHashSet<String>,
+}
+
+impl<'a> Visit<'a> for ScriptReferenceScan {
+    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+        self.names.insert(it.name.to_string());
+        walk::walk_identifier_reference(self, it);
+    }
+}
+
+/// Script identifier references by name, or empty when the script does not
+/// parse (no synthetic references are invented for broken input).
+fn script_reference_names(script: &str) -> FxHashSet<String> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, script, SourceType::ts().with_module(true)).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return FxHashSet::default();
+    }
+    let mut scan = ScriptReferenceScan {
+        names: FxHashSet::default(),
+    };
+    scan.visit_program(&parsed.program);
+    scan.names
+}
+
+/// Style `v-bind()` names: the only way authored style references script
+/// bindings. Handles `v-bind(name)` and quoted `v-bind('name')` forms.
+fn style_vbind_names(style: &str) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
+    let mut rest = style;
+    while let Some(open) = rest.find("v-bind(") {
+        rest = &rest[open + "v-bind(".len()..];
+        let Some(close) = rest.find(')') else {
+            break;
+        };
+        let candidate = rest[..close].trim().trim_matches(|c| c == '\'' || c == '"');
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            && !candidate.as_bytes()[0].is_ascii_digit()
+        {
+            names.insert(candidate.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    names
 }
 
 /// Actual usage accounting over one declared name set.
@@ -273,6 +347,31 @@ impl BindingUsageSet {
         self.used.iter().any(|binding| binding.name == name)
     }
 
+    /// Account usage from authored region text instead of caller-supplied
+    /// slices: template markup mentions, script identifier references, and
+    /// style `v-bind()` names. Template and style collection is a lexical
+    /// mention scan over authored bytes (strings and comments may
+    /// over-approximate; undeclared words are still ignored, never
+    /// invented into the population). Script collection walks the parsed
+    /// AST for identifier references, so declarations never count as uses.
+    /// An unparseable script contributes no script references rather than
+    /// synthetic ones.
+    #[must_use]
+    pub fn from_region_text(
+        declared: &[String],
+        template: &str,
+        script: &str,
+        style: &str,
+    ) -> Self {
+        let template_owned = template_mentions(template);
+        let script_owned = script_reference_names(script);
+        let style_owned = style_vbind_names(style);
+        let template_refs: Vec<&str> = template_owned.iter().map(String::as_str).collect();
+        let script_refs: Vec<&str> = script_owned.iter().map(String::as_str).collect();
+        let style_refs: Vec<&str> = style_owned.iter().map(String::as_str).collect();
+        Self::from_authored_references(declared, &template_refs, &script_refs, &style_refs)
+    }
+
     /// Declared names with no authored reference in any region, in
     /// declared order.
     #[must_use]
@@ -300,8 +399,12 @@ pub struct BindingViewsProjection {
 }
 
 /// Vue reactivity factories recognised at setup scope by binding (not by
-/// bare spelling). `defineProps` and `withDefaults` are macros under the
-/// same rule.
+/// bare spelling). The membership is Vue's public Composition API surface
+/// (`ref`, `computed`, `reactive`, `readonly`, `toRefs`) plus the
+/// `<script setup>` compile-time macros (`defineProps`, `defineModel`,
+/// `withDefaults`); each entry is checked against an actual `from 'vue'`
+/// import or a free reference by [`factory_export`], so the table is
+/// verified against the parsed imports rather than trusted on spelling.
 const FACTORY_EXPORTS: [&str; 8] = [
     "ref",
     "computed",
@@ -413,9 +516,15 @@ fn setter_domain(content: &str, object: &oxc_ast::ast::ObjectExpression<'_>) -> 
     let first = params?.items.first()?;
     let annotation = first.type_annotation.as_ref()?;
     let span = annotation.type_annotation.span();
-    content
-        .get(span.start as usize..span.end as usize)
-        .map(str::to_string)
+    let (start, end) = (span.start as usize, span.end as usize);
+    // The span comes from this same parse of `content`, so an
+    // out-of-bounds slice is an internal invariant break, never a
+    // plausible empty domain: assert instead of clamping to `""`.
+    assert!(
+        start <= end && end <= content.len(),
+        "setter annotation span {start}..{end} escapes the parsed setup block"
+    );
+    Some(content[start..end].to_string())
 }
 
 /// Names bound by a binding pattern, with each name's span relative to
@@ -456,16 +565,21 @@ fn pattern_names(pattern: &BindingPattern<'_>, base: u32) -> Vec<(String, Source
 /// Push one read row plus its write shape. `computed_domain` carries the
 /// declared setter domain for writable computed values; other kinds ignore
 /// it. Writable computed rows always record the declared domain (empty
-/// when unannotated), never the read type. A name that already has a read
-/// row is left untouched: the earliest row wins, so a later partially
-/// bound destructuring pattern cannot duplicate or override an earlier
-/// readonly classification with a conflicting writable row.
+/// when unannotated), never the read type. `mutable` is false for `const`
+/// declarators: an immutable lexical plain (object literals holding nested
+/// refs, reactive destructuring copies, other non-call initializers)
+/// keeps its direct read row but is refused as a write target, so template
+/// reassignment of a `const` name cannot typecheck. A name that already
+/// has a read row is left untouched: the earliest row wins, so a later
+/// partially bound destructuring pattern cannot duplicate or override an
+/// earlier readonly classification with a conflicting writable row.
 fn push_binding(
     projection: &mut BindingViewsProjection,
     name: String,
     kind: BindingKind,
     range: SourceRange,
     computed_domain: Option<String>,
+    mutable: bool,
 ) {
     if projection.read.lookup(&name).is_some() {
         return;
@@ -503,10 +617,13 @@ fn push_binding(
             domain: WriteDomain::ModelValue,
         }),
         BindingKind::Readonly => projection.write.readonly.push(name),
-        BindingKind::Plain => projection.write.writable.push(WritableBinding {
+        BindingKind::Plain if mutable => projection.write.writable.push(WritableBinding {
             name,
             domain: WriteDomain::PlainAssign,
         }),
+        // Immutable lexical plains keep the direct read row above but are
+        // refused here: reassigning a `const` name must not typecheck.
+        BindingKind::Plain => projection.write.immutable.push(name),
     }
 }
 
@@ -554,19 +671,30 @@ fn resolve_props_call<'a>(
     }
 }
 
+/// Shared context for [`classify_declarator`]: the parsed block text,
+/// its carrier base offset, the setup value bindings, the runtime `'vue'`
+/// imports, and whether the declarator is mutable (`let`/`var`, not `const`).
+struct DeclaratorCtx<'a> {
+    content: &'a str,
+    base: u32,
+    values: &'a FxHashSet<String>,
+    vue_imports: &'a FxHashMap<&'a str, &'a str>,
+    mutable: bool,
+}
+
 /// Classify one setup declarator initializer into read/write rows.
+/// `ctx.mutable` is false for `const` declarators (only the
+/// [`BindingKind::Plain`] write shape consults it; refs, computed values,
+/// reactive objects, models and readonly rows carry their own mutability).
 fn classify_declarator(
     projection: &mut BindingViewsProjection,
-    content: &str,
-    base: u32,
+    ctx: &DeclaratorCtx<'_>,
     id: &BindingPattern<'_>,
     init: Option<&Expression<'_>>,
-    values: &FxHashSet<String>,
-    vue_imports: &FxHashMap<&str, &str>,
 ) {
     // Names already carrying a read row keep it: a partially bound
     // destructuring pattern only adds its unbound members.
-    let names: Vec<(String, SourceRange)> = pattern_names(id, base)
+    let names: Vec<(String, SourceRange)> = pattern_names(id, ctx.base)
         .into_iter()
         .filter(|(name, _)| projection.read.lookup(name).is_none())
         .collect();
@@ -577,27 +705,49 @@ fn classify_declarator(
         // Object literals (possibly holding nested refs), arrays and every
         // other initializer read directly: only top-level `ref` unwraps.
         for (name, range) in names {
-            push_binding(projection, name, BindingKind::Plain, range, None);
+            push_binding(
+                projection,
+                name,
+                BindingKind::Plain,
+                range,
+                None,
+                ctx.mutable,
+            );
         }
         return;
     };
     // `withDefaults(defineProps<...>(), ...)` binds props, not a plain.
-    if let Some(props_call) = resolve_props_call(call, values, vue_imports) {
-        collect_props_call(projection, base, props_call, &names, id);
+    if let Some(props_call) = resolve_props_call(call, ctx.values, ctx.vue_imports) {
+        collect_props_call(projection, ctx.base, props_call, &names, id);
         return;
     }
-    match factory_export(&call.callee, values, vue_imports) {
-        Some("ref") | Some("toRefs") => {
-            // Top-level `ref` and destructured `toRefs(state)` members stay
-            // refs: the template unwraps each top-level member.
+    match factory_export(&call.callee, ctx.values, ctx.vue_imports) {
+        Some("ref") => {
+            // Top-level `ref` stays a ref: the template unwraps the member.
             for (name, range) in names {
-                push_binding(projection, name, BindingKind::Ref, range, None);
+                push_binding(projection, name, BindingKind::Ref, range, None, ctx.mutable);
+            }
+        }
+        Some("toRefs") => {
+            // `toRefs(state)` returns an object whose members are refs: only
+            // destructured members (`const { a } = toRefs(state)`) are
+            // template-unwrapped refs. The whole returned object
+            // (`const refs = toRefs(state)`) reads directly like any other
+            // object holding nested refs.
+            let whole = matches!(id, BindingPattern::BindingIdentifier(_));
+            for (name, range) in names {
+                let kind = if whole {
+                    BindingKind::Plain
+                } else {
+                    BindingKind::Ref
+                };
+                push_binding(projection, name, kind, range, None, ctx.mutable);
             }
         }
         Some("computed") => match first_argument(call) {
             Some(Expression::ObjectExpression(object)) => {
                 let has_set = object_property(object, "set").is_some();
-                let domain = setter_domain(content, object);
+                let domain = setter_domain(ctx.content, object);
                 for (name, range) in names {
                     push_binding(
                         projection,
@@ -605,6 +755,7 @@ fn classify_declarator(
                         BindingKind::Computed { setter: has_set },
                         range,
                         domain.clone(),
+                        ctx.mutable,
                     );
                 }
             }
@@ -619,6 +770,7 @@ fn classify_declarator(
                         BindingKind::Computed { setter: false },
                         range,
                         None,
+                        ctx.mutable,
                     );
                 }
             }
@@ -631,22 +783,43 @@ fn classify_declarator(
                     BindingPattern::BindingIdentifier(_) => BindingKind::Reactive,
                     _ => BindingKind::Plain,
                 };
-                push_binding(projection, name, kind, range, None);
+                push_binding(projection, name, kind, range, None, ctx.mutable);
             }
         }
         Some("readonly") => {
             for (name, range) in names {
-                push_binding(projection, name, BindingKind::Readonly, range, None);
+                push_binding(
+                    projection,
+                    name,
+                    BindingKind::Readonly,
+                    range,
+                    None,
+                    ctx.mutable,
+                );
             }
         }
         Some("defineModel") => {
             for (name, range) in names {
-                push_binding(projection, name, BindingKind::Model, range, None);
+                push_binding(
+                    projection,
+                    name,
+                    BindingKind::Model,
+                    range,
+                    None,
+                    ctx.mutable,
+                );
             }
         }
         _ => {
             for (name, range) in names {
-                push_binding(projection, name, BindingKind::Plain, range, None);
+                push_binding(
+                    projection,
+                    name,
+                    BindingKind::Plain,
+                    range,
+                    None,
+                    ctx.mutable,
+                );
             }
         }
     }
@@ -808,6 +981,7 @@ fn collect_props_call(
                 BindingKind::Readonly,
                 *range,
                 None,
+                true,
             );
         }
         return;
@@ -819,6 +993,7 @@ fn collect_props_call(
             BindingKind::Readonly,
             bound[0].1,
             None,
+            true,
         );
         return;
     }
@@ -831,6 +1006,7 @@ fn collect_props_call(
                 BindingKind::Readonly,
                 *range,
                 None,
+                true,
             );
         }
     }
@@ -845,7 +1021,7 @@ fn collect_standalone_props_call(
     call: &oxc_ast::ast::CallExpression<'_>,
 ) {
     for (name, range) in extract_props(base, call) {
-        push_binding(projection, name, BindingKind::Readonly, range, None);
+        push_binding(projection, name, BindingKind::Readonly, range, None, true);
     }
 }
 
@@ -924,6 +1100,7 @@ fn project_options_members(
                     BindingKind::Readonly,
                     range,
                     None,
+                    true,
                 );
             }
             OptionsMemberKind::Computed { setter } => {
@@ -933,6 +1110,7 @@ fn project_options_members(
                     BindingKind::Computed { setter },
                     range,
                     None,
+                    true,
                 );
             }
             // Options methods are callable reads, never writable
@@ -962,19 +1140,23 @@ fn classify_setup_body(
     for statement in &program.body {
         match statement {
             Statement::VariableDeclaration(declaration) => {
+                // Only `let`/`var` declarators bind mutable plains; `const`
+                // plains keep their read row but refuse writes.
+                let ctx = DeclaratorCtx {
+                    content,
+                    base,
+                    values,
+                    vue_imports,
+                    mutable: !matches!(
+                        declaration.kind,
+                        oxc_ast::ast::VariableDeclarationKind::Const
+                    ),
+                };
                 for declarator in &declaration.declarations {
                     if declarator_bound(projection, &declarator.id) {
                         continue;
                     }
-                    classify_declarator(
-                        projection,
-                        content,
-                        base,
-                        &declarator.id,
-                        declarator.init.as_ref(),
-                        values,
-                        vue_imports,
-                    );
+                    classify_declarator(projection, &ctx, &declarator.id, declarator.init.as_ref());
                 }
             }
             Statement::FunctionDeclaration(function) => {
