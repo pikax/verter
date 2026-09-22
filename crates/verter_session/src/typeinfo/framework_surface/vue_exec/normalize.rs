@@ -167,7 +167,6 @@ pub(crate) fn props_from_typeinfo_surface(
                 [candidate] if !member_value_is_merge_capable => candidate.payload.clone(),
                 [candidate] => candidate.payload.clone().filter(|locator| {
                     authored_candidate_matches_member_value(
-                        ctx,
                         &dispatch,
                         macro_surface.owner_canonical.as_ref(),
                         locator,
@@ -894,7 +893,6 @@ pub(crate) fn emits_from_typeinfo_surface(
                     return false;
                 };
                 authored_candidate_matches_call_signature_payload(
-                    ctx,
                     &dispatch,
                     macro_surface.owner_canonical.as_ref(),
                     locator,
@@ -1083,7 +1081,6 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
                     return false;
                 };
                 authored_candidate_matches_member_value(
-                    ctx,
                     &dispatch,
                     macro_surface.owner_canonical.as_ref(),
                     locator,
@@ -1251,7 +1248,6 @@ fn inherited_emit_payload_source(
 /// after the event-name parameter; every tuple fact and element type must equal
 /// the realized resolver signature. No display text participates.
 fn authored_candidate_matches_call_signature_payload(
-    ctx: &dyn crate::resolver_core::ResolverContext,
     dispatch: &ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     locator: &verter_type_expr::locators::MacroPayloadLocator,
@@ -1279,8 +1275,8 @@ fn authored_candidate_matches_call_signature_payload(
             element.label.as_deref() == param.name.as_deref()
                 && element.optional == param.optional
                 && element.rest == param.rest
-                && crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
-                    ctx,
+                && crate::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
+                    dispatch,
                     element.value,
                     param.ty,
                 ) == Some(true)
@@ -1294,7 +1290,7 @@ fn authored_candidate_matches_call_signature_payload(
 /// structural transit — one member annotation, never a body expansion — and
 /// must fold to the SAME interned raised shape as the surface member's
 /// VALUE node
-/// ([`crate::project_semantic_dispatch::raise::raised_shape_eq_nodes`]), OR
+/// ([`crate::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch`]), OR
 /// — for a merged COMPOSITE member value — to the same raised shape as
 /// EVERY contributing arm (identical-shape same-name contributors are all
 /// denoted exactly by the one authored annotation, e.g. an own-body member
@@ -1309,7 +1305,6 @@ fn authored_candidate_matches_call_signature_payload(
 /// caller publishes the graph-native merged-member route instead.
 /// Node-domain only; no `TypeExpr` is materialized here.
 fn authored_candidate_matches_member_value(
-    ctx: &dyn crate::resolver_core::ResolverContext,
     dispatch: &ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     locator: &verter_type_expr::locators::MacroPayloadLocator,
@@ -1325,8 +1320,8 @@ fn authored_candidate_matches_member_value(
     else {
         return false;
     };
-    if crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
-        ctx,
+    if crate::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
+        dispatch,
         raised.node(),
         member_value,
     ) == Some(true)
@@ -1343,8 +1338,8 @@ fn authored_candidate_matches_member_value(
             let arms = composite.composite_members().expect("composite arm");
             !arms.is_empty()
                 && arms.iter().all(|&arm| {
-                    crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
-                        ctx,
+                    crate::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
+                        dispatch,
                         raised.node(),
                         arm,
                     ) == Some(true)

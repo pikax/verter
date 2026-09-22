@@ -1973,7 +1973,7 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
 
         let adapter = super::SessionDispatchHost::new(&host);
         assert_eq!(
-            super::DispatchHost::resolve_builtin_utility(&adapter, carrier, local),
+            adapter.resolve_builtin_utility(carrier, local),
             gate,
             "{local:?} imported in {consumer:?} must not classify as the builtin utility"
         );
@@ -2011,7 +2011,7 @@ fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
     let carrier = bare_ref_carrier(&dispatch, "Awaited", scope, &[PrimitiveKind::String]);
     let adapter = super::SessionDispatchHost::new(&host);
     assert_eq!(
-        super::DispatchHost::resolve_builtin_utility(&adapter, carrier, "Awaited"),
+        adapter.resolve_builtin_utility(carrier, "Awaited"),
         super::BuiltinUtilityResolution::Builtin(Some(BuiltinUtility::Awaited)),
     );
 }

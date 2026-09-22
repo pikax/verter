@@ -85,9 +85,9 @@ pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_p
 /// Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
 /// Published(Expanded) }`, gate on NODE-DOMAIN facts
 /// (`materialized && expanded_surface`) plus the node-domain "changed" check
-/// (`!raised_shape_eq_node_type_expr(result, expr)`), and materialise the
-/// accepted result node ONCE at this sink. `None` on lower-miss, dispatch
-/// error/recursive, gate-reject, or raise-miss.
+/// (`!raised_shape_eq_node_type_expr_with_dispatch(result, expr)`), and
+/// materialise the accepted result node ONCE at this sink. `None` on
+/// lower-miss, dispatch error/recursive, gate-reject, or raise-miss.
 pub(crate) fn lower_and_project_to_expanded_node(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
