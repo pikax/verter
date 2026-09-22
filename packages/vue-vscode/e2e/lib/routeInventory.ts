@@ -240,16 +240,135 @@ export function resolveE2eFixtureSelection(options: {
   return { fixture, typeProvider };
 }
 
+/**
+ * Select an exact, ordered list of routes from a comma-separated list of
+ * `<fixture>@<provider>` labels. This is the selector a CI shard runs with: the
+ * shard planner emits the labels and the runner executes precisely those, so a
+ * route can never be scheduled twice or dropped between the two. Explicit
+ * labels reach the whole inventory, like `--fixture=<fixture>@<provider>`.
+ */
+export function selectE2eRoutesByLabels(labels: string): E2eRoute[] {
+  const parsed = labels
+    .split(",")
+    .map((label) => label.trim())
+    .filter((label) => label.length > 0);
+  if (parsed.length === 0) {
+    throw new Error("VS Code E2E route list must name at least one <fixture>@<provider> route");
+  }
+  const seen = new Set<string>();
+  for (const label of parsed) {
+    if (seen.has(label)) {
+      throw new Error(`VS Code E2E route list names ${label} twice`);
+    }
+    seen.add(label);
+  }
+  return parsed.map(parseE2eRouteLabel);
+}
+
+/**
+ * Relative per-route duration weights used ONLY to balance CI shards. A weight
+ * is roughly the route's wall-clock minutes inside one launched VS Code host;
+ * the parity workloads dominate, the topology fixtures sit in the middle, and
+ * the contract, projectless and acceptance routes are the cheapest. Every
+ * fixture in the inventory must appear here so a new fixture is weighted on
+ * purpose rather than defaulting to a guess. Accuracy affects balance only,
+ * never which routes run.
+ */
+export const E2E_FIXTURE_WEIGHTS: Readonly<Record<string, number>> = {
+  "svelte-parity": 4.5,
+  "vue-parity": 4,
+  monorepo: 2,
+  "tsconfig-extends": 2,
+  "tsconfig-references": 2,
+  "path-aliases": 2,
+  "composite-paths": 2,
+  "single-project": 1,
+  "barrel-exports": 1,
+  "vue-contract": 1,
+  "svelte-contract": 1,
+  "mixed-parity": 1,
+  "multi-root-parity": 1,
+  "ecosystem-parity": 1,
+  "no-config": 1,
+  "single-file": 1,
+  "editor-owned-project": 1,
+  "out-of-tree-monorepo": 1,
+};
+
+export function e2eRouteWeight(route: E2eRoute): number {
+  const weight = E2E_FIXTURE_WEIGHTS[route.fixture];
+  if (weight === undefined) {
+    throw new Error(
+      `VS Code E2E fixture ${JSON.stringify(route.fixture)} has no E2E duration weight; add it to E2E_FIXTURE_WEIGHTS`,
+    );
+  }
+  return weight;
+}
+
+/**
+ * How many CI runners the required matrix is spread across. Every shard pays
+ * checkout, dependency install, artifact download and VS Code acquisition once,
+ * then runs its routes back to back in one process; fewer, fuller shards cost
+ * far less runner time and queue depth than one runner per route.
+ */
+export const E2E_CI_SHARD_COUNT = 6;
+
+export interface E2eCiShard {
+  /** One-based shard ordinal; the shard label is `${shard}/${shardCount}`. */
+  readonly shard: number;
+  readonly routes: readonly E2eRoute[];
+}
+
+/**
+ * Partition the required matrix into `shardCount` duration-balanced shards.
+ *
+ * Longest-processing-time first: routes are taken heaviest first and each goes
+ * onto the currently lightest shard, ties broken by shard ordinal. The input
+ * order is the inventory order with a stable weight sort, so the partition is a
+ * pure function of the inventory and the weight table. Every required route
+ * lands in exactly one shard; deselected routes are never scheduled.
+ */
+export function buildE2eCiShards(shardCount: number = E2E_CI_SHARD_COUNT): E2eCiShard[] {
+  const required = buildRequiredE2eRouteInventory();
+  if (!Number.isInteger(shardCount) || shardCount < 1 || shardCount > required.length) {
+    throw new Error(
+      `VS Code E2E shard count must be an integer in 1..${required.length}, got ${shardCount}`,
+    );
+  }
+  const ordered = required
+    .map((route, index) => ({ route, index, weight: e2eRouteWeight(route) }))
+    .sort((a, b) => b.weight - a.weight || a.index - b.index);
+  const loads = new Array<number>(shardCount).fill(0);
+  const routes: E2eRoute[][] = Array.from({ length: shardCount }, () => []);
+  for (const { route, weight } of ordered) {
+    let lightest = 0;
+    for (let shard = 1; shard < shardCount; shard++) {
+      if (loads[shard] < loads[lightest]) lightest = shard;
+    }
+    loads[lightest] += weight;
+    routes[lightest].push(route);
+  }
+  return routes.map((shardRoutes, index) => ({ shard: index + 1, routes: shardRoutes }));
+}
+
+/**
+ * The GitHub Actions matrix: one entry per CI shard. `routes` is the exact
+ * comma-separated route list the runner receives through `E2E_ROUTES`, so the
+ * workflow never re-derives which routes a shard owns.
+ */
 export function buildGitHubActionsMatrix(): {
   readonly include: Array<{
-    readonly fixture: string;
-    readonly type_provider: E2eTypeProviderRoute;
+    readonly shard: string;
+    readonly shard_count: string;
+    readonly routes: string;
   }>;
 } {
+  const shards = buildE2eCiShards();
   return {
-    include: buildRequiredE2eRouteInventory().map(({ fixture, typeProvider }) => ({
-      fixture,
-      type_provider: typeProvider,
+    include: shards.map(({ shard, routes }) => ({
+      shard: String(shard),
+      shard_count: String(shards.length),
+      routes: routes.map(e2eRouteLabel).join(","),
     })),
   };
 }

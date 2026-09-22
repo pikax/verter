@@ -31,6 +31,7 @@ import {
   e2eRouteLabel,
   parseE2eRouteLabel,
   selectE2eRoutes,
+  selectE2eRoutesByLabels,
   type E2eRoute,
 } from "./lib/routeInventory";
 import { installFixtureDeps } from "./lib/fixtureDeps";
@@ -203,10 +204,21 @@ function requiredParityRun(
  */
 function selectRoutes(options: {
   readonly fixtureArg?: string;
+  readonly envRoutes?: string;
   readonly envFixture?: string;
   readonly envTypeProvider?: string;
 }): E2eRoute[] {
   if (options.fixtureArg?.includes("@")) return [parseE2eRouteLabel(options.fixtureArg)];
+  // A CI shard receives its exact route list; it is never combined with the
+  // fixture/provider selectors, which describe a different kind of selection.
+  if (options.envRoutes) {
+    if (options.fixtureArg || options.envFixture || options.envTypeProvider) {
+      throw new Error(
+        "E2E_ROUTES cannot be combined with --fixture, E2E_FIXTURE or E2E_TYPE_PROVIDER",
+      );
+    }
+    return selectE2eRoutesByLabels(options.envRoutes);
+  }
   return selectE2eRoutes({
     fixture: options.fixtureArg ?? options.envFixture,
     typeProvider: options.envTypeProvider,
@@ -396,10 +408,12 @@ async function main() {
   const fixtureArg = process.argv.find((a) => a.startsWith("--fixture="));
   const onlyArg = process.argv.find((a) => a.startsWith("--only="));
   const onlyPattern = onlyArg?.slice("--only=".length) || readE2eEnv("ONLY");
+  const envRoutes = readE2eEnv("ROUTES");
   const envFixture = readE2eEnv("FIXTURE");
   const envTypeProvider = readE2eEnv("TYPE_PROVIDER");
   const routesToRun = selectRoutes({
     fixtureArg: fixtureArg?.replace("--fixture=", ""),
+    envRoutes,
     envFixture,
     envTypeProvider,
   });

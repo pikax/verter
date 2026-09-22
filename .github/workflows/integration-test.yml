@@ -41,7 +41,9 @@ on:
     types: [created]
 
 concurrency:
-  group: integration-test-${{ github.ref }}
+  # A `/integration` comment fires with `github.ref` = the default branch, so
+  # keying on the ref alone made one PR's run cancel another's. Key on the PR.
+  group: integration-test-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -51,12 +53,14 @@ permissions:
   checks: write
 
 jobs:
-  # Check if workflow should run (for PR comment trigger)
+  # Check if workflow should run (for PR comment trigger). The comment-body and
+  # PR checks live in the job condition so an unrelated issue comment never
+  # occupies a runner; the step below still owns the permission check.
   check-trigger:
     name: Check Trigger
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.event_name == 'issue_comment'
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/integration')
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
       pr-number: ${{ steps.check.outputs.pr-number }}

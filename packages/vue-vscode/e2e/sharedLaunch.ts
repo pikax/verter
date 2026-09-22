@@ -183,7 +183,34 @@ export interface ResolveVscodeOptions {
   platform?: NodeJS.Platform;
   /** `fs.existsSync` override (defaults to the real one). */
   existsSync?: (p: string) => boolean;
+  /** Bounded retry policy for the download itself (see {@link VSCODE_ACQUISITION_RETRY}). */
+  retry?: Partial<VscodeAcquisitionRetry>;
 }
+
+export interface VscodeAcquisitionRetry {
+  /** Total download attempts, including the first. */
+  attempts: number;
+  /** Wait before the second attempt; each later wait doubles. */
+  delayMs: number;
+  /** Injectable wait (defaults to a real timer). */
+  sleep: (ms: number) => Promise<void>;
+  /** Injectable attempt reporter (defaults to stderr). */
+  warn: (message: string) => void;
+}
+
+/**
+ * Acquiring the VS Code host is a network download, and a transient timeout there
+ * is infrastructure, not a product regression. The download is retried a bounded
+ * number of times so a runner that lost one connection does not fail every route
+ * it owns; nothing downstream of acquisition (launch, suites, assertions) is
+ * retried, so a real failure stays visible.
+ */
+export const VSCODE_ACQUISITION_RETRY: Readonly<VscodeAcquisitionRetry> = {
+  attempts: 3,
+  delayMs: 5_000,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  warn: (message) => console.warn(message),
+};
 
 /**
  * Resolve the VS Code host executable for extension tests. The downloader is lazily
@@ -208,8 +235,26 @@ export async function resolveVscodeExecutablePath(
   const download =
     opts.download ??
     (async (v: string) => (await import("@vscode/test-electron")).downloadAndUnzipVSCode(v));
+  const retry: VscodeAcquisitionRetry = { ...VSCODE_ACQUISITION_RETRY, ...opts.retry };
+  const attempts = Math.max(1, Math.floor(retry.attempts));
 
-  return download(version);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await download(version);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      const delay = retry.delayMs * 2 ** (attempt - 1);
+      retry.warn(
+        `VS Code ${version} acquisition attempt ${attempt}/${attempts} failed (${String(
+          error instanceof Error ? error.message : error,
+        )}); retrying in ${delay}ms`,
+      );
+      await retry.sleep(delay);
+    }
+  }
+  throw lastError;
 }
 
 export interface SynchronousCommandResult {
