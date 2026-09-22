@@ -1,10 +1,7 @@
 {
   "schema": "ProbeManifest",
   "version": 1,
-  "engines": [
-    "ts-js",
-    "ts-native"
-  ],
+  "engines": ["ts-js", "ts-native"],
   "inventory": "tests/sfc-projection/STP1/products/current-feature-inventory.json",
   "engineMatrix": "tests/sfc-projection/STP1/products/engine-matrix.json",
   "performanceMethodology": "tests/sfc-projection/STP1/products/performance-methodology.json",
@@ -56,6 +53,10 @@
     {
       "id": "STP12",
       "manifest": "tests/sfc-projection/STP12/manifest.json"
+    },
+    {
+      "id": "STP13",
+      "manifest": "tests/sfc-projection/STP13/manifest.json"
     },
     {
       "id": "STP14",
