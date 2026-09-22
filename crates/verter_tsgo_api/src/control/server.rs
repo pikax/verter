@@ -113,6 +113,10 @@ pub struct ControlServer {
     /// (the same bound the carrier-sync barrier uses); a test sets it to a SHORT value to observe
     /// the internal timeout fire against a wedged writer.
     carrier_op_bound: Duration,
+    /// The bound on each carrier sync barrier. Defaults to
+    /// [`CARRIER_SYNC_BARRIER_TIMEOUT`]; a test sets a SHORT value to reach the
+    /// unanswered-barrier outcome without waiting the production bound out.
+    sync_barrier_bound: Duration,
 }
 
 impl ControlServer {
@@ -139,6 +143,7 @@ impl ControlServer {
             opened_carriers: HashSet::new(),
             retract_carriers_on_end: true,
             carrier_op_bound: CARRIER_SYNC_BARRIER_TIMEOUT,
+            sync_barrier_bound: CARRIER_SYNC_BARRIER_TIMEOUT,
         }
     }
 
@@ -331,6 +336,10 @@ impl ControlServer {
                 Some(self.handle_carrier_did_change_synced(&id, params).await),
                 false,
             ),
+            messages::METHOD_CARRIER_SYNC_BATCH => (
+                Some(self.handle_carrier_sync_batch(&id, params).await),
+                false,
+            ),
             messages::METHOD_CARRIER_DID_CLOSE => (
                 Some(self.handle_carrier_did_close(&id, params).await),
                 false,
@@ -375,6 +384,7 @@ impl ControlServer {
                     editor_session_generation: self.editor_session_generation,
                     capabilities: ControlCapabilities {
                         carrier_injection: true,
+                        carrier_batch: true,
                         api_session: true,
                         wait_initialized: true,
                         feature_requests: true,
@@ -483,12 +493,104 @@ impl ControlServer {
         match self
             .relay
             .injection_channel()
-            .sync_overlay(&params.uri)
+            .sync_overlay_with_timeout(&params.uri, self.sync_barrier_bound)
             .await
         {
             Ok(()) => ok_frame(id, &ControlAck { ok: true }),
-            Err(e) => op_error_frame(id, "carrier didOpenSynced", &e),
+            Err(e) => sent_unconfirmed_frame(id, "carrier didOpenSynced", &e),
         }
+    }
+
+    /// Send every overlay write of a batch in order, then await ONE sync barrier.
+    ///
+    /// Each write keeps the single-op rules: the send is BOUNDED, and an `Open` is
+    /// tracked as retract-eligible the moment it MAY have reached the engine — before
+    /// the barrier — so a barrier failure or an abnormal session end cannot strand it.
+    /// A write whose send failed is reported as
+    /// [`messages::CarrierBatchFailureKind::SendFailed`] and takes no part in the barrier;
+    /// when the barrier itself fails, every write that WAS sent is reported as
+    /// [`messages::CarrierBatchFailureKind::SentUnconfirmed`] — it is on the wire in order,
+    /// so the client keeps the overlay rather than retracting it.
+    async fn handle_carrier_sync_batch(
+        &mut self,
+        id: &serde_json::Value,
+        params: serde_json::Value,
+    ) -> Vec<u8> {
+        let params: messages::CarrierSyncBatchParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return err_frame(id, ERROR_MALFORMED_PAYLOAD, &format!("carrier batch: {e}"))
+            }
+        };
+        let mut failures = Vec::new();
+        let mut sent: Vec<(usize, String)> = Vec::new();
+        // ONE budget for the whole batch: every send is awaited on the serial serve
+        // loop, so a per-op bound would let a wedged writer hold the loop for
+        // `ops × bound`. Once the budget is spent the remaining ops fail at once.
+        let deadline = tokio::time::Instant::now() + self.carrier_op_bound;
+        for (index, op) in params.ops.iter().enumerate() {
+            let channel = self.relay.injection_channel();
+            let send = async {
+                match op {
+                    messages::CarrierBatchOp::Open {
+                        uri,
+                        language_id,
+                        version,
+                        text,
+                    } => channel.did_open(uri, language_id, *version, text).await,
+                    messages::CarrierBatchOp::Change { uri, version, text } => {
+                        channel.did_change(uri, *version, text).await
+                    }
+                }
+            };
+            let is_open = matches!(op, messages::CarrierBatchOp::Open { .. });
+            match tokio::time::timeout_at(deadline, send).await {
+                Ok(Ok(())) => {
+                    if is_open {
+                        self.opened_carriers.insert(op.uri().to_string());
+                    }
+                    sent.push((index, op.uri().to_string()));
+                }
+                Ok(Err(e)) => failures.push(messages::CarrierBatchFailure {
+                    index,
+                    uri: op.uri().to_string(),
+                    message: e.to_string(),
+                    kind: messages::CarrierBatchFailureKind::SendFailed,
+                }),
+                Err(_elapsed) => {
+                    // The write MAY have reached the engine: possibly live.
+                    if is_open {
+                        self.opened_carriers.insert(op.uri().to_string());
+                    }
+                    failures.push(messages::CarrierBatchFailure {
+                        index,
+                        uri: op.uri().to_string(),
+                        message: carrier_send_timeout_error(self.carrier_op_bound).to_string(),
+                        kind: messages::CarrierBatchFailureKind::SendFailed,
+                    });
+                }
+            }
+        }
+        if let Some((_, last)) = sent.last() {
+            if let Err(e) = self
+                .relay
+                .injection_channel()
+                .sync_overlay_with_timeout(last, self.sync_barrier_bound)
+                .await
+            {
+                let message = e.to_string();
+                failures.extend(
+                    sent.iter()
+                        .map(|(index, uri)| messages::CarrierBatchFailure {
+                            index: *index,
+                            uri: uri.clone(),
+                            message: message.clone(),
+                            kind: messages::CarrierBatchFailureKind::SentUnconfirmed,
+                        }),
+                );
+            }
+        }
+        ok_frame(id, &messages::CarrierSyncBatchResult { failures })
     }
 
     async fn handle_carrier_did_change_synced(
@@ -523,9 +625,12 @@ impl ControlServer {
                 )
             }
         }
-        match channel.sync_overlay(&params.uri).await {
+        match channel
+            .sync_overlay_with_timeout(&params.uri, self.sync_barrier_bound)
+            .await
+        {
             Ok(()) => ok_frame(id, &ControlAck { ok: true }),
-            Err(e) => op_error_frame(id, "carrier didChangeSynced", &e),
+            Err(e) => sent_unconfirmed_frame(id, "carrier didChangeSynced", &e),
         }
     }
 
@@ -733,6 +838,16 @@ fn op_error_frame(id: &serde_json::Value, op: &str, error: &TsgoApiError) -> Vec
         id,
         ERROR_CONTROL_OP_FAILED,
         &format!("{op} failed: {error:?}"),
+    )
+}
+
+/// Encode a carrier write that WAS sent but whose sync barrier failed: distinct from
+/// [`op_error_frame`] so the client keeps the overlay instead of retracting it.
+fn sent_unconfirmed_frame(id: &serde_json::Value, op: &str, error: &TsgoApiError) -> Vec<u8> {
+    err_frame(
+        id,
+        messages::ERROR_CARRIER_SENT_UNCONFIRMED,
+        &format!("{op} sent but unconfirmed: {error:?}"),
     )
 }
 

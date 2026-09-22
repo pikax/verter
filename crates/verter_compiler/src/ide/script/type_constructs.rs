@@ -120,7 +120,10 @@ declare module "@verter/types" {
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
-  export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
+  export declare function componentConstructor<T extends new (...args: any[]) => any>(comp: T): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(comp: (props: P, ...args: A) => R): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
+export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
   export declare function extractArgumentsFromRenderSlot<
     TSlots extends Record<string, any>,
     N extends keyof TSlots & string,
@@ -181,6 +184,9 @@ export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer 
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
+export declare function componentConstructor<T extends new (...args: any[]) => any>(comp: T): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(comp: (props: P, ...args: A) => R): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
 export declare function instantiateComponent<T, P>(comp: T, props: P): T extends { new (...args: any[]): infer I } ? I : T extends (...args: any[]) => infer R ? R : T;
 export declare function extractArgumentsFromRenderSlot<
   TSlots extends Record<string, any>,
@@ -274,6 +280,104 @@ pub(super) fn collect_builtin_components(
     result
 }
 
+/// The setup bindings whose WHOLE initializer is a call to Vue's runtime
+/// `defineAsyncComponent`.
+///
+/// Vue types that call as returning whatever the loader resolves to, so a
+/// loader resolving to a raw options object yields a binding with no construct
+/// or call signature: valid at runtime, rejected as a JSX tag. The template
+/// reads these bindings through the `asyncComponent` helper instead.
+///
+/// Proof is structural: the callee must be an identifier bound by a runtime
+/// (non-type-only) named `vue` import of `defineAsyncComponent` under any local
+/// alias, or that member read off a runtime `vue` namespace import. A same-name
+/// local function, a non-Vue import, or a type-only import proves nothing.
+pub(super) fn proven_vue_async_component_bindings<'a>(
+    body: &[Statement<'a>],
+    items: &[crate::utils::oxc::vue::ScriptItem<'_>],
+) -> rustc_hash::FxHashSet<&'a str> {
+    use crate::utils::oxc::vue::{ImportSpecifierKind, ScriptItem};
+    use oxc_ast::ast::Expression;
+
+    const VUE_ASYNC_COMPONENT_EXPORT: &str = "defineAsyncComponent";
+
+    let mut callees: Vec<&str> = Vec::new();
+    let mut namespaces: Vec<&str> = Vec::new();
+    for item in items {
+        let ScriptItem::Import(import) = item else {
+            continue;
+        };
+        if import.is_type_only || import.source != "vue" {
+            continue;
+        }
+        for binding in import
+            .bindings
+            .iter()
+            .filter(|binding| !binding.is_type_only)
+        {
+            match binding.import_kind {
+                Some(ImportSpecifierKind::Named)
+                    if binding.imported == Some(VUE_ASYNC_COMPONENT_EXPORT) =>
+                {
+                    callees.push(binding.name)
+                }
+                Some(ImportSpecifierKind::Namespace) => namespaces.push(binding.name),
+                _ => {}
+            }
+        }
+    }
+
+    let mut proven = rustc_hash::FxHashSet::default();
+    if callees.is_empty() && namespaces.is_empty() {
+        return proven;
+    }
+    for stmt in body {
+        let Statement::VariableDeclaration(decl) = stmt else {
+            continue;
+        };
+        for declarator in &decl.declarations {
+            let (BindingPattern::BindingIdentifier(id), Some(Expression::CallExpression(call))) =
+                (&declarator.id, &declarator.init)
+            else {
+                continue;
+            };
+            let is_vue_call = match &call.callee {
+                Expression::Identifier(callee) => callees.contains(&callee.name.as_str()),
+                Expression::StaticMemberExpression(member) => {
+                    member.property.name == VUE_ASYNC_COMPONENT_EXPORT
+                        && matches!(
+                            &member.object,
+                            Expression::Identifier(object)
+                                if namespaces.contains(&object.name.as_str())
+                        )
+                }
+                _ => false,
+            };
+            if is_vue_call {
+                proven.insert(id.name.as_str());
+            }
+        }
+    }
+    proven
+}
+
+/// The built-in components the generated `vue` import still has to bind.
+///
+/// Every authored import is hoisted to module scope, beside the generated
+/// one. A built-in whose name an authored import already binds there must not
+/// be imported a second time: the duplicate module-scope binding is a
+/// redeclaration error reported against valid source.
+pub(super) fn unbound_builtin_components<'b>(
+    builtin_components: &[&'b str],
+    hoisted_import_names: &rustc_hash::FxHashSet<&str>,
+) -> Vec<&'b str> {
+    builtin_components
+        .iter()
+        .copied()
+        .filter(|name| !hoisted_import_names.contains(name))
+        .collect()
+}
+
 /// Emit helper imports hoisted before the wrapper function.
 pub(super) fn emit_helper_imports(
     out: &mut CodeGenOutput<'_>,
@@ -290,7 +394,31 @@ pub(super) fn emit_helper_imports(
         options,
         builtin_components,
         template_ast,
-        false,
+        HelperImportNeeds::default(),
+    );
+}
+
+/// [`emit_helper_imports`] for a setup script that reads at least one proven
+/// `defineAsyncComponent` binding through the `asyncComponent` helper.
+pub(super) fn emit_helper_imports_with_async_component(
+    out: &mut CodeGenOutput<'_>,
+    pos: u32,
+    carrier_anchor: Option<u32>,
+    options: &IdeScriptOptions<'_>,
+    builtin_components: &[&str],
+    template_ast: Option<&crate::ast::types::TemplateAst>,
+) {
+    emit_helper_imports_inner(
+        out,
+        pos,
+        carrier_anchor,
+        options,
+        builtin_components,
+        template_ast,
+        HelperImportNeeds {
+            async_component: true,
+            ..HelperImportNeeds::default()
+        },
     );
 }
 
@@ -309,8 +437,20 @@ pub(super) fn emit_helper_imports_with_define_component(
         options,
         builtin_components,
         template_ast,
-        true,
+        HelperImportNeeds {
+            define_component: true,
+            ..HelperImportNeeds::default()
+        },
     );
+}
+
+/// The optional helper imports a particular script shape asks for.
+#[derive(Clone, Copy, Default)]
+struct HelperImportNeeds {
+    /// `defineComponent`, for an Options-API default export that is wrapped.
+    define_component: bool,
+    /// `asyncComponent`, for a proven `defineAsyncComponent` binding.
+    async_component: bool,
 }
 
 fn emit_helper_imports_inner(
@@ -320,7 +460,7 @@ fn emit_helper_imports_inner(
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_ast: Option<&crate::ast::types::TemplateAst>,
-    needs_define_component: bool,
+    needs: HelperImportNeeds,
 ) {
     use std::fmt::Write;
 
@@ -355,15 +495,27 @@ fn emit_helper_imports_inner(
     // top-level `vue` import that would perturb the providers' import fixer.
     writeln!(
         imports,
-        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives, strictRenderSlot as {P}strictRenderSlot, checkRequiredSlots as {P}checkRequiredSlots, globalComponentsNav as {P}globalComponentsNav }} from \"{}\";",
+        "import {{ shallowUnwrapRef as {P}shallowUnwrapRef, enhanceElementWithProps as {P}enhanceElementWithProps, extractRenderComponent as {P}extractRenderComponent, instantiateComponent as {P}instantiateComponent, componentConstructor as {P}componentConstructor, extractArgumentsFromRenderSlot as {P}extractArgumentsFromRenderSlot, runCustomDirective as {P}runCustomDirective, retrieveSetupDirectives as {P}retrieveSetupDirectives, strictRenderSlot as {P}strictRenderSlot, checkRequiredSlots as {P}checkRequiredSlots, globalComponentsNav as {P}globalComponentsNav }} from \"{}\";",
         options.types_module_name,
         P = PREFIX,
     )
     .expect("write to String is infallible");
 
+    // Imported only by the files that use it, so every other file's generated
+    // preamble is unaffected.
+    if needs.async_component {
+        writeln!(
+            imports,
+            "import {{ asyncComponent as {P}asyncComponent }} from \"{}\";",
+            options.types_module_name,
+            P = PREFIX,
+        )
+        .expect("write to String is infallible");
+    }
+
     // Collect vue imports: built-in components + template helpers (normalizeClass, normalizeStyle)
     let mut vue_imports: Vec<&str> = Vec::new();
-    if needs_define_component {
+    if needs.define_component {
         vue_imports.push("defineComponent as ___VERTER___defineComponent");
     }
     for &name in builtin_components {

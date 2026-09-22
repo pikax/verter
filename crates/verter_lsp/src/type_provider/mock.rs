@@ -124,6 +124,9 @@ mod inner {
             added: Vec<serde_json::Value>,
             removed: Vec<serde_json::Value>,
         },
+        WatchedFilesChanged {
+            changes: Vec<verter_type_runtime::WatchedFileChange>,
+        },
         NotifyCarrierChanged {
             companion_path: String,
         },
@@ -171,6 +174,7 @@ mod inner {
         /// that fail a kind's sync still want to observe whether a stale path of
         /// that kind was (wrongly) closed.
         fail_sync_paths: std::collections::HashSet<String>,
+        fail_carrier_metadata_sources: std::collections::HashSet<String>,
         hover_responses: Vec<(String, u32, Option<HoverInfo>)>,
         /// Scripted transient hover failures: while > 0, each `get_hover`
         /// RECORDS its call and returns `Err` (simulating a provider/transport
@@ -200,6 +204,7 @@ mod inner {
         /// unbounded provider pull cannot starve independently available
         /// framework diagnostics.
         hang_diagnostics: bool,
+        diagnostics_gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -408,6 +413,15 @@ mod inner {
         }
 
         /// Wedge `get_diagnostics` after recording the call.
+        /// Test seam: every later `get_diagnostics` is RECORDED and then waits
+        /// for one permit on the returned semaphore, so a test admits the
+        /// pulls one at a time and can observe how many are in flight.
+        pub fn gate_diagnostics(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+            let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            self.state.lock().unwrap().diagnostics_gate = Some(gate.clone());
+            gate
+        }
+
         pub fn hang_diagnostics(&self) {
             let mut state = self.state.lock().unwrap();
             state.hang_diagnostics = true;
@@ -604,6 +618,16 @@ mod inner {
         /// while the API `.ts` succeeds) so tests can prove a kind's stale path
         /// is retained when only that kind's replacement sync fails. `close_file`
         /// is NOT gated, so a wrongful close of the stale path is still observed.
+        /// Test seam: every carrier-metadata registration for `source_path`
+        /// is recorded and then rejected.
+        pub fn set_fail_carrier_metadata_source(&self, source_path: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .fail_carrier_metadata_sources
+                .insert(source_path.to_string());
+        }
+
         pub fn set_fail_sync_path(&self, path: &str) {
             self.state
                 .lock()
@@ -678,6 +702,16 @@ mod inner {
             self.state.lock().unwrap().open_block =
                 Some((path.to_string(), arrived.clone(), release.clone()));
             (arrived, release)
+        }
+
+        /// [`Self::block_open_file`] for whichever path is opened NEXT.
+        pub fn block_next_open_file(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            self.block_open_file("")
         }
 
         pub fn block_get_completions(
@@ -939,10 +973,12 @@ mod inner {
                     _ => None,
                 };
                 let block = match &state.open_block {
-                    Some((armed_path, _, _)) if armed_path == path => state
-                        .open_block
-                        .take()
-                        .map(|(_, arrived, release)| (arrived, release)),
+                    Some((armed_path, _, _)) if armed_path.is_empty() || armed_path == path => {
+                        state
+                            .open_block
+                            .take()
+                            .map(|(_, arrived, release)| (arrived, release))
+                    }
                     _ => None,
                 };
                 (fail, on_open, block)
@@ -958,6 +994,21 @@ mod inner {
                 }
                 fail_or_ok(fail, "open_file")
             })
+        }
+
+        fn notify_watched_files_changed<'a>(
+            &'a self,
+            changes: &'a [verter_type_runtime::WatchedFileChange],
+        ) -> ProviderFuture<'a, ()> {
+            self.state
+                .lock()
+                .unwrap()
+                .calls
+                .push(MockCall::WatchedFilesChanged {
+                    changes: changes.to_vec(),
+                });
+            self.note_recorded();
+            Box::pin(async { Ok(()) })
         }
 
         fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -1107,17 +1158,23 @@ mod inner {
             content: &str,
             project_file_name: &str,
         ) -> ProviderFuture<'_, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::RegisterCarrierMetadata {
+            let fail = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::RegisterCarrierMetadata {
                     source_path: source_path.to_string(),
                     companion_path: companion_path.to_string(),
                     content: content.to_string(),
                     project_file_name: project_file_name.to_string(),
                 });
-            Box::pin(async { Ok(()) })
+                state.fail_carrier_metadata_sources.contains(source_path)
+            };
+            Box::pin(async move {
+                if fail {
+                    Err(TypeProviderError::new("mock carrier metadata failure"))
+                } else {
+                    Ok(())
+                }
+            })
         }
 
         fn activate_carrier_member(
@@ -1251,7 +1308,7 @@ mod inner {
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-            let (result, on_query, hang) = {
+            let (result, on_query, hang, gate) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDiagnostics {
                     path: path.to_string(),
@@ -1268,7 +1325,12 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query, state.hang_diagnostics)
+                (
+                    result,
+                    on_query,
+                    state.hang_diagnostics,
+                    state.diagnostics_gate.clone(),
+                )
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
@@ -1278,7 +1340,16 @@ mod inner {
             if hang {
                 return Box::pin(std::future::pending());
             }
-            Box::pin(async move { Ok(result) })
+            self.note_recorded();
+            Box::pin(async move {
+                if let Some(gate) = gate {
+                    gate.acquire()
+                        .await
+                        .expect("the diagnostics gate is never closed")
+                        .forget();
+                }
+                Ok(result)
+            })
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {

@@ -228,7 +228,10 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
         let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
         rest[..end].to_string()
     };
-    for helper in ["carrier_provider_diagnostics", "self_file_diagnostics"] {
+    for helper in [
+        "carrier_provider_diagnostics_batch",
+        "self_file_diagnostics",
+    ] {
         let body = top_level_fn_slice(&sync_coordinator, helper);
         for forbidden in [
             "get_ide(",
@@ -244,17 +247,10 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
         }
     }
 
-    // background_init routes BOTH its post-scan and post-init publishers through
-    // the shared captured-surface helper and keeps no inline torn merge.
+    // background_init owns NO diagnostics publisher: its post-init and post-scan
+    // steps hand the open documents to the debounced coordinator, so it keeps
+    // no inline torn merge either.
     let background_init = read_server_source("background_init.rs");
-    assert!(
-        background_init
-            .matches("carrier_provider_diagnostics(")
-            .count()
-            >= 2,
-        "background_init must route both diagnostics publishers through the shared \
-         captured-surface helper"
-    );
     for forbidden in [".get_diagnostics(", "merge_diagnostics("] {
         assert!(
             !background_init.contains(forbidden),
@@ -262,34 +258,6 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
              (`{forbidden}`) — the shared captured-surface helper owns that path"
         );
     }
-}
-
-/// The scanner can enqueue carrier retries after background init's first drain.
-/// Level 2 must therefore settle that post-scan queue before it claims the type
-/// provider is fully synchronized, and it must stay fail-closed while any retry
-/// remains queued.
-#[test]
-fn post_scan_completion_settles_provider_queue_before_notification() {
-    let source = read_server_source("background_init.rs");
-    let waiter_start = source
-        .find("if !await_scan_complete_after_ready(scanner_done_rx, ready_announced_rx).await")
-        .expect("guard must find the post-scan readiness waiter");
-    let waiter = &source[waiter_start..];
-    let notification = waiter
-        .find("send_notification::<TypeProviderSyncComplete>")
-        .expect("guard must find the level-2 notification");
-    let before_notification = &waiter[..notification];
-
-    assert!(
-        before_notification.contains("drain_pending_snapshot_provider_sync("),
-        "the post-scan waiter must drain carrier retries created by the scanner before \
-         TypeProviderSyncComplete"
-    );
-    assert!(
-        before_notification.contains("pending_snapshot_provider_sync.is_empty()"),
-        "TypeProviderSyncComplete must remain fail-closed while a scanner carrier retry \
-         is still pending"
-    );
 }
 
 /// FOREIGN carrier IDE locations map through the surface set pinned at request

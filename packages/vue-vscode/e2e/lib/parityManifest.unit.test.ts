@@ -120,12 +120,12 @@ describe("parity inventory", () => {
     );
     expect(inventory.literalRegistrationCount).toBe(derivedLiteralCount);
     expect(discovered).toHaveLength(42);
-    expect(derivedLiteralCount).toBe(259);
+    expect(derivedLiteralCount).toBe(260);
   });
 
-  it("attests all 73 unique matrix IDs and every authored anchor", () => {
+  it("attests all 74 unique matrix IDs and every authored anchor", () => {
     const matrix = [...VUE_MATRIX_CASES, ...SVELTE_MATRIX_CASES];
-    expect(matrix).toHaveLength(73);
+    expect(matrix).toHaveLength(74);
     expect(new Set(matrix.map((entry) => entry.id)).size).toBe(matrix.length);
     for (const entry of VUE_MATRIX_CASES) assertMatrixFixture("vue-parity", entry);
     for (const entry of SVELTE_MATRIX_CASES) assertMatrixFixture("svelte-parity", entry);
@@ -143,8 +143,8 @@ describe("parity inventory", () => {
       suiteRoot,
       matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
     });
-    expect(inventory.literalRegistrationCount).toBe(259);
-    expect(inventory.matrixCaseCount).toBe(73);
+    expect(inventory.literalRegistrationCount).toBe(260);
+    expect(inventory.matrixCaseCount).toBe(74);
     expect(inventory.matrixCaseCount).toBe(VUE_MATRIX_CASES.length + SVELTE_MATRIX_CASES.length);
     for (const ids of Object.values(inventory.testIdsByFixture)) {
       expect(ids.length).toBeGreaterThan(0);

@@ -2103,3 +2103,36 @@ fn delete_dir_all_trailing_slash_matches_exact_entry() {
          semantics as delete_dir_all(\"/a\")"
     );
 }
+
+/// A byte-less content transition exists so a consumer that was refused at a
+/// revision key can retry under a STRICTLY NEWER one. The refused key is itself
+/// the value a previous transition recorded, so recording "the current
+/// generation plus one" again hands the retry the very key it was just refused
+/// under — and it is refused forever.
+#[test]
+fn a_repeated_byteless_content_transition_is_strictly_newer_each_time() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let canonical = "/src/App.vue";
+    let before = WorkspaceRead::last_content_transition_generation(&ws, canonical);
+
+    WorkspaceRead::record_content_transition(&ws, canonical);
+    let first = WorkspaceRead::last_content_transition_generation(&ws, canonical);
+    assert!(first > before);
+
+    WorkspaceRead::record_content_transition(&ws, canonical);
+    let second = WorkspaceRead::last_content_transition_generation(&ws, canonical);
+    assert!(
+        second > first,
+        "a second transition must mint a newer key than the first ({first}), got {second}"
+    );
+
+    // A real content mutation afterwards still moves the rail forward, never back.
+    ws.notify_upsert(canonical, Arc::from("<template><div/></template>"));
+    assert!(WorkspaceRead::last_content_transition_generation(&ws, canonical) > second);
+
+    // Other canonicals are untouched.
+    assert_eq!(
+        WorkspaceRead::last_content_transition_generation(&ws, "/src/Other.vue"),
+        WorkspaceRead::last_content_transition_generation(&ws, "/src/Unrelated.vue"),
+    );
+}

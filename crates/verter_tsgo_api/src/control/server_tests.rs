@@ -32,6 +32,8 @@ fn fake_api_pipe() -> String {
 
 #[derive(Default)]
 struct FakeServerState {
+    /// How many sync-barrier requests the fake engine answered.
+    barriers: usize,
     opened: Vec<String>,
     closed: Vec<String>,
     saw_initialize: bool,
@@ -124,8 +126,11 @@ fn spawn_fake_tsgo_cfg(
                         )
                         .await;
                     }
-                    (Some("textDocument/diagnostic"), Some(id)) if answer_barrier => {
+                    (Some(crate::relay::CARRIER_SYNC_BARRIER_METHOD), Some(id))
+                        if answer_barrier =>
+                    {
                         // The sync barrier: any completed response proves order.
+                        st.lock().unwrap().barriers += 1;
                         reply(
                             &mut write,
                             &id,
@@ -230,6 +235,16 @@ fn wire_loopback(nonce: &str) -> Loopback {
 /// tsgo (see [`spawn_fake_tsgo_cfg`]): `false` leaves the pull-diagnostic sync
 /// barrier unanswered so a carrier open lands as SENT-but-unsynced.
 fn wire_loopback_cfg(nonce: &str, answer_barrier: bool) -> Loopback {
+    wire_loopback_bounded(nonce, answer_barrier, CARRIER_SYNC_BARRIER_TIMEOUT)
+}
+
+/// [`wire_loopback_cfg`] with an explicit sync-barrier bound, so a test of the
+/// unanswered-barrier outcome does not wait out the production bound.
+fn wire_loopback_bounded(
+    nonce: &str,
+    answer_barrier: bool,
+    sync_barrier_bound: Duration,
+) -> Loopback {
     let (editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
     let (server_endpoint, relay_server) = tokio::io::duplex(64 * 1024);
     let (er, ew) = tokio::io::split(relay_editor);
@@ -240,13 +255,14 @@ fn wire_loopback_cfg(nonce: &str, answer_barrier: bool) -> Loopback {
 
     let (control_client_side, control_server_side) = tokio::io::duplex(64 * 1024);
     let (cs_r, cs_w) = tokio::io::split(control_server_side);
-    let server = ControlServer::new(
+    let mut server = ControlServer::new(
         Arc::clone(&relay),
         nonce,
         7, // editor_session_generation
         0xABCD_u64,
         "ctl-1",
     );
+    server.sync_barrier_bound = sync_barrier_bound;
     let server_task = tokio::spawn(server.serve(cs_r, cs_w));
     let (cc_r, cc_w) = tokio::io::split(control_client_side);
     let client = ControlClient::from_connection(JsonRpcConnection::connect(cc_r, cc_w));
@@ -444,6 +460,208 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
 /// tokio's `test-util` feature, so the virtual-clock `start_paused` seam is unavailable —
 /// the outer bound (5s) is > the handler's 3s internal timeout, so the handler's
 /// timeout is what returns and boundedness is proven within the outer bound.
+/// A project-wide injection is one request per overlay only if each overlay pays its
+/// own barrier — and each barrier makes the editor's engine rebuild its program. One
+/// connection is consumed in order, so ONE barrier after the last write proves them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_of_overlays_is_ordered_by_one_barrier() {
+    let mut lb = wire_loopback("the-nonce");
+    drive_editor_initialize(&mut lb.editor_write, &mut lb.editor_read).await;
+    let hello = lb
+        .client
+        .hello("the-nonce", "verter_lsp")
+        .await
+        .expect("hello");
+    assert!(hello.capabilities.carrier_batch);
+
+    let uris: Vec<String> = (0..5)
+        .map(|index| format!("file:///w/src/Carrier{index}.ts"))
+        .collect();
+    let ops = uris
+        .iter()
+        .map(|uri| crate::control::messages::CarrierBatchOp::Open {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const x = 1;".to_string(),
+        })
+        .collect();
+    let result = tokio::time::timeout(Duration::from_secs(5), lb.client.carrier_sync_batch(ops))
+        .await
+        .expect("carrierSyncBatch timed out")
+        .expect("carrierSyncBatch");
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+
+    let (opened, barriers) = {
+        let fake = lb.fake.lock().unwrap();
+        (fake.opened.clone(), fake.barriers)
+    };
+    assert_eq!(opened, uris, "every overlay reached the engine, in order");
+    assert_eq!(barriers, 1, "one barrier orders the whole batch");
+    // Every batched open is retract-eligible, exactly like a single open.
+    let status = lb.client.status().await.expect("status");
+    assert_eq!(status.open_carriers, 5);
+}
+
+/// An overlay write that reached the wire but whose barrier never answered is NOT a
+/// failed write: the engine holds (or will hold) it, so retracting it costs the engine a
+/// delete plus a later re-create. The server reports it apart from a write that never
+/// left, on the batch path and the single-op path alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_barrier_reports_sent_writes_as_sent_unconfirmed() {
+    use crate::control::messages::{CarrierBatchFailureKind, CarrierBatchOp};
+    use crate::error::TsgoApiError;
+
+    let mut lb = wire_loopback_bounded("the-nonce", false, Duration::from_millis(200));
+    drive_editor_initialize(&mut lb.editor_write, &mut lb.editor_read).await;
+    lb.client
+        .hello("the-nonce", "verter_lsp")
+        .await
+        .expect("hello");
+    let open = |uri: &str| CarrierBatchOp::Open {
+        uri: uri.to_string(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const x = 1;".to_string(),
+    };
+
+    let result = lb
+        .client
+        .carrier_sync_batch(vec![open("file:///w/src/A.ts"), open("file:///w/src/B.ts")])
+        .await
+        .expect("carrierSyncBatch");
+    assert_eq!(
+        result
+            .failures
+            .iter()
+            .map(|failure| (failure.uri.as_str(), failure.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "file:///w/src/A.ts",
+                CarrierBatchFailureKind::SentUnconfirmed
+            ),
+            (
+                "file:///w/src/B.ts",
+                CarrierBatchFailureKind::SentUnconfirmed
+            ),
+        ],
+        "both opens were written; only the barrier is missing"
+    );
+
+    // The single-op paths agree with the batch path.
+    let single_open = lb
+        .client
+        .carrier_did_open_synced("file:///w/src/C.ts", "typescript", 1, "export {};")
+        .await;
+    assert!(
+        matches!(single_open, Err(TsgoApiError::Timeout(_))),
+        "{single_open:?}"
+    );
+    let single_change = lb
+        .client
+        .carrier_did_change_synced("file:///w/src/C.ts", 2, "export const y = 2;")
+        .await;
+    assert!(
+        matches!(single_change, Err(TsgoApiError::Timeout(_))),
+        "{single_change:?}"
+    );
+
+    let relay = Arc::clone(&lb.relay);
+    let client = Arc::new(lb.client);
+    let batcher = crate::control::OverlayBatcher::new(Arc::clone(&client));
+    let unconfirmed = batcher.submit(open("file:///w/src/D.ts")).await;
+    assert!(
+        matches!(unconfirmed, Err(TsgoApiError::Timeout(_))),
+        "{unconfirmed:?}"
+    );
+
+    // A write that never left stays a plain failure.
+    relay.shutdown().await;
+    let result = client
+        .carrier_sync_batch(vec![open("file:///w/src/E.ts")])
+        .await
+        .expect("carrierSyncBatch");
+    assert_eq!(
+        result
+            .failures
+            .iter()
+            .map(|failure| (failure.uri.as_str(), failure.kind))
+            .collect::<Vec<_>>(),
+        vec![("file:///w/src/E.ts", CarrierBatchFailureKind::SendFailed)]
+    );
+    let not_sent = batcher.submit(open("file:///w/src/F.ts")).await;
+    assert!(
+        matches!(not_sent, Err(TsgoApiError::Transport(_))),
+        "{not_sent:?}"
+    );
+    let single_not_sent = client
+        .carrier_did_open_synced("file:///w/src/G.ts", "typescript", 1, "export {};")
+        .await;
+    assert!(
+        matches!(single_not_sent, Err(TsgoApiError::Transport(_))),
+        "{single_not_sent:?}"
+    );
+}
+
+/// Writes issued together must not each pay a barrier: the batcher sends what is
+/// queued as ONE batch, and a write that fails is reported to ITS caller only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_overlay_writes_coalesce_behind_shared_barriers() {
+    let mut lb = wire_loopback("the-nonce");
+    drive_editor_initialize(&mut lb.editor_write, &mut lb.editor_read).await;
+    lb.client
+        .hello("the-nonce", "verter_lsp")
+        .await
+        .expect("hello");
+    let fake = Arc::clone(&lb.fake);
+    let batcher = crate::control::OverlayBatcher::new(Arc::new(lb.client));
+
+    let writes = 24;
+    let submits = (0..writes).map(|index| {
+        batcher.submit(crate::control::messages::CarrierBatchOp::Open {
+            uri: format!("file:///w/src/Carrier{index}.ts"),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const x = 1;".to_string(),
+        })
+    });
+    let mut outcomes = Vec::new();
+    // Polled together on this task, exactly as the overlay sweep polls them.
+    let mut pending: Vec<_> = submits.map(Box::pin).collect();
+    std::future::poll_fn(|cx| {
+        pending.retain_mut(
+            |submit| match std::future::Future::poll(submit.as_mut(), cx) {
+                std::task::Poll::Ready(outcome) => {
+                    outcomes.push(outcome);
+                    false
+                }
+                std::task::Poll::Pending => true,
+            },
+        );
+        if pending.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+
+    assert_eq!(outcomes.len(), writes);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    let (opened, barriers) = {
+        let fake = fake.lock().unwrap();
+        (fake.opened.len(), fake.barriers)
+    };
+    assert_eq!(opened, writes, "every overlay reached the engine");
+    // The first write may leave alone before the rest are queued; everything queued
+    // while that batch is in flight leaves together.
+    assert!(
+        barriers <= 2,
+        "{writes} concurrent writes paid {barriers} barriers"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_initialized_times_out_when_editor_never_initializes() {
     let mut lb = wire_loopback("the-nonce");
@@ -585,7 +803,7 @@ async fn abnormal_control_termination_retracts_open_carriers_non_destructively()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sent_but_unsynced_open_is_retracted_on_session_end() {
     // A fake tsgo that answers `initialize` and RECORDS didOpen/didClose but NEVER answers
-    // the `textDocument/diagnostic` sync barrier — the connection stays OPEN (relay alive),
+    // the sync barrier — the connection stays OPEN (relay alive),
     // so the carrier's sync barrier fails CLOSED via timeout.
     let mut lb = wire_loopback_cfg("the-nonce", false);
 
@@ -1053,8 +1271,12 @@ async fn session_end_drain_is_bounded_against_a_wedged_writer() {
     let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
     // Far more carriers than the 256-slot mpsc + the one frame the parked writer holds, so
     // the drain is guaranteed to block on a `didClose` send partway through.
+    // Tracked on the relay too: a close of an overlay the relay does not hold open writes
+    // nothing, and would never reach the wedge.
     for i in 0..512 {
-        server.opened_carriers.insert(format!("file:///w/c{i}.ts"));
+        let uri = format!("file:///w/c{i}.ts");
+        relay.track_open_overlay(&uri);
+        server.opened_carriers.insert(uri);
     }
     assert_eq!(server.opened_carriers.len(), 512);
 
@@ -1178,7 +1400,7 @@ async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carri
     for _ in 0..200 {
         if relay
             .injection_channel()
-            .did_close("file:///__probe__")
+            .did_change("file:///__probe__", 2, "")
             .await
             .is_err()
         {
@@ -1250,8 +1472,10 @@ async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carri
     let _editor_keepalive2 = editor_endpoint2;
     let mut server2 = ControlServer::new(Arc::clone(&relay2), "n", 1, 1, "ctl");
 
-    server2.opened_carriers.insert(uri_a.to_string());
-    server2.opened_carriers.insert(uri_b.to_string());
+    for uri in [uri_a, uri_b] {
+        relay2.track_open_overlay(uri);
+        server2.opened_carriers.insert(uri.to_string());
+    }
 
     server2.retract_open_carriers().await;
 
@@ -1274,7 +1498,7 @@ async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carri
 }
 
 /// Saturate the relay's outbound `server_tx` mpsc against a WEDGED writer so the NEXT carrier
-/// notification send PARKS (the wedge the bounded handler must survive). Sends `didClose`
+/// notification send PARKS (the wedge the bounded handler must survive). Sends `didChange`
 /// notifications until a bounded probe send fails to complete within its short probe window —
 /// at which point the 256-slot channel is full and any further send parks (the writer is parked
 /// on a 1-byte, never-drained server pipe, so it never frees a slot). Bounded to 1024 sends so a
@@ -1283,7 +1507,9 @@ async fn saturate_wedged_server_channel(relay: &Arc<LspRelay>) {
     for _ in 0..1024 {
         if tokio::time::timeout(
             Duration::from_millis(50),
-            relay.injection_channel().did_close("file:///w/saturate.ts"),
+            relay
+                .injection_channel()
+                .did_change("file:///w/saturate.ts", 2, ""),
         )
         .await
         .is_err()
@@ -1309,6 +1535,52 @@ async fn wedged_relay_with_saturated_writer() -> (Arc<LspRelay>, DuplexStream, D
     // `didClose` NOTIFICATION or the `custom/initializeAPISession` REQUEST — parks on the wedge.
     saturate_wedged_server_channel(&relay).await;
     (relay, editor_endpoint, server_endpoint)
+}
+
+/// A batch is served on the serial control loop, so the WHOLE batch shares one
+/// send budget: against a writer that never drains, a project's worth of writes
+/// must not hold the loop for one bound each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_against_a_wedged_writer_spends_one_send_budget() {
+    let (relay, _editor_endpoint, _server_endpoint) = wedged_relay_with_saturated_writer().await;
+    let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+    server.carrier_op_bound = Duration::from_millis(300);
+    let writes = 8;
+    let ops: Vec<serde_json::Value> = (0..writes)
+        .map(|index| {
+            serde_json::json!({
+                "kind": "open", "uri": format!("file:///w/src/Wedged{index}.vue.tsx"),
+                "languageId": "typescript", "version": 1, "text": "",
+            })
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    let frame = tokio::time::timeout(
+        Duration::from_secs(10),
+        server.handle_carrier_sync_batch(&serde_json::json!(1), serde_json::json!({ "ops": ops })),
+    )
+    .await
+    .expect("the batch returns");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "{writes} wedged writes took {elapsed:?}: each spent its own 300ms bound"
+    );
+    let value = decode_frame(&frame);
+    let failures = value["result"]["failures"].as_array().expect("failures");
+    assert_eq!(
+        failures
+            .iter()
+            .map(|failure| failure["index"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        (0..writes as u64).collect::<Vec<_>>(),
+        "every write is reported, by position: {value}"
+    );
+    // A bounded-out open may have reached the engine: tracked for the session-end drain.
+    assert_eq!(server.opened_carriers.len(), writes);
+    relay.shutdown().await;
 }
 
 /// EVERY relay-round-trip control handler BOUNDS its relay send against a WEDGED writer (a full
@@ -1406,6 +1678,9 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
         let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
         server.carrier_op_bound = Duration::from_millis(300);
         let uri = "file:///w/src/Wedged.vue.tsx";
+        // Open on the relay as well — a close of an untracked overlay writes nothing and
+        // would return without ever meeting the wedge.
+        relay.track_open_overlay(uri);
         server.opened_carriers.insert(uri.to_string());
 
         let outcome = tokio::time::timeout(

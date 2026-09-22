@@ -135,8 +135,15 @@ pub(crate) fn build_probe_candidate_list(
     let has_extension = Path::new(base).extension().is_some();
     if has_extension {
         out.push(base.to_string());
-    } else {
-        for ext in probe_extensions_list() {
+    }
+    // A dotted import stem is not necessarily a complete source filename:
+    // `./types.d` and `./Button.types` still need `.ts` probing. Keep explicit
+    // script/carrier suffixes and literal SFC src attributes unchanged.
+    let extensions = probe_extensions_list();
+    let dotted_import_stem =
+        apply_source_sibling && !extensions.iter().any(|extension| base.ends_with(extension));
+    if !has_extension || dotted_import_stem {
+        for ext in extensions {
             out.push(format!("{base}{ext}"));
         }
     }

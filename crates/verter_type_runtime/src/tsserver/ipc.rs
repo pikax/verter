@@ -570,10 +570,9 @@ impl TsserverTransport {
             .collect()
     }
 
-    /// Variant used by diagnostics, where the semantic pass is authoritative
-    /// but syntactic and suggestion failures degrade independently. Admission
-    /// and preemption are transaction-wide; ordinary command errors remain
-    /// frame-local so the later diagnostic categories are still collected.
+    /// Collect all diagnostic categories before deciding whether the complete
+    /// pull succeeded. Admission and preemption are transaction-wide; ordinary
+    /// command errors remain frame-local so later categories are still queried.
     async fn request_background_batch_results(
         &self,
         requests: &[(&str, serde_json::Value)],
@@ -1690,25 +1689,6 @@ enum OpenKind {
     CarrierSource,
 }
 
-/// Last successful synchronous diagnostic pull for one exact local content
-/// generation. A transport failure may reuse it only while that same generation
-/// is still current; edits and close/reopen cycles draw a fresh global stamp.
-#[derive(Clone)]
-struct CachedDiagnostics {
-    content_generation: u64,
-    diagnostics: Vec<TypeDiagnostic>,
-}
-
-fn cached_diagnostics_for_generation(
-    cached: Option<&CachedDiagnostics>,
-    current_generation: Option<u64>,
-) -> Vec<TypeDiagnostic> {
-    cached
-        .filter(|cached| current_generation == Some(cached.content_generation))
-        .map(|cached| cached.diagnostics.clone())
-        .unwrap_or_default()
-}
-
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
 pub struct TsserverTypeProvider {
     transport: Arc<TsserverTransport>,
@@ -1725,9 +1705,6 @@ pub struct TsserverTypeProvider {
     /// companion CONTENTLESSLY. Used by `update_file` to decide between `open` vs
     /// `updateOpen`. `load_file` adds to `contents` but NOT to `opened_files`.
     opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
-    /// Last successful synchronous diagnostics pull, fenced by local content
-    /// generation. Unversioned tsserver diagnostic events never enter it.
-    diagnostics_cache: Arc<Mutex<HashMap<String, CachedDiagnostics>>>,
     /// Workspace root path (forward slashes) for `projectRootPath` in open commands.
     workspace_root: String,
     /// Per-project roots for per-file `projectRootPath` matching.
@@ -1805,6 +1782,162 @@ struct TsserverCarrierRefresh {
 enum CarrierRefreshPriority {
     Background,
     Interactive,
+}
+
+/// Captured diagnostics transaction, independent of provider process ownership.
+#[derive(Clone)]
+struct DiagnosticsQuery<'a> {
+    file: String,
+    diagnostic_file: String,
+    transport: Arc<TsserverTransport>,
+    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
+    carrier_companions: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    normalize_response_paths: bool,
+    active_sources: Arc<parking_lot::RwLock<BTreeSet<String>>>,
+    carrier_refresh: Arc<TsserverCarrierRefresh>,
+    carrier_refresh_generation: &'a AtomicU64,
+    project_file_name: Option<String>,
+}
+
+impl DiagnosticsQuery<'_> {
+    async fn execute(self) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+        let Self {
+            file,
+            diagnostic_file,
+            transport,
+            contents_cache,
+            carrier_companions,
+            normalize_response_paths,
+            active_sources,
+            carrier_refresh,
+            carrier_refresh_generation,
+            project_file_name,
+        } = self;
+        let content = contents_cache.lock().await.get(&file).cloned();
+
+        // Pull all three tsserver diagnostic passes synchronously and union
+        // them: SEMANTIC (type errors), SYNTACTIC (parse errors), and
+        // SUGGESTION (unused-symbol / hint findings). A semantic-only request
+        // would drop parse errors and suggestions that the native TS
+        // experience (and TSGO's pull model) surface — the tsserver-family
+        // parity gap (GAP-2). Every category must succeed before the pull can
+        // certify a complete result. A transport failure is never an empty
+        // category or a cached answer from older dependency state.
+        //
+        // COLD-build re-poll: on a freshly built configured project the
+        // just-published companion is not yet a program member tsserver
+        // type-checks, so the semantic pass fails the whole command with
+        // "Could not find source file: <companion>". On that NARROW error,
+        // recover the companion's configured-project membership (re-query
+        // `getExternalFiles` — see `recover_companion_membership`) and re-issue
+        // the semantic pass, bounded by recovery attempts rather than elapsed
+        // time (never a busy-spin). The recovery fires ONLY on this cold miss,
+        // so a warm pull never pays it. Only this error is retried: a genuine
+        // module-not-found arrives in the SUCCESS body (so it never reaches the
+        // error path) and timeouts / closed channels are distinct terminal
+        // strings that fall straight through.
+        let mut recovery_attempts = 0_u8;
+        let (semantic_result, syntactic_result, suggestion_result) = loop {
+            let requests = [
+                (
+                    "semanticDiagnosticsSync",
+                    inject_project_file_name(
+                        serde_json::json!({ "file": diagnostic_file.clone() }),
+                        &project_file_name,
+                    ),
+                ),
+                (
+                    "syntacticDiagnosticsSync",
+                    inject_project_file_name(
+                        serde_json::json!({ "file": diagnostic_file.clone() }),
+                        &project_file_name,
+                    ),
+                ),
+                (
+                    "suggestionDiagnosticsSync",
+                    inject_project_file_name(
+                        serde_json::json!({ "file": diagnostic_file.clone() }),
+                        &project_file_name,
+                    ),
+                ),
+            ];
+            let (semantic, syntactic, suggestion) =
+                match transport.request_background_batch_results(&requests).await {
+                    Ok(results) => {
+                        let mut results = results.into_iter();
+                        (
+                            results.next().expect("diagnostic batch has semantic frame"),
+                            results.next(),
+                            results.next(),
+                        )
+                    }
+                    Err(error) => (Err(error), None, None),
+                };
+            match &semantic {
+                Err(error)
+                    if tsserver_diag_error_is_companion_not_ready(&error.message)
+                        && recovery_attempts < 2 =>
+                {
+                    recovery_attempts += 1;
+                    recover_companion_managed_root(
+                        Arc::clone(&transport),
+                        Arc::clone(&active_sources),
+                        Arc::clone(&carrier_refresh),
+                        carrier_refresh_generation,
+                        file.clone(),
+                    )
+                    .await;
+                    tokio::task::yield_now().await;
+                }
+                _ => break (semantic, syntactic, suggestion),
+            }
+        };
+
+        match semantic_result {
+            Ok(semantic_body) => {
+                // One index for all three diagnostic passes: semantic,
+                // syntactic and suggestion all resolve against the same
+                // content snapshot, so the document is scanned once for the
+                // whole pull rather than twice per diagnostic per pass.
+                let index = content.as_deref().map(SourceIndex::new_utf16);
+                let semantic = parse_tsserver_diagnostics_body(
+                    &semantic_body,
+                    index.as_ref(),
+                    Some(file.as_str()),
+                );
+
+                let syntactic_body = syntactic_result.ok_or_else(|| {
+                    TypeProviderError::new("missing syntactic diagnostic response")
+                })??;
+                let suggestion_body = suggestion_result.ok_or_else(|| {
+                    TypeProviderError::new("missing suggestion diagnostic response")
+                })??;
+                let syntactic = parse_tsserver_diagnostics_body(
+                    &syntactic_body,
+                    index.as_ref(),
+                    Some(file.as_str()),
+                );
+                let suggestion = parse_tsserver_diagnostics_body(
+                    &suggestion_body,
+                    index.as_ref(),
+                    Some(file.as_str()),
+                );
+
+                let mut diags = merge_diagnostic_sets(semantic, syntactic, suggestion);
+                for diagnostic in &mut diags {
+                    for related in &mut diagnostic.related_information {
+                        related.path = remap_carrier_response_path(
+                            &related.path,
+                            &carrier_companions,
+                            normalize_response_paths,
+                        );
+                    }
+                }
+                Ok(diags)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl Drop for TsserverTypeProvider {
@@ -2158,8 +2291,6 @@ impl TsserverTypeProvider {
             ));
         }
 
-        let diagnostics_cache: Arc<Mutex<HashMap<String, CachedDiagnostics>>> =
-            Arc::new(Mutex::new(HashMap::new()));
         let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -2201,7 +2332,6 @@ impl TsserverTypeProvider {
             tree,
             contents: contents_cache,
             opened_files: Arc::new(Mutex::new(HashMap::new())),
-            diagnostics_cache,
             workspace_root: ws_root,
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
@@ -3753,8 +3883,6 @@ impl TypeProvider for TsserverTypeProvider {
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
-        let content_generations = Arc::clone(&self.content_generations);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let active_sources = Arc::clone(&self.active_carrier_sources);
@@ -3766,177 +3894,21 @@ impl TypeProvider for TsserverTypeProvider {
         // empty). `None` for a non-carrier file (its default project is correct).
         let project_file_name = self.project_file_name_for(&query_file);
         let diagnostic_file = query_file;
-        Box::pin(async move {
-            let (content, request_generation) = {
-                let cache = contents_cache.lock().await;
-                let generation = content_generations.map.lock().get(&file).copied();
-                (cache.get(&file).cloned(), generation)
-            };
-
-            // Pull all three tsserver diagnostic passes synchronously and union
-            // them: SEMANTIC (type errors), SYNTACTIC (parse errors), and
-            // SUGGESTION (unused-symbol / hint findings). A semantic-only request
-            // would drop parse errors and suggestions that the native TS
-            // experience (and TSGO's pull model) surface — the tsserver-family
-            // parity gap (GAP-2). The semantic pass is authoritative for the
-            // success/fallback decision; syntactic/suggestion failures degrade to
-            // an empty set for that category rather than failing the whole pull.
-            //
-            // COLD-build re-poll: on a freshly built configured project the
-            // just-published companion is not yet a program member tsserver
-            // type-checks, so the semantic pass fails the whole command with
-            // "Could not find source file: <companion>". On that NARROW error,
-            // recover the companion's configured-project membership (re-query
-            // `getExternalFiles` — see `recover_companion_membership`) and re-issue
-            // the semantic pass, bounded by recovery attempts rather than elapsed
-            // time (never a busy-spin). The recovery fires ONLY on this cold miss,
-            // so a warm pull never pays it. Only this error is retried: a genuine
-            // module-not-found arrives in the SUCCESS body (so it never reaches the
-            // error path) and timeouts / closed channels are distinct terminal
-            // strings that fall straight through.
-            let mut recovery_attempts = 0_u8;
-            let (semantic_result, syntactic_result, suggestion_result) = loop {
-                let requests = [
-                    (
-                        "semanticDiagnosticsSync",
-                        inject_project_file_name(
-                            serde_json::json!({ "file": diagnostic_file.clone() }),
-                            &project_file_name,
-                        ),
-                    ),
-                    (
-                        "syntacticDiagnosticsSync",
-                        inject_project_file_name(
-                            serde_json::json!({ "file": diagnostic_file.clone() }),
-                            &project_file_name,
-                        ),
-                    ),
-                    (
-                        "suggestionDiagnosticsSync",
-                        inject_project_file_name(
-                            serde_json::json!({ "file": diagnostic_file.clone() }),
-                            &project_file_name,
-                        ),
-                    ),
-                ];
-                let (semantic, syntactic, suggestion) =
-                    match transport.request_background_batch_results(&requests).await {
-                        Ok(results) => {
-                            let mut results = results.into_iter();
-                            (
-                                results.next().expect("diagnostic batch has semantic frame"),
-                                results.next(),
-                                results.next(),
-                            )
-                        }
-                        Err(error) => (Err(error), None, None),
-                    };
-                match &semantic {
-                    Err(error)
-                        if tsserver_diag_error_is_companion_not_ready(&error.message)
-                            && recovery_attempts < 2 =>
-                    {
-                        recovery_attempts += 1;
-                        recover_companion_managed_root(
-                            Arc::clone(&transport),
-                            Arc::clone(&active_sources),
-                            Arc::clone(&carrier_refresh),
-                            carrier_refresh_generation,
-                            file.clone(),
-                        )
-                        .await;
-                        tokio::task::yield_now().await;
-                    }
-                    _ => break (semantic, syntactic, suggestion),
-                }
-            };
-
-            match semantic_result {
-                Ok(semantic_body) => {
-                    // One index for all three diagnostic passes: semantic,
-                    // syntactic and suggestion all resolve against the same
-                    // content snapshot, so the document is scanned once for the
-                    // whole pull rather than twice per diagnostic per pass.
-                    let index = content.as_deref().map(SourceIndex::new_utf16);
-                    let semantic = parse_tsserver_diagnostics_body(
-                        &semantic_body,
-                        index.as_ref(),
-                        Some(file.as_str()),
-                    );
-
-                    let syntactic = syntactic_result
-                        .and_then(Result::ok)
-                        .map(|body| {
-                            parse_tsserver_diagnostics_body(
-                                &body,
-                                index.as_ref(),
-                                Some(file.as_str()),
-                            )
-                        })
-                        .unwrap_or_default();
-
-                    let suggestion = suggestion_result
-                        .and_then(Result::ok)
-                        .map(|body| {
-                            parse_tsserver_diagnostics_body(
-                                &body,
-                                index.as_ref(),
-                                Some(file.as_str()),
-                            )
-                        })
-                        .unwrap_or_default();
-
-                    let mut diags = merge_diagnostic_sets(semantic, syntactic, suggestion);
-                    for diagnostic in &mut diags {
-                        for related in &mut diagnostic.related_information {
-                            related.path = remap_carrier_response_path(
-                                &related.path,
-                                &carrier_companions,
-                                normalize_response_paths,
-                            );
-                        }
-                    }
-                    // Cache only if the file remained on the exact content
-                    // generation that initiated the pull. The caller applies
-                    // its own authored-document version fence before publish;
-                    // this guard prevents a later transport failure from
-                    // reviving a response that raced an edit or close/reopen.
-                    let current_generation = content_generations.map.lock().get(&file).copied();
-                    if let Some(content_generation) = request_generation {
-                        if current_generation == Some(content_generation) {
-                            diagnostics_cache.lock().await.insert(
-                                file.clone(),
-                                CachedDiagnostics {
-                                    content_generation,
-                                    diagnostics: diags.clone(),
-                                },
-                            );
-                        }
-                    }
-                    Ok(diags)
-                }
-                Err(e) if tsserver_diag_error_is_companion_not_ready(&e.message) => {
-                    // The companion is STILL not in the program after the bounded
-                    // cold-build re-poll. Surface this as a NOT-READY error (do not
-                    // mask it to an empty set, which would warm a torn empty result
-                    // and let it read as "no diagnostics"). Propagating lets the
-                    // caller's diagnostics retry loop re-pull once the project
-                    // finishes building.
-                    Err(e)
-                }
-                Err(_) => {
-                    // A transport failure may reuse only a last-good pull from
-                    // this exact local content generation. tsserver diagnostic
-                    // events carry no version and are intentionally never cached.
-                    let current_generation = content_generations.map.lock().get(&file).copied();
-                    let cache = diagnostics_cache.lock().await;
-                    Ok(cached_diagnostics_for_generation(
-                        cache.get(&file),
-                        current_generation,
-                    ))
-                }
+        Box::pin(
+            DiagnosticsQuery {
+                file,
+                diagnostic_file,
+                transport,
+                contents_cache,
+                carrier_companions,
+                normalize_response_paths,
+                active_sources,
+                carrier_refresh,
+                carrier_refresh_generation,
+                project_file_name,
             }
-        })
+            .execute(),
+        )
     }
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {

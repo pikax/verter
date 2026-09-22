@@ -203,6 +203,16 @@ export const POLL_BUDGETS = {
       "passed explicitly by the same root `beforeAll`: the provider handshake is a suite-level " +
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
+  restartTypeProviderSync: {
+    budgetMs: 30_000,
+    parentTimeoutMs: 60_000,
+    reason:
+      "passed explicitly by `restartParityReady`: an explicit language-server restart repeats the " +
+      "SAME provider handshake `rootTypeProviderSync` budgets at 30s (process start, workspace " +
+      "scan, cold provider project), so it takes the same budget. Every caller restarts under a " +
+      "hook or test that declares at least 60s. It used to take the ordinary 12s default only " +
+      "because the wait was vacuous: the previous server's log lines satisfied it instantly",
+  },
   waitForExtensionReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForTypeProviderSync: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForFileReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -343,6 +353,26 @@ export const POLL_SEQUENCES = {
       "`suite/index.ts` root beforeAll awaits ensureFixtureWarm (extension ready), then " +
       "ensureTypeProviderSynced (provider sync), then openReadyCached (file ready) — in series, " +
       "under ONE deadline. At 60s the second and third could be killed before reaching their own.",
+  },
+  restartedSuiteSetup: {
+    members: ["restartTypeProviderSync", "waitForFileReady"],
+    parentTimeoutMs: 60_000,
+    reason:
+      "a state-sensitive suite's suiteSetup restarts the language server, waits for the NEW " +
+      "server's provider sync, and may then wait for its entry document — in series under the " +
+      "hook's declared 60s deadline",
+  },
+  restartedProviderOwnedWitnesses: {
+    members: [
+      "restartTypeProviderSync",
+      "waitForFileReady",
+      "restartTypeProviderSync",
+      "waitForFileReady",
+    ],
+    parentTimeoutMs: 90_000,
+    reason:
+      "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
+      "server epoch: restart, provider sync, file ready — twice, in series, under its own 90s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],

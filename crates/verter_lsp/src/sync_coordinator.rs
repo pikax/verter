@@ -46,10 +46,13 @@ struct CanonicalChangeState {
 /// Shared "changes received but not yet processed" map, read by the coordinator
 /// loop and written by the `did_change` handlers.
 type ChangeTracker = Arc<parking_lot::Mutex<HashMap<String, CanonicalChangeState>>>;
+/// When the user last turned to each open document without editing it.
+type TouchTracker = Arc<parking_lot::Mutex<HashMap<String, Instant>>>;
 
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
 pub struct SyncCoordinatorHandle {
+    documents: std::sync::Weak<DocumentRegistry>,
     /// Capacity-one edge trigger. Repeated edits do not allocate queued messages.
     wake_tx: mpsc::Sender<()>,
     /// Latest URI per canonical document. Replacements coalesce while the actor
@@ -57,6 +60,10 @@ pub struct SyncCoordinatorHandle {
     pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     /// Changes received but not yet processed. See [`CanonicalChangeState`].
     changes: ChangeTracker,
+    /// When the user last turned to each document WITHOUT editing it.
+    touches: TouchTracker,
+    /// Whether a workspace scan is currently publishing into the provider.
+    scanning: Arc<std::sync::atomic::AtomicBool>,
     /// TEST-ONLY: the coordinator's own progress receipts.
     #[cfg(test)]
     pub(crate) receipts: CoordinatorReceipts,
@@ -111,6 +118,19 @@ struct PendingSignal {
     /// at drain charges all of that waiting to the user as fresh quiet time and
     /// restarts the full debounce window from zero.
     received_at: Instant,
+    /// The latest receipt that came from the USER touching this document (an
+    /// open or an edit), or `None` for purely background work: semantic
+    /// enrichment, a generation refresh, an importer republish, an init re-arm.
+    ///
+    /// This, not `received_at`, is what orders dispatch. Background work
+    /// restamps `received_at` for every open document, so ordering on it lets
+    /// a replayed backlog keep overtaking the one document the user is
+    /// actually looking at.
+    user_received_at: Option<Instant>,
+    /// Whether an EDIT (a `did_change`) is behind this signal, as opposed to an
+    /// open. A restart replays every open editor as an open; only an edit says
+    /// the user is working in THIS document right now.
+    edited: bool,
 }
 
 impl SyncCoordinatorHandle {
@@ -120,6 +140,22 @@ impl SyncCoordinatorHandle {
     /// entry instant, never `Instant::now()` taken at some later point on the
     /// path. The debounce window is measured from it.
     pub fn signal(&self, canonical_id: String, uri_str: String, received_at: Instant) {
+        self.deposit_user_signal(canonical_id, uri_str, received_at, false);
+    }
+
+    /// The deposit behind [`Self::signal`]. `edited` is written in the SAME
+    /// locked step as the signal itself, so the coordinator can never drain the
+    /// signal without the fact that an edit is behind it.
+    fn deposit_user_signal(
+        &self,
+        canonical_id: String,
+        uri_str: String,
+        received_at: Instant,
+        edited: bool,
+    ) {
+        if let Some(documents) = self.documents.upgrade() {
+            documents.invalidate_diagnostics(&uri_str);
+        }
         self.pending
             .lock()
             .entry(canonical_id)
@@ -133,6 +169,8 @@ impl SyncCoordinatorHandle {
                 // its own. Assigning would walk the window backwards and fire
                 // the sync while the user is still typing.
                 pending.received_at = pending.received_at.max(received_at);
+                pending.user_received_at = pending.user_received_at.max(Some(received_at));
+                pending.edited |= edited;
             })
             .or_insert(PendingSignal {
                 uri: uri_str,
@@ -140,6 +178,8 @@ impl SyncCoordinatorHandle {
                 force_diagnostics: false,
                 sync_retries_remaining: 1,
                 received_at,
+                user_received_at: Some(received_at),
+                edited,
             });
         // Full means a wake is already queued, which is exactly the desired
         // coalescing behavior. Closed means the server is shutting down.
@@ -163,6 +203,9 @@ impl SyncCoordinatorHandle {
         uri_str: String,
         received_at: Instant,
     ) {
+        if let Some(documents) = self.documents.upgrade() {
+            documents.invalidate_diagnostics(&uri_str);
+        }
         self.pending
             .lock()
             .entry(canonical_id)
@@ -177,6 +220,8 @@ impl SyncCoordinatorHandle {
                 force_diagnostics: true,
                 sync_retries_remaining: 0,
                 received_at,
+                user_received_at: None,
+                edited: false,
             });
         let _ = self.wake_tx.try_send(());
     }
@@ -200,15 +245,44 @@ impl SyncCoordinatorHandle {
         }
     }
 
+    /// A workspace scan started or ended. While one runs, only a document the
+    /// user is EDITING is pulled from the provider: the scan is publishing
+    /// hundreds of documents into the engine, every pull makes it rebuild its
+    /// program against that moving target, and the result is thrown away
+    /// anyway — every open document is re-armed when the scan completes.
+    pub fn set_workspace_scan_in_progress(&self, scanning: bool) {
+        self.scanning
+            .store(scanning, std::sync::atomic::Ordering::Release);
+        let _ = self.wake_tx.try_send(());
+    }
+
+    /// Whether a workspace scan is publishing documents into the engine right now.
+    pub fn workspace_scan_in_progress(&self) -> bool {
+        self.scanning.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The user turned to this document without editing it (an interactive
+    /// request against it). It queues no work; it only moves the document to
+    /// the front of whatever work is already owed to it.
+    pub fn touch(&self, canonical_id: &str) {
+        self.touches
+            .lock()
+            .insert(canonical_id.to_string(), Instant::now());
+        let _ = self.wake_tx.try_send(());
+    }
+
     /// Create an isolated handle/inbox pair for testing the coalescing contract.
     #[cfg(test)]
     pub fn new_for_test() -> (Self, mpsc::Receiver<()>) {
         let (wake_tx, wake_rx) = mpsc::channel(1);
         (
             Self {
+                documents: std::sync::Weak::new(),
                 wake_tx,
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                touches: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                scanning: Arc::default(),
                 receipts: CoordinatorReceipts::default(),
             },
             wake_rx,
@@ -343,7 +417,7 @@ impl ChangeInFlight {
     /// change was received rather than any later instant on the path.
     pub fn signal(&self, uri_str: String) {
         self.handle
-            .signal(self.canonical_id.clone(), uri_str, self.received_at);
+            .deposit_user_signal(self.canonical_id.clone(), uri_str, self.received_at, true);
     }
 
     /// Deposit a REPUBLISH-only signal for this change, stamped with the same
@@ -424,41 +498,140 @@ pub struct SyncCoordinatorDeps {
 /// millisecond form of the one quiet-window policy.
 pub(crate) const DEBOUNCE_MS: u64 = crate::edit_quiet_window::EDIT_QUIET_WINDOW_MS;
 
+/// How many provider diagnostic pulls may be in flight at once.
+///
+/// A pull handed to the provider sits in a queue this side cannot reorder, so
+/// the depth of that queue is the floor on how long the document the user
+/// turns to NEXT must wait. tsserver answers strictly one request at a time, so
+/// anything beyond keeping its pipe fed is pure queueing; TSGO serves requests
+/// concurrently and takes a wider window.
+pub(crate) fn max_inflight_diagnostics(kind: &crate::TypeProviderKind) -> usize {
+    match kind {
+        crate::TypeProviderKind::Tsgo => 8,
+        _ => 2,
+    }
+}
+
+/// How many of those pulls may be BACKGROUND work — documents nobody touched,
+/// re-armed by a scan completing, semantic enrichment or a generation refresh.
+///
+/// Always at least one below the window, so a slot is kept for the document the
+/// user turns to next; and small in absolute terms, because every background
+/// check competes inside the engine with the hover, completion and semantic
+/// tokens of the document the user is actually looking at.
+pub(crate) fn max_background_diagnostics(kind: &crate::TypeProviderKind) -> usize {
+    max_inflight_diagnostics(kind).saturating_sub(1).clamp(1, 2)
+}
+
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
+    let documents = Arc::downgrade(&deps.documents);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let touches: TouchTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let scanning: Arc<std::sync::atomic::AtomicBool> = Arc::default();
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
+    let diagnostics_refresh_rx = deps.documents.subscribe_diagnostics_refresh();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
     #[cfg(test)]
     let receipts = CoordinatorReceipts::default();
     tokio::spawn(coordinator_loop(
         wake_rx,
         semantic_ready_rx,
-        Arc::clone(&pending),
-        Arc::clone(&changes),
+        diagnostics_refresh_rx,
+        CoordinatorShared {
+            inbox: Arc::clone(&pending),
+            changes: Arc::clone(&changes),
+            touches: Arc::clone(&touches),
+            scanning: Arc::clone(&scanning),
+        },
         Arc::new(deps),
         #[cfg(test)]
         receipts.clone(),
     ));
     SyncCoordinatorHandle {
+        documents,
         wake_tx,
         pending,
         changes,
+        touches,
+        scanning,
         #[cfg(test)]
         receipts,
+    }
+}
+
+/// The state a [`SyncCoordinatorHandle`] shares with the coordinator loop.
+struct CoordinatorShared {
+    inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    changes: ChangeTracker,
+    touches: TouchTracker,
+    scanning: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// One in-flight provider pull. Dropping it — on completion OR cancellation —
+/// tells the coordinator a slot is free.
+struct PullSlot(mpsc::Sender<()>);
+
+impl Drop for PullSlot {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+/// Move every deposited signal into the coordinator's pending map.
+fn absorb_inbox(
+    inbox: &parking_lot::Mutex<HashMap<String, PendingSignal>>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+) {
+    let signals = std::mem::take(&mut *inbox.lock());
+    for (canonical_id, signal) in signals {
+        tracing::debug!("sync_coordinator: signal {canonical_id}");
+        if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
+            stale.abort();
+        }
+        // Reset the quiet window for the latest edit only — measured from when
+        // that edit REACHED the server, which the signal carries, NOT from now.
+        // Time spent waiting in the inbox is time the file was already quiet,
+        // and must not be charged to the user again. `max` for the same reason
+        // `signal` uses it: a concurrently-dispatched older handler can deposit
+        // after a newer one.
+        let received_at = signal.received_at;
+        pending_files
+            .entry(canonical_id)
+            .and_modify(|(changed_at, pending)| {
+                *changed_at = (*changed_at).max(received_at);
+                pending.uri = signal.uri.clone();
+                pending.requires_sync |= signal.requires_sync;
+                pending.force_diagnostics |= signal.force_diagnostics;
+                pending.sync_retries_remaining = pending
+                    .sync_retries_remaining
+                    .max(signal.sync_retries_remaining);
+                pending.user_received_at = pending.user_received_at.max(signal.user_received_at);
+                pending.edited |= signal.edited;
+            })
+            .or_insert((received_at, signal));
     }
 }
 
 async fn coordinator_loop(
     mut wake_rx: mpsc::Receiver<()>,
     mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
-    inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
-    changes: ChangeTracker,
+    mut diagnostics_refresh_rx: tokio::sync::broadcast::Receiver<
+        crate::documents::DiagnosticsRefresh,
+    >,
+    shared: CoordinatorShared,
     deps: Arc<SyncCoordinatorDeps>,
     #[cfg(test)] receipts: CoordinatorReceipts,
 ) {
+    let CoordinatorShared {
+        inbox,
+        changes,
+        touches,
+        scanning,
+    } = shared;
     let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
     // Map from canonical_id → (last_change_time, uri_str)
     let mut pending_files: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
@@ -475,47 +648,53 @@ async fn coordinator_loop(
     // the file is re-examined the instant it becomes quiescent.
     let quiescent = |canonical_id: &str| !changes.lock().contains_key(canonical_id);
 
+    // A finished (or cancelled) pull frees its slot and wakes the loop. Capacity
+    // one: a full channel means a wake is already queued.
+    let max_inflight = max_inflight_diagnostics(&deps.type_provider_kind);
+    let max_background = max_background_diagnostics(&deps.type_provider_kind);
+    // When the user last turned to each document, kept PAST the service that
+    // consumed it. A follow-up the server owes a document (its receipt outdated by
+    // another document's pass, native analysis landing) has no editor signal of
+    // its own; without this it would queue as anonymous background work behind
+    // every re-armed open document, and the file the user is in would stay
+    // uncertified for the length of the whole backlog. Bounded by the open set:
+    // an entry leaves when its document is no longer open.
+    let mut last_attention: HashMap<String, Instant> = HashMap::new();
+    // The in-flight pulls that are background work (see `max_background`).
+    let mut background_inflight: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let (pull_done_tx, mut pull_done_rx) = mpsc::channel::<()>(1);
+
     loop {
-        // Calculate next deadline from pending files
-        let next_deadline = pending_files
-            .iter()
-            .filter(|(canonical_id, _)| quiescent(canonical_id))
-            .map(|(_, (t, _))| *t + debounce)
-            .min();
+        // Calculate next deadline from pending files. With every pull slot
+        // taken nothing is dispatchable, so no timer is armed at all: the loop
+        // parks until a slot frees or a signal arrives, instead of spinning on
+        // an already-elapsed deadline.
+        diagnostic_tasks.retain(|_, task| !task.is_finished());
+        // Background work may never fill the window: one slot is always kept
+        // for a document the user touched, which would otherwise wait behind
+        // pulls this side can no longer overtake.
+        background_inflight.retain(|id| diagnostic_tasks.contains_key(id));
+        let user_slots_only = background_inflight.len() >= max_background;
+        let dispatchable = |signal: &PendingSignal, id: &String| {
+            !user_slots_only || signal.user_received_at.is_some() || touches.lock().contains_key(id)
+        };
+        let next_deadline = if diagnostic_tasks.len() >= max_inflight {
+            None
+        } else {
+            pending_files
+                .iter()
+                .filter(|(canonical_id, (_, signal))| {
+                    quiescent(canonical_id) && dispatchable(signal, canonical_id)
+                })
+                .map(|(_, (t, _))| *t + debounce)
+                .min()
+        };
 
         tokio::select! {
             wake = wake_rx.recv() => {
                 match wake {
-                    Some(()) => {
-                        let signals = std::mem::take(&mut *inbox.lock());
-                        for (canonical_id, signal) in signals {
-                            tracing::debug!("sync_coordinator: signal {canonical_id}");
-                            if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
-                                stale.abort();
-                            }
-                            // Reset the quiet window for the latest edit only —
-                            // measured from when that edit REACHED the server,
-                            // which the signal carries, NOT from now. Time spent
-                            // waiting in the inbox is time the file was already
-                            // quiet, and must not be charged to the user again.
-                            // `max` for the same reason `signal` uses it: a
-                            // concurrently-dispatched older handler can deposit
-                            // after a newer one.
-                            let received_at = signal.received_at;
-                            pending_files
-                                .entry(canonical_id)
-                                .and_modify(|(changed_at, pending)| {
-                                    *changed_at = (*changed_at).max(received_at);
-                                    pending.uri = signal.uri.clone();
-                                    pending.requires_sync |= signal.requires_sync;
-                                    pending.force_diagnostics |= signal.force_diagnostics;
-                                    pending.sync_retries_remaining = pending
-                                        .sync_retries_remaining
-                                        .max(signal.sync_retries_remaining);
-                                })
-                                .or_insert((received_at, signal));
-                        }
-                    }
+                    Some(()) => absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks),
                     None => {
                         // All handles dropped — coordinator shutting down.
                         for (_, task) in diagnostic_tasks.drain() {
@@ -523,6 +702,46 @@ async fn coordinator_loop(
                         }
                         return;
                     }
+                }
+            }
+            refresh = diagnostics_refresh_rx.recv() => {
+                let uris = match refresh {
+                    Ok(refresh) => {
+                        if !deps.documents.claim_diagnostics_refresh(&refresh) {
+                            continue;
+                        }
+                        vec![refresh.uri.to_string()]
+                    }
+                    // A burst still owes every open document a current batch.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let uris = deps.documents.open_uris();
+                        for uri in &uris {
+                            deps.documents.invalidate_diagnostics(uri);
+                        }
+                        uris
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+                for uri in uris {
+                    let Ok(parsed) = uri.parse::<Uri>() else { continue; };
+                    let Some(canonical_id) = deps.documents.get_canonical_id(&parsed) else { continue; };
+                    deps.cached_verter_diags.remove(&uri);
+                    if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
+                        stale.abort();
+                    }
+                    let received_at = Instant::now();
+                    let attended = last_attention.get(&canonical_id).copied();
+                    pending_files.entry(canonical_id)
+                        .and_modify(|(changed_at, pending)| {
+                            *changed_at = (*changed_at).max(received_at);
+                            pending.force_diagnostics = true;
+                        })
+                        .or_insert((received_at, PendingSignal {
+                            uri, requires_sync: false, force_diagnostics: true,
+                            sync_retries_remaining: 0, received_at,
+                            user_received_at: attended,
+                            edited: false,
+                        }));
                 }
             }
             semantic_ready = semantic_ready_rx.recv() => {
@@ -543,6 +762,7 @@ async fn coordinator_loop(
                             // An earlier pre-semantic pass may have cached an empty
                             // result under this same document/host generation.
                             deps.cached_verter_diags.remove(&ready.uri);
+                            deps.documents.invalidate_diagnostics(&ready.uri);
                             if let Some(stale) = diagnostic_tasks.remove(&ready.canonical_id) {
                                 stale.abort();
                             }
@@ -551,6 +771,7 @@ async fn coordinator_loop(
                             // receipt to honour — the reason to republish arose
                             // exactly here, so the quiet window starts here.
                             let received_at = Instant::now();
+                            let attended = last_attention.get(&ready.canonical_id).copied();
                             pending_files
                                 .entry(ready.canonical_id)
                                 .and_modify(|(changed_at, pending)| {
@@ -566,6 +787,8 @@ async fn coordinator_loop(
                                         force_diagnostics: true,
                                         sync_retries_remaining: 0,
                                         received_at,
+                                        user_received_at: attended,
+                                        edited: false,
                                     },
                                 ));
                         }
@@ -581,6 +804,7 @@ async fn coordinator_loop(
                             let Ok(parsed) = uri.parse::<Uri>() else { continue; };
                             let Some(canonical_id) = deps.documents.get_canonical_id(&parsed) else { continue; };
                             deps.cached_verter_diags.remove(&uri);
+                            deps.documents.invalidate_diagnostics(&uri);
                             pending_files.insert(
                                 canonical_id,
                                 (
@@ -591,6 +815,8 @@ async fn coordinator_loop(
                                         force_diagnostics: true,
                                         sync_retries_remaining: 0,
                                         received_at,
+                                        user_received_at: None,
+                                        edited: false,
                                     },
                                 ),
                             );
@@ -608,6 +834,8 @@ async fn coordinator_loop(
                     }
                 }
             }
+            // A slot freed: fall through and recompute what is dispatchable.
+            Some(()) = pull_done_rx.recv() => {}
             _ = async {
                 match next_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -620,11 +848,50 @@ async fn coordinator_loop(
                 // would dispatch once per handler for the whole backlog — one
                 // provider sync per keystroke, the exact flood the debounce
                 // exists to prevent.
+                //
+                // ONE document per dispatch: the one the user touched most
+                // recently, then background work newest-first.
+                // The provider sync below is awaited inline, so a batch taken
+                // here is a batch nothing can overtake: a restart replays every
+                // open editor at once, and the document the user touched after
+                // that replay would wait behind the entire backlog in whatever
+                // order the map happened to iterate. Taking only the newest
+                // settled receipt lets each later arrival be considered before
+                // the next older document is started. The rest stay pending
+                // with their deadline already elapsed, so the loop comes
+                // straight back for them.
+                //
+                // Deposits that landed while the previous document was being
+                // served are absorbed FIRST: which select arm runs is not
+                // ordered, and the newest receipt can only win a choice it is
+                // part of.
+                absorb_inbox(&inbox, &mut pending_files, &mut diagnostic_tasks);
+                let touch_tracker = &touches;
+                let touches = touch_tracker.lock().clone();
                 let now = Instant::now();
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
-                    .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
+                    .filter(|(id, (t, signal))| {
+                        now.duration_since(*t) >= debounce
+                            && quiescent(id)
+                            && (!user_slots_only
+                                || signal.user_received_at.is_some()
+                                || touches.contains_key(*id))
+                    })
+                    .max_by(|(left_id, (left, left_signal)), (right_id, (right, right_signal))| {
+                        // `None < Some(_)`: anything the user touched outranks
+                        // purely background work, newest touch first. A touch
+                        // is read LIVE, so it re-ranks work queued before it.
+                        let touched = |id: &String, signal: &PendingSignal| {
+                            signal.user_received_at.max(touches.get(id).copied())
+                        };
+                        touched(left_id, left_signal)
+                            .cmp(&touched(right_id, right_signal))
+                            .then_with(|| left.cmp(right))
+                            .then_with(|| left_id.cmp(right_id))
+                    })
                     .map(|(id, (_, signal))| (id.clone(), signal.clone()))
+                    .into_iter()
                     .collect();
 
                 // The canonicals whose settled signal carried a REAL edit
@@ -637,6 +904,13 @@ async fn coordinator_loop(
 
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
+                    // The touch has done its job once its document is served; what
+                    // it said about the user's attention outlives the service.
+                    let touched = touch_tracker.lock().remove(&canonical_id);
+                    if let Some(attended) = signal.user_received_at.max(touched) {
+                        let latest = last_attention.entry(canonical_id.clone()).or_insert(attended);
+                        *latest = (*latest).max(attended);
+                    }
                     let mut publish_diagnostics = signal.force_diagnostics;
                     let will_sync = signal.requires_sync
                         && deps.needs_provider_sync.remove(&canonical_id).is_some();
@@ -681,6 +955,8 @@ async fn coordinator_loop(
                                             .sync_retries_remaining
                                             .saturating_sub(1),
                                         received_at,
+                                        user_received_at: signal.user_received_at,
+                                        edited: signal.edited,
                                     },
                                 ),
                             );
@@ -700,10 +976,25 @@ async fn coordinator_loop(
                         publish_diagnostics = true;
                     }
 
+                    if publish_diagnostics
+                        && scanning.load(std::sync::atomic::Ordering::Acquire)
+                        && !signal.edited
+                    {
+                        // Synced above; pulled by the post-scan re-arm.
+                        publish_diagnostics = false;
+                    }
+
                     if publish_diagnostics {
 
                         if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
                             stale.abort();
+                        }
+                        if signal.user_received_at.is_none()
+                            && !touches.contains_key(&canonical_id)
+                        {
+                            background_inflight.insert(canonical_id.clone());
+                        } else {
+                            background_inflight.remove(&canonical_id);
                         }
                         let task_deps = Arc::clone(&deps);
                         let task_canonical_id = canonical_id.clone();
@@ -716,7 +1007,9 @@ async fn coordinator_loop(
                                 let diag_tasks_live = Arc::clone(&receipts.diag_tasks_live);
                                 #[cfg(test)]
                                 let diags_published_count = Arc::clone(&receipts.diags_published_count);
+                                let slot = PullSlot(pull_done_tx.clone());
                                 async move {
+                                    let _slot = slot;
                                     {
                                         #[cfg(test)]
                                         let _live = DiagTaskLiveGuard::new(diag_tasks_live);
@@ -739,6 +1032,16 @@ async fn coordinator_loop(
                     }
                 }
                 arm_open_importer_republish(&deps, &settled_edits, &mut pending_files);
+                // Bounded by the open set: prune only once it has outgrown it.
+                let open_uris = deps.documents.open_uris();
+                if last_attention.len() > open_uris.len() {
+                    let open: std::collections::HashSet<String> = open_uris
+                        .iter()
+                        .filter_map(|uri| uri.parse::<Uri>().ok())
+                        .filter_map(|uri| deps.documents.get_canonical_id(&uri))
+                        .collect();
+                    last_attention.retain(|canonical_id, _| open.contains(canonical_id));
+                }
                 diagnostic_tasks.retain(|_, task| !task.is_finished());
                 #[cfg(test)]
                 receipts
@@ -856,6 +1159,8 @@ fn arm_open_importer_republish(
                         force_diagnostics: true,
                         sync_retries_remaining: 0,
                         received_at,
+                        user_received_at: None,
+                        edited: false,
                     },
                 ));
         }
@@ -1344,14 +1649,7 @@ async fn sync_file(
     }
     if deps.carrier_publish_coordinator.is_some() {
         deps.client
-            .send_notification::<crate::server::protocol_types::TypeProviderSyncComplete>(
-                crate::server::protocol_types::TypeProviderSyncCompleteParams {
-                    gen: deps
-                        .documents
-                        .host()
-                        .last_content_transition_generation(canonical_id),
-                },
-            )
+            .send_notification::<crate::server::protocol_types::CarrierStoreChanged>(())
             .await;
     }
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
@@ -1502,28 +1800,59 @@ async fn clear_provider_sync_state(
 /// DROPPED and the Verter-only set publishes (fail closed). Falls back to the
 /// verter diagnostics alone when no capturable Shadow surface exists or the
 /// provider errors.
+pub(crate) struct ProviderDiagnosticBatch {
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) complete: bool,
+    pub(crate) surface: Option<Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>>,
+}
+
+impl ProviderDiagnosticBatch {
+    fn incomplete(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            complete: false,
+            surface: None,
+        }
+    }
+    pub(crate) fn complete(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            complete: true,
+            surface: None,
+        }
+    }
+    fn with_surface(
+        mut self,
+        snapshot: &Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+    ) -> Self {
+        self.surface = Some(Arc::clone(snapshot));
+        self
+    }
+}
+
 async fn self_file_diagnostics(
-    deps: &SyncCoordinatorDeps,
+    documents: &DocumentRegistry,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    encoding: PositionEncodingKind,
     tp: &dyn TypeProvider,
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
-) -> Vec<Diagnostic> {
-    let store = deps.documents.provider_surfaces();
+) -> ProviderDiagnosticBatch {
+    let store = documents.provider_surfaces();
     let Some(snapshot) = crate::provider_surface_store::capture_committed_shadow_surface(
         store,
-        &deps.provider_sync_states,
-        &deps.documents,
+        provider_sync_states,
+        documents,
         canonical_id,
     ) else {
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
     // No usable mapper ⇒ the provider's offsets could not be mapped back onto
     // the module source ⇒ fail closed to Verter-only.
     let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
 
-    let encoding = deps.position_encoding.read().clone();
     let provider_li = LineIndex::new(&snapshot.provider_content, encoding.clone());
     let source_li = LineIndex::new(&snapshot.carrier_source, encoding.clone());
     let encoding_for_related = encoding;
@@ -1534,7 +1863,7 @@ async fn self_file_diagnostics(
             // no longer matches must be DROPPED (fail closed).
             if !crate::provider_surface_store::captured_surface_still_valid_for_canonical(
                 store,
-                &deps.documents,
+                documents,
                 canonical_id,
                 &snapshot,
             ) {
@@ -1542,15 +1871,15 @@ async fn self_file_diagnostics(
                     "sync_coordinator: dropping self-file provider diagnostics for \
                      {canonical_id} — captured surface no longer valid"
                 );
-                return verter_diags;
+                return ProviderDiagnosticBatch::incomplete(verter_diags);
             }
             // Related-span map-back: a same-file related span maps through the
             // in-context mapper; a real `.ts` related span reads its own source via
             // the VFS reader. A FOREIGN carrier `.tsx` related span needs the
             // server-side external resolver (unavailable on this background path)
             // and drops fail-closed (`external_resolver: None`).
-            let carrier_source_exists = |p: &str| deps.documents.host().get_source(p).is_some();
-            merge::merge_diagnostics(
+            let carrier_source_exists = |p: &str| documents.host().get_source(p).is_some();
+            ProviderDiagnosticBatch::complete(merge::merge_diagnostics(
                 verter_diags,
                 type_diags,
                 canonical_id,
@@ -1562,16 +1891,17 @@ async fn self_file_diagnostics(
                 encoding_for_related,
                 &|p: &str| {
                     crate::server::block_in_place_guarded(|| {
-                        deps.documents.host().workspace_read().read_file(p)
+                        documents.host().workspace_read().read_file(p)
                     })
                 },
-            )
+            ))
+            .with_surface(&snapshot)
         }
         Err(error) => {
             tracing::warn!(
                 "sync_coordinator: type provider error for self-file document {canonical_id}: {error}"
             );
-            verter_diags
+            ProviderDiagnosticBatch::incomplete(verter_diags)
         }
     }
 }
@@ -1586,7 +1916,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         Ok(u) => u,
         Err(_) => return,
     };
-    let Some(snapshot) = deps.documents.snapshot_identity(&uri) else {
+    let Some(publication) = deps.documents.begin_diagnostics_publication(&uri) else {
         return;
     };
     let verter_diagnostics = compute_verter_diagnostics(deps, canonical_id, &uri);
@@ -1603,33 +1933,33 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
             .collect::<Vec<_>>()
             .join("|")
     );
-    if !deps.documents.snapshot_identity_is_current(&uri, &snapshot) {
-        return;
-    }
     // Framework/native diagnostics are an independent snapshot lane. Publish
     // them as soon as the current revision is available; a cold TypeScript
     // configured-project build must not starve lint, ownership, or framework
     // declaration hints. The provider result replaces this staged batch below.
-    deps.client
+    deps.documents
         .publish_diagnostics(
-            uri.clone(),
+            &deps.client,
+            &uri,
+            &publication,
             verter_diagnostics.clone(),
-            Some(snapshot.version),
+            deps.type_provider.is_none(),
+            None,
         )
         .await;
-
     if deps.type_provider.is_none() {
         return;
     }
-    let diagnostics = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
-    // Revalidate after every provider await. Provider synchronization and API
-    // reconciliation deliberately share a work bit, so only the editor's LSP
-    // version is a valid freshness authority for diagnostics publication.
-    if !deps.documents.snapshot_identity_is_current(&uri, &snapshot) {
-        return;
-    }
-    deps.client
-        .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
+    let batch = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
+    deps.documents
+        .publish_diagnostics(
+            &deps.client,
+            &uri,
+            &publication,
+            batch.diagnostics,
+            batch.complete,
+            batch.surface,
+        )
         .await;
 }
 
@@ -1646,7 +1976,9 @@ async fn compute_merged_diagnostics(
     uri: &Uri,
 ) -> Vec<Diagnostic> {
     let verter_diags = compute_verter_diagnostics(deps, canonical_id, uri);
-    merge_provider_diagnostics(deps, canonical_id, verter_diags).await
+    merge_provider_diagnostics(deps, canonical_id, verter_diags)
+        .await
+        .diagnostics
 }
 
 /// Compute diagnostics owned by Verter without entering the TypeScript
@@ -1696,25 +2028,12 @@ async fn merge_provider_diagnostics(
     deps: &SyncCoordinatorDeps,
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
-) -> Vec<Diagnostic> {
-    // A self-file document (rune module or plain TS-family script) has NO IDE
-    // TSX — its provider buffer is served from its OWN canonical path. Route
-    // its debounced diagnostics through the generalized self-file projection
-    // (the document's rewrite-aware mapper + own-path provider buffer), so
-    // type diagnostics land at the correctly offset source position — NOT
-    // through the carrier IDE-source-map path below (which requires an
-    // `ide_path` a self-file document never has).
-    if let Some(tp) = &deps.type_provider {
-        if crate::server::self_file_language_for(canonical_id).is_some() {
-            return self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
-        }
-    }
-
+) -> ProviderDiagnosticBatch {
     let Some(tp) = &deps.type_provider else {
-        return verter_diags;
+        return ProviderDiagnosticBatch::complete(verter_diags);
     };
     let encoding = deps.position_encoding.read().clone();
-    carrier_provider_diagnostics(
+    provider_diagnostics_batch(
         &deps.documents,
         &deps.provider_sync_states,
         tp.as_ref(),
@@ -1723,6 +2042,31 @@ async fn merge_provider_diagnostics(
         verter_diags,
     )
     .await
+}
+
+/// Shared routing for both startup sweeps and debounced publications. Plain
+/// scripts and rune modules query their own shadow surface, carriers their IDE.
+pub(crate) async fn provider_diagnostics_batch(
+    documents: &DocumentRegistry,
+    states: &DashMap<String, ProviderSyncState>,
+    provider: &dyn TypeProvider,
+    encoding: PositionEncodingKind,
+    canonical_id: &str,
+    native: Vec<Diagnostic>,
+) -> ProviderDiagnosticBatch {
+    if crate::server::self_file_language_for(canonical_id).is_some() {
+        self_file_diagnostics(documents, states, encoding, provider, canonical_id, native).await
+    } else {
+        carrier_provider_diagnostics_batch(
+            documents,
+            states,
+            provider,
+            encoding,
+            canonical_id,
+            native,
+        )
+        .await
+    }
 }
 
 /// Merge a carrier's provider type diagnostics into `verter_diags` for a
@@ -1739,14 +2083,35 @@ async fn merge_provider_diagnostics(
 /// Verter-only set publishes (fail closed) — the debounced coordinator
 /// republishes after the next sync lands. Returns `verter_diags` unchanged
 /// when the query context is unavailable.
+#[cfg(test)]
 pub(crate) async fn carrier_provider_diagnostics(
+    documents: &DocumentRegistry,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    tp: &dyn TypeProvider,
+    encoding: PositionEncodingKind,
+    canonical_id: &str,
+    verter_diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    carrier_provider_diagnostics_batch(
+        documents,
+        provider_sync_states,
+        tp,
+        encoding,
+        canonical_id,
+        verter_diags,
+    )
+    .await
+    .diagnostics
+}
+
+pub(crate) async fn carrier_provider_diagnostics_batch(
     documents: &DocumentRegistry,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     tp: &dyn crate::type_provider::traits::TypeProvider,
     encoding: PositionEncodingKind,
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
-) -> Vec<Diagnostic> {
+) -> ProviderDiagnosticBatch {
     let store = documents.provider_surfaces();
     let Some(snapshot) = crate::provider_surface_store::capture_committed_carrier_ide_surface(
         store,
@@ -1757,7 +2122,7 @@ pub(crate) async fn carrier_provider_diagnostics(
         tracing::debug!(
             "carrier_provider_diagnostics: no committed current IDE surface for {canonical_id}"
         );
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
     // No usable source map ⇒ the provider's offsets could not be mapped back
     // onto the carrier ⇒ fail closed to Verter-only.
@@ -1765,7 +2130,7 @@ pub(crate) async fn carrier_provider_diagnostics(
         tracing::debug!(
             "carrier_provider_diagnostics: current IDE surface has no source map for {canonical_id}"
         );
-        return verter_diags;
+        return ProviderDiagnosticBatch::incomplete(verter_diags);
     };
     let tsx_path = snapshot.stamp.provider_path.to_string();
     let tsx_li = LineIndex::new(&snapshot.provider_content, encoding.clone());
@@ -1786,7 +2151,7 @@ pub(crate) async fn carrier_provider_diagnostics(
                      captured surface no longer valid",
                     canonical_id
                 );
-                return verter_diags;
+                return ProviderDiagnosticBatch::incomplete(verter_diags);
             }
             tracing::debug!(
                 "carrier_provider_diagnostics: merge {} verter + {} type diags for {}",
@@ -1800,7 +2165,7 @@ pub(crate) async fn carrier_provider_diagnostics(
             // span needs the server-side external resolver (unavailable on
             // this background path) → drops fail-closed (`None`).
             let carrier_source_exists = |p: &str| documents.host().get_source(p).is_some();
-            merge::merge_diagnostics(
+            ProviderDiagnosticBatch::complete(merge::merge_diagnostics(
                 verter_diags,
                 type_diags,
                 &tsx_path,
@@ -1815,14 +2180,15 @@ pub(crate) async fn carrier_provider_diagnostics(
                         documents.host().workspace_read().read_file(p)
                     })
                 },
-            )
+            ))
+            .with_surface(&snapshot)
         }
         Err(e) => {
             tracing::warn!(
                 "carrier_provider_diagnostics: type provider error for {}: {e}",
                 canonical_id
             );
-            verter_diags
+            ProviderDiagnosticBatch::incomplete(verter_diags)
         }
     }
 }

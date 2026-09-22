@@ -25,6 +25,8 @@ use verter_session::external_ts::{
 };
 use verter_session::VerterHost;
 use verter_workspace::published_state::PublishedRoot;
+use verter_workspace::workspace_snapshot::WorkspaceSnapshot;
+use verter_workspace::{decide_generated_unit_admission, CanonicalPath, GeneratedUnitAdmission};
 
 use crate::external_ts::TsgoEngineBackend;
 
@@ -46,11 +48,28 @@ const OWNED_GATE_BOOTSTRAP_VERSION: &str = "";
 /// re-decision, the generation for the transport re-arm, and `bound.project()` — the
 /// version-independent owning tsconfig — for the `--api` overlay), so a bound carrier
 /// is resolved EXACTLY ONCE for both the OWNED gate and the SHARED union.
-#[derive(Debug)]
+///
+/// It also RETAINS the exact workspace snapshot the binding was resolved over, so the
+/// generated-unit admission a SHARED write needs ([`Self::admit_generated_units`]) is
+/// decided against the SAME membership that decided ownership — never a later
+/// publication. A cached `BoundCarrier` lives exactly one admission epoch, so a changed
+/// `include`/`files`/`exclude` (a new publication) can never be answered from it.
 pub struct BoundCarrier {
     bound: BoundProject,
     binding: ProjectBinding,
     generation: u64,
+    snapshot: Arc<WorkspaceSnapshot>,
+}
+
+impl std::fmt::Debug for BoundCarrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The retained snapshot is the whole project graph — identify it, never dump it.
+        f.debug_struct("BoundCarrier")
+            .field("bound", &self.bound)
+            .field("binding", &self.binding)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BoundCarrier {
@@ -70,6 +89,23 @@ impl BoundCarrier {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Decide whether EVERY generated unit of `units` is admitted to this carrier's
+    /// owning configured project, over the snapshot the binding was resolved at.
+    ///
+    /// Owning the carrier SOURCE proves nothing about the units generated for it (an
+    /// extension-specific `src/**/*.vue` include owns `Foo.vue` and matches no
+    /// `Foo.vue.tsx`), so this is the separate proof a write into an engine Verter does
+    /// not own must hold. The membership authority is the workspace's; nothing here
+    /// re-derives it.
+    #[must_use]
+    pub fn admit_generated_units(&self, units: &[CanonicalPath]) -> GeneratedUnitAdmission {
+        decide_generated_unit_admission(
+            self.snapshot.as_ref(),
+            &CanonicalPath::new(self.binding.tsconfig_uri()),
+            units,
+        )
     }
 }
 
@@ -140,6 +176,18 @@ pub fn resolve_carrier(
     ts_version: Arc<str>,
     readiness_mode: OwnershipReadinessMode,
 ) -> Option<(CarrierOwnershipResolution, u64)> {
+    resolve_carrier_over_snapshot(host, source, ts_version, readiness_mode)
+        .map(|(resolution, generation, _)| (resolution, generation))
+}
+
+/// [`resolve_carrier`] plus the exact workspace snapshot the resolution was decided over,
+/// for a caller that must decide a FURTHER membership fact against the same publication.
+fn resolve_carrier_over_snapshot(
+    host: &VerterHost,
+    source: &str,
+    ts_version: Arc<str>,
+    readiness_mode: OwnershipReadinessMode,
+) -> Option<(CarrierOwnershipResolution, u64, Arc<WorkspaceSnapshot>)> {
     let ws_read = host.workspace_read();
     let published = ws_read.published_root()?;
     let generation = published.snapshot.generation.0;
@@ -177,7 +225,11 @@ pub fn resolve_carrier(
         &env_dims_source,
         ownership_ready,
     );
-    Some((resolver.resolve(source, None), generation))
+    Some((
+        resolver.resolve(source, None),
+        generation,
+        Arc::clone(&published.snapshot),
+    ))
 }
 
 /// How [`resolve_carrier`] treats a PRESENT-but-cold published snapshot.
@@ -214,7 +266,7 @@ pub enum OwnershipReadinessMode {
 #[must_use]
 pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBinding {
     let ts_version: Arc<str> = Arc::from(OWNED_GATE_BOOTSTRAP_VERSION);
-    let Some((resolution, generation)) = resolve_carrier(
+    let Some((resolution, generation, snapshot)) = resolve_carrier_over_snapshot(
         host.as_ref(),
         source,
         Arc::clone(&ts_version),
@@ -234,6 +286,7 @@ pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBin
                     bound,
                     binding,
                     generation,
+                    snapshot,
                 })),
                 Err(_) => CarrierBinding::EnsureFailed,
             }
@@ -282,10 +335,27 @@ const ADMISSION_FENCE_MAX_RETRIES: usize = 3;
 /// Epoch equality requires ALL THREE to match — the publication by POINTER identity, the
 /// two generations by value. `PartialEq` is hand-written (not derived): `PublishedRoot` is
 /// compared by `Arc` pointer, never by content.
-struct AdmissionEpoch {
+pub(crate) struct AdmissionEpoch {
     published: Option<Arc<PublishedRoot>>,
     content_generation: u64,
     project_generation: u64,
+}
+
+impl AdmissionEpoch {
+    /// The host's CURRENT admission epoch, read cheaply (NO resolve): the live published
+    /// root RETAINED as the `Arc<PublishedRoot>` identity (`None` before the first publish)
+    /// plus the content + monotonic project generations.
+    pub(crate) fn current(host: &Arc<VerterHost>) -> Self {
+        let ws_read = host.workspace_read();
+        let published = ws_read.published_root();
+        let content_generation = ws_read.content_generation();
+        let project_generation = host.project_type_store().current_project_generation();
+        Self {
+            published,
+            content_generation,
+            project_generation,
+        }
+    }
 }
 
 impl PartialEq for AdmissionEpoch {
@@ -456,15 +526,7 @@ impl CarrierAdmissionCache {
     /// root RETAINED as the `Arc<PublishedRoot>` identity (`None` before the first publish)
     /// plus the content + monotonic project generations.
     fn current_epoch(host: &Arc<VerterHost>) -> AdmissionEpoch {
-        let ws_read = host.workspace_read();
-        let published = ws_read.published_root();
-        let content_generation = ws_read.content_generation();
-        let project_generation = host.project_type_store().current_project_generation();
-        AdmissionEpoch {
-            published,
-            content_generation,
-            project_generation,
-        }
+        AdmissionEpoch::current(host)
     }
 
     /// Resolve the admission decision for `source` through the ONE shared

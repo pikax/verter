@@ -2,7 +2,7 @@
 //! typed eligibility facts + the warm cache (no engine contact).
 //!
 //! These are the decision-layer half of the risk-class negatives:
-//!  - FAIL-OPEN / eligibility-gates-SHARED: each of the five provenance facts
+//!  - FAIL-OPEN / eligibility-gates-SHARED: each of the provenance facts
 //!    missing IN TURN forces OWNED; only the all-positive set serves SHARED.
 //!  - SPLIT-BRAIN: a reconnect (bumped editor-session generation) mints a FRESH
 //!    `EngineIdentity` (never the prior one) and the prior warm entry is
@@ -18,19 +18,21 @@ use std::time::Duration;
 
 use verter_session::external_ts::{
     resolve_reference_canonical_path, AttachFact, BindingFact, CarrierOwnershipResolution,
-    ConfigPathProbe, EditorBindingFact, EngineSessionFacts, EngineWarmCache, OwnedReason,
-    OwnedSessionFacts, ProjectBinding, ProxyFact, ReferenceInput, ServeMode, ServingProvenance,
-    SharedSessionFacts, VersionGateFact,
+    ConfigPathProbe, EditorBindingFact, EngineSessionFacts, EngineWarmCache,
+    GeneratedUnitAdmissionFact, OwnedReason, OwnedSessionFacts, ProjectBinding, ProxyFact,
+    ReferenceInput, ServeMode, ServingProvenance, SharedSessionFacts, VersionGateFact,
 };
 use verter_session::external_ts::{EnvDims, ProjectEnvDimsSource};
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_type_runtime::protocol::TypeProviderError;
+use verter_workspace::{GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmissionReason};
 
 use super::{
-    apply_local_sync_commit, decide_shared_serve, promote_synced, require_synced_carrier_content,
-    reserve_carrier_capturing, resolve_editor_binding, stable_project_identity, sync_commit,
-    synced_content, CarrierSlot, CarrierSyncState, CarrierWireOp, InjectAction, PendingKind,
-    SharedModeController, SyncCommit, SyncMutex,
+    apply_local_sync_commit, carrier_wire_error, decide_shared_serve, promote_synced,
+    require_synced_carrier_content, reserve_carrier_capturing, resolve_editor_binding,
+    stable_project_identity, sync_commit, synced_content, CarrierSlot, CarrierSyncState,
+    CarrierWireError, CarrierWireFailure, CarrierWireOp, InjectAction, PendingKind,
+    SharedModeController, SyncCommit, SyncMutex, WireOutcome,
 };
 
 fn pid(b: u8) -> ProjectIdentity {
@@ -124,6 +126,7 @@ struct Positive {
     version_gate: VersionGateFact,
     attach: AttachFact,
     binding: BindingFact,
+    generated_units: GeneratedUnitAdmissionFact,
     proxy: ProxyFact,
     editor_binding: EditorBindingFact,
     identity: ProjectIdentity,
@@ -137,6 +140,7 @@ fn positive(identity: ProjectIdentity, generation: u64) -> Positive {
         },
         attach: AttachFact::Live(shared_session(generation)),
         binding: BindingFact::from_resolution(&test_binding(identity)),
+        generated_units: admitted(),
         proxy: ProxyFact::Available,
         editor_binding: EditorBindingFact::evaluate(&identity, &identity),
         identity,
@@ -144,12 +148,25 @@ fn positive(identity: ProjectIdentity, generation: u64) -> Positive {
     }
 }
 
+/// The positive generated-unit admission fact the all-positive fixtures carry.
+fn admitted() -> GeneratedUnitAdmissionFact {
+    GeneratedUnitAdmissionFact::Admitted(GeneratedUnitAdmissionFingerprint::from_raw(1))
+}
+
 fn decide(p: &Positive, warm: &mut EngineWarmCache) -> ServeMode {
+    decide_with_reason(p, warm).0
+}
+
+fn decide_with_reason(
+    p: &Positive,
+    warm: &mut EngineWarmCache,
+) -> (ServeMode, Option<OwnedReason>) {
     // The queried project declares NO references, so its closure is itself alone.
-    decide_shared_serve(
+    let decision = decide_shared_serve(
         p.version_gate.clone(),
         p.attach.clone(),
         p.binding,
+        p.generated_units,
         p.proxy,
         p.editor_binding,
         p.identity,
@@ -160,8 +177,8 @@ fn decide(p: &Positive, warm: &mut EngineWarmCache) -> ServeMode {
         p.generation,
         p.identity,
         warm,
-    )
-    .mode()
+    );
+    (decision.mode(), decision.decision().owned_reason())
 }
 
 // ── FAIL-OPEN / eligibility-gates-SHARED ──
@@ -213,6 +230,32 @@ fn each_missing_positive_fact_fails_closed_to_owned() {
             ServeMode::Owned,
             "no resolved project binding must fail closed to OWNED"
         );
+    }
+    // A bound project whose generated units are refused — or never proven — is
+    // OWNED under its own reason, never "not bound".
+    for (fact, reason) in [
+        (
+            GeneratedUnitAdmissionFact::NotAdmitted(
+                GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            ),
+            OwnedReason::GeneratedUnitsNotAdmitted(
+                GeneratedUnitNonAdmissionReason::NotMatchedByIncludeOrFiles,
+            ),
+        ),
+        (
+            GeneratedUnitAdmissionFact::Unproven,
+            OwnedReason::GeneratedUnitAdmissionUnproven,
+        ),
+    ] {
+        let mut warm = EngineWarmCache::new();
+        let mut p = positive(id, 1);
+        p.generated_units = fact;
+        assert_eq!(
+            decide_with_reason(&p, &mut warm),
+            (ServeMode::Owned, Some(reason)),
+            "generated units that are not proven admitted must fail closed to OWNED"
+        );
+        assert!(warm.is_empty(), "an OWNED decision warms nothing");
     }
     // 4. Proxy unavailable.
     {
@@ -344,6 +387,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
             version_gate.clone(),
             AttachFact::Live(shared_session(gen)),
             BindingFact::from_resolution(&test_binding(project_b)),
+            admitted(),
             ProxyFact::Available,
             EditorBindingFact::evaluate(&project_b, &project_b),
             project_b,
@@ -370,6 +414,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
             version_gate.clone(),
             AttachFact::Live(shared_session(gen)),
             BindingFact::from_resolution(&test_binding(project_a)),
+            admitted(),
             ProxyFact::Available,
             EditorBindingFact::evaluate(&project_a, &project_a),
             project_a,
@@ -407,6 +452,7 @@ fn controller_recomputes_editor_binding_per_decided_binding() {
     // on A and cold-misses the primed B-slot.
     let decided = controller.decide(
         BindingFact::from_resolution(&test_binding(project_b)),
+        admitted(),
         project_b,
         Arc::clone(&ts),
         &[],
@@ -450,6 +496,7 @@ fn redirect_reference_to_absent_member_fails_closure_closed_to_owned() {
         p.version_gate.clone(),
         p.attach.clone(),
         p.binding,
+        p.generated_units,
         p.proxy,
         p.editor_binding,
         a,
@@ -502,6 +549,7 @@ fn reconnect_mints_fresh_identity_and_prior_warm_entry_is_unreachable() {
             },
             AttachFact::Live(shared_session(attach_gen)),
             BindingFact::from_resolution(&test_binding(id)),
+            admitted(),
             ProxyFact::Available,
             EditorBindingFact::evaluate(&id, &id),
             id,
@@ -728,25 +776,31 @@ fn reserve_classifies_vacant_synced_and_unsynced_slots() {
 /// outcome (`Promote` always) would leave divergent served state after a failed barrier.
 #[test]
 fn sync_commit_maps_barrier_outcome_to_consistent_action() {
-    assert_eq!(sync_commit(InjectAction::Open, true), SyncCommit::Promote);
-    assert_eq!(sync_commit(InjectAction::Change, true), SyncCommit::Promote);
     assert_eq!(
-        sync_commit(InjectAction::ReconcileThenOpen, true),
+        sync_commit(InjectAction::Open, WireOutcome::Synced),
+        SyncCommit::Promote
+    );
+    assert_eq!(
+        sync_commit(InjectAction::Change, WireOutcome::Synced),
+        SyncCommit::Promote
+    );
+    assert_eq!(
+        sync_commit(InjectAction::ReconcileThenOpen, WireOutcome::Synced),
         SyncCommit::Promote,
         "a reconcile-then-open that syncs promotes like any accepted open"
     );
     assert_eq!(
-        sync_commit(InjectAction::Open, false),
+        sync_commit(InjectAction::Open, WireOutcome::SendFailed),
         SyncCommit::RetractOpen,
         "a first-open barrier failure must RETRACT the possibly-open Program file (no phantom open)"
     );
     assert_eq!(
-        sync_commit(InjectAction::ReconcileThenOpen, false),
+        sync_commit(InjectAction::ReconcileThenOpen, WireOutcome::SendFailed),
         SyncCommit::RetractOpen,
         "a reconcile-then-open barrier failure also retracts the possibly-open Program file"
     );
     assert_eq!(
-        sync_commit(InjectAction::Change, false),
+        sync_commit(InjectAction::Change, WireOutcome::SendFailed),
         SyncCommit::MarkOpenUnsyncedContent,
         "a didChange barrier failure must fail closed to OpenUnsyncedContent (never keep the \
          possibly-stale prior synced content, never the unaccepted new text)"
@@ -935,7 +989,7 @@ fn didchange_failure_marks_open_unsynced_content_non_serveable() {
         &injected,
         carrier,
         Arc::from("v1"),
-        sync_commit(InjectAction::Open, true),
+        sync_commit(InjectAction::Open, WireOutcome::Synced),
     );
     assert_eq!(
         synced_content(&injected, carrier, carrier).as_deref(),
@@ -952,7 +1006,7 @@ fn didchange_failure_marks_open_unsynced_content_non_serveable() {
         &injected,
         carrier,
         Arc::from("v2"),
-        sync_commit(InjectAction::Change, false),
+        sync_commit(InjectAction::Change, WireOutcome::SendFailed),
     );
     assert!(
         matches!(
@@ -1105,14 +1159,14 @@ fn open_failure_marks_slot_possibly_open_unsynced_for_reconcile() {
     );
     // The first-open barrier FAILS → the RetractOpen commit marks the slot PossiblyOpenUnsynced.
     assert_eq!(
-        sync_commit(InjectAction::Open, false),
+        sync_commit(InjectAction::Open, WireOutcome::SendFailed),
         SyncCommit::RetractOpen
     );
     apply_local_sync_commit(
         &injected,
         carrier,
         Arc::from("v1"),
-        sync_commit(InjectAction::Open, false),
+        sync_commit(InjectAction::Open, WireOutcome::SendFailed),
     );
     assert!(
         matches!(
@@ -1321,7 +1375,7 @@ async fn failed_first_open_does_not_drop_a_later_committed_change() {
     });
     poll_until_pending_behind_gate(&mut b, state.gate_parked_notify()).await;
 
-    // Release A: its first-open barrier FAILS → retract + drop the slot; THEN B runs.
+    // Release A: its first-open FAILS → a confirmed retract drops the slot; THEN B runs.
     release_open.notify_one();
     let a_res = a.await.unwrap();
     let b_res = b.await;
@@ -1334,21 +1388,18 @@ async fn failed_first_open_does_not_drop_a_later_committed_change() {
         "the later injection commits after the failed first-open"
     );
 
-    // The failed first-open marked its slot PossiblyOpenUnsynced + best-effort retracted; B
-    // then RECONCILED the uncertain shell (a bounded retract) and re-OPENED the LATEST content
-    // — the failed earlier op never clobbered B's commit, and B never bare-re-didOpened onto an
-    // uncertain open.
+    // The failed first-open retracted, and the retract was CONFIRMED — the Program holds no
+    // overlay — so B OPENED the LATEST content directly: the failed earlier op never clobbered
+    // B's commit, and no second close went out for an overlay already known closed.
     assert_eq!(
         *record.lock().unwrap(),
         vec![
             "open:v1".to_string(),
             "retract".to_string(),
-            "retract".to_string(),
             "open:v2".to_string()
         ],
-        "ordered: the failed first-open marks the slot PossiblyOpenUnsynced + best-effort \
-         retracts, then the later op RECONCILES (a bounded retract) before re-opening the latest \
-         content — never a bare re-didOpen onto an uncertain open"
+        "ordered: the failed first-open retracts once; its confirmed retract leaves the carrier \
+         vacant, so the later op opens the latest content without a second close"
     );
     assert_eq!(
         state.synced_content(carrier, carrier).as_deref(),
@@ -2728,4 +2779,147 @@ async fn reconcile_close_failure_aborts_the_fresh_open() {
         state.synced_content(carrier, carrier).is_none(),
         "the shell serves no content after a failed reconcile close (fail-closed)"
     );
+}
+
+/// A recording sink for the first-open recovery tests: the FIRST open fails with
+/// `first_open`, the retract answers `retract_ok`, and every later write syncs.
+fn first_open_failure_sink(
+    record: &Arc<std::sync::Mutex<Vec<String>>>,
+    first_open: fn() -> CarrierWireError,
+    retract_ok: bool,
+) -> impl Fn(CarrierWireOp) -> std::future::Ready<Result<(), CarrierWireError>> {
+    let record = Arc::clone(record);
+    move |op: CarrierWireOp| {
+        let mut record = record.lock().unwrap();
+        let first = record.is_empty();
+        std::future::ready(match op {
+            CarrierWireOp::Open { content, .. } => {
+                record.push(format!("open:{content}"));
+                if first {
+                    Err(first_open())
+                } else {
+                    Ok(())
+                }
+            }
+            CarrierWireOp::Change { content, .. } => {
+                record.push(format!("change:{content}"));
+                Ok(())
+            }
+            CarrierWireOp::Close => {
+                record.push("close".to_string());
+                if retract_ok {
+                    Ok(())
+                } else {
+                    Err(TypeProviderError::new("close failed").into())
+                }
+            }
+        })
+    }
+}
+
+/// A first `didOpen` that reached the wire but whose barrier went unanswered leaves the
+/// overlay OPEN in the engine: retracting it costs the engine a file delete and the retry
+/// a file create. The slot commits as open-with-unconfirmed-content — nothing is served —
+/// and the retry is ONE full-text `didChange`.
+#[tokio::test]
+async fn sent_unconfirmed_first_open_is_kept_and_retried_as_a_change() {
+    let state = CarrierSyncState::new();
+    let carrier = "/ws/Kept.vue.tsx";
+    let record = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = || {
+        first_open_failure_sink(
+            &record,
+            || CarrierWireError::sent_unconfirmed(TypeProviderError::new("barrier unanswered")),
+            true,
+        )
+    };
+
+    let first = state
+        .drive(carrier, PendingKind::Inject(Arc::from("v1")), sink())
+        .await;
+    assert!(first.is_err(), "an unconfirmed open is not served from");
+    assert_eq!(*record.lock().unwrap(), vec!["open:v1".to_string()]);
+    assert!(
+        matches!(
+            state.injected.lock().get(carrier),
+            Some(CarrierSlot::OpenUnsyncedContent)
+        ),
+        "the overlay is open; only its content is unconfirmed"
+    );
+    assert_eq!(state.synced_content(carrier, carrier), None);
+
+    state
+        .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink())
+        .await
+        .expect("the retry syncs");
+    assert_eq!(
+        *record.lock().unwrap(),
+        vec!["open:v1".to_string(), "change:v2".to_string()],
+        "the retry is one didChange — never a close and a re-open"
+    );
+    assert_eq!(
+        state.synced_content(carrier, carrier).as_deref(),
+        Some("v2")
+    );
+}
+
+/// A first `didOpen` whose SEND failed is retracted. A CONFIRMED retract proves the engine
+/// holds no overlay, so the slot is dropped and the retry is a plain `didOpen`; only a
+/// retract that itself failed leaves the open-uncertain shell, whose retry closes first.
+#[tokio::test]
+async fn confirmed_retract_of_a_failed_first_open_drops_the_slot() {
+    for (retract_ok, expected) in [
+        (true, vec!["open:v1", "close", "open:v2"]),
+        (false, vec!["open:v1", "close", "close", "open:v2"]),
+    ] {
+        let state = CarrierSyncState::new();
+        let carrier = "/ws/Retracted.vue.tsx";
+        let record = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let failing = first_open_failure_sink(
+            &record,
+            || TypeProviderError::new("send failed").into(),
+            retract_ok,
+        );
+
+        let first = state
+            .drive(carrier, PendingKind::Inject(Arc::from("v1")), failing)
+            .await;
+        assert!(first.is_err());
+        assert_eq!(
+            state.injected.lock().contains_key(carrier),
+            !retract_ok,
+            "retract_ok={retract_ok}: only an unconfirmed retract keeps the shell"
+        );
+
+        let recovering = first_open_failure_sink(&record, || unreachable!(), true);
+        state
+            .drive(carrier, PendingKind::Inject(Arc::from("v2")), recovering)
+            .await
+            .expect("the retry syncs");
+        assert_eq!(*record.lock().unwrap(), expected, "retract_ok={retract_ok}");
+        assert_eq!(
+            state.synced_content(carrier, carrier).as_deref(),
+            Some("v2")
+        );
+    }
+}
+
+/// Only a write the shim reports as sent-but-unconfirmed keeps its overlay; a failure that
+/// leaves the send itself in doubt keeps the retract.
+#[test]
+fn only_a_control_timeout_classifies_as_sent_unconfirmed() {
+    use verter_tsgo_api::error::TsgoApiError;
+    for (error, expected) in [
+        (
+            TsgoApiError::Timeout("barrier".to_string()),
+            CarrierWireFailure::SentUnconfirmed,
+        ),
+        (
+            TsgoApiError::Transport("send".to_string()),
+            CarrierWireFailure::SendFailed,
+        ),
+        (TsgoApiError::Closed, CarrierWireFailure::SendFailed),
+    ] {
+        assert_eq!(carrier_wire_error("didOpen", &error).failure, expected);
+    }
 }

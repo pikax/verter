@@ -73,6 +73,23 @@ pub(super) async fn handle_initialize(
         })
         .unwrap_or(PositionEncodingKind::UTF16);
     tracing::info!("negotiated position encoding: {}", encoding.as_str());
+    {
+        let workspace = params.capabilities.workspace.as_ref();
+        server.client_refreshes_semantic_tokens.store(
+            workspace
+                .and_then(|workspace| workspace.semantic_tokens.as_ref())
+                .and_then(|tokens| tokens.refresh_support)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
+        server.client_refreshes_inlay_hints.store(
+            workspace
+                .and_then(|workspace| workspace.inlay_hint.as_ref())
+                .and_then(|hints| hints.refresh_support)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
     *server.position_encoding.write() = encoding.clone();
     server.documents.set_encoding(encoding.clone());
 
@@ -1167,6 +1184,9 @@ pub(super) async fn handle_did_change_watched_files(
     let mut adapter_module_resync_ids = Vec::new();
     let mut adapter_module_delete_ids = Vec::new();
     let mut config_changed = false;
+    let mut disk_changes = Vec::new();
+    let mut provider_changes = Vec::new();
+    let mut importer_closure = std::collections::BTreeSet::new();
 
     for event in &params.changes {
         let canonical_id = uri_to_canonical_id(&event.uri);
@@ -1176,6 +1196,41 @@ pub(super) async fn handle_did_change_watched_files(
         if server.documents.get(&event.uri).is_some() {
             continue;
         }
+
+        // Importers are read BEFORE the change is applied: removing a target
+        // drops its reverse-dependency bucket, and an unresolved import is
+        // only reachable through the extension-stripped stem the query
+        // already unions in.
+        {
+            use verter_workspace::WorkspaceRead;
+            if let Some(ws) = server.vfs_workspace.read().as_ref() {
+                importer_closure.extend(ws.affected_canonicals(&canonical_id));
+            }
+        }
+        // A framework carrier is never a TypeScript file in its own right: the
+        // engine only ever sees the companions Verter delivers for it.
+        if carrier_language_for(&canonical_id).is_none() {
+            provider_changes.push(verter_type_runtime::WatchedFileChange {
+                path: canonical_id.clone(),
+                kind: if event.typ == FileChangeType::DELETED {
+                    verter_type_runtime::WatchedFileChangeKind::Deleted
+                } else if event.typ == FileChangeType::CREATED {
+                    verter_type_runtime::WatchedFileChangeKind::Created
+                } else {
+                    verter_type_runtime::WatchedFileChangeKind::Changed
+                },
+            });
+        }
+        disk_changes.push(if event.typ == FileChangeType::DELETED {
+            verter_workspace::WorkspaceChange::FileDeleted {
+                canonical_id: canonical_id.clone(),
+            }
+        } else {
+            verter_workspace::WorkspaceChange::FileChanged {
+                canonical_id: canonical_id.clone(),
+                source: None,
+            }
+        });
 
         if is_config_file(&canonical_id) {
             config_changed = true;
@@ -1213,6 +1268,15 @@ pub(super) async fn handle_did_change_watched_files(
             } else {
                 ts_js_resync_ids.push(canonical_id);
             }
+        }
+    }
+
+    // The filesystem facts move whether or not the host ever tracked the
+    // file: a never-loaded dependency still owns a cached presence/absence
+    // answer that import resolution reads.
+    if !disk_changes.is_empty() {
+        if let Some(ws) = server.vfs_workspace.read().as_ref() {
+            ws.apply_changes(disk_changes);
         }
     }
 
@@ -1277,8 +1341,18 @@ pub(super) async fn handle_did_change_watched_files(
         .into_iter()
         .chain(adapter_module_resync_ids)
         .collect();
+    let importers: Vec<String> = importer_closure.into_iter().collect();
+    let resync_owes_importer_refresh =
+        !non_carrier_resync_ids.is_empty() && server.project_sync.is_some();
+    if !resync_owes_importer_refresh {
+        server
+            .forward_watched_files_to_provider(&provider_changes)
+            .await;
+        server.refresh_open_importers_after_disk_change(&importers);
+    }
     if !non_carrier_resync_ids.is_empty() {
         if let Some(sync) = &server.project_sync {
+            let refresh_server = server.clone();
             let host = server.documents.host_arc();
             let sync = sync.clone();
             let vfs_workspace = Arc::clone(&server.vfs_workspace);
@@ -1298,6 +1372,12 @@ pub(super) async fn handle_did_change_watched_files(
                     .await;
                     tracing::debug!("did_change_watched_files: resynced {canonical_id}");
                 }
+                // The importers are checked only once every changed
+                // dependency has reached the provider.
+                refresh_server
+                    .forward_watched_files_to_provider(&provider_changes)
+                    .await;
+                refresh_server.refresh_open_importers_after_disk_change(&importers);
             });
         }
     }

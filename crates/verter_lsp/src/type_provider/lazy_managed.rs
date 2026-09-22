@@ -18,7 +18,7 @@ type FactoryFuture =
     Pin<Box<dyn Future<Output = Result<Arc<dyn TypeProvider>, TypeProviderError>> + Send>>;
 type Factory = dyn Fn() -> FactoryFuture + Send + Sync;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileAccess {
     Open,
     Loaded,
@@ -319,10 +319,19 @@ impl LazyManagedTypeProvider {
         let _activation = self.activation.lock().await;
         {
             let mut desired = self.desired.lock().unwrap();
-            let preserved_access = desired
-                .files
-                .get(&path)
-                .map_or(FileAccess::Open, |file| file.access);
+            // Both backends publish updates as open editor overlays. Replay
+            // must retain that promotion even when activation happens later.
+            let retained_access = if update
+                || access == Some(FileAccess::Open)
+                || desired
+                    .files
+                    .get(&path)
+                    .is_some_and(|file| file.access == FileAccess::Open)
+            {
+                FileAccess::Open
+            } else {
+                FileAccess::Loaded
+            };
             let first_live_sequence = match desired.files.get(&path) {
                 Some(file) => file.first_live_sequence,
                 None => {
@@ -337,7 +346,7 @@ impl LazyManagedTypeProvider {
                 path.clone(),
                 DesiredFile {
                     content: content.clone(),
-                    access: access.unwrap_or(preserved_access),
+                    access: retained_access,
                     lane,
                     first_live_sequence,
                 },
@@ -946,6 +955,20 @@ impl TypeProvider for LazyManagedTypeProvider {
         removed: Vec<serde_json::Value>,
     ) -> ProviderFuture<'_, ()> {
         Box::pin(self.record_workspace_folders(added, removed, false))
+    }
+
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [verter_type_runtime::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        // An engine that was never started has nothing to be told: it reads the
+        // disk as it is when it activates.
+        Box::pin(async move {
+            match self.current() {
+                Some(provider) => provider.notify_watched_files_changed(changes).await,
+                None => Ok(()),
+            }
+        })
     }
 
     fn update_workspace_folders_background(

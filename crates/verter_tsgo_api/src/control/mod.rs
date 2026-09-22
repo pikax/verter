@@ -15,11 +15,13 @@
 //!   wire contract.
 
 pub mod advertisement;
+pub mod batcher;
 pub mod client;
 pub mod messages;
 pub mod server;
 pub mod transport;
 
+pub use batcher::OverlayBatcher;
 pub use client::ControlClient;
 pub use server::ControlServer;
 pub use transport::{

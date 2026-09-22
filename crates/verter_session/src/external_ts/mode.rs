@@ -110,6 +110,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_workspace::GeneratedUnitNonAdmissionReason;
 
 use crate::file_artifact_store::ProjectIdentity;
 
@@ -149,6 +150,14 @@ pub enum EligibilityFailure {
     AttachNotLive,
     /// The carrier source has no resolved configured-project binding.
     ProjectNotBound,
+    /// A generated unit the serve would write is not admitted to the bound
+    /// configured project (the payload is the closed refusal reason). Distinct
+    /// from [`Self::ProjectNotBound`]: the project OWNS the carrier source; its
+    /// `include`/`files` do not admit the generated units.
+    GeneratedUnitsNotAdmitted(GeneratedUnitNonAdmissionReason),
+    /// No proof exists that the generated units are admitted to the bound
+    /// configured project.
+    GeneratedUnitAdmissionUnproven,
     /// Verter cannot interpose the editor's full TS-LSP connection, so
     /// carrier-path leak suppression is unenforceable.
     ProxyUnavailable,
@@ -172,6 +181,14 @@ pub enum OwnedReason {
     AttachNotLive,
     /// The carrier source has no resolved configured-project binding.
     ProjectNotBound,
+    /// A generated unit the serve would write is not admitted to the bound
+    /// configured project (the payload is the closed refusal reason). Distinct
+    /// from [`Self::ProjectNotBound`]: the project OWNS the carrier source; its
+    /// `include`/`files` do not admit the generated units.
+    GeneratedUnitsNotAdmitted(GeneratedUnitNonAdmissionReason),
+    /// No proof exists that the generated units are admitted to the bound
+    /// configured project.
+    GeneratedUnitAdmissionUnproven,
     /// Verter cannot interpose the editor's full TS-LSP connection, so
     /// carrier-path leak suppression is unenforceable.
     ProxyUnavailable,
@@ -209,6 +226,12 @@ impl From<EligibilityFailure> for OwnedReason {
             EligibilityFailure::VersionGateNotGreen => OwnedReason::VersionGateNotGreen,
             EligibilityFailure::AttachNotLive => OwnedReason::AttachNotLive,
             EligibilityFailure::ProjectNotBound => OwnedReason::ProjectNotBound,
+            EligibilityFailure::GeneratedUnitsNotAdmitted(reason) => {
+                OwnedReason::GeneratedUnitsNotAdmitted(reason)
+            }
+            EligibilityFailure::GeneratedUnitAdmissionUnproven => {
+                OwnedReason::GeneratedUnitAdmissionUnproven
+            }
             EligibilityFailure::ProxyUnavailable => OwnedReason::ProxyUnavailable,
             EligibilityFailure::EditorBindingMismatch => OwnedReason::EditorBindingMismatch,
         }

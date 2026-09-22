@@ -2338,6 +2338,23 @@ impl TsgoTypeProvider {
         self.versions.lock().await.remove(path);
     }
 
+    /// Wait until the engine has processed every notification sent before this
+    /// call. The engine handles document notifications in arrival order and only
+    /// then dispatches a request, so ANY response proves it; a syntax-only request
+    /// is used because it costs the engine no type checking (about a millisecond,
+    /// against most of a second for a diagnostic pull on a real project). The
+    /// answer itself is irrelevant and an error response proves the same thing.
+    pub async fn ordering_barrier(&self, path: &str) {
+        let uri = Self::path_to_uri(path);
+        let _ = self
+            .transport
+            .request(
+                "textDocument/foldingRange",
+                serde_json::json!({ "textDocument": { "uri": uri } }),
+            )
+            .await;
+    }
+
     /// Pull and parse the current document diagnostics without degrading a wire
     /// failure to the push-diagnostic cache. Non-owning editor-session consumers use
     /// this to distinguish a legitimate empty report from a failed relay request, so
@@ -2652,7 +2669,11 @@ fn build_client_capabilities() -> serde_json::Value {
         // live). The read loop's `workspace/configuration` responder supplies
         // the preferences.
         "workspace": {
-            "configuration": true
+            "configuration": true,
+            // TSGO has no disk watcher of its own: it asks its client to watch
+            // and relies on `workspace/didChangeWatchedFiles`. Without this it
+            // never learns that a file was created or deleted on disk.
+            "didChangeWatchedFiles": { "dynamicRegistration": true }
         }
     })
 }
@@ -3163,34 +3184,8 @@ impl TypeProvider for TsgoTypeProvider {
     }
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-        let path_owned = path.to_string();
-        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
-        Box::pin(async move {
-            // Use pull diagnostics (textDocument/diagnostic) — TSGO supports this
-            // model rather than push (publishDiagnostics). Pull is synchronous:
-            // we send a request and get the diagnostics back directly.
-            match self.get_diagnostics_strict(&path_owned).await {
-                Ok(diags) => {
-                    tracing::debug!(
-                        "get_diagnostics: pull returned {} diagnostics for {}",
-                        diags.len(),
-                        path_owned
-                    );
-                    Ok(diags)
-                }
-                Err(e) => {
-                    // Pull diagnostics failed — fall back to push diagnostics cache.
-                    tracing::debug!(
-                        "get_diagnostics: pull failed ({e}), falling back to cache for {}",
-                        path_owned
-                    );
-                    let cache_key = normalize_file_uri(&Self::path_to_uri(&path_owned));
-                    let cache = diagnostics_cache.lock().await;
-                    let result = cache.get(&cache_key).cloned().unwrap_or_default();
-                    Ok(result)
-                }
-            }
-        })
+        let path = path.to_string();
+        Box::pin(async move { self.get_diagnostics_strict(&path).await })
     }
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
@@ -3878,6 +3873,38 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
+    fn notify_watched_files_changed<'a>(
+        &'a self,
+        changes: &'a [crate::WatchedFileChange],
+    ) -> ProviderFuture<'a, ()> {
+        let transport = Arc::clone(&self.transport);
+        let changes: Vec<serde_json::Value> = changes
+            .iter()
+            .map(|change| {
+                serde_json::json!({
+                    "uri": Self::path_to_uri(&change.path),
+                    // LSP `FileChangeType`.
+                    "type": match change.kind {
+                        crate::WatchedFileChangeKind::Created => 1,
+                        crate::WatchedFileChangeKind::Changed => 2,
+                        crate::WatchedFileChangeKind::Deleted => 3,
+                    },
+                })
+            })
+            .collect();
+        Box::pin(async move {
+            if changes.is_empty() {
+                return Ok(());
+            }
+            transport
+                .notify(
+                    "workspace/didChangeWatchedFiles",
+                    serde_json::json!({ "changes": changes }),
+                )
+                .await
+        })
+    }
+
     fn child_pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|child| {
             child
@@ -3912,7 +3939,6 @@ impl TypeProvider for TsgoTypeProvider {
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             let result = transport
                 .request_with_priority(
@@ -3943,11 +3969,7 @@ impl TypeProvider for TsgoTypeProvider {
                         })
                         .collect())
                 }
-                Err(_) => {
-                    let cache = diagnostics_cache.lock().await;
-                    let normalized = normalize_file_uri(&Self::path_to_uri(&path_owned));
-                    Ok(cache.get(&normalized).cloned().unwrap_or_default())
-                }
+                Err(error) => Err(error),
             }
         })
     }

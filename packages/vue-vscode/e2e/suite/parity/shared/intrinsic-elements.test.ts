@@ -17,6 +17,7 @@ import {
   typeDefinitionsAt,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
+import { SUITE_TIMEOUT_MS } from "../../../lib/timeouts";
 import {
   HTML_INTRINSIC_ATTRS,
   HTML_INTRINSIC_TAGS,
@@ -81,7 +82,7 @@ suite(`Intrinsic element interfaces [${FIXTURE_NAME}]`, function () {
       throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     }
     // Warm only — inherits Mocha default when root already synced; cap if cold.
-    this.timeout(20_000);
+    this.timeout(SUITE_TIMEOUT_MS);
     await ensureParityReady(fw === "vue" ? "src/App.vue" : "src/App.svelte");
   });
 

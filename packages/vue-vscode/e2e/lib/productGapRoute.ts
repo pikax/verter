@@ -2,7 +2,12 @@ import {
   knownFrameworkContractGapsForRoute,
   type ContractFramework,
 } from "./frameworkContractManifest";
-import { knownProductGapsForRoute, type ProductGapManifest } from "./knownProductGapManifest";
+import {
+  knownProductGapCanariesForRoute,
+  knownProductGapsForRoute,
+  type ProductGapCanaryManifest,
+  type ProductGapManifest,
+} from "./knownProductGapManifest";
 
 const CONTRACT_FRAMEWORK_BY_FIXTURE: Readonly<Record<string, ContractFramework>> = {
   "vue-contract": "vue",
@@ -18,4 +23,13 @@ export function productGapsForFixtureRoute(
   if (framework) return knownFrameworkContractGapsForRoute(framework, typeProvider);
   if (!fixture.endsWith("-parity") || !typeProvider) return {};
   return knownProductGapsForRoute(fixture, typeProvider);
+}
+
+/** Exact canaries whose test bodies run, and are expected to fail, on this fixture/provider route. */
+export function productGapCanariesForFixtureRoute(
+  fixture: string,
+  typeProvider: string | undefined,
+): ProductGapCanaryManifest {
+  if (!fixture.endsWith("-parity") || !typeProvider) return {};
+  return knownProductGapCanariesForRoute(fixture, typeProvider);
 }

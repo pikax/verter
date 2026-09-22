@@ -74,6 +74,29 @@ export type ExtractComponentProps<T> = T extends { new (): infer I }
         ? P
         : {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
+export declare function componentConstructor<T extends new (...args: any[]) => any>(
+  comp: T,
+): ConstructorParameters<T> extends [] ? new (props: unknown) => InstanceType<T> : T;
+export declare function componentConstructor<P, A extends any[], R>(
+  comp: (props: P, ...args: A) => R,
+): new (props: P) => R;
+export declare function componentConstructor<T>(comp: T): new (props: unknown) => T;
+export type AsyncComponentOptionsProps<T> = (T extends { props: infer P }
+  ? P extends readonly (infer K)[]
+    ? { [Q in K & string]?: any }
+    : import("vue").ExtractPublicPropTypes<P>
+  : {}) &
+  (T extends { emits: infer E }
+    ? E extends readonly string[] | Record<string, any>
+      ? import("vue").EmitsToProps<E>
+      : {}
+    : {});
+export type AsyncComponent<T> = T extends abstract new (...args: any) => any
+  ? T
+  : T extends (...args: any) => any
+    ? T
+    : new (...args: any[]) => import("vue").ComponentPublicInstance<AsyncComponentOptionsProps<T>>;
+export declare function asyncComponent<T>(comp: T): AsyncComponent<T>;
 export declare function instantiateComponent<T, P>(
   comp: T,
   props: P,

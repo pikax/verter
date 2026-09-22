@@ -9,7 +9,10 @@
  * is omitted deliberately because it is a regression sentinel, not accepted debt.
  */
 
+import type { ProductGapCanaryManifest } from "../../src/runSummaryOracle";
+
 export type ProductGapManifest = Readonly<Record<string, string>>;
+export type { ProductGapCanaryManifest };
 
 const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> = {
   "ecosystem-parity@shared-tsgo": {
@@ -143,7 +146,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "shared.js.references.script-and-markup": "ISSUE-js-references",
     "shared.js.rename.from-markup": "ISSUE-js-rename-markup",
     "shared.js.rename.from-script": "ISSUE-js-rename-script",
-    "shared.lifecycle.external-ts-create-delete": "ISSUE-lifecycle-external-ts",
     "shared.rename.from-markup.applies": "ISSUE-shared-rename-from-markup",
     "shared.rename.from-script.applies": "ISSUE-shared-rename-apply",
     "shared.rename.js.function": "ISSUE-rename-js-function",
@@ -205,8 +207,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "generic.expect-error.structural": "ISSUE-vue-generic-expect-error",
     "generic.hover.event-payload-matches-options": "ISSUE-vue-generic-hover-event",
     "generic.hover.field-multi-prop-number-chain": "ISSUE-vue-generic-hover-field",
-    "generic.hover.slot-prop-inferred-number": "ISSUE-vue-generic-hover-slot-num",
-    "generic.hover.slot-prop-inferred-string": "ISSUE-vue-generic-hover-slot-str",
     "generic.infer.bad-mismatched-props-events": "ISSUE-vue-generic-infer-bad",
     "generic.multi-prop-linkage.field-format-change": "ISSUE-vue-generic-multi-prop",
     "generic.slot.wrong-method-on-inferred-type": "ISSUE-vue-generic-slot-wrong",
@@ -289,8 +289,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "generic.event-handler.infers-from-options": "ISSUE-vue-generic-event-infer",
     "generic.expect-error.structural": "ISSUE-vue-generic-expect-error",
     "generic.hover.field-multi-prop-number-chain": "ISSUE-vue-generic-hover-field",
-    "generic.hover.slot-prop-inferred-number": "ISSUE-vue-generic-hover-slot-num",
-    "generic.hover.slot-prop-inferred-string": "ISSUE-vue-generic-hover-slot-str",
     "generic.infer.bad-mismatched-props-events": "ISSUE-vue-generic-infer-bad",
     "generic.infer.good-clean-no-type-args": "ISSUE-vue-generic-infer-good",
     "generic.multi-prop-linkage.field-format-change": "ISSUE-vue-generic-multi-prop",
@@ -305,7 +303,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "product.extract-component.command": "ISSUE-product-extract-component",
     "shared.code-action.apply.organize-imports": "ISSUE-code-action-apply-organize",
     "shared.inlay-hints.script-region": "ISSUE-product-inlay-hints",
-    "shared.lifecycle.external-ts-create-delete": "ISSUE-lifecycle-external-ts",
     "shared.rename.from-markup.applies": "ISSUE-shared-rename-from-markup",
     "shared.rename.from-script.applies": "ISSUE-shared-rename-apply",
     "shared.style.id.references": "ISSUE-style-id-references",
@@ -332,8 +329,6 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "generic.defaulted-t-string.no-annotation": "ISSUE-vue-generic-default",
     "generic.expect-error.structural": "ISSUE-vue-generic-expect-error",
     "generic.hover.field-multi-prop-number-chain": "ISSUE-vue-generic-hover-field",
-    "generic.hover.slot-prop-inferred-number": "ISSUE-vue-generic-hover-slot-num",
-    "generic.hover.slot-prop-inferred-string": "ISSUE-vue-generic-hover-slot-str",
     "generic.multi-prop-linkage.field-format-change": "ISSUE-vue-generic-multi-prop",
     "ide.auto-import.symbol-accept": "ISSUE-vue-symbol-auto-import",
     "intrinsic.type-definition.div-not-any": "ISSUE-vue-intrinsic-type-definition",
@@ -355,6 +350,46 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
   },
 };
 
+/**
+ * Route-specific CANARIES: known product gaps whose tests EXECUTE and are expected
+ * to fail. Unlike a skipped gap, a canary notices its own repair — the run summary
+ * oracle tolerates its failure, fails the route when it passes (the entry must then
+ * be removed so the case is a normal required test again), and fails an unfiltered
+ * run in which it never executed. Routes without canaries are simply absent. A test
+ * is never both a skipped gap and a canary on the same route.
+ */
+const PLAIN_TS_CONSUMER = "ISSUE-shared-tsgo-plain-ts-consumer";
+// The two shapes the unresolved `./ExposePublic.vue` import takes in the consumer.
+const UNRESOLVED_COMPONENT_IMPORT = /ts:2307:Cannot find module '\.\/ExposePublic\.vue'/;
+
+const KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE: Readonly<Record<string, ProductGapCanaryManifest>> = {
+  "vue-parity@shared-tsgo": {
+    // On the editor-shared tsgo route a plain `.ts` file is served by the editor's own
+    // TypeScript, where Verter's TypeScript plugin does not exist, and generated
+    // component modules are (correctly) not injected into an editor-owned engine whose
+    // configured project does not admit them — so a `.ts` consumer cannot resolve
+    // `./X.vue`.
+    // Each entry names the failure the defect produces in THAT test; any other failure
+    // of the same test is a regression and fails the route.
+    "ide.complete.import-path-carrier": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: /^completion@src\/features\/ExposePublicConsumer\.ts:\d+ not ready within/,
+    },
+    "testing-api.vue.public-importer-hides-setup-bindings": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: UNRESOLVED_COMPONENT_IMPORT,
+    },
+    "vue.public-surface.consumer-source-documents-negative": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: UNRESOLVED_COMPONENT_IMPORT,
+    },
+    "vue.public-surface.no-secret-internal-on-component-hover": {
+      issue: PLAIN_TS_CONSUMER,
+      failure: /^hover src\/features\/ExposePublicConsumer\.ts#ExposePublic not ready within/,
+    },
+  },
+};
+
 export function knownProductGapsForRoute(
   fixture: string,
   typeProvider: string,
@@ -368,4 +403,16 @@ export function knownProductGapsForRoute(
 
 export const KNOWN_PRODUCT_GAP_ROUTE_KEYS = Object.freeze(
   Object.keys(KNOWN_PRODUCT_GAPS_BY_ROUTE).sort(),
+);
+
+/** The route's complete canary manifest; the run summary oracle narrows it to a selection. */
+export function knownProductGapCanariesForRoute(
+  fixture: string,
+  typeProvider: string,
+): ProductGapCanaryManifest {
+  return KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE[`${fixture}@${typeProvider}`] ?? {};
+}
+
+export const KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS = Object.freeze(
+  Object.keys(KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE).sort(),
 );

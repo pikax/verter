@@ -100,6 +100,8 @@ export interface QuiescenceObservation {
    * the interval is unstable; omit it for the counter-only variant.
    */
   readonly providerQueryOk?: boolean;
+  /** Requested input has reached the server (for example, all didOpen commits). */
+  readonly prerequisitesReady?: boolean;
 }
 
 /** The quiescence verdict over a sequence of observations. */
@@ -121,6 +123,9 @@ type IntervalStatus =
 
 /** Classify the interval between two adjacent observations. */
 function intervalStatus(prev: QuiescenceObservation, curr: QuiescenceObservation): IntervalStatus {
+  if (prev.prerequisitesReady === false || curr.prerequisitesReady === false) {
+    return { stable: false, reason: "requested input has not reached the server" };
+  }
   if (!countersEqual(prev.counters, curr.counters)) {
     return { stable: false, reason: "host counters still changing" };
   }
@@ -184,6 +189,8 @@ export function decideQuiescence(
 
 /** Options for {@link pollUntilQuiesced}; clock hooks are injectable for tests. */
 export interface PollUntilQuiescedOptions {
+  /** Evaluated after each counter sample; false prevents a premature quiet window. */
+  readonly prerequisitesReady?: () => boolean;
   /** Delay between polls (ms). Default 150. */
   readonly intervalMs?: number;
   readonly requiredStableIntervals?: number;
@@ -257,7 +264,11 @@ export async function pollUntilQuiesced(
 
     const counters = await pollCounters();
     const newWarnLines = [...drainWarnLines()];
-    observations.push({ counters, newWarnLines });
+    observations.push({
+      counters,
+      newWarnLines,
+      prerequisitesReady: options.prerequisitesReady?.(),
+    });
     decision = decideQuiescence(observations, required);
 
     if (decision.quiesced) {

@@ -12,6 +12,7 @@ use super::*;
 use crate::external_ts::mode::{EligibilityFailure, ProjectEligibility, SharedSessionFacts};
 use crate::external_ts::mode::{EngineSessionFacts, OwnedReason};
 use crate::file_artifact_store::ProjectIdentity;
+use verter_workspace::{GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmissionReason};
 
 fn pid(b: u8) -> ProjectIdentity {
     ProjectIdentity([b; 16])
@@ -35,6 +36,9 @@ fn all_positive(bound_to: ProjectIdentity) -> EligibilityFacts {
         },
         attach: AttachFact::Live(shared_facts()),
         binding: BindingFact::Bound(bound_to),
+        generated_units: GeneratedUnitAdmissionFact::Admitted(
+            GeneratedUnitAdmissionFingerprint::from_raw(1),
+        ),
         proxy: ProxyFact::Available,
         editor_binding: EditorBindingFact::Matched(bound_to),
     }
@@ -47,7 +51,7 @@ fn all_positive_facts_compose_to_eligible() {
     assert_eq!(compose_eligibility(&facts), ProjectEligibility::Eligible);
 }
 
-/// Each of the five facts, taken negative IN TURN over an otherwise all-positive
+/// Each fact, taken negative IN TURN over an otherwise all-positive
 /// set, yields OWNED with that fact's precise `EligibilityFailure` — never
 /// `Eligible`, never a different reason. This is the fail-open guard: a missing
 /// fact is never assumed satisfied.
@@ -74,6 +78,25 @@ fn each_missing_fact_fails_closed_to_its_precise_reason() {
     assert_eq!(
         compose_eligibility(&f),
         ProjectEligibility::Owned(EligibilityFailure::ProjectNotBound)
+    );
+
+    // A bound project whose generated units are refused — or never proven —
+    // is NOT "not bound": each negative admission state has its own reason.
+    let mut f = all_positive(p);
+    f.generated_units =
+        GeneratedUnitAdmissionFact::NotAdmitted(GeneratedUnitNonAdmissionReason::Excluded);
+    assert_eq!(
+        compose_eligibility(&f),
+        ProjectEligibility::Owned(EligibilityFailure::GeneratedUnitsNotAdmitted(
+            GeneratedUnitNonAdmissionReason::Excluded
+        ))
+    );
+
+    let mut f = all_positive(p);
+    f.generated_units = GeneratedUnitAdmissionFact::Unproven;
+    assert_eq!(
+        compose_eligibility(&f),
+        ProjectEligibility::Owned(EligibilityFailure::GeneratedUnitAdmissionUnproven)
     );
 
     let mut f = all_positive(p);
@@ -103,6 +126,7 @@ fn precedence_follows_the_failure_enum_order() {
         version_gate: VersionGateFact::NotGreen,
         attach: AttachFact::NotLive,
         binding: BindingFact::NotBound,
+        generated_units: GeneratedUnitAdmissionFact::Unproven,
         proxy: ProxyFact::Unavailable,
         editor_binding: EditorBindingFact::Mismatch,
     };
@@ -128,8 +152,17 @@ fn precedence_follows_the_failure_enum_order() {
         ProjectEligibility::Owned(EligibilityFailure::ProjectNotBound)
     );
 
-    // + binding → proxy is next.
+    // + binding → generated-unit admission is next, evaluated right after the
+    // binding it qualifies.
     f.binding = BindingFact::Bound(p);
+    assert_eq!(
+        compose_eligibility(&f),
+        ProjectEligibility::Owned(EligibilityFailure::GeneratedUnitAdmissionUnproven)
+    );
+
+    // + admission → proxy is next.
+    f.generated_units =
+        GeneratedUnitAdmissionFact::Admitted(GeneratedUnitAdmissionFingerprint::from_raw(1));
     assert_eq!(
         compose_eligibility(&f),
         ProjectEligibility::Owned(EligibilityFailure::ProxyUnavailable)
@@ -146,7 +179,7 @@ fn precedence_follows_the_failure_enum_order() {
 /// The OWNED output can only carry an `EligibilityFailure` (the restricted
 /// eligibility-INPUT set) — a derived decision reason is unrepresentable as a
 /// composition result. This asserts the composition never emits any reason
-/// OUTSIDE the five inputs (the smuggle-prevention `EligibilityFailure ⊂
+/// OUTSIDE the eligibility inputs (the smuggle-prevention `EligibilityFailure ⊂
 /// OwnedReason` gives us at the type level), by round-tripping every OWNED
 /// output through `OwnedReason::from` and checking it lands in the input set.
 #[test]
@@ -155,6 +188,8 @@ fn owned_output_is_always_an_eligibility_input_reason_never_derived() {
         OwnedReason::VersionGateNotGreen,
         OwnedReason::AttachNotLive,
         OwnedReason::ProjectNotBound,
+        OwnedReason::GeneratedUnitsNotAdmitted(GeneratedUnitNonAdmissionReason::Excluded),
+        OwnedReason::GeneratedUnitAdmissionUnproven,
         OwnedReason::ProxyUnavailable,
         OwnedReason::EditorBindingMismatch,
     ];
@@ -167,13 +202,19 @@ fn owned_output_is_always_an_eligibility_input_reason_never_derived() {
     ];
 
     let p = pid(1);
-    for negate in 0..5u8 {
+    for negate in 0..7u8 {
         let mut f = all_positive(p);
         match negate {
             0 => f.version_gate = VersionGateFact::NotGreen,
             1 => f.attach = AttachFact::NotLive,
             2 => f.binding = BindingFact::NotBound,
             3 => f.proxy = ProxyFact::Unavailable,
+            4 => {
+                f.generated_units = GeneratedUnitAdmissionFact::NotAdmitted(
+                    GeneratedUnitNonAdmissionReason::Excluded,
+                );
+            }
+            5 => f.generated_units = GeneratedUnitAdmissionFact::Unproven,
             _ => f.editor_binding = EditorBindingFact::Mismatch,
         }
         let ProjectEligibility::Owned(failure) = compose_eligibility(&f) else {
@@ -182,7 +223,7 @@ fn owned_output_is_always_an_eligibility_input_reason_never_derived() {
         let reason = OwnedReason::from(failure);
         assert!(
             input_reasons.contains(&reason),
-            "the composed OWNED reason must be one of the five eligibility inputs"
+            "the composed OWNED reason must be one of the eligibility inputs"
         );
         assert!(
             !derived_reasons.contains(&reason),

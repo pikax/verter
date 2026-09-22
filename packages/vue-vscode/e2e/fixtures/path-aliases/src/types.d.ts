@@ -1,0 +1,4 @@
+export interface ImportedProps {
+  title?: string;
+  count: number;
+}

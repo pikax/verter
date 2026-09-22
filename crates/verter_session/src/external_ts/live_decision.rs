@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+use verter_workspace::GeneratedUnitAdmissionFingerprint;
+
 use crate::file_artifact_store::ProjectIdentity;
 
 use super::eligibility::{compose_eligibility, EligibilityFacts};
@@ -41,7 +43,7 @@ pub struct LiveProjectInput<'a> {
     /// The canonical tsconfig path of this project (a warm-key dimension when
     /// this project is the served component's representative).
     pub canonical_tsconfig: Arc<str>,
-    /// The five SHARED-precondition facts for this project.
+    /// The SHARED-precondition facts for this project.
     pub facts: EligibilityFacts,
     /// This project's declared references (redirect-disabled ones are excluded by
     /// the graph builder).
@@ -136,6 +138,7 @@ pub fn decide_live(
         representative_tsconfig(request, &decision),
         request.config_generation,
         request.editor_binding,
+        &member_admission_fingerprints(request, &decision),
     );
     match warm_cache.get(&key) {
         Some(state) => LiveDecision {
@@ -220,6 +223,7 @@ pub fn renegotiate_on_reconnect(
         representative_tsconfig(request, &decision),
         request.config_generation,
         request.editor_binding,
+        &member_admission_fingerprints(request, &decision),
     );
     warm_cache
         .insert_shared(key, decision.clone())
@@ -250,6 +254,27 @@ fn compute_decision(
         .collect();
     let graph = build_redirect_reference_graph(&graph_inputs, probe, identity);
     select_component_mode(&graph, &request.root, request.engines)
+}
+
+/// The generated-unit admission fingerprint of every member of the served
+/// component, in canonical member order — the warm-key admission dimension. A
+/// SHARED decision's members are all eligible, so each carries a positive
+/// admission; a member without one contributes nothing (unreachable for SHARED).
+fn member_admission_fingerprints(
+    request: &LiveDecisionRequest,
+    decision: &ComponentModeDecision,
+) -> Vec<GeneratedUnitAdmissionFingerprint> {
+    decision
+        .members()
+        .members()
+        .filter_map(|member| {
+            request
+                .projects
+                .iter()
+                .find(|p| p.identity == member)
+                .and_then(|p| p.facts.generated_units.fingerprint())
+        })
+        .collect()
 }
 
 /// The canonical tsconfig path of the served component's representative (the

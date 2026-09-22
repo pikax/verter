@@ -727,12 +727,29 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     let fetched_ide = if req.ide.is_none() {
         req.documents.and_then(|documents| {
             let profile = documents.tsx_profile.read().clone();
-            block_in_place_if_available(|| documents.host.get_ide(req.canonical_id, &profile))
+            // COMPILE, never a cache-only read: a cold IDE cache is not "this
+            // carrier has no IDE surface". Publishing the API companion alone
+            // would REPLACE the advertised set with a smaller one, and the
+            // engine would fall back to parsing the raw carrier as TypeScript.
+            block_in_place_if_available(|| {
+                let _ = documents
+                    .host
+                    .ensure_ide_compiled(req.canonical_id, &profile);
+                documents.host.get_ide(req.canonical_id, &profile)
+            })
         })
     } else {
         None
     };
     let ide = req.ide.or(fetched_ide.as_ref());
+    if ide.is_none() || committed_state.ide_path.is_none() {
+        tracing::debug!(
+            "carrier-sync gateway: {} publishes without an IDE companion (ide output: {}, ide path: {})",
+            req.canonical_id,
+            ide.is_some(),
+            committed_state.ide_path.is_some()
+        );
+    }
 
     let mut companions = match build_carrier_companions(
         req.host,
@@ -816,7 +833,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         Ok(ReconcileOutcome::Advertised { receipt, .. }) => {
             match membership.provider_delivery {
                 CarrierProviderDelivery::StoreBacked => {
-                    if membership.activate_provider_member {
+                    // Activation promotes the IDE member. A publication that
+                    // carries none (no IDE output exists for this source right
+                    // now) has nothing to promote: asking anyway can only fail,
+                    // and a retry cannot produce the missing output — only a
+                    // source change can, and that re-enters through the
+                    // ordinary sync.
+                    let publishes_ide_member = companions.iter().any(|companion| {
+                        companion.role == verter_session::external_ts::SnapshotRole::CarrierIde
+                    });
+                    if membership.activate_provider_member && publishes_ide_member {
                         match membership
                             .coordinator
                             .activate_published_source(req.canonical_id)

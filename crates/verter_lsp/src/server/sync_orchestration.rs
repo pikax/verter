@@ -489,14 +489,11 @@ impl VerterLanguageServer {
     }
 
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
-        let Some(snapshot) = self.documents.snapshot_identity(uri) else {
+        let Some(publication) = self.documents.begin_diagnostics_publication(uri) else {
             return;
         };
         let diagnostics = self.compute_full_diagnostics(uri).await;
-        if !self.documents.snapshot_identity_is_current(uri, &snapshot) {
-            return;
-        }
-        self.publish_diagnostics_raw(uri, diagnostics, snapshot.version)
+        self.publish_diagnostics_raw(uri, diagnostics, &publication)
             .await;
     }
 
@@ -625,7 +622,7 @@ impl VerterLanguageServer {
         &self,
         uri: &Uri,
         diagnostics: Vec<Diagnostic>,
-        version: i32,
+        publication: &crate::documents::DiagnosticPublication,
     ) {
         let _timer = self
             .statistics
@@ -637,8 +634,10 @@ impl VerterLanguageServer {
             diagnostics.len()
         );
 
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
+        // This legacy compute path returns a Vec and cannot attest provider
+        // completeness. The coordinator owns the subsequent complete receipt.
+        self.documents
+            .publish_diagnostics(&self.client, uri, publication, diagnostics, false, None)
             .await;
 
         tracing::info!("publish_diagnostics EXIT {}", uri.as_str());
@@ -970,13 +969,8 @@ impl VerterLanguageServer {
         if self.carrier_publish_coordinator.is_none() {
             return;
         }
-        let generation = self
-            .init_generation
-            .load(std::sync::atomic::Ordering::Acquire);
         self.client
-            .send_notification::<super::protocol_types::TypeProviderSyncComplete>(
-                super::protocol_types::TypeProviderSyncCompleteParams { gen: generation },
-            )
+            .send_notification::<super::protocol_types::CarrierStoreChanged>(())
             .await;
     }
 
@@ -1067,6 +1061,49 @@ impl VerterLanguageServer {
                 })
                 .collect(),
         );
+    }
+
+    /// Tell the provider what changed on disk. An engine that watches the disk
+    /// itself ignores this; an engine that is an LSP server (TSGO) has no other
+    /// way to learn that a file it does not hold open was created or deleted.
+    pub(super) async fn forward_watched_files_to_provider(
+        &self,
+        changes: &[verter_type_runtime::WatchedFileChange],
+    ) {
+        if changes.is_empty() {
+            return;
+        }
+        if let Some(provider) = &self.type_provider {
+            if let Err(error) = provider.notify_watched_files_changed(changes).await {
+                tracing::warn!(
+                    "did_change_watched_files: provider refused the disk changes: {error}"
+                );
+            }
+        }
+    }
+
+    /// A dependency changed on disk underneath these importers. Every one of
+    /// them re-records its import edges against the new filesystem facts;
+    /// only the OPEN ones are owed diagnostics, so only they have their
+    /// receipt retired and a fresh publication armed.
+    pub(super) fn refresh_open_importers_after_disk_change(&self, importers: &[String]) {
+        let received_at = tokio::time::Instant::now();
+        for importer in importers {
+            self.refresh_carrier_dependency_tracking(importer);
+            let Some(uri) = self.documents.canonical_id_to_uri(importer) else {
+                continue;
+            };
+            if self.documents.get(&uri).is_none() {
+                continue;
+            }
+            self.documents.host().bump_diagnostics_generation(importer);
+            self.cached_verter_diags.remove(uri.as_str());
+            self.sync_coordinator.signal_diagnostics_only(
+                importer.clone(),
+                uri.as_str().to_string(),
+                received_at,
+            );
+        }
     }
 
     pub(super) async fn sync_non_carrier_file_to_provider(
@@ -2145,6 +2182,22 @@ impl VerterLanguageServer {
     /// Used to suppress non-critical TSGO requests (diagnostics, semantic tokens, inlay hints)
     /// during rapid typing.  TSGO processes requests serially, so queuing these during typing
     /// blocks interactive requests like completions.
+    /// Whether a render-cadence decoration (semantic tokens, inlay hints) must
+    /// stay off the type provider for now.
+    ///
+    /// The editor asks for decorations on its own, for every visible document,
+    /// the moment the server is up — while the workspace is still being published
+    /// into the engine. An engine that builds its program lazily answers that one
+    /// request by building a program from the HALF-published workspace, and then
+    /// pays many times the cost of a cold build to absorb the rest into it: one
+    /// stray decoration turns a few seconds of start-up into half a minute during
+    /// which nothing else is served. Nothing is lost by waiting — the answer would
+    /// describe a half-published workspace, and the editor is asked to refresh its
+    /// decorations once the publication completes.
+    pub(super) fn decorations_must_wait(&self) -> bool {
+        self.is_typing_cooldown() || self.sync_coordinator.workspace_scan_in_progress()
+    }
+
     pub(super) fn is_typing_cooldown(&self) -> bool {
         let last = self
             .last_change_ms
@@ -2709,8 +2762,6 @@ impl VerterLanguageServer {
             provider_sync_states: Arc::clone(&self.provider_sync_states),
             pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
             is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            cached_verter_diags: Arc::clone(&self.cached_verter_diags),
-            position_encoding: Arc::clone(&self.position_encoding),
             mru_canonical_ids: {
                 // Snapshot the MRU list at spawn time — background_init uses it for drain ordering
                 Arc::new(parking_lot::Mutex::new(

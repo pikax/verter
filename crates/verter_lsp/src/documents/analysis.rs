@@ -116,6 +116,21 @@ impl DocumentRegistry {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub(super) fn semantic_diagnostics_ready(
+        &self,
+        uri: &Uri,
+        revision: DocumentRevisionId,
+    ) -> bool {
+        !self.semantic_analysis_enabled()
+            || self
+                .semantic_snapshots
+                .get(&uri_to_canonical_id(uri))
+                .is_some_and(|snapshot| {
+                    snapshot.document_revision == revision
+                        && self.semantic_generation_is_current(snapshot.semantic_generation)
+                })
+    }
+
     pub(crate) fn subscribe_semantic_ready(
         &self,
     ) -> tokio::sync::broadcast::Receiver<SemanticReady> {
@@ -404,6 +419,7 @@ impl DocumentRegistry {
                     let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
                     hook(&registry, &hook_uri);
                 }
+                registry.invalidate_diagnostics(&uri_key);
                 registry.semantic_snapshots.insert(
                     canonical_id.clone(),
                     SemanticSnapshot {

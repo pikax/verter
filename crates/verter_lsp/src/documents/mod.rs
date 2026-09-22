@@ -1,8 +1,11 @@
 mod analysis;
+mod diagnostics;
 pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
+pub(crate) use diagnostics::DiagnosticPublication;
+pub(crate) use diagnostics::DiagnosticsRefresh;
 pub mod carrier_structure;
 pub mod line_index;
 pub mod position_map;
@@ -35,6 +38,9 @@ pub struct DocumentRegistry {
     pub(crate) host: Arc<VerterHost>,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
+    diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
+    diagnostics_publisher: tokio::sync::Mutex<()>,
+    diagnostics_refresh_tx: tokio::sync::broadcast::Sender<DiagnosticsRefresh>,
     next_open_incarnation: std::sync::atomic::AtomicU64,
     /// Default compile profile for TSX generation (LSP mode).
     pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
@@ -511,9 +517,13 @@ impl DocumentRegistry {
 
     pub fn new(host: Arc<VerterHost>) -> Self {
         let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
+        let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             host,
             documents: DashMap::new(),
+            diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
+            diagnostics_publisher: tokio::sync::Mutex::new(()),
+            diagnostics_refresh_tx,
             next_open_incarnation: std::sync::atomic::AtomicU64::new(1),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
@@ -1196,6 +1206,7 @@ impl DocumentRegistry {
 
     /// Handle a document being closed.
     pub fn did_close(&self, uri: &Uri) {
+        self.invalidate_diagnostics(uri.as_str());
         // Clear the VFS overlay so resolution falls back to snapshot/disk.
         let canonical_id = uri_to_canonical_id(uri);
         // route through `host.notify_close`

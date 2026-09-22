@@ -790,7 +790,16 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         }],
     );
 
-    let merged = self_file_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    let merged = provider_diagnostics_batch(
+        &deps.documents,
+        &deps.provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        canonical_id,
+        Vec::new(),
+    )
+    .await
+    .diagnostics;
 
     // The type provider must have been queried at the module's OWN canonical
     // path (the Shadow buffer), never a derived `.tsx`.
@@ -1950,6 +1959,235 @@ async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface
 /// coordinator has synchronized the current carrier. Valid diagnostics for that
 /// same LSP version must still run.
 #[tokio::test(flavor = "multi_thread")]
+async fn diagnostic_completion_waits_for_enabled_native_semantics() {
+    let (documents, _, _, canonical_id, _, deps) = make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    documents.set_semantic_analysis_enabled(true);
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "provider completion cannot certify pending native analysis"
+    );
+    let mut semantic_ready = documents.subscribe_semantic_ready();
+    documents.schedule_semantic_analysis(&uri);
+    tokio::time::timeout(Duration::from_secs(20), semantic_ready.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "semantic commit still needs merged republication"
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalidated_inflight_diagnostics_cannot_restore_completion() {
+    let (documents, _, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    let query_documents = Arc::clone(&documents);
+    let query_uri = uri.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            query_documents.invalidate_diagnostics(query_uri.as_str());
+        }),
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(!documents.diagnostics_ready(&uri));
+    assert!(
+        refreshes.try_recv().is_err(),
+        "newer queued work owns epoch-only invalidation"
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(
+        documents.diagnostics_ready(&uri),
+        "a fresh successful pass completes without an edit"
+    );
+
+    // A subsequent native fallback from any publisher must withdraw the
+    // previous provider completion, even at the same authored version.
+    let publication = documents.begin_diagnostics_publication(&uri).unwrap();
+    documents
+        .publish_diagnostics(&deps.client, &uri, &publication, Vec::new(), false, None)
+        .await;
+    assert!(!documents.diagnostics_ready(&uri));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_generation_advance_during_query_eventually_publishes_without_another_signal() {
+    let (documents, _, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let query_documents = Arc::clone(&documents);
+    let query_canonical = canonical_id.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // Workspace compilation can advance diagnostics while the authored
+            // buffer and provider bytes stay identical. No editor signal follows.
+            query_documents
+                .host()
+                .bump_diagnostics_generation(&query_canonical);
+        }),
+    );
+    provider.clear_calls();
+    let handle = spawn_sync_coordinator(deps);
+    handle.signal_diagnostics_only(canonical_id, uri.to_string(), Instant::now());
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&uri),
+            || {
+                panic!(
+                    "superseded diagnostics were dropped without publishing the current generation"
+                )
+            },
+        )
+        .await;
+    let queries = provider
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(call,
+        MockCall::GetDiagnostics { path } if path == &ide_path)
+        })
+        .count();
+    assert_eq!(
+        queries, 2,
+        "only the superseded generation needs replacement"
+    );
+}
+
+/// Computing a PARENT's diagnostics compiles the children it imports, and a
+/// compile advances the child's diagnostics generation. When that lands after
+/// the child's receipt is already committed, no publication of the child is in
+/// flight to notice it: the receipt reads stale from then on, and with no editor
+/// signal to follow, the child would stay uncertified until its next edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn generation_advance_after_a_committed_receipt_owes_a_refresh() {
+    let (documents, _, _provider, canonical_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let parent: Uri = "file:///workspace/src/Parent.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: parent.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><p>parent</p></template>
+"
+        .to_string(),
+    });
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    assert!(refreshes.try_recv().is_err());
+
+    // The parent's pass compiles the child, then publishes the PARENT.
+    documents.host().bump_diagnostics_generation(&canonical_id);
+    let publication = documents.begin_diagnostics_publication(&parent).unwrap();
+    documents
+        .publish_diagnostics(&deps.client, &parent, &publication, Vec::new(), true, None)
+        .await;
+
+    let refresh = refreshes
+        .try_recv()
+        .expect("the child's stale receipt must owe a refresh");
+    assert_eq!(refresh.uri, uri);
+    assert!(documents.claim_diagnostics_refresh(&refresh));
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    assert!(
+        refreshes.try_recv().is_err(),
+        "a stable generation does not schedule polling"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_generation_refresh_cannot_displace_a_newer_complete_publication() {
+    let (documents, _, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let mut refreshes = documents.subscribe_diagnostics_refresh();
+    let query_documents = Arc::clone(&documents);
+    let query_canonical = canonical_id.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            query_documents
+                .host()
+                .bump_diagnostics_generation(&query_canonical);
+        }),
+    );
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    let refresh = refreshes
+        .try_recv()
+        .expect("generation drift must owe a refresh");
+    assert!(!documents.diagnostics_ready(&uri));
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(documents.diagnostics_ready(&uri));
+    assert!(!documents.claim_diagnostics_refresh(&refresh));
+    assert!(
+        documents.diagnostics_ready(&uri),
+        "delayed old work cannot invalidate new completion"
+    );
+    assert!(
+        refreshes.try_recv().is_err(),
+        "a stable generation does not schedule polling"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_diagnostics_invalidate_completion_before_debounce() {
+    let (_, _, _, canonical_id, _, deps) = make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(deps.documents.diagnostics_ready(&uri));
+    let handle = spawn_sync_coordinator(deps.clone());
+    handle.signal_diagnostics_only(canonical_id, uri.to_string(), Instant::now());
+    assert!(
+        !deps.documents.diagnostics_ready(&uri),
+        "pending work is not complete"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_provider_surface_invalidates_diagnostics_completion() {
+    let (_, _, _, canonical_id, ide_path, deps) = make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await;
+    assert!(deps.documents.diagnostics_ready(&uri));
+    let surface = deps
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .unwrap();
+    let mut replacement = crate::provider_surface_store::RecordSurface::carrier_legacy(
+        surface.kind,
+        ide_path.clone(),
+        canonical_id,
+        Arc::clone(&surface.provider_content),
+        surface.source_map.as_ref().map(|map| (**map).clone()),
+        Arc::clone(&surface.carrier_source),
+    );
+    replacement.map_hash = surface.stamp.map_hash;
+    deps.documents.provider_surfaces().record(replacement);
+    assert!(
+        deps.documents.diagnostics_ready(&uri),
+        "byte-identical repair preserves valid diagnostics"
+    );
+    let _close = deps.documents.provider_surfaces().forget(&ide_path);
+    assert!(
+        !deps.documents.diagnostics_ready(&uri),
+        "a retired surface cannot certify diagnostics"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
     let (_documents, _states, provider, canonical_id, ide_path, deps) =
         make_carrier_diagnostics_fixture().await;
@@ -1964,6 +2202,18 @@ async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
             .iter()
             .any(|call| matches!(call, MockCall::GetDiagnostics { path } if path == &ide_path)),
         "same-version deferred API work must not suppress provider diagnostics"
+    );
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    assert!(
+        deps.documents.diagnostics_ready(&uri),
+        "a successful provider publication must be observable as complete"
+    );
+    deps.documents
+        .host()
+        .bump_diagnostics_generation(&canonical_id);
+    assert!(
+        !deps.documents.diagnostics_ready(&uri),
+        "a dependency change invalidates completion without an editor edit"
     );
 }
 
@@ -2114,8 +2364,9 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
         "test client must initialize: {response:?}"
     );
 
+    let publish_uri = uri.clone();
     let publish = tokio::spawn(async move {
-        publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await
+        publish_merged_diagnostics(&deps, &canonical_id, publish_uri.as_str()).await
     });
     let request = tokio::time::timeout(Duration::from_secs(1), socket.next())
         .await
@@ -2128,6 +2379,10 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
     )
     .expect("publish params deserialize");
     assert_eq!(params.version, Some(2));
+    assert!(
+        !documents.diagnostics_ready(&uri),
+        "a native batch is not proof that TypeScript finished"
+    );
     assert!(
         params.diagnostics.iter().any(|diagnostic| {
             matches!(
@@ -2349,7 +2604,16 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         }),
     );
 
-    let merged = self_file_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    let merged = provider_diagnostics_batch(
+        &deps.documents,
+        &deps.provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        canonical_id,
+        Vec::new(),
+    )
+    .await
+    .diagnostics;
     assert!(
         !merged
             .iter()
@@ -3276,6 +3540,590 @@ async fn wait_for_provider_syncs(
     .await
     .expect("provider file-sync calls never reached the expected count");
     provider_syncs_for(provider, canonical_id)
+}
+
+/// A backlog of settled documents (a restart replays every open editor at
+/// once) must not stand between the user and the document they touched last:
+/// the most recently received settled document is always served next, even when
+/// it arrives while an older document's provider sync is still in flight.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_most_recently_touched_document_is_served_ahead_of_an_older_backlog() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">
+const msg = '{marker}'
+</script>
+             <template><div>{{{{ msg }}}}</div></template>
+"
+        )
+    };
+    let open = |name: &str| {
+        let uri: Uri = format!("file:///workspace/src/{name}.vue")
+            .parse()
+            .expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source(name),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the document must be open");
+        (canonical_id, uri)
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    // Every receipt is already overdue, oldest first, so the whole backlog is
+    // dispatchable the moment the coordinator looks at it.
+    let overdue = Instant::now() - Duration::from_secs(60);
+    const BACKLOG: usize = 5;
+    let backlog: Vec<(String, Uri)> = (0..BACKLOG)
+        .map(|index| open(&format!("Backlog{index}")))
+        .collect();
+    let (arrived, release) = provider.block_next_open_file();
+    for (index, (canonical_id, uri)) in backlog.iter().enumerate() {
+        needs_provider_sync.insert(canonical_id.clone());
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+
+    // The coordinator is now parked inside a backlog document's provider sync.
+    tokio::time::timeout(Duration::from_secs(20), arrived.notified())
+        .await
+        .expect("no backlog document ever reached the provider");
+    let (active_id, active_uri) = open("Active");
+    needs_provider_sync.insert(active_id.clone());
+    handle.signal(
+        active_id.clone(),
+        active_uri.as_str().to_string(),
+        overdue + Duration::from_secs(1),
+    );
+    // A background re-arm (semantic enrichment, a generation refresh, an
+    // importer republish) stamps a NEWER receipt on the oldest backlog
+    // document. It is not the user touching that document, so it must not
+    // promote it past anything the user did touch.
+    let (oldest_id, oldest_uri) = &backlog[0];
+    handle.signal_diagnostics_only(
+        oldest_id.clone(),
+        oldest_uri.as_str().to_string(),
+        overdue + Duration::from_secs(2),
+    );
+    release.notify_one();
+
+    let first_sync_order = |calls: &[MockCall]| {
+        let mut order: Vec<String> = Vec::new();
+        for call in calls {
+            let (MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }) = call else {
+                continue;
+            };
+            let Some(name) = path
+                .strip_prefix("/workspace/src/")
+                .and_then(|rest| rest.split('.').next())
+            else {
+                continue;
+            };
+            if (name == "Active" || name.starts_with("Backlog"))
+                && !order.iter().any(|seen| seen == name)
+            {
+                order.push(name.to_string());
+            }
+        }
+        order
+    };
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| first_sync_order(calls).len() == BACKLOG + 1),
+    )
+    .await
+    .expect("every settled document must reach the provider");
+
+    // Which backlog document the coordinator was parked in is not the subject:
+    // it may wake on the first signal, before the rest of the backlog is queued.
+    // Everything AFTER that document is: the user's document next, then the rest
+    // of the backlog newest-first — the re-armed oldest document not promoted.
+    let order = first_sync_order(&provider.calls());
+    let parked = order[0].clone();
+    assert!(parked.starts_with("Backlog"), "{order:?}");
+    let mut expected = vec![parked.clone(), "Active".to_string()];
+    expected.extend(
+        (0..BACKLOG)
+            .rev()
+            .map(|index| format!("Backlog{index}"))
+            .filter(|name| *name != parked),
+    );
+    assert_eq!(
+        order, expected,
+        "the newest settled receipt is served next; the rest follow newest-first"
+    );
+}
+
+/// A restart (or the post-scan re-arm) owes every open document a fresh
+/// provider pull at once. They must not all be handed to the provider together:
+/// its queue cannot be reordered, so the document the user turns to next would
+/// wait behind every one of them. Only a bounded number are in flight, and each
+/// freed slot goes to whatever the user touched most recently.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_user() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let cap = crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind) + 1;
+    let backlog_len = cap.min(64) + 3;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    // Every document is synced and certified once, ungated, so each has a
+    // committed provider surface and a later re-arm really does pull.
+    let docs: Vec<(String, Uri)> = (0..backlog_len)
+        .map(|index| {
+            let uri: Uri = format!("file:///workspace/src/Doc{index}.vue")
+                .parse()
+                .expect("test uri");
+            let _ = documents.did_open(&TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: source(&format!("doc{index}")),
+            });
+            let canonical_id = documents
+                .get_canonical_id(&uri)
+                .expect("the document must be open");
+            needs_provider_sync.insert(canonical_id.clone());
+            handle.signal(
+                canonical_id.clone(),
+                uri.as_str().to_string(),
+                Instant::now(),
+            );
+            (canonical_id, uri)
+        })
+        .collect();
+    handle
+        .await_until(
+            || {
+                docs.iter().all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the documents never reached their first certified state"),
+        )
+        .await;
+
+    let pulled_docs = |calls: &[MockCall]| -> Vec<String> {
+        calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::GetDiagnostics { path } => path
+                    .strip_prefix("/workspace/src/")
+                    .and_then(|rest| rest.split('.').next())
+                    .filter(|name| name.starts_with("Doc"))
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The re-arm: background receipts, oldest document first.
+    let gate = provider.gate_diagnostics();
+    provider.clear_calls();
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in docs.iter().enumerate() {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        // Background work fills all but the one slot kept for the user.
+        provider.wait_until_calls(|calls| pulled_docs(calls).len() >= cap - 1),
+    )
+    .await
+    .expect("the first pulls never reached the provider");
+
+    // The user turns to the OLDEST document, the one a newest-first backlog
+    // would serve last. Nothing is released: it takes the slot kept for it.
+    handle.touch(&docs[0].0);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulled_docs(calls).len() >= cap),
+    )
+    .await
+    .expect("the touched document must be admitted into the reserved slot");
+
+    let pulled = pulled_docs(&provider.calls());
+    assert_eq!(
+        pulled.len(),
+        cap,
+        "the window is never exceeded: {pulled:?}"
+    );
+    assert_eq!(
+        pulled[cap - 1],
+        "Doc0",
+        "the reserved slot goes to the document the user touched: {pulled:?}"
+    );
+
+    gate.add_permits(backlog_len * 4);
+    handle
+        .await_until(
+            || {
+                docs.iter().all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the bounded backlog must still drain completely"),
+        )
+        .await;
+}
+
+/// While a workspace scan is publishing hundreds of documents into the provider,
+/// every background diagnostic pull makes the engine rebuild its program against
+/// a moving target — and buys nothing, because every open document is re-armed
+/// when the scan completes. A restart replays every open editor as an OPEN, so
+/// only a document the user is EDITING is pulled during a scan; the rest are
+/// still SYNCED, and are pulled once it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+    handle.set_workspace_scan_in_progress(true);
+
+    let overdue = Instant::now() - Duration::from_secs(60);
+    let names = ["ReplayedA", "ReplayedB", "Active"];
+    let docs: Vec<(String, Uri)> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let uri: Uri = format!("file:///workspace/src/{name}.vue")
+                .parse()
+                .expect("test uri");
+            let _ = documents.did_open(&TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: source(name),
+            });
+            let canonical_id = documents
+                .get_canonical_id(&uri)
+                .expect("the document must be open");
+            needs_provider_sync.insert(canonical_id.clone());
+            if *name == "Active" {
+                // The one document the user is typing in.
+                let change = handle.change_received(canonical_id.clone());
+                let _ = documents.did_change(&uri, 2, &source("Active edited"));
+                change.signal(uri.as_str().to_string());
+            } else {
+                handle.signal(
+                    canonical_id.clone(),
+                    uri.as_str().to_string(),
+                    overdue + Duration::from_millis(index as u64),
+                );
+            }
+            (canonical_id, uri)
+        })
+        .collect();
+
+    let synced = |calls: &[MockCall], name: &str| {
+        calls.iter().any(|call| match call {
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } => {
+                path.starts_with(&format!("/workspace/src/{name}.vue"))
+            }
+            _ => false,
+        })
+    };
+    let pulled = |calls: &[MockCall], name: &str| {
+        calls.iter().any(|call| {
+            matches!(call, MockCall::GetDiagnostics { path }
+                if path.starts_with(&format!("/workspace/src/{name}.vue")))
+        })
+    };
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| names.iter().all(|name| synced(calls, name))),
+    )
+    .await
+    .expect("every replayed document is still SYNCED during a scan");
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&docs[2].1) && handle.diag_tasks_live() == 0,
+            || panic!("the edited document must be certified during the scan"),
+        )
+        .await;
+    let calls = provider.calls();
+    assert!(pulled(&calls, "Active"));
+    assert!(
+        !pulled(&calls, "ReplayedA") && !pulled(&calls, "ReplayedB"),
+        "documents the user is not looking at are not pulled while the scan runs: {calls:?}"
+    );
+
+    // The scan ends and the open documents are re-armed: now they are pulled.
+    handle.set_workspace_scan_in_progress(false);
+    for (canonical_id, uri) in &docs[..2] {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+    }
+    handle
+        .await_until(
+            || {
+                docs.iter().all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("every open document is certified once the scan has ended"),
+        )
+        .await;
+}
+
+/// Background re-arms (the post-scan sweep re-arms every open document at once)
+/// may never fill the whole in-flight window: a pull already handed to the
+/// provider cannot be overtaken, so the document the user opens next would wait
+/// behind a full window of them. One slot is always kept for user work.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_pulls_always_leave_a_slot_for_the_document_the_user_opens() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let cap = crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind) + 1;
+    assert!(cap > 1, "a window of one cannot reserve anything");
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">
+const msg = '{marker}'
+</script>
+             <template><div>{{{{ msg }}}}</div></template>
+"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+    let open = |name: &str| {
+        let uri: Uri = format!("file:///workspace/src/{name}.vue")
+            .parse()
+            .expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source(name),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the document must be open");
+        needs_provider_sync.insert(canonical_id.clone());
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            Instant::now(),
+        );
+        (canonical_id, uri)
+    };
+    let background: Vec<(String, Uri)> = (0..cap + 2)
+        .map(|index| open(&format!("Bg{index}")))
+        .collect();
+    handle
+        .await_until(
+            || {
+                background
+                    .iter()
+                    .all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the documents never reached their first certified state"),
+        )
+        .await;
+
+    let pulls = |calls: &[MockCall], prefix: &str| -> usize {
+        calls
+            .iter()
+            .filter(|call| {
+                matches!(call, MockCall::GetDiagnostics { path }
+                    if path.starts_with(&format!("/workspace/src/{prefix}")))
+            })
+            .count()
+    };
+    let gate = provider.gate_diagnostics();
+    provider.clear_calls();
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in background.iter().enumerate() {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Bg") >= cap - 1),
+    )
+    .await
+    .expect("background pulls never started");
+
+    // The user opens a document while the background window is as full as it
+    // is allowed to get. Nothing has been released: its pull must start anyway.
+    let (_, active_uri) = open("Active");
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Active") == 1),
+    )
+    .await
+    .expect("the document the user opened must be pulled without waiting for a background pull");
+    assert_eq!(
+        pulls(&provider.calls(), "Bg"),
+        cap - 1,
+        "background work holds at most all-but-one of the window"
+    );
+
+    gate.add_permits(64);
+    handle
+        .await_until(
+            || {
+                documents.diagnostics_ready(&active_uri)
+                    && background
+                        .iter()
+                        .all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the whole backlog must still drain"),
+        )
+        .await;
+}
+
+/// A follow-up the server owes a document — its receipt outdated by another
+/// document's pass, or native analysis landing — is work for a document the user
+/// may be looking at right now. Queued as anonymous background work it waits
+/// behind every re-armed open document (a restart re-arms all of them at once,
+/// and a throttled provider serves them one at a time), so the file the user is
+/// in stays uncertified for the length of the whole backlog. A follow-up keeps
+/// the attention its document last had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_for_the_document_the_user_is_in_is_not_queued_as_background() {
+    let (documents, _states, provider, _app_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let cap = crate::sync_coordinator::max_background_diagnostics(&deps.type_provider_kind) + 1;
+    let source = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">
+const msg = '{marker}'
+</script>
+             <template><div>{{{{ msg }}}}</div></template>
+"
+        )
+    };
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let client = deps.client.clone();
+    let handle = spawn_sync_coordinator(deps);
+    let open = |name: &str| {
+        let uri: Uri = format!("file:///workspace/src/{name}.vue")
+            .parse()
+            .expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source(name),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the document must be open");
+        needs_provider_sync.insert(canonical_id.clone());
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            Instant::now(),
+        );
+        (canonical_id, uri)
+    };
+    let background: Vec<(String, Uri)> = (0..cap + 2)
+        .map(|index| open(&format!("Bg{index}")))
+        .collect();
+    // The document the user is in: opened last, certified like the rest.
+    let (active_id, active_uri) = open("Active");
+    handle
+        .await_until(
+            || {
+                documents.diagnostics_ready(&active_uri)
+                    && background
+                        .iter()
+                        .all(|(_, uri)| documents.diagnostics_ready(uri))
+                    && handle.diag_tasks_live() == 0
+            },
+            || panic!("the documents never reached their first certified state"),
+        )
+        .await;
+
+    let pulls = |calls: &[MockCall], prefix: &str| -> usize {
+        calls
+            .iter()
+            .filter(|call| {
+                matches!(call, MockCall::GetDiagnostics { path }
+                    if path.starts_with(&format!("/workspace/src/{prefix}")))
+            })
+            .count()
+    };
+    let gate = provider.gate_diagnostics();
+    provider.clear_calls();
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in background.iter().enumerate() {
+        handle.signal_diagnostics_only(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Bg") >= cap - 1),
+    )
+    .await
+    .expect("background pulls never started");
+
+    // Another document's pass outdates the active document's receipt: the server
+    // now owes it a fresh publication, with no editor signal behind it.
+    documents.host().bump_diagnostics_generation(&active_id);
+    let (_, other_uri) = &background[cap + 1];
+    let publication = documents
+        .begin_diagnostics_publication(other_uri)
+        .expect("the other document is open");
+    documents
+        .publish_diagnostics(&client, other_uri, &publication, Vec::new(), false, None)
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| pulls(calls, "Active") == 1),
+    )
+    .await
+    .expect(
+        "the follow-up for the document the user is in must not wait for the background backlog",
+    );
+
+    gate.add_permits(64);
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&active_uri) && handle.diag_tasks_live() == 0,
+            || panic!("the follow-up must certify the active document"),
+        )
+        .await;
 }
 
 /// LSP notification handlers are dispatched concurrently, so an OLDER change

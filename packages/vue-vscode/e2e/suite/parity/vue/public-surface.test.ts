@@ -10,6 +10,7 @@ import {
   failProduct,
   assertTsExpectErrorFileHolds,
 } from "../../../lib/parityHarness";
+import { SUITE_TIMEOUT_MS } from "../../../lib/timeouts";
 
 function onlyVueParity(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "vue-parity")
@@ -18,7 +19,7 @@ function onlyVueParity(ctx: Mocha.Context): void {
 
 suite(`Vue public surface (negative) [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
-    this.timeout(20_000);
+    this.timeout(SUITE_TIMEOUT_MS);
     onlyVueParity(this);
     await ensureParityReady("src/App.vue");
   });

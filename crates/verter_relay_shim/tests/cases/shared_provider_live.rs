@@ -470,6 +470,14 @@ fn init_params(root_uri: &str) -> serde_json::Value {
     })
 }
 
+/// Admission proof for the live fixtures: their `include: ["src/**/*"]` admits every
+/// generated unit.
+fn admitted_generated_units() -> verter_session::external_ts::GeneratedUnitAdmissionFact {
+    verter_session::external_ts::GeneratedUnitAdmissionFact::Admitted(
+        verter_workspace::GeneratedUnitAdmissionFingerprint::from_raw(1),
+    )
+}
+
 /// Resolve the carrier SOURCE's owning project through the PRODUCTION
 /// `WorkspaceProjectResolver` over a real published fixture snapshot (the same
 /// `include: ["src/**/*"]` configured project the composite test publishes) — the
@@ -579,6 +587,7 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
             workspace_root: &workspace_norm,
             tsconfig_path: &tsconfig_norm,
             resolution: resolved_binding(&workspace_norm, &tsconfig_norm),
+            generated_units: admitted_generated_units(),
             // The published fixture snapshot's generation (`SnapshotGeneration(1)`).
             config_generation: 1,
             client_label: "verter_lsp",
@@ -669,6 +678,7 @@ async fn setup_dual_claimant(tsgo: &Path, tag: &str) -> Harness {
             workspace_root: &workspace_norm,
             tsconfig_path: &owner_tsconfig_norm,
             resolution,
+            generated_units: admitted_generated_units(),
             config_generation: 1,
             client_label: "verter_lsp",
         }),

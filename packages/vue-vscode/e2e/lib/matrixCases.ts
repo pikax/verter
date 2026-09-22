@@ -245,6 +245,13 @@ export const VUE_MATRIX_CASES: readonly MatrixCase[] = [
     issue: "ISSUE-vue-matrix-no-virtual-tag",
     kind: "no-virtual-definition",
     file: "src/components/PropParent.vue",
+    anchor: { file: "src/components/PropParent.vue", token: "PropChild", occurrence: 2 },
+  },
+  {
+    id: "vue.matrix.no-virtual.component-import",
+    issue: "ISSUE-vue-matrix-no-virtual",
+    kind: "no-virtual-definition",
+    file: "src/components/PropParent.vue",
     anchor: { file: "src/components/PropParent.vue", token: "PropChild", occurrence: 1 },
   },
 

@@ -114,7 +114,7 @@ real_provider_test!(
 // (`export { default as PageContent }`) -> PageContent.vue
 // ---------------------------------------------------------------------------
 //
-// The literal user symptom: `import { PageContent } from '@/components/layouts'`
+// An aliased component barrel: `import { PageContent } from '@/components/layouts'`
 // where the aliased directory index re-exports a `.vue` carrier. This is a 2-hop
 // chain (alias resolution + one re-export). The barrel BFS must resolve the `@/`
 // specifier through the shared workspace resolver to the `layouts` index, follow
