@@ -744,24 +744,7 @@ pub(crate) enum ResolveCallSelection {
         /// deposit widens at the caller's value (member) positions.
         fresh_literal_returns: Vec<SemanticNodeId>,
     },
-    /// A UNION callee's per-arm winners: one first-applicable signature in
-    /// EVERY callable arm; the close unions the arm returns.
-    UnionSelected {
-        arms: Vec<ResolveCallUnionArmSelection>,
-    },
     DynamicAny,
-}
-
-/// One union-callee arm's staged winner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolveCallUnionArmSelection {
-    pub(crate) selected: SignatureCandidateOrigin,
-    /// The arm winner's signature node (the sealed deferred carrier node
-    /// when the arm's return deferred — the general signature of a lone
-    /// winner is minted at close, but a union close has no per-arm return
-    /// to mint with, so the carrier node itself is the arm's signature).
-    pub(crate) selected_signature: SemanticNodeId,
-    pub(crate) substitution: CanonicalTypeSubstitution,
 }
 
 impl ResolveCallSelection {
@@ -773,7 +756,7 @@ impl ResolveCallSelection {
                 fresh_literal_returns,
                 ..
             } => fresh_literal_returns,
-            Self::UnionSelected { .. } | Self::DynamicAny => &[],
+            Self::DynamicAny => &[],
         }
     }
 
@@ -799,19 +782,6 @@ impl ResolveCallSelection {
                 substitution: substitution.clone(),
                 return_type,
                 fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
-            },
-            Self::UnionSelected { arms } => ResolvedCallResult::UnionSelected {
-                selections: Arc::from(
-                    arms.iter()
-                        .map(|arm| crate::semantic_query::ResolvedUnionArm {
-                            selected: arm.selected.clone(),
-                            selected_signature: arm.selected_signature,
-                            substitution: arm.substitution.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-                return_type,
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
         }

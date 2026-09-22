@@ -9,10 +9,246 @@
 //! `project_router`, so `use super::*` resolves to its items.
 
 use super::*;
+use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use std::path::PathBuf;
 use verter_session::external_ts::EnvDims;
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+
+struct BatchRouterFixture {
+    _temp: tempfile::TempDir,
+    router: ProjectTsserverProvider,
+    workspace: Arc<verter_workspace::FilesystemWorkspace>,
+    providers: [Arc<MockTypeProvider>; 2],
+    members: Vec<CarrierActivation>,
+}
+
+/// Only engine discovery/spawning is substituted. Every operation still resolves
+/// its source against the live, published configured-project ownership graph.
+fn batch_router_fixture() -> BatchRouterFixture {
+    use verter_semantic::resolver_core::{
+        ConfiguredMembership, ModuleResolverCore, StaticMembershipSpec,
+    };
+    use verter_workspace::workspace_snapshot::{OwnershipProject, ProjectPayload};
+    use verter_workspace::{CanonicalPath, PublishedRoot, WorkspaceSnapshot};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = ProjectTsserverProvider::normalized(&temp.path().to_string_lossy());
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = Arc::new(VerterHost::new(
+        verter_session::HostConfig::default(),
+        workspace.clone(),
+    ));
+    let router = ProjectTsserverProvider {
+        host,
+        tsdk: None,
+        plugin_path: None,
+        node_path: "unused".to_string(),
+        client: Arc::new(OnceCell::new()),
+        witness_backend: TsserverEngineBackend::with_default_host_version(),
+        engine_specs: DashMap::new(),
+        providers: DashMap::new(),
+        routes: DashMap::new(),
+    };
+    let providers = [
+        Arc::new(MockTypeProvider::new()),
+        Arc::new(MockTypeProvider::new()),
+    ];
+    let members: Vec<_> = [
+        ("a", "First.vue", CarrierScriptKind::Tsx),
+        ("b", "Middle.svelte", CarrierScriptKind::Ts),
+        ("a", "Last.vue", CarrierScriptKind::Jsx),
+    ]
+    .into_iter()
+    .map(|(project, file, script_kind)| CarrierActivation {
+        source_path: format!("{root}/{project}/{file}"),
+        companion_path: format!("{root}/{project}/{file}.verter.ts"),
+        project_file_name: format!("{root}/{project}/tsconfig.json"),
+        script_kind,
+    })
+    .collect();
+    let mut projects = Vec::new();
+    let mut configs = Vec::new();
+    for (index, (name, provider)) in ["a", "b"].into_iter().zip(&providers).enumerate() {
+        let project_root = format!("{root}/{name}");
+        let tsconfig = format!("{project_root}/tsconfig.json");
+        let files: Vec<_> = members
+            .iter()
+            .filter(|member| member.project_file_name == tsconfig)
+            .map(|member| CanonicalPath::new(&member.source_path))
+            .collect();
+        projects.push(OwnershipProject {
+            id: ProjectId(index as u32),
+            root: CanonicalPath::new(&project_root),
+            workspace_root: CanonicalPath::new(&root),
+            payload: ProjectPayload::Configured {
+                tsconfig_path: CanonicalPath::new(&tsconfig),
+                membership: ConfiguredMembership {
+                    spec: StaticMembershipSpec {
+                        files: files.clone(),
+                        include: Vec::new(),
+                        exclude: Vec::new().into(),
+                    },
+                    materialized_files: files.into_iter().collect(),
+                },
+                compiler_options: Default::default(),
+                references: Vec::new(),
+                workspace_aliases: Vec::new(),
+            },
+        });
+        configs.push(verter_workspace::ide_project_config(
+            project_root,
+            root.clone(),
+            Some(tsconfig.clone()),
+        ));
+        let key = ProjectEngineKey {
+            project: tsconfig.clone(),
+            tsserver_path: format!("{root}/typescript/lib/tsserver.js"),
+        };
+        router.engine_specs.insert(
+            tsconfig,
+            CachedEngineSpec {
+                generation: 1,
+                outcome: Ok(ProjectEngineSpec {
+                    key: key.clone(),
+                    workspace_root: root.clone(),
+                    default_lib_count: 1,
+                }),
+            },
+        );
+        let provider: Arc<dyn TypeProvider> = provider.clone();
+        router
+            .providers
+            .insert(key, Arc::new(OnceCell::new_with(Some(provider))));
+    }
+    workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects,
+        resolver: ModuleResolverCore::new(configs),
+        generation: SnapshotGeneration(1),
+    })));
+    BatchRouterFixture {
+        _temp: temp,
+        router,
+        workspace,
+        providers,
+        members,
+    }
+}
+
+#[tokio::test]
+async fn carrier_batches_preserve_each_provider_order_without_scalar_dispatch() {
+    let fixture = batch_router_fixture();
+    let members = &fixture.members;
+    fixture
+        .router
+        .activate_carrier_members(members)
+        .await
+        .unwrap();
+    for (provider, expected) in [
+        (
+            &fixture.providers[0],
+            vec![members[0].clone(), members[2].clone()],
+        ),
+        (&fixture.providers[1], vec![members[1].clone()]),
+    ] {
+        let calls = provider.calls();
+        assert!(
+            matches!(calls.as_slice(), [MockCall::ActivateCarrierMembers { members }] if *members == expected),
+            "each provider must receive one ordered activation batch, got {calls:?}"
+        );
+        provider.clear_calls();
+    }
+
+    let paths: Vec<_> = members
+        .iter()
+        .map(|member| member.companion_path.clone())
+        .collect();
+    fixture
+        .router
+        .notify_carriers_changed(&paths)
+        .await
+        .unwrap();
+    for (provider, expected) in [
+        (
+            &fixture.providers[0],
+            vec![paths[0].clone(), paths[2].clone()],
+        ),
+        (&fixture.providers[1], vec![paths[1].clone()]),
+    ] {
+        let calls = provider.calls();
+        assert!(
+            matches!(calls.as_slice(), [MockCall::NotifyCarriersChanged { companion_paths }] if *companion_paths == expected),
+            "each provider must receive one ordered change batch, got {calls:?}"
+        );
+        provider.clear_calls();
+    }
+
+    let member = &members[0];
+    fixture
+        .router
+        .activate_carrier_member(
+            &member.source_path,
+            &member.companion_path,
+            &member.project_file_name,
+            member.script_kind,
+        )
+        .await
+        .unwrap();
+    let calls = fixture.providers[0].calls();
+    assert!(
+        matches!(calls.as_slice(), [MockCall::ActivateCarrierMember { source_path, companion_path, project_file_name, script_kind }]
+        if source_path == &member.source_path && companion_path == &member.companion_path
+            && project_file_name == &member.project_file_name && script_kind == &member.script_kind)
+    );
+    assert!(fixture.providers[1].calls().is_empty());
+}
+
+#[tokio::test]
+async fn carrier_batches_revalidate_live_ownership_after_routes_are_registered() {
+    let fixture = batch_router_fixture();
+    fixture
+        .router
+        .activate_carrier_members(&fixture.members)
+        .await
+        .unwrap();
+    for provider in &fixture.providers {
+        provider.clear_calls();
+    }
+    fixture
+        .workspace
+        .publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(Arc::new(
+            verter_workspace::WorkspaceSnapshot {
+                owners_memo: Default::default(),
+                projects: Vec::new(),
+                resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+                generation: SnapshotGeneration(2),
+            },
+        )));
+    assert!(fixture
+        .router
+        .activate_carrier_members(&fixture.members)
+        .await
+        .is_err());
+    let paths: Vec<_> = fixture
+        .members
+        .iter()
+        .map(|member| member.companion_path.clone())
+        .collect();
+    assert!(fixture
+        .router
+        .notify_carriers_changed(&paths)
+        .await
+        .is_err());
+    for provider in &fixture.providers {
+        assert!(
+            provider.calls().is_empty(),
+            "withdrawn ownership must not reach a cached engine"
+        );
+    }
+}
 
 fn write_typescript(root: &Path, version: &str) -> PathBuf {
     let lib = root.join("node_modules/typescript/lib");

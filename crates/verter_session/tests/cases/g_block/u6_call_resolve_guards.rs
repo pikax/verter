@@ -555,13 +555,11 @@ fn signature_ref_is_occurrence_aware() {
         node: SemanticNodeId(71),
         occurrence: origin.clone(),
         return_carrier: SignatureReturnCarrier::Declared(SemanticNodeId(72)),
-        arm_ordinal: 0,
     };
     let SignatureRef {
         node,
         occurrence,
         return_carrier,
-        arm_ordinal,
     } = &candidate;
     assert_eq!(*node, SemanticNodeId(71));
     assert_eq!(occurrence, &origin);
@@ -569,10 +567,6 @@ fn signature_ref_is_occurrence_aware() {
         return_carrier,
         SignatureReturnCarrier::Declared(id) if *id == SemanticNodeId(72)
     ));
-    assert_eq!(
-        *arm_ordinal, 0,
-        "a non-union callee's candidates all carry arm ordinal 0"
-    );
 
     // Instantiating the signature node preserves the occurrence: the same
     // origin rides a different signature node.

@@ -1156,13 +1156,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn is_flow_return_type_member_base_data(&self, data: &SemanticNodeData) -> bool {
         if let SemanticNodeData::InstantiationRef { base, args } = data {
             return base.canonical_id.as_ref() == "__builtin__"
-                && base.decl_name.as_ref() == "ReturnType"
+                && super::signature_utility::SignatureUtility::ReturnType
+                    .spells(base.decl_name.as_ref())
                 && args.len() == 1
                 && self.flow_return_callee_for_typeof_arg(args[0]).is_some();
         }
         if let Some((name, _scope)) = data.bare_ref_head() {
             let args = data.carrier_type_args();
-            return name.as_ref() == "ReturnType"
+            return super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
                 && args.len() == 1
                 && self.flow_return_callee_for_typeof_arg(args[0]).is_some();
         }
@@ -13411,32 +13412,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             callee_node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         );
-        // An OVERLOADED callee is not answerable at a CALL site, whether
-        // or not the group has an implementation. TypeScript picks the
-        // FIRST signature whose parameters accept the arguments;
-        // `select_signature_function` deliberately selects the LAST
-        // (which is what the signature UTILITIES want — `ReturnType<typeof
-        // f>` over an overloaded `f` IS the last overload's return). For
-        // an AMBIENT group (`declare function f(…)` ×3) that hands back
-        // the last declaration's return as the call's value, cleanly and
-        // warm, with no visible signature the call would ever select.
-        //
-        // Picking the right overload needs argument-driven overload
-        // resolution, which this substrate does not perform; the answer is
-        // the `UnrepresentableCallee` degradation — the typed positional
-        // marker, `ReturnOnly` by contract.
-        if self
+        // The callee's call signatures come from the shared signature
+        // list. This sink carries no arguments, so it answers only a callee
+        // with exactly ONE call signature: a call takes the FIRST signature
+        // whose parameters accept the arguments, and choosing among several
+        // is argument-driven overload resolution. Handing back any fixed
+        // member of an overloaded group — for an AMBIENT group
+        // (`declare function f(…)` ×3), a declaration the call might never
+        // select — would publish it cleanly and warm; the answer is the
+        // `UnrepresentableCallee` degradation — the typed positional
+        // marker, `ReturnOnly` by contract. So is an unsettled callee.
+        let function_node = match self
             .dispatch
-            .signature_bucket_arity(resolved, super::build::SignatureBucket::Call)
-            > 1
+            .authored_signatures_of(resolved, crate::semantic_query::SignatureKind::Call)
         {
-            return self.degraded_unrepresentable_callee();
-        }
-        let Some(function_node) = self
-            .dispatch
-            .select_signature_function(resolved, super::build::SignatureBucket::Call)
-        else {
-            return self.degraded_unrepresentable_callee();
+            super::signature_utility::AuthoredSignatures::Nodes(signatures) => {
+                match signatures.as_slice() {
+                    [only] => *only,
+                    _ => return self.degraded_unrepresentable_callee(),
+                }
+            }
+            super::signature_utility::AuthoredSignatures::Undecided => {
+                return self.degraded_unrepresentable_callee()
+            }
         };
         // A resolved callee VALUE TYPE was composed from a DECLARED
         // signature, lowered in file owner scope where the callee's own
@@ -13981,8 +13979,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         node: SemanticNodeId,
         site: crate::flow_slice_content::SliceCallSite,
     ) -> bool {
-        let Some((_, call_sigs, construct_sigs)) = self.dispatch.settle_signature_group(node)
-        else {
+        let Ok((call_sigs, construct_sigs)) = self.dispatch.shared_signature_buckets(node) else {
             return false;
         };
         if call_sigs.len() + construct_sigs.len() > 1 {
@@ -14586,8 +14583,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // the typed degradation — the read cannot pick).
                 if self.call_group_needs_executor(node, site) {
                     let overloaded = matches!(
-                        self.dispatch.settle_signature_group(node),
-                        Some((_, call_sigs, construct_sigs))
+                        self.dispatch.shared_signature_buckets(node),
+                        Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
                     if let Some(value) = self.eval_call_via_resolve_call(node, site) {
@@ -14694,7 +14691,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 else {
                     return self.degraded_unrepresentable_callee();
                 };
-                if name.as_ref() != "ReturnType" || type_arguments.len() != 1 {
+                if !super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
+                    || type_arguments.len() != 1
+                {
                     return self.degraded_unrepresentable_callee();
                 }
                 // A member-call callee rooted at a FRAME binding
@@ -14740,8 +14739,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // and an undecided executor falls back to it.
                 if self.call_group_needs_executor(callee_node, site) {
                     let overloaded = matches!(
-                        self.dispatch.settle_signature_group(callee_node),
-                        Some((_, call_sigs, construct_sigs))
+                        self.dispatch.shared_signature_buckets(callee_node),
+                        Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
                     if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {

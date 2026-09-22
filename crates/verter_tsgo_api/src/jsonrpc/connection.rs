@@ -74,6 +74,23 @@ enum Outbound {
     Close,
 }
 
+/// A completed JSON-RPC error response ([`JsonRpcConnection::request_coded`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonRpcErrorResponse {
+    /// The response's `error.code`, when it carried an integer one.
+    pub code: Option<i64>,
+    /// The response's `error.message`.
+    pub message: String,
+}
+
+impl JsonRpcErrorResponse {
+    /// The error [`JsonRpcConnection::request`] reports for this response.
+    #[must_use]
+    pub fn into_transport(self) -> TsgoApiError {
+        TsgoApiError::Transport(format!("jsonrpc error response: {}", self.message))
+    }
+}
+
 /// A live JSON-RPC 2.0 connection. Cloneable handle; the read + write tasks run in
 /// the background and shut down when the last handle is dropped or
 /// [`JsonRpcConnection::close`] is called.
@@ -193,6 +210,19 @@ impl JsonRpcConnection {
         method: &str,
         params: serde_json::Value,
     ) -> TsgoApiResult<serde_json::Value> {
+        self.request_coded(method, params)
+            .await?
+            .map_err(|error| error.into_transport())
+    }
+
+    /// [`Self::request`], keeping a completed JSON-RPC error response apart from a
+    /// request that never round-tripped: the inner `Err` carries the response's
+    /// `code`, for a caller whose protocol assigns meaning to it.
+    pub async fn request_coded(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> TsgoApiResult<Result<serde_json::Value, JsonRpcErrorResponse>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id, tx);
@@ -216,14 +246,15 @@ impl JsonRpcConnection {
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown error");
-                    return Err(TsgoApiError::Transport(format!(
-                        "jsonrpc error response: {message}"
-                    )));
+                    return Ok(Err(JsonRpcErrorResponse {
+                        code: err.get("code").and_then(serde_json::Value::as_i64),
+                        message: message.to_string(),
+                    }));
                 }
-                Ok(value
+                Ok(Ok(value
                     .get("result")
                     .cloned()
-                    .unwrap_or(serde_json::Value::Null))
+                    .unwrap_or(serde_json::Value::Null)))
             }
             // The read task dropped the sender (connection closed) — the guard
             // prunes on drop.

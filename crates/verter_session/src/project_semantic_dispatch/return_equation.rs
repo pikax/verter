@@ -252,8 +252,7 @@ fn resolved_call_fresh_target(
                 Vec::new()
             },
         ),
-        crate::semantic_query::ResolvedCallResult::UnionSelected { return_type, .. }
-        | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
+        crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
             (*return_type, Vec::new())
         }
     }
@@ -264,7 +263,6 @@ pub(super) fn resolved_call_return_type(
 ) -> SemanticNodeId {
     match result {
         crate::semantic_query::ResolvedCallResult::Selected { return_type, .. }
-        | crate::semantic_query::ResolvedCallResult::UnionSelected { return_type, .. }
         | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => *return_type,
     }
 }

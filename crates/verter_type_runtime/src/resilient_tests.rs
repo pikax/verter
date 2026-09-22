@@ -44,6 +44,53 @@ fn project_bound_diagnostics_quarantine_is_scoped_to_the_configured_project() {
     assert_ne!(first, second);
 }
 
+#[tokio::test]
+async fn quarantined_diagnostics_are_unavailable_until_content_changes() {
+    let harness = make_harness(MockProvider::new("tsgo"), MockProvider::new("tsgo"));
+    let provider = &harness.provider;
+    let path = "/workspace/App.vue.tsx";
+    let project = "/workspace/tsconfig.json";
+    assert!(provider.get_diagnostics(path).await.unwrap().is_empty());
+    {
+        let mut watch = provider.state.query_watch.lock().unwrap();
+        for fingerprint in [
+            QueryFingerprint::new("diagnostics", path, 0, 0),
+            QueryFingerprint::new("diagnostics-in-project", path, 0, 0).in_scope(project),
+        ] {
+            watch.begin(&fingerprint);
+            for _ in 0..super::QUARANTINE_STRIKE_THRESHOLD {
+                watch.record_crash_implications();
+            }
+            watch.end(&fingerprint, false);
+        }
+    }
+    let foreground = provider.get_diagnostics(path).await;
+    let background = provider.get_diagnostics_background(path).await;
+    let configured = provider.get_diagnostics_in_project(path, project).await;
+    assert!(
+        foreground.is_err() && background.is_err() && configured.is_err(),
+        "quarantine cannot attest a successful diagnostic pull: {foreground:?}, {background:?}, {configured:?}"
+    );
+    assert!(provider
+        .get_diagnostics("/workspace/Other.vue.tsx")
+        .await
+        .is_ok());
+    provider
+        .update_file(path, "const changed = true")
+        .await
+        .unwrap();
+    assert!(provider.get_diagnostics(path).await.unwrap().is_empty());
+    assert!(provider
+        .get_diagnostics_background(path)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(provider
+        .get_diagnostics_in_project(path, project)
+        .await
+        .is_ok());
+}
+
 /// A recorded provider call.
 #[derive(Debug, Clone, PartialEq)]
 enum MockCall {
@@ -107,6 +154,8 @@ struct MockInner {
     /// crash quarantine covers). Hovers on other paths stay instant so the
     /// liveness probes (`await_down`/`await_live`) never park on the gate.
     hover_gate: parking_lot::Mutex<Option<(String, Arc<Semaphore>)>>,
+    configure_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    shutdowns: AtomicUsize,
 }
 
 /// A recording `TypeProvider` mock. Cloning shares the recorded state (so the
@@ -124,6 +173,8 @@ impl MockProvider {
                 calls: parking_lot::Mutex::new(Vec::new()),
                 tap: parking_lot::Mutex::new(None),
                 hover_gate: parking_lot::Mutex::new(None),
+                configure_gate: parking_lot::Mutex::new(None),
+                shutdowns: AtomicUsize::new(0),
             }),
         }
     }
@@ -317,6 +368,17 @@ impl TypeProvider for MockProvider {
             base_url: base_url.to_string(),
             paths,
         });
+        let gate = self.inner.configure_gate.lock().clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await;
+            }
+            Ok(())
+        })
+    }
+
+    fn shutdown(&self) -> ProviderFuture<'_, ()> {
+        self.inner.shutdowns.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     }
 
@@ -1415,9 +1477,73 @@ async fn retracted_carrier_is_absent_from_restart_replay() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn restart_replays_state_without_downgrading_loaded_files() {
-    // PRESERVED behavior: load/open mode fidelity, path configs, and workspace
-    // folders all survive a respawn.
+async fn crash_interrupts_a_stalled_mutation_and_replays_retained_state() {
+    let initial = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let gate = Arc::new(Semaphore::new(0));
+    *initial.inner.configure_gate.lock() = Some(Arc::clone(&gate));
+    let mut entered = initial.attach_tap();
+    let harness = make_harness(initial.clone(), replacement.clone());
+    let provider = Arc::clone(&harness.provider);
+    let mutation = tokio::spawn(async move {
+        provider
+            .configure_paths("/project", serde_json::json!({"@/*": ["src/*"]}))
+            .await
+    });
+    assert!(matches!(
+        entered.recv().await,
+        Some(MockCall::ConfigurePaths { .. })
+    ));
+    assert!(
+        !mutation.is_finished(),
+        "healthy pending work must not be abandoned"
+    );
+
+    // This mutation queues behind the stalled forward. Recovery must retain it
+    // without forwarding it to the failed provider or reordering the replay.
+    let queued = harness
+        .provider
+        .open_file("/project/Latest.ts", "export const latest = 42;");
+    tokio::pin!(queued);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    harness.crash_current_generation();
+    await_down(&harness.provider).await;
+    assert_eq!(initial.inner.shutdowns.load(Ordering::SeqCst), 1);
+    assert!(mutation.await.unwrap().is_err());
+    queued.await.unwrap();
+    harness.spawn_gate.add_permits(1);
+    await_live(&harness.provider).await;
+    assert_eq!(
+        gate.available_permits(),
+        0,
+        "the wedged operation was never released"
+    );
+    let calls = replacement.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(
+                |c| matches!(c, MockCall::ConfigurePaths { base_url, .. } if base_url == "/project")
+            )
+            .count(),
+        1
+    );
+    assert_eq!(calls.iter().filter(|c| matches!(c, MockCall::OpenFile { path, content } if path == "/project/Latest.ts" && content == "export const latest = 42;")).count(), 1);
+    assert!(!initial
+        .calls()
+        .iter()
+        .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == "/project/Latest.ts")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_replays_updates_as_open_and_retains_background_only_files() {
+    // Replay must match the real backends: update_file opens an editor overlay,
+    // while discovery-only files remain background loads.
     let initial = MockProvider::new("tsserver");
     let replacement = MockProvider::new("tsserver");
     let mut replay_rx = replacement.attach_tap();
@@ -1425,6 +1551,11 @@ async fn restart_replays_state_without_downgrading_loaded_files() {
 
     let loaded = "/project/src/loaded.vue.tsx";
     let opened = "/project/src/open.vue.tsx";
+    let background = "/project/src/background.vue.tsx";
+    provider
+        .load_file(background, "const background = 1;")
+        .await
+        .unwrap();
     provider
         .load_file(loaded, "const loaded = 1;")
         .await
@@ -1454,14 +1585,14 @@ async fn restart_replays_state_without_downgrading_loaded_files() {
     assert!(
         replayed
             .iter()
-            .any(|c| matches!(c, MockCall::LoadFile { path, content } if path == loaded && content == "const loaded = 2;")),
-        "a loaded file replays via load_file with its latest content, got {replayed:?}"
+            .any(|c| matches!(c, MockCall::OpenFile { path, content } if path == loaded && content == "const loaded = 2;")),
+        "an editor update promotes a loaded file to an open overlay, got {replayed:?}"
     );
     assert!(
         !replayed
             .iter()
-            .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == loaded)),
-        "a loaded file must NOT be downgraded to open on replay, got {replayed:?}"
+            .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == background)),
+        "discovery-only files must not become open overlays, got {replayed:?}"
     );
     assert!(
         replayed

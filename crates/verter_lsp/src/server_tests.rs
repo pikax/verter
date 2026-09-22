@@ -6763,117 +6763,130 @@ async fn rename_after_did_change_repairs_latest_provider_surface_for_vue_and_sve
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_update() {
-    let blocker_v1 = "<script setup lang=\"ts\">const blocker = 1</script>\n";
-    let blocker_v2 = "<script setup lang=\"ts\">const blocker = 2</script>\n";
-    let target_v1 = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
-    let target_v2 = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
-    let warm_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild /></template>\n";
-    let (_temp, service, drain_handle, provider, workspace_id) =
-        make_definition_test_server_with_kind(
-            &[
-                ("src/Blocker.vue", "vue", blocker_v1),
-                (
-                    "src/OldChild.vue",
-                    "vue",
-                    "<script setup lang=\"ts\">defineProps<{ staleProp: string }>()</script>",
-                ),
-                (
-                    "src/NewChild.vue",
-                    "vue",
-                    "<script setup lang=\"ts\">defineProps<{ currentProp: string }>()</script>",
-                ),
-                ("src/Target.vue", "vue", target_v1),
-                ("src/Warm.vue", "vue", warm_source),
-            ],
-            crate::TypeProviderKind::Tsgo,
-        )
-        .await;
-    let server = service.inner();
-    let blocker_uri = workspace_uri(&workspace_id, "src/Blocker.vue");
-    let target_uri = workspace_uri(&workspace_id, "src/Target.vue");
-    let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
-    settle_child_contracts(server, &warm_uri, &workspace_id, &["src/NewChild.vue"]).await;
-    server.ensure_current_file_synced(&blocker_uri).await;
-    let blocker_ide_path = server
-        .active_ide_path_for_uri(&blocker_uri)
-        .expect("blocker provider path");
-    let (update_arrived, update_release) = provider.block_update_file(&blocker_ide_path);
+/// Runs on the serve thread, as every handler does in the shipped binary: this
+/// body polls a `did_change`, a second `did_change` and a `completion` handler
+/// future INLINE and nested, which is exactly the shape
+/// [`crate::SERVE_THREAD_STACK_BYTES`] is sized for. On libtest's default
+/// thread an unoptimized build overflows the stack before any assertion runs.
+#[test]
+fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_update() {
+    crate::run_on_serve_thread(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime must build")
+            .block_on(async {
+            let blocker_v1 = "<script setup lang=\"ts\">const blocker = 1</script>\n";
+            let blocker_v2 = "<script setup lang=\"ts\">const blocker = 2</script>\n";
+            let target_v1 = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
+            let target_v2 = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
+            let warm_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild /></template>\n";
+            let (_temp, service, drain_handle, provider, workspace_id) =
+                make_definition_test_server_with_kind(
+                    &[
+                        ("src/Blocker.vue", "vue", blocker_v1),
+                        (
+                            "src/OldChild.vue",
+                            "vue",
+                            "<script setup lang=\"ts\">defineProps<{ staleProp: string }>()</script>",
+                        ),
+                        (
+                            "src/NewChild.vue",
+                            "vue",
+                            "<script setup lang=\"ts\">defineProps<{ currentProp: string }>()</script>",
+                        ),
+                        ("src/Target.vue", "vue", target_v1),
+                        ("src/Warm.vue", "vue", warm_source),
+                    ],
+                    crate::TypeProviderKind::Tsgo,
+                )
+                .await;
+            let server = service.inner();
+            let blocker_uri = workspace_uri(&workspace_id, "src/Blocker.vue");
+            let target_uri = workspace_uri(&workspace_id, "src/Target.vue");
+            let warm_uri = workspace_uri(&workspace_id, "src/Warm.vue");
+            settle_child_contracts(server, &warm_uri, &workspace_id, &["src/NewChild.vue"]).await;
+            server.ensure_current_file_synced(&blocker_uri).await;
+            let blocker_ide_path = server
+                .active_ide_path_for_uri(&blocker_uri)
+                .expect("blocker provider path");
+            let (update_arrived, update_release) = provider.block_update_file(&blocker_ide_path);
 
-    let blocked_update = super::lifecycle::handle_did_change(
-        server,
-        DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri: blocker_uri,
-                version: 2,
-            },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: blocker_v2.to_string(),
-            }],
-        },
-    );
-    let probe = async {
-        update_arrived.notified().await;
-        let target_edit = super::lifecycle::handle_did_change(
-            server,
-            DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: target_uri.clone(),
-                    version: 2,
+            let blocked_update = super::lifecycle::handle_did_change(
+                server,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: blocker_uri,
+                        version: 2,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: blocker_v2.to_string(),
+                    }],
                 },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: target_v2.to_string(),
-                }],
-            },
-        );
-        let observe = async {
-            tokio::time::timeout(BLOCKED_PROVIDER_PROBE_LIVENESS, async {
-                loop {
-                    if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("unrelated target commit must not wait for blocker provider publication");
-
-            settle_child_contracts(server, &target_uri, &workspace_id, &["src/NewChild.vue"]).await;
-
-            let cursor = target_v2.find("<NewChild ").unwrap() + "<NewChild ".len();
-            let position = LineIndex::new_utf16(target_v2)
-                .offset_to_position(cursor as u32)
-                .expect("current completion position");
-            let response = tokio::time::timeout(
-                BLOCKED_PROVIDER_PROBE_LIVENESS,
-                server.completion(completion_params(&target_uri, position, None)),
-            )
-            .await
-            .expect("completion must use the independently committed target edit")
-            .expect("completion succeeds");
-            let labels = completion_labels(response);
-            assert!(
-                labels.contains(&"current-prop".to_string()),
-                "completion must answer current target props: {labels:?}"
             );
-            assert!(
-                !labels.contains(&"stale-prop".to_string()),
-                "completion must not answer pre-edit target props: {labels:?}"
-            );
+            let probe = async {
+                update_arrived.notified().await;
+                let target_edit = super::lifecycle::handle_did_change(
+                    server,
+                    DidChangeTextDocumentParams {
+                        text_document: VersionedTextDocumentIdentifier {
+                            uri: target_uri.clone(),
+                            version: 2,
+                        },
+                        content_changes: vec![TextDocumentContentChangeEvent {
+                            range: None,
+                            range_length: None,
+                            text: target_v2.to_string(),
+                        }],
+                    },
+                );
+                let observe = async {
+                    tokio::time::timeout(BLOCKED_PROVIDER_PROBE_LIVENESS, async {
+                        loop {
+                            if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("unrelated target commit must not wait for blocker provider publication");
 
-            update_release.notify_one();
-        };
-        futures_util::future::join(target_edit, observe).await;
-    };
-    futures_util::future::join(blocked_update, probe).await;
+                    settle_child_contracts(server, &target_uri, &workspace_id, &["src/NewChild.vue"]).await;
 
-    drain_handle.abort();
-    drop(service);
+                    let cursor = target_v2.find("<NewChild ").unwrap() + "<NewChild ".len();
+                    let position = LineIndex::new_utf16(target_v2)
+                        .offset_to_position(cursor as u32)
+                        .expect("current completion position");
+                    let response = tokio::time::timeout(
+                        BLOCKED_PROVIDER_PROBE_LIVENESS,
+                        server.completion(completion_params(&target_uri, position, None)),
+                    )
+                    .await
+                    .expect("completion must use the independently committed target edit")
+                    .expect("completion succeeds");
+                    let labels = completion_labels(response);
+                    assert!(
+                        labels.contains(&"current-prop".to_string()),
+                        "completion must answer current target props: {labels:?}"
+                    );
+                    assert!(
+                        !labels.contains(&"stale-prop".to_string()),
+                        "completion must not answer pre-edit target props: {labels:?}"
+                    );
+
+                    update_release.notify_one();
+                };
+                futures_util::future::join(target_edit, observe).await;
+            };
+            futures_util::future::join(blocked_update, probe).await;
+
+            drain_handle.abort();
+            drop(service);
+            });
+    });
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -29241,6 +29254,618 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
     assert!(
         vfs_workspace.file_exists(&file_id),
         "create watcher events should invalidate the cached missing sibling result"
+    );
+}
+
+struct WatchedDependencyFixture {
+    _temp: tempfile::TempDir,
+    service: tower_lsp_server::LspService<VerterLanguageServer>,
+    provider: Arc<MockTypeProvider>,
+    root: String,
+    published: Arc<parking_lot::Mutex<Vec<PublishDiagnosticsParams>>>,
+    published_changed: Arc<tokio::sync::Notify>,
+    sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
+    store_changed: Arc<std::sync::atomic::AtomicUsize>,
+    drain: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for WatchedDependencyFixture {
+    fn drop(&mut self) {
+        self.drain.abort();
+    }
+}
+
+async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::test_utils::canonical_test_path(temp.path());
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("tsconfig.json"), "{}").unwrap();
+    if helper_exists {
+        std::fs::write(temp.path().join("src/helper.ts"), "export const value = 1;").unwrap();
+    }
+    let provider = Arc::new(MockTypeProvider::new());
+    let provider_for_server = provider.clone();
+    let (mut service, mut socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::new(VerterHost::new_standalone(HostConfig::default())),
+                type_provider: Some(provider_for_server.clone()),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::Tsserver,
+                ),
+                mcp_port: None,
+                type_provider_reason: None,
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({ "processId": null, "rootUri": null, "capabilities": {} }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    let published = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = published.clone();
+    let published_changed = Arc::new(tokio::sync::Notify::new());
+    let captured_changed = published_changed.clone();
+    let sync_complete = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_complete = sync_complete.clone();
+    let store_changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_store_changed = store_changed.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(message) = socket.next().await {
+            if message.method() == "$/verter/carrierStoreChanged" {
+                captured_store_changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if message.method() == "$/verter/typeProviderSyncComplete" {
+                let params = serde_json::to_value(message.params().unwrap()).unwrap();
+                captured_complete
+                    .lock()
+                    .push(params["gen"].as_u64().unwrap());
+            }
+            if message.method() == "textDocument/publishDiagnostics" {
+                let params = serde_json::from_value(
+                    serde_json::to_value(message.params().unwrap()).unwrap(),
+                )
+                .unwrap();
+                captured.lock().push(params);
+                captured_changed.notify_one();
+            }
+        }
+    });
+    let server = service.inner();
+    install_test_resolver_for_root(server, &root, Some(&format!("{root}/tsconfig.json")));
+    if helper_exists {
+        // The dependency reaches the provider before its importers record
+        // their edges: loading it afterwards replaces the host entry and
+        // drops the importers' reverse-dependency bucket.
+        crate::workspace_scanner::resync_non_carrier_file(
+            &format!("{root}/src/helper.ts"),
+            &server.documents.host_arc(),
+            server.project_sync.as_ref().unwrap(),
+            server.documents.provider_surfaces(),
+            &server.vfs_workspace,
+            &server.provider_sync_states,
+        )
+        .await;
+    }
+    for (name, source) in [
+        ("Consumer.vue", "<script setup lang=\"ts\">\nimport { value } from './helper';\n</script>\n<template>{{ value }}</template>"),
+        ("Unrelated.vue", "<template><p>unrelated</p></template>"),
+    ] {
+        let id = format!("{root}/src/{name}");
+        let uri = crate::uri::path_to_file_uri(&id).unwrap();
+        std::fs::write(temp.path().join("src").join(name), source).unwrap();
+        server.documents.did_open(&TextDocumentItem {
+            uri: uri.clone(), language_id: "vue".into(), version: 1, text: source.into(),
+        });
+        server.refresh_carrier_dependency_tracking(&id);
+        server.ensure_current_file_synced(&uri).await;
+        server.sync_coordinator.signal_diagnostics_only(id, uri.to_string(), tokio::time::Instant::now());
+    }
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                ["Consumer.vue", "Unrelated.vue"].iter().all(|name| {
+                    server
+                        .documents
+                        .diagnostics_ready(&workspace_uri(&root, &format!("src/{name}")))
+                }) && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("initial watched-file fixture diagnostics did not complete"),
+        )
+        .await;
+    WatchedDependencyFixture {
+        _temp: temp,
+        service,
+        provider,
+        root,
+        published,
+        published_changed,
+        sync_complete,
+        store_changed,
+        drain,
+    }
+}
+
+/// Level 2 of the readiness ladder is announced by the post-scan completion
+/// alone. Publishing a carrier writes the on-disk store and tells the editor
+/// so, but a client (or a test gate) waiting for the provider to be synced must
+/// never be released by it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carrier_publication_never_announces_provider_sync_completion() {
+    // The fixture opens two carriers and waits for both to be published and
+    // certified; no scan and no post-scan completion ever runs.
+    let fixture = watched_dependency_fixture(true).await;
+    assert_eq!(
+        *fixture.sync_complete.lock(),
+        Vec::<u64>::new(),
+        "no provider-sync completion was reached, so none may be announced"
+    );
+    assert!(
+        fixture
+            .store_changed
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0,
+        "the carrier publications still tell the editor the store changed"
+    );
+}
+
+async fn drain_pending_provider_sync_for(server: &VerterLanguageServer) {
+    crate::server::drain_pending_snapshot_provider_sync(
+        server.project_sync.as_ref(),
+        &server.documents,
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+        &server.pending_snapshot_provider_sync,
+        false,
+        None,
+        server.carrier_publish_coordinator.as_ref(),
+        &server.carrier_transaction_coordinator,
+    )
+    .await;
+}
+
+/// An open script that NO configured project owns (a TypeScript lib file the
+/// user navigated into, a scratch file outside the workspace) can never be
+/// delivered to the provider. Once ownership is authoritative that is a
+/// terminal answer, not a retry: left queued, it would hold the pending set
+/// non-empty for the rest of the session and level 2 would never be announced.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_script_with_no_owning_project_is_not_retried_forever() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let outside = tempfile::tempdir().unwrap();
+    let ownerless = format!(
+        "{}/lib.ownerless.d.ts",
+        crate::test_utils::canonical_test_path(outside.path())
+    );
+    std::fs::write(
+        outside.path().join("lib.ownerless.d.ts"),
+        "declare const x: 1;",
+    )
+    .unwrap();
+    server.documents.did_open(&TextDocumentItem {
+        uri: crate::uri::path_to_file_uri(&ownerless).unwrap(),
+        language_id: "typescript".into(),
+        version: 1,
+        text: "declare const x: 1;".into(),
+    });
+    let owned = format!("{}/src/helper.ts", fixture.root);
+
+    server.queue_snapshot_provider_sync(ownerless.clone());
+    server.queue_snapshot_provider_sync(owned.clone());
+    drain_pending_provider_sync_for(server).await;
+
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&owned),
+        "control: an owned script settles and is dequeued"
+    );
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&ownerless),
+        "a script no project owns is a terminal answer, not a pending retry"
+    );
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        server.complete_post_scan(generation).await,
+        "with nothing genuinely pending, level 2 is announced"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_is_pending() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let healthy = format!("{}/src/Consumer.vue", fixture.root);
+    let healthy_uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let healthy_provider_path = server
+        .capture_provider_request_surface(&healthy_uri)
+        .unwrap()
+        .stamp
+        .provider_path
+        .to_string();
+
+    // An unrelated closed carrier whose provider delivery keeps failing.
+    let broken = format!("{}/src/Broken.vue", fixture.root);
+    std::fs::write(
+        fixture._temp.path().join("src/Broken.vue"),
+        "<template><p>broken</p></template>",
+    )
+    .unwrap();
+    fixture.provider.set_fail_carrier_metadata_source(&broken);
+    server
+        .vfs_workspace
+        .read()
+        .as_ref()
+        .unwrap()
+        .apply_changes(vec![verter_workspace::WorkspaceChange::FileChanged {
+            canonical_id: broken.clone(),
+            source: None,
+        }]);
+
+    assert!(server.documents.diagnostics_ready(&healthy_uri));
+    server.queue_snapshot_provider_sync(healthy.clone());
+    server.queue_snapshot_provider_sync(broken.clone());
+    drain_pending_provider_sync_for(server).await;
+    assert!(
+        server.pending_snapshot_provider_sync.contains(&broken),
+        "precondition: the failing carrier stays queued"
+    );
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(&healthy),
+        "precondition: the healthy carrier settles"
+    );
+    assert!(
+        !server.documents.diagnostics_ready(&healthy_uri),
+        "precondition: the drain advanced the healthy document past its completed receipt"
+    );
+
+    fixture.provider.clear_calls();
+    let announced_before = fixture.sync_complete.lock().len();
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        !server.complete_post_scan(generation).await,
+        "level 2 must stay unannounced while provider work is pending"
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&healthy_uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || {
+                panic!(
+                    "a healthy open document is owed a current receipt even while an unrelated carrier is pending"
+                )
+            },
+        )
+        .await;
+    assert!(
+        fixture.provider.calls().iter().any(
+            |call| matches!(call, MockCall::GetDiagnostics { path } if path == &healthy_provider_path)
+        ),
+        "the receipt must come from a fresh provider pull: {:?}",
+        fixture.provider.calls()
+    );
+    assert!(server.pending_snapshot_provider_sync.contains(&broken));
+    assert_eq!(fixture.sync_complete.lock().len(), announced_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_withholds_the_receipt_of_a_pending_open_document() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let pending = format!("{}/src/Consumer.vue", fixture.root);
+    let pending_uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let settled_uri = workspace_uri(&fixture.root, "src/Unrelated.vue");
+
+    server
+        .documents
+        .host()
+        .bump_diagnostics_generation(&pending);
+    server.queue_snapshot_provider_sync(pending.clone());
+    let announced_before = fixture.sync_complete.lock().len();
+    let pending_provider_path = server
+        .capture_provider_request_surface(&pending_uri)
+        .unwrap()
+        .stamp
+        .provider_path
+        .to_string();
+    fixture.provider.clear_calls();
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(!server.complete_post_scan(generation).await);
+    assert!(
+        !server.documents.diagnostics_ready(&settled_uri),
+        "the settled document's prior receipt is retired before the call returns"
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&settled_uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the settled open document never received its fresh receipt"),
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&pending_uri),
+        "a document whose provider sync is still pending must not be certified"
+    );
+    assert!(
+        !fixture.provider.calls().iter().any(
+            |call| matches!(call, MockCall::GetDiagnostics { path } if path == &pending_provider_path)
+        ),
+        "a pending document is not pulled at all: {:?}",
+        fixture.provider.calls()
+    );
+    assert_eq!(fixture.sync_complete.lock().len(), announced_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_scan_completion_announces_only_the_current_settled_generation() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let generation = server
+        .init_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    assert!(
+        !server.complete_post_scan(generation + 1).await,
+        "a generation that is not the live one must not announce or publish"
+    );
+
+    assert!(server.complete_post_scan(generation).await);
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the announced generation never republished its open documents"),
+        )
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fixture.sync_complete.lock().last() != Some(&generation) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("an empty pending set announces level 2");
+    assert!(
+        !fixture.sync_complete.lock().contains(&(generation + 1)),
+        "the superseded generation must never be announced"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_ts_delete_republishes_only_open_importers() {
+    use verter_workspace::WorkspaceRead;
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let helper = format!("{}/src/helper.ts", fixture.root);
+    let consumer = format!("{}/src/Consumer.vue", fixture.root);
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let workspace = server.vfs_workspace.read().clone().unwrap();
+    assert!(workspace.file_exists(&helper));
+    // A closed importer remains in the graph but is not owed editor diagnostics.
+    let closed = format!("{}/src/Closed.vue", fixture.root);
+    server.documents.host().upsert(UpsertRequest {
+        canonical_id: Some(closed.clone()), input_id: closed.clone(),
+        source: Arc::from("<script setup lang=\"ts\">import { value } from './helper';</script><template>{{ value }}</template>"),
+        file_language: FileLanguage::vue(), aliases: Vec::new(),
+    }).unwrap();
+    server.refresh_carrier_dependency_tracking(&closed);
+    let affected = workspace.affected_canonicals(&helper);
+    assert!(affected.contains(&consumer) && affected.contains(&closed));
+    let surface = server.capture_provider_request_surface(&uri).unwrap();
+    let provider_path = surface.stamp.provider_path.to_string();
+    let start = surface.provider_content.find("./helper").unwrap() as u32;
+    fixture.provider.set_diagnostics(
+        &provider_path,
+        vec![TypeDiagnostic {
+            message: "Cannot find module './helper'".into(),
+            severity: crate::type_provider::protocol::TypeDiagnosticSeverity::Error,
+            start,
+            end: start + 8,
+            code: Some("2307".into()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+    fixture.provider.clear_calls();
+    std::fs::remove_file(fixture._temp.path().join("src/helper.ts")).unwrap();
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: workspace_uri(&fixture.root, "src/helper.ts"),
+                typ: FileChangeType::DELETED,
+            }],
+        },
+    )
+    .await;
+    assert!(
+        !server.documents.diagnostics_ready(&uri),
+        "dependency deletion must retire the clean receipt before returning"
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("watched dependency deletion never republished the consumer"),
+        )
+        .await;
+    assert!(!workspace.file_exists(&helper));
+    let calls = fixture.provider.calls();
+    // An engine that is an LSP server learns about the disk only from its
+    // client, so the event itself is forwarded — before anything is re-checked.
+    let forwarded = calls
+        .iter()
+        .position(|call| {
+            matches!(
+                call,
+                MockCall::WatchedFilesChanged { changes }
+                    if changes.as_slice() == [verter_type_runtime::WatchedFileChange {
+                        path: helper.clone(),
+                        kind: verter_type_runtime::WatchedFileChangeKind::Deleted,
+                    }]
+            )
+        })
+        .expect("the provider must be told the dependency was deleted");
+    assert!(
+        calls.iter().enumerate().all(|(index, call)| {
+            !matches!(call, MockCall::GetDiagnostics { .. }) || index > forwarded
+        }),
+        "the importer is re-checked only after the provider knows about the disk: {calls:?}"
+    );
+    let close = calls
+        .iter()
+        .position(|call| matches!(call, MockCall::CloseFile { path } if path == &helper))
+        .unwrap();
+    let pulls: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| match call {
+            MockCall::GetDiagnostics { path } => Some((index, path)),
+            _ => None,
+        })
+        .collect();
+    assert!(!pulls.is_empty());
+    assert!(
+        pulls
+            .iter()
+            .all(|(index, path)| *index > close && *path == &provider_path),
+        "only the open consumer must be checked, after helper close: {calls:?}"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let changed = fixture.published_changed.notified();
+            if fixture.published.lock().iter().any(|batch| {
+                batch.uri == uri
+                    && batch.version == Some(1)
+                    && batch.diagnostics.iter().any(|diagnostic| {
+                        diagnostic.code == Some(NumberOrString::String("2307".into()))
+                    })
+            }) {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("the unchanged consumer must receive the new missing-module diagnostic");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watched_ts_create_refreshes_missing_lookup_before_open_importers() {
+    use verter_workspace::WorkspaceRead;
+    let fixture = watched_dependency_fixture(false).await;
+    let server = fixture.service.inner();
+    let helper = format!("{}/src/helper.ts", fixture.root);
+    let consumer = format!("{}/src/Consumer.vue", fixture.root);
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let workspace = server.vfs_workspace.read().clone().unwrap();
+    assert!(
+        !workspace.file_exists(&helper),
+        "seed the cached missing-file lookup"
+    );
+    assert!(
+        workspace.affected_canonicals(&helper).contains(&consumer),
+        "an unresolved relative import must identify its consumer"
+    );
+    let provider_path = server
+        .capture_provider_request_surface(&uri)
+        .unwrap()
+        .stamp
+        .provider_path
+        .to_string();
+    fixture.provider.clear_calls();
+    std::fs::write(
+        fixture._temp.path().join("src/helper.ts"),
+        "export const value = 2;",
+    )
+    .unwrap();
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: workspace_uri(&fixture.root, "src/helper.ts"),
+                typ: FileChangeType::CREATED,
+            }],
+        },
+    )
+    .await;
+    assert!(
+        workspace.file_exists(&helper),
+        "standard watcher events must invalidate cached absence even for a never-loaded helper"
+    );
+    server.sync_coordinator.await_until(
+        || fixture.provider.calls().iter().any(|call| matches!(call, MockCall::GetDiagnostics { path } if path == &provider_path))
+            && server.documents.diagnostics_ready(&uri) && server.sync_coordinator.diag_tasks_live() == 0,
+        || panic!("created dependency never reached the open consumer"),
+    ).await;
+    let calls = fixture.provider.calls();
+    let load = calls
+        .iter()
+        .position(|call| matches!(call, MockCall::LoadFile { path, .. } if path == &helper))
+        .unwrap();
+    assert!(calls.iter().enumerate().all(|(index, call)| !matches!(call, MockCall::GetDiagnostics { path } if index <= load || path != &provider_path)), "consumer queries must follow dependency publication: {calls:?}");
+
+    let helper_uri = workspace_uri(&fixture.root, "src/helper.ts");
+    let unsaved = "export const value = 'unsaved';";
+    server.documents.did_open(&TextDocumentItem {
+        uri: helper_uri,
+        language_id: "typescript".into(),
+        version: 1,
+        text: unsaved.into(),
+    });
+    fixture.provider.clear_calls();
+    std::fs::write(
+        fixture._temp.path().join("src/helper.ts"),
+        "export const value = 'disk';",
+    )
+    .unwrap();
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: workspace_uri(&fixture.root, "src/helper.ts"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(
+        server.documents.host().get_source(&helper).as_deref(),
+        Some(unsaved)
+    );
+    assert!(
+        fixture.provider.calls().is_empty(),
+        "a disk event must not replace an open editor buffer"
     );
 }
 

@@ -2104,7 +2104,6 @@ fn selected_return_literal(dispatch: &ProjectSemanticDispatch<'_>, key: ResolveC
     let result = selected_query(dispatch, key);
     let return_type = match result {
         ResolvedCallResult::Selected { return_type, .. }
-        | ResolvedCallResult::UnionSelected { return_type, .. }
         | ResolvedCallResult::DynamicAny { return_type } => return_type,
     };
     match dispatch.graph().node_data(return_type).as_deref() {
@@ -3313,8 +3312,27 @@ fn unresolved_argument_mapping_degrades_and_admits_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// Union callees: ONE composite union-signature group
+// Union callees: the shared list's common / synthesized union signatures
 // ---------------------------------------------------------------------------
+
+/// The winner of a call through a union callee: ONE union signature of the
+/// shared list — a composite with no authored position of its own.
+fn union_signature_return(result: &ResolvedCallResult) -> SemanticNodeId {
+    let ResolvedCallResult::Selected {
+        selected,
+        return_type,
+        ..
+    } = result
+    else {
+        panic!("a union callee selects one union signature, got {result:?}");
+    };
+    assert_eq!(
+        *selected,
+        crate::semantic_query::SignatureCandidateOrigin::Rootless,
+        "a union signature is a composite, never one arm's authored occurrence"
+    );
+    *return_type
+}
 
 fn union_callee(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -3327,10 +3345,10 @@ fn union_callee(
     ))
 }
 
-/// `(() => 1) | (() => 2)` selects a first-applicable signature in EVERY
-/// arm and unions the selected returns (`tsc --strict`: `1 | 2`).
-/// Mutation recipe: route a `Union` callee to the settle loop's miss arm
-/// and this call degrades `NotCallable`.
+/// `(() => 1) | (() => 2)` has ONE common union signature whose return is
+/// the union of the matched arm returns (`tsc --strict`: `1 | 2`).
+/// Mutation recipe: read only the representative's return for a common
+/// union signature and this call answers `1`.
 #[test]
 fn union_callee_selects_every_arm_and_unions_returns() {
     let host = host();
@@ -3369,24 +3387,17 @@ fn union_callee_selects_every_arm_and_unions_returns() {
         Vec::new(),
     )));
     let expected = dispatch.intern_normalized_union_or_intersection(&[one, two], true);
-    let ResolvedCallResult::UnionSelected {
-        selections,
-        return_type,
-    } = &result
-    else {
-        panic!("a union callee closes on the composite union selection, got {result:?}");
-    };
-    assert_eq!(selections.len(), 2, "one winner per callable arm");
     assert_eq!(
-        *return_type, expected,
-        "the selected returns union (tsc --strict: 1 | 2)"
+        union_signature_return(&result),
+        expected,
+        "the matched arm returns union (tsc --strict: 1 | 2)"
     );
 }
 
-/// A union of shape-identical arms still selects per arm; the unioned
-/// returns collapse to the single shared return. Mutation recipe: treat
-/// arm order as overload precedence (first arm wins, others unchecked)
-/// and the two-winner assertion fails.
+/// A union of shape-identical arms is one common union signature; the
+/// unioned returns collapse to the single shared return (`tsc --strict`:
+/// `string`). Mutation recipe: keep the first arm's authored signature as
+/// the winner and the composite-origin assertion fails.
 #[test]
 fn union_of_identical_arms_collapses_the_return_union() {
     let host = host();
@@ -3419,23 +3430,19 @@ fn union_of_identical_arms_collapses_the_return_union() {
         None,
         Vec::new(),
     )));
-    let ResolvedCallResult::UnionSelected {
-        selections,
-        return_type,
-    } = &result
-    else {
-        panic!("a union callee closes on the composite union selection, got {result:?}");
-    };
-    assert_eq!(selections.len(), 2, "every arm decided its own winner");
-    assert_eq!(*return_type, string, "identical arm returns collapse");
+    assert_eq!(
+        union_signature_return(&result),
+        string,
+        "identical arm returns collapse"
+    );
 }
 
-/// Declaration order applies INDEPENDENTLY within each arm: with reversed
-/// per-arm overload ordinals a `string` argument selects ordinal 0 in the
-/// first arm and ordinal 1 in the second (`tsc --strict`:
-/// `"a-str" | "b-str"`). Mutation recipe: share one first-applicable
-/// cursor across arms and the second arm's number overload wins or the
-/// call rejects.
+/// A common union signature pairs each first-arm overload with its MATCH
+/// in the other arm, wherever that match sits: with reversed per-arm
+/// overload ordinals a `string` argument selects the union signature of
+/// ordinal 0 in the first arm and ordinal 1 in the second (`tsc --strict`:
+/// `"a-str" | "b-str"`). Mutation recipe: pair overloads by ordinal across
+/// arms and the answer becomes `"a-str" | "b-num"` or the call rejects.
 #[test]
 fn union_arm_overload_order_is_per_arm_not_cross_arm() {
     let host = host();
@@ -3496,20 +3503,19 @@ fn union_arm_overload_order_is_per_arm_not_cross_arm() {
     )));
     let expected =
         dispatch.intern_normalized_union_or_intersection(&[lit("a-str"), lit("b-str")], true);
-    let ResolvedCallResult::UnionSelected { return_type, .. } = &result else {
-        panic!("a union callee closes on the composite union selection, got {result:?}");
-    };
     assert_eq!(
-        *return_type, expected,
-        "tsc --strict: ordinal 0 wins in arm A, ordinal 1 wins in arm B"
+        union_signature_return(&result),
+        expected,
+        "tsc --strict: arm A's ordinal 0 matches arm B's ordinal 1"
     );
 }
 
 /// Partial applicability rejects: `((x: string) => 1) | ((x: number) => 2)`
-/// called with `"s"` has NO applicable signature in the number arm — the
-/// whole call is `NoApplicableOverload` (tsc TS2349: the union has no
-/// common applicable signature). Mutation recipe: let an applicable arm
-/// stand in for the whole union and this call silently answers `1`.
+/// has no common signature, so the list synthesizes ONE signature whose
+/// parameter is `string & number` (`never`); `"s"` is not assignable to it
+/// and the whole call is `NoApplicableOverload` (`tsc --strict` TS2345).
+/// Mutation recipe: let an applicable arm stand in for the whole union and
+/// this call silently answers `1`.
 #[test]
 fn union_partial_applicability_is_no_applicable_overload() {
     let host = host();
@@ -3553,7 +3559,7 @@ fn union_partial_applicability_is_no_applicable_overload() {
                 crate::semantic_query::ResolveCallFailure::NoApplicableOverload
             )
         ),
-        "an arm with no applicable signature rejects the whole union call"
+        "the synthesized union signature accepts no argument of either arm alone"
     );
     assert_eq!(
         dispatch
@@ -3564,9 +3570,10 @@ fn union_partial_applicability_is_no_applicable_overload() {
     );
 }
 
-/// A non-callable arm makes the whole union `NotCallable`. Mutation
-/// recipe: skip non-callable arms instead of failing the settle and the
-/// call silently answers the callable arm's return.
+/// A non-callable arm empties the union's shared signature list, so the
+/// whole union is `NotCallable` (`tsc --strict` TS2349). Mutation recipe:
+/// skip arms with no signature instead of emptying the list and the call
+/// silently answers the callable arm's return.
 #[test]
 fn union_non_callable_arm_is_not_callable() {
     let host = host();
@@ -3603,10 +3610,68 @@ fn union_non_callable_arm_is_not_callable() {
     );
 }
 
+/// Only a callee that NEVER resolved (`Opaque(Miss)`) is `NotCallable` on
+/// an empty candidate set; every other opaque payload is an incomplete
+/// callee, not a settled type with no signature. A callee whose resolution
+/// was cancelled or tripped a budget carries no evidence about its
+/// signatures, so the call degrades through the shared signature list's
+/// incompleteness (`Budget` / `Undecidable`) — never `NotCallable`.
+/// Mutation recipe: classify every `Opaque(_)` callee as unresolved and the
+/// cancelled callee below answers `NotCallable`.
+#[test]
+fn incomplete_opaque_callee_is_not_classified_not_callable() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let missing = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::Miss,
+    ));
+    assert!(
+        matches!(
+            dispatch.execute_resolve_call(call_key(
+                &dispatch,
+                missing,
+                CallKind::Call,
+                None,
+                Vec::new(),
+            )),
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::NotCallable
+            )
+        ),
+        "a typed miss has no type to enumerate and is not callable"
+    );
+    for incomplete in [
+        crate::semantic_query::QueryError::Cancelled,
+        crate::semantic_query::QueryError::Other(Arc::from("unsettled")),
+    ] {
+        let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
+        let step = dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            callee,
+            CallKind::Call,
+            None,
+            Vec::new(),
+        ));
+        assert!(
+            matches!(
+                step,
+                super::call_resolve::ResolveCallStep::Degraded(
+                    crate::semantic_query::ResolveCallFailure::Budget
+                        | crate::semantic_query::ResolveCallFailure::Undecidable
+                )
+            ),
+            "an incomplete callee ({incomplete:?}) degrades as incomplete, never \
+             `NotCallable`; got {step:?}"
+        );
+    }
+}
+
 /// UNCERTAINTY in any arm degrades the whole call: an arm whose parameter
-/// type is unresolvable cannot prove or refute applicability, so no other
-/// arm's success may stand in. Mutation recipe: treat the undecidable
-/// arm's rejection as a mismatch and the call silently selects arm A.
+/// type is unresolvable cannot be matched against the other arm, so the
+/// shared list does not settle and the call is `Undecidable` — never
+/// `NotCallable`, and never the other arm alone. Mutation recipe: report an
+/// unsettled list as an empty one and this call degrades `NotCallable`.
 #[test]
 fn union_undecidable_arm_degrades_the_whole_call() {
     let host = host();
@@ -3745,7 +3810,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
         QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::OverloadSet(refs),
             ..
-        }) => assert_eq!(refs.len(), 2, "the union resolves"),
+        }) => assert_eq!(refs.len(), 1, "the union resolves to one union signature"),
         other => panic!("the union overload set must resolve, got {other:?}"),
     }
     assert_eq!(
@@ -3758,7 +3823,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let call = call_key(&dispatch, union, CallKind::Call, None, Vec::new());
     let result = selected_query(&dispatch, call.clone());
     assert!(
-        matches!(result, ResolvedCallResult::UnionSelected { .. }),
+        matches!(result, ResolvedCallResult::Selected { .. }),
         "the union call resolves, got {result:?}"
     );
     let call_query = SemanticQueryKey::ResolveCall(Box::new(call));
@@ -3963,7 +4028,7 @@ fn inline_callable_call_admits_rooted_on_its_declaring_file() {
 
 /// A UNION callee interned as a scope-less canonical composite over two
 /// inline callables from DIFFERENT files reaches its file leaves
-/// transitively: the `UnionSelected` result is admitted with both
+/// transitively: the selected union signature is admitted with both
 /// declaring files in its proof, and an edit to either arm's file misses
 /// it.
 ///
@@ -3995,8 +4060,14 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
 
     let fresh = selected_query(&dispatch, key.clone());
     assert!(
-        matches!(&fresh, ResolvedCallResult::UnionSelected { selections, .. } if selections.len() == 2),
-        "every arm selects, got {fresh:?}"
+        matches!(
+            &fresh,
+            ResolvedCallResult::Selected {
+                selected: crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                ..
+            }
+        ),
+        "the union signature selects, got {fresh:?}"
     );
     assert_eq!(
         graph.slot_candidate_count_for_tests(&query),
@@ -4064,7 +4135,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
         QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::OverloadSet(refs),
             ..
-        }) => assert_eq!(refs.len(), 2, "both arms contribute a candidate"),
+        }) => assert_eq!(refs.len(), 1, "the arms share one common union signature"),
         other => panic!("the union overload set must resolve, got {other:?}"),
     }
     assert_eq!(graph.slot_candidate_count_for_tests(&set_key), 1);
@@ -4086,4 +4157,127 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
         graph.get_validated(&set_key, host.as_ref()).is_none(),
         "an edit to an arm's declaring file misses the warm read"
     );
+}
+
+/// Call resolution, signature-utility inference and the flow rail's callee
+/// classification read ONE signature list: for every subject the overload
+/// set IS the shared list (call bucket, then construct), and the utility
+/// infers from that list's LAST call signature. A union subject is the row
+/// that tells the consumers apart — the list carries its union signatures,
+/// never one bucket per arm.
+///
+/// Mutation recipe: collect a union callee's overload set per arm and the
+/// union rows report one candidate per arm; pick the utility's signature
+/// off the settled surface instead of the list and the intersection row
+/// disagrees.
+#[test]
+fn call_utility_and_flow_consumers_read_one_signature_list() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let sig = |name: &str, ordinal: u32, kind: SignatureKind, param: SemanticNodeId, ret| {
+        signature(
+            &dispatch,
+            name,
+            ordinal,
+            kind,
+            vec![FunctionParam::synthetic(None, param, false, false)],
+            Vec::new(),
+            ret,
+        )
+    };
+    let lone = sig("diffLone", 0, SignatureKind::Call, string, string);
+    let overloaded = callable(
+        &dispatch,
+        vec![
+            sig("diffOver", 0, SignatureKind::Call, string, string),
+            sig("diffOver", 1, SignatureKind::Call, number, number),
+        ],
+        vec![sig("diffOver", 2, SignatureKind::Construct, string, number)],
+    );
+    let intersection = dispatch.intern_normalized_union_or_intersection(
+        &[
+            sig("diffMeetA", 0, SignatureKind::Call, string, string),
+            sig("diffMeetB", 0, SignatureKind::Call, number, number),
+        ],
+        false,
+    );
+    let union_common = union_callee(
+        &dispatch,
+        vec![
+            sig("diffCommonA", 0, SignatureKind::Call, string, string),
+            sig("diffCommonB", 0, SignatureKind::Call, string, number),
+        ],
+    );
+    let union_synthesized = union_callee(
+        &dispatch,
+        vec![
+            sig("diffSynthA", 0, SignatureKind::Call, string, string),
+            sig("diffSynthB", 0, SignatureKind::Call, number, number),
+        ],
+    );
+    let not_callable = callable(&dispatch, Vec::new(), Vec::new());
+    let env = host.host_view_env_hashes_for(CANONICAL);
+
+    // (subject, shared call-list length, whether the subject is a union)
+    let rows = [
+        ("lone", lone, 1, false),
+        ("overloaded", overloaded, 2, false),
+        ("intersection", intersection, 2, false),
+        ("union-common", union_common, 1, true),
+        ("union-synthesized", union_synthesized, 1, true),
+        ("not-callable", not_callable, 0, false),
+    ];
+    for (name, subject, calls, is_union) in rows {
+        let (call_list, construct_list) = dispatch
+            .shared_signature_buckets(subject)
+            .unwrap_or_else(|reason| panic!("{name}: the shared list settles, got {reason:?}"));
+        assert_eq!(call_list.len(), calls, "{name}: shared call signatures");
+
+        // Call resolution's candidates ARE the shared list.
+        let shared: Vec<SemanticNodeId> = call_list
+            .iter()
+            .chain(construct_list.iter())
+            .copied()
+            .collect();
+        let set = dispatch.execute(SemanticQueryKey::ResolveOverloadSet {
+            callee: subject,
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::OverloadSetContext {
+                resolve_env_hash: env.resolve_env_hash,
+                ..Default::default()
+            },
+        });
+        match set {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::OverloadSet(refs),
+                ..
+            }) => assert_eq!(
+                refs.iter()
+                    .map(|candidate| candidate.node)
+                    .collect::<Vec<_>>(),
+                shared,
+                "{name}: the overload set is the shared list, in list order"
+            ),
+            QueryResult::Error(QueryError::Miss) => {
+                assert!(shared.is_empty(), "{name}: only an empty list misses")
+            }
+            other => panic!("{name}: unexpected overload set {other:?}"),
+        }
+
+        // Utility inference reads the LAST call signature of the same list
+        // (a union subject distributes instead and infers nothing here).
+        let inferred = dispatch.utility_inference_signature(subject, SignatureKind::Call);
+        if is_union {
+            assert_eq!(inferred, None, "{name}: a union subject distributes");
+        } else {
+            assert_eq!(
+                inferred,
+                call_list.last().copied(),
+                "{name}: the utility infers from the list's last call signature"
+            );
+        }
+    }
 }

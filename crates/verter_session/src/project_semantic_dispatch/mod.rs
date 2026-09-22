@@ -103,6 +103,7 @@ pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
+pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
@@ -1490,7 +1491,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
         let graph = self.ctx.project_type_store().semantic_graph();
         let data = graph.node_data(node)?;
-        let to_ref = |sig: SemanticNodeId, arm_ordinal: u32| -> Option<SignatureRef> {
+        let to_ref = |sig: SemanticNodeId| -> Option<SignatureRef> {
             let sig_data = graph.node_data(sig)?;
             // The sealed index-composed carrier is read through the
             // `ResolveOverloadSet` consumer witness — its occurrence is
@@ -1504,7 +1505,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.signature_occurrence_for(parts.occurrence),
                     ),
                     return_carrier: parts.return_carrier.clone(),
-                    arm_ordinal,
                 });
             }
             let SemanticNodeData::Signature {
@@ -1518,10 +1518,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // A signature authored at a served declaration position
             // carries its content-free occurrence; an ANONYMOUS callable
             // type (an inline function value, a function-typed
-            // annotation, an object-type call signature) has no authored
-            // position and is ROOTLESS — never a fabricated declaration
-            // slot and never a graph-instance node id standing in for an
-            // occurrence.
+            // annotation, an object-type call signature) and a composite
+            // candidate of the shared list have no authored position and
+            // are ROOTLESS — never a fabricated declaration slot and never
+            // a graph-instance node id standing in for an occurrence.
             let occurrence = match occurrence {
                 Some(occurrence) => crate::semantic_query::SignatureCandidateOrigin::Authored(
                     self.signature_occurrence_for(occurrence),
@@ -1532,43 +1532,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 node: sig,
                 occurrence,
                 return_carrier: return_carrier.clone(),
-                arm_ordinal,
             })
         };
-        let refs_for_arm = |arm: SemanticNodeId, arm_ordinal: u32| -> Option<Vec<SignatureRef>> {
-            let arm_data = graph.node_data(arm)?;
-            match &*arm_data {
-                // Both kinds intentionally: a lone signature of EITHER
-                // kind is its own overload set (mirroring the Object
-                // arm, which chains the call AND construct buckets);
-                // each `SignatureRef` node carries its kind for
-                // consumers to discriminate.
-                SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
-                    Some(vec![to_ref(arm, arm_ordinal)?])
-                }
-                SemanticNodeData::Object(surface) => surface
-                    .call_signatures
-                    .iter()
-                    .chain(surface.construct_signatures.iter())
-                    .map(|sig| to_ref(*sig, arm_ordinal))
-                    .collect::<Option<Vec<_>>>(),
-                _ => None,
+        let refs = match &*data {
+            // Both kinds intentionally: a lone signature of EITHER kind is
+            // its own overload set (mirroring the Object arm, which chains
+            // the call AND construct buckets); each `SignatureRef` node
+            // carries its kind for consumers to discriminate.
+            SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+                vec![to_ref(node)?]
             }
+            SemanticNodeData::Object(surface) => surface
+                .call_signatures
+                .iter()
+                .chain(surface.construct_signatures.iter())
+                .map(|sig| to_ref(*sig))
+                .collect::<Option<Vec<_>>>()?,
+            _ => return None,
         };
-        match &*data {
-            // A UNION group-bearing node is the composite union-signature
-            // group: one ordered bucket per arm, tagged with its arm
-            // ordinal — the executor selects a first-applicable signature
-            // in EVERY callable arm and unions the selected returns.
-            SemanticNodeData::Union(members) => {
-                let mut refs = Vec::new();
-                for (ordinal, member) in members.iter().enumerate() {
-                    refs.extend(refs_for_arm(*member, u32::try_from(ordinal).ok()?)?);
-                }
-                Some(Arc::from(refs.into_boxed_slice()))
-            }
-            _ => refs_for_arm(node, 0).map(|refs| Arc::from(refs.into_boxed_slice())),
-        }
+        Some(Arc::from(refs.into_boxed_slice()))
     }
 
     /// The env-bearing occurrence identity of one candidate — the env-free
@@ -2221,25 +2203,13 @@ pub(crate) fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
 /// See the utility-equivalence rule.
 pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
     match name {
-        "Partial"
-        | "Required"
-        | "Readonly"
-        | "NonNullable"
-        | "NoInfer"
-        | "ReturnType"
-        | "Parameters"
-        | "ConstructorParameters"
-        | "InstanceType"
-        | "ThisParameterType"
-        | "OmitThisParameter"
-        | "Uppercase"
-        | "Lowercase"
-        | "Capitalize"
-        | "Uncapitalize" => &["T"],
+        "Partial" | "Required" | "Readonly" | "NonNullable" | "NoInfer" | "Uppercase"
+        | "Lowercase" | "Capitalize" | "Uncapitalize" => &["T"],
         "Awaited" => &["P"],
         "Pick" | "Omit" => &["T", "K"],
         "Record" => &["K", "V"],
         "Extract" | "Exclude" => &["T", "U"],
+        _ if signature_utility::SignatureUtility::from_builtin_name(name).is_some() => &["T"],
         _ => &[],
     }
 }

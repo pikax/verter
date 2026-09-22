@@ -486,6 +486,10 @@ pub struct ServerCore {
     vite_config_options: tokio::sync::Mutex<verter_workspace::ViteConfigOptions>,
     /// Whether type provider inlay hints are enabled (from initializationOptions).
     inlay_hints_enabled: std::sync::atomic::AtomicBool,
+    /// The editor re-pulls semantic tokens when asked to (`workspace.semanticTokens.refreshSupport`).
+    pub(crate) client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool,
+    /// The editor re-pulls inlay hints when asked to (`workspace.inlayHint.refreshSupport`).
+    pub(crate) client_refreshes_inlay_hints: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document:
     /// URI → (document_version, diagnostics_generation, diagnostics).
     /// Avoids re-running host + lint + component diagnostics when both push and
@@ -1242,6 +1246,8 @@ impl VerterLanguageServer {
                 verter_workspace::ViteConfigOptions::default(),
             ),
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
+            client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool::new(false),
+            client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
             cached_verter_diags,
             provider_sync_states,
             decl_overlay_owner,

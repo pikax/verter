@@ -767,9 +767,12 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         AwaitedNormalize => U6FlowReturnSubstrate,
         // The async publication rule, produced by the return wrap.
         AsyncReturnPayload => U6FlowReturnSubstrate,
-        // Shared signature discovery and demand-driven results: the call
-        // and construct consumers read them; no manifest row consumes them.
-        SignaturesOfType | ReadSignatureResult => U6CallResolve,
+        // Shared signature discovery is value-domain substrate: the
+        // signature utilities and call/construct resolution both read it,
+        // so it is owned where its lowest consumer is.
+        SignaturesOfType => U2QueryValueDomain,
+        // Demand-driven signature results serve call/construct resolution.
+        ReadSignatureResult => U6CallResolve,
     }
 }
 
@@ -2108,9 +2111,9 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // takes `AwaitedNormalize` for its iteration parameters, which is
         // exactly the distinction these two families exist to keep.
         (AsyncReturnPayload, U6FlowReturnSubstrate),
-        // Shared signature discovery and result reads serve call/construct
-        // resolution.
-        (SignaturesOfType, U6CallResolve),
+        // Shared signature discovery is value-domain substrate; result
+        // reads serve call/construct resolution.
+        (SignaturesOfType, U2QueryValueDomain),
         (ReadSignatureResult, U6CallResolve),
     ];
 

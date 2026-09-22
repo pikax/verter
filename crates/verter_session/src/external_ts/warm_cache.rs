@@ -10,7 +10,8 @@
 //! - the project/config generation,
 //! - the FULL [`EngineIdentity`] (`mode` + `observed_version` + `wire_pin` +
 //!   `editor_session_generation`),
-//! - the editor-binding witness/fingerprint.
+//! - the editor-binding witness/fingerprint,
+//! - the generated-unit admission fingerprint of every component member.
 //!
 //! ## Reconnect ALWAYS mints a fresh identity
 //!
@@ -34,6 +35,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_workspace::GeneratedUnitAdmissionFingerprint;
 
 use crate::file_artifact_store::ProjectIdentity;
 
@@ -65,6 +67,12 @@ pub struct WarmCacheKey {
     /// The editor-binding witness/fingerprint (the project the editor bound the
     /// carrier to).
     editor_binding: ProjectIdentity,
+    /// The generated-unit admission each component member's SHARED eligibility
+    /// was proven under, in canonical member order. A changed `include` / `files`
+    /// / `exclude`, a changed generated-unit set, or a changed unit owner changes a
+    /// fingerprint, so a SHARED decision proven under the earlier admission is
+    /// unreachable.
+    generated_unit_admission: Box<[GeneratedUnitAdmissionFingerprint]>,
 }
 
 impl WarmCacheKey {
@@ -79,6 +87,7 @@ impl WarmCacheKey {
         canonical_tsconfig: impl Into<Arc<str>>,
         config_generation: u64,
         editor_binding: ProjectIdentity,
+        generated_unit_admission: &[GeneratedUnitAdmissionFingerprint],
     ) -> Self {
         let component_root = decision
             .members()
@@ -91,6 +100,7 @@ impl WarmCacheKey {
             config_generation,
             engine: decision.engine().clone(),
             editor_binding,
+            generated_unit_admission: generated_unit_admission.into(),
         }
     }
 

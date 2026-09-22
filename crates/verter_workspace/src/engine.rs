@@ -817,11 +817,25 @@ impl Engine {
         self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// The per-canonical rail only moves FORWARD. A byte-less transition may
+    /// have advanced it past the global content generation, and a later real
+    /// mutation recorded at that lower generation must not walk it back onto a
+    /// key a consumer was already refused under.
     fn record_content_transition_at(&self, canonical_id: &str, generation: u64) {
-        self.content_transitions.write().insert(
-            verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
-            generation,
-        );
+        let mut transitions = self.content_transitions.write();
+        let recorded = transitions
+            .entry(verter_semantic::resolver_core::normalize_canonical_id(
+                canonical_id,
+            ))
+            .or_insert(0);
+        // Every recorded transition mints a key strictly newer than the last
+        // one read for this canonical — a real mutation included, since a
+        // byte-less transition may already sit at or above its generation.
+        *recorded = if generation > *recorded {
+            generation
+        } else {
+            *recorded + 1
+        };
     }
 
     fn record_subtree_content_transition_at(&self, prefix: &str, generation: u64) {
@@ -873,6 +887,10 @@ impl Engine {
     /// Record a content transition for `canonical_id` at the CURRENT
     /// generation without bumping — for multi-canonical mutations that
     /// bump once after recording every affected id.
+    ///
+    /// Strictly newer than whatever this canonical's rail last read, every
+    /// time: the caller was just refused at that very value, so recording
+    /// "current generation + 1" twice would hand its retry the same key back.
     pub(crate) fn record_content_transition(&self, canonical_id: &str) {
         let generation = self.current_content_generation();
         self.record_content_transition_at(canonical_id, generation + 1);

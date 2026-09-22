@@ -341,7 +341,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     || (matches!(
                         context.mode,
                         ProjectionMode::Navigate | ProjectionMode::Skeleton
-                    ) && name.as_ref() == "ReturnType"
+                    ) && super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
                         && type_args.len() == 1
                         && self
                             .flow_return_callee_for_typeof_arg(type_args[0])

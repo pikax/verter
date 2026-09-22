@@ -3027,7 +3027,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // through this same dispatch).
                     let flow_member_arg = (still_more_path
                         && is_builtin
-                        && base.decl_name.as_ref() == "ReturnType"
+                        && super::signature_utility::SignatureUtility::ReturnType.spells(base.decl_name.as_ref())
                         && args.len() == 1)
                         .then(|| args[0]);
                     let identity = self
@@ -3574,7 +3574,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let head_name = data.bare_ref_head().map(|(name, _)| Arc::clone(name));
                 let args = data.carrier_type_args();
                 match (head_name, args.len()) {
-                    (Some(name), 1) if name.as_ref() == "InstanceType" => {
+                    (Some(name), 1)
+                        if super::signature_utility::SignatureUtility::InstanceType
+                            .spells(name.as_ref()) =>
+                    {
                         match self.graph().node_data(args[0]).as_deref() {
                             Some(
                                 arg_data @ (SemanticNodeData::TypeOf(_)
@@ -3594,7 +3597,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
             Some(SemanticNodeData::InstantiationRef { base, args })
                 if base.canonical_id.as_ref() == "__builtin__"
-                    && base.decl_name.as_ref() == "InstanceType"
+                    && super::signature_utility::SignatureUtility::InstanceType
+                        .spells(base.decl_name.as_ref())
                     && args.len() == 1 =>
             {
                 let arg = args[0];

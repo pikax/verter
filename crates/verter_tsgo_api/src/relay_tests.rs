@@ -149,7 +149,7 @@ async fn carrier_channel_refuses_exit_shutdown_initialize_and_arbitrary() {
 }
 
 #[tokio::test]
-async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apisession() {
+async fn carrier_channel_allows_didopen_didchange_didclose_barrier_and_apisession() {
     let (conn, trace, join) = connection_to_recording_server();
     let overlays = StdMutex::new(HashSet::new());
     let taint = StdMutex::new(HashSet::new());
@@ -193,7 +193,7 @@ async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apises
     for (i, expected) in [
         "textDocument/didOpen",
         "textDocument/didChange",
-        "textDocument/diagnostic",
+        CARRIER_SYNC_BARRIER_METHOD,
         crate::attach::INITIALIZE_API_SESSION_METHOD,
         "textDocument/didClose",
     ]
@@ -207,6 +207,113 @@ async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apises
              order (transparency of allowed writes): {methods:?}"
         );
     }
+}
+
+/// A `didClose` for a URI the channel does not track as open never reaches the wire:
+/// the engine treats an overlay close as a file delete and rebuilds its project, so a
+/// close of a never-opened (or already-closed) overlay is pure cost.
+#[tokio::test]
+async fn did_close_of_untracked_overlay_writes_nothing() {
+    let (conn, trace, join) = connection_to_recording_server();
+    let overlays = StdMutex::new(HashSet::new());
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
+
+    let uri = "file:///ws/Idem.vue.tsx";
+    channel
+        .did_close(uri)
+        .await
+        .expect("closing a never-opened overlay is a successful no-op");
+    channel
+        .did_open(uri, "typescriptreact", 1, "export {};")
+        .await
+        .expect("didOpen passes the gate");
+    channel.did_close(uri).await.expect("the tracked close");
+    channel
+        .did_close(uri)
+        .await
+        .expect("closing an already-closed overlay is a successful no-op");
+
+    conn.close().await.unwrap();
+    join.await.unwrap();
+    assert_eq!(
+        trace_methods(&trace),
+        vec![
+            "textDocument/didOpen".to_string(),
+            "textDocument/didClose".to_string()
+        ],
+        "only the close of the TRACKED overlay reaches the wire"
+    );
+}
+
+/// A sink whose notification send never completes (a wedged writer) — it records the
+/// method it was handed first.
+struct WedgedNotifySink {
+    wedge: &'static str,
+    seen: TestMutex<Vec<String>>,
+}
+
+impl GatedWireSink for WedgedNotifySink {
+    fn send_notify<'a>(
+        &'a self,
+        method: &'a str,
+        _params: serde_json::Value,
+    ) -> SinkFuture<'a, ()> {
+        self.seen.lock().unwrap().push(method.to_string());
+        if method == self.wedge {
+            Box::pin(std::future::pending())
+        } else {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn send_request<'a>(
+        &'a self,
+        _method: &'a str,
+        _params: serde_json::Value,
+    ) -> SinkFuture<'a, serde_json::Value> {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+}
+
+/// A `didOpen` whose send was abandoned mid-flight MAY have reached the engine, so the
+/// overlay must already be tracked as open: its retracting `didClose` has to reach the
+/// wire rather than be dropped as a close of an unknown overlay.
+#[tokio::test]
+async fn abandoned_did_open_send_stays_retractable() {
+    let sink = WedgedNotifySink {
+        wedge: "textDocument/didOpen",
+        seen: TestMutex::new(Vec::new()),
+    };
+    let overlays = StdMutex::new(HashSet::new());
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&sink, &overlays, &taint);
+
+    let uri = "file:///ws/Wedged.vue.tsx";
+    let abandoned = tokio::time::timeout(
+        Duration::from_millis(20),
+        channel.did_open(uri, "typescriptreact", 1, "export {};"),
+    )
+    .await;
+    assert!(abandoned.is_err(), "the wedged send is abandoned");
+    assert!(
+        overlays.lock().unwrap().contains(uri),
+        "a possibly-sent didOpen is tracked as open BEFORE its send completes"
+    );
+
+    channel
+        .did_close(uri)
+        .await
+        .expect("the retract reaches the sink");
+    assert_eq!(
+        *sink.seen.lock().unwrap(),
+        vec![
+            "textDocument/didOpen".to_string(),
+            "textDocument/didClose".to_string()
+        ],
+        "the possibly-open overlay's retract is written"
+    );
+    assert!(!overlays.lock().unwrap().contains(uri));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -226,11 +333,11 @@ async fn carrier_channel_refuses_kind_mismatched_allowlisted_ops() {
     // diagnostic is a REQUEST-only carrier op — sent as a NOTIFICATION it is a
     // kind mismatch and must be refused, though the method name is allowlisted.
     let err = channel
-        .gated_notify("textDocument/diagnostic", serde_json::json!({}))
+        .gated_notify(CARRIER_SYNC_BARRIER_METHOD, serde_json::json!({}))
         .await
         .expect_err("an allowlisted REQUEST method sent as a NOTIFICATION must be refused");
     assert!(
-        matches!(err, TsgoApiError::WriteGateDenied { method: ref m } if m == "textDocument/diagnostic"),
+        matches!(err, TsgoApiError::WriteGateDenied { method: ref m } if m == CARRIER_SYNC_BARRIER_METHOD),
         "the kind-mismatch refusal must be the typed WriteGateDenied; got {err:?}"
     );
 
@@ -275,24 +382,21 @@ async fn carrier_channel_refuses_kind_mismatched_allowlisted_ops() {
             .cloned()
             .collect()
     };
-    // Exactly ONE diagnostic frame — the control REQUEST (it carries an `id`).
-    // A leaked `gated_notify("textDocument/diagnostic")` would add an id-LESS
+    // Exactly ONE barrier frame — the control REQUEST (it carries an `id`).
+    // A leaked `gated_notify(CARRIER_SYNC_BARRIER_METHOD)` would add an id-LESS
     // notification frame, so the count AND the kind discriminate the gate.
-    let diagnostics = frames_for("textDocument/diagnostic");
+    let barriers = frames_for(CARRIER_SYNC_BARRIER_METHOD);
     assert_eq!(
-        diagnostics.len(),
+        barriers.len(),
         1,
-        "exactly one diagnostic frame (the control request) reached the wire — \
-         no kind-mismatched diagnostic leaked: {frames:?}"
+        "exactly one barrier frame (the control request) reached the wire — \
+         no kind-mismatched barrier leaked: {frames:?}"
     );
     assert!(
-        diagnostics[0]
-            .get("id")
-            .map(|v| !v.is_null())
-            .unwrap_or(false),
-        "the sole diagnostic frame is a REQUEST (carries an id) — a leaked \
-         diagnostic-as-notification would be id-less: {:?}",
-        diagnostics[0]
+        barriers[0].get("id").map(|v| !v.is_null()).unwrap_or(false),
+        "the sole barrier frame is a REQUEST (carries an id) — a leaked \
+         barrier-as-notification would be id-less: {:?}",
+        barriers[0]
     );
     // Exactly ONE didChange frame — the control NOTIFICATION (no `id`). A leaked
     // `gated_request("textDocument/didChange")` would carry an `id`.
@@ -883,21 +987,21 @@ async fn relay_injected_request_demuxes_to_verter_not_editor() {
     let channel = relay.injection_channel();
     let result = channel
         .gated_request(
-            "textDocument/diagnostic",
+            CARRIER_SYNC_BARRIER_METHOD,
             serde_json::json!({ "textDocument": { "uri": "file:///ws/Inj.vue.tsx" } }),
         )
         .await
         .expect("the injected allowlisted request must round-trip");
     assert_eq!(
         result,
-        serde_json::json!({ "answered": "textDocument/diagnostic" }),
+        serde_json::json!({ "answered": CARRIER_SYNC_BARRIER_METHOD }),
         "the injected request's response must demux back to Verter"
     );
     // The server observed the injected request under a reserved `verter:*` id.
     let frames = server_trace.lock().unwrap().clone();
     let injected = frames
         .iter()
-        .find(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/diagnostic"))
+        .find(|f| f.get("method").and_then(|m| m.as_str()) == Some(CARRIER_SYNC_BARRIER_METHOD))
         .expect("the server must observe the injected request");
     let injected_id = injected
         .get("id")
@@ -1837,12 +1941,19 @@ async fn injected_didopen_precedes_sync_barrier() {
         .expect("the server observes the injected didOpen");
     let barrier_at = methods
         .iter()
-        .position(|m| m == "textDocument/diagnostic")
+        .position(|m| m == CARRIER_SYNC_BARRIER_METHOD)
         .expect("the server observes the sync-barrier request");
     assert!(
         open_at < barrier_at,
         "the injected didOpen must be observed BEFORE the sync barrier on the \
          ordered server wire: {methods:?}"
+    );
+    // The barrier only has to prove ORDER. A pull-diagnostic there costs the
+    // editor's engine a semantic check per injected overlay, and an editor
+    // request arriving during a project-wide injection waits behind all of them.
+    assert!(
+        methods.iter().all(|m| m != "textDocument/diagnostic"),
+        "injecting an overlay must never ask the engine for a semantic check: {methods:?}"
     );
     drop(editor_write);
     relay.shutdown().await;

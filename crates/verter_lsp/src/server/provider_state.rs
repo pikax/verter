@@ -818,6 +818,9 @@ impl VerterLanguageServer {
         mru.insert(0, canonical_id.to_string());
         // Cap at a reasonable size
         mru.truncate(64);
+        drop(mru);
+        // The same fact orders the diagnostics this document is still owed.
+        self.sync_coordinator.touch(canonical_id);
     }
 
     pub(super) fn queue_snapshot_provider_sync(&self, canonical_id: impl Into<String>) {

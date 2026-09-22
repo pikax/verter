@@ -19,5 +19,7 @@
 pub mod connection;
 pub mod framing;
 
-pub use connection::{JsonRpcConnection, NotificationHandler, ServerRequestHandler};
+pub use connection::{
+    JsonRpcConnection, JsonRpcErrorResponse, NotificationHandler, ServerRequestHandler,
+};
 pub use framing::{decode_base64_data, encode_base64_data, encode_message, MessageFramer};

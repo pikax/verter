@@ -7,6 +7,7 @@
 import "../tsx/tsx";
 import { describe, it, assertType } from "vitest";
 import { defineComponent, VNode } from "vue";
+import { componentConstructor } from "./components";
 import {
   KeepAlive,
   Transition,
@@ -633,6 +634,29 @@ describe("components helpers", () => {
   });
 
   describe("instantiateComponent", () => {
+    it("infers generic slot payloads from the component's supplied props", () => {
+      const Select = null! as {
+        new <T>(props?: { options: T[]; modelValue: T }): {
+          $slots: { selected(props: { value: T }): unknown };
+        };
+      } & { displayName: string };
+      const text = new (componentConstructor(Select))({ options: ["one"], modelValue: "one" });
+      const number = new (componentConstructor(Select))({ options: [1], modelValue: 1 });
+      const Plain = null! as new () => { $slots: { selected(props: { value: boolean }): unknown } };
+      const plain = new (componentConstructor(Plain))({});
+      assertType<boolean>(null! as Parameters<typeof plain.$slots.selected>[0]["value"]);
+      const Functional = null! as <T>(props: { value: T }, context: object) => { value: T };
+      const functional = new (componentConstructor(Functional))({ value: 1 });
+      assertType<number>(functional.value);
+      type TextValue = Parameters<typeof text.$slots.selected>[0]["value"];
+      type NumberValue = Parameters<typeof number.$slots.selected>[0]["value"];
+      assertType<string>(null! as TextValue);
+      assertType<number>(null! as NumberValue);
+      // @ts-expect-error concrete inference must not widen to any
+      assertType<TextValue>(1);
+      // @ts-expect-error separate uses must retain their own inferred type
+      assertType<NumberValue>("one");
+    });
     it("returns instance type for class-based component", () => {
       type MockInstance = { $props: { msg: string }; $emit: () => void };
       type MockConstructor = { new (): MockInstance };

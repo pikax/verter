@@ -1324,7 +1324,10 @@ fn normalize_component_prop_name(
     }
 }
 
-fn normalized_component_prop_name(is_component: bool, authored: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn normalized_component_prop_name(
+    is_component: bool,
+    authored: &str,
+) -> std::borrow::Cow<'_, str> {
     if !is_component || authored.starts_with("data-") || authored.starts_with("aria-") {
         std::borrow::Cow::Borrowed(authored)
     } else {

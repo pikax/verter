@@ -16,6 +16,7 @@ import {
   FIXTURE_NAME,
   ensureTypeProviderSynced,
   invalidateTypeProviderSyncCache,
+  logMark,
   sleep,
   waitForDiagnostics,
   waitForDiagnosticsSettled,
@@ -83,9 +84,15 @@ export async function ensureParityReady(entry: string): Promise<vscode.TextDocum
 
 /** Start a clean provider epoch for a state-sensitive parity suite. */
 export async function restartParityReady(entry: string): Promise<vscode.TextDocument> {
+  // Marked BEFORE the restart: init generations restart at 1, so the previous
+  // server's readiness lines would otherwise vouch for the one still booting.
+  const logFloor = logMark();
   await vscode.commands.executeCommand("verter.restartLanguageServer");
-  invalidateTypeProviderSyncCache();
-  return ensureParityReady(entry);
+  invalidateTypeProviderSyncCache(logFloor);
+  // A restart repeats the root provider handshake, so it takes that budget
+  // explicitly rather than the ordinary per-wait default.
+  await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+  return openRelative(entry);
 }
 
 export function tokenOffset(doc: vscode.TextDocument, anchor: TokenAnchor): number {

@@ -65,6 +65,7 @@ fn hello_messages_round_trip() {
             api_session: true,
             wait_initialized: true,
             feature_requests: true,
+            carrier_batch: true,
         },
     });
 }
@@ -311,4 +312,25 @@ fn verify_hello_rejects_wrong_nonce_fail_closed() {
         verify_hello(&params, "the-real-nonce").expect_err("wrong nonce must be refused");
     assert_eq!(rejection, HelloRejection::NonceMismatch);
     assert_eq!(rejection.error_code(), ERROR_NONCE_MISMATCH);
+}
+
+/// A batch failure from a server that predates the failure kind reads as a send
+/// failure — the conservative reading, which keeps the retract.
+#[test]
+fn a_batch_failure_without_a_kind_reads_as_send_failed() {
+    let failure: CarrierBatchFailure = serde_json::from_value(
+        serde_json::json!({ "index": 0, "uri": "file:///w/A.ts", "message": "m" }),
+    )
+    .expect("a kind-less failure decodes");
+    assert_eq!(failure.kind, CarrierBatchFailureKind::SendFailed);
+    assert_eq!(
+        serde_json::to_value(CarrierBatchFailure {
+            index: 0,
+            uri: "file:///w/A.ts".to_string(),
+            message: "m".to_string(),
+            kind: CarrierBatchFailureKind::SentUnconfirmed,
+        })
+        .unwrap()["kind"],
+        "sentUnconfirmed"
+    );
 }

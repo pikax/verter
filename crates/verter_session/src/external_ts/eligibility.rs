@@ -1,18 +1,18 @@
-//! Composition of a per-project [`ProjectEligibility`] from the five real
+//! Composition of a per-project [`ProjectEligibility`] from the real
 //! SHARED-precondition facts, as TYPED, PROVENANCE-BEARING inputs.
 //!
 //! SHARED (attaching to the editor's already-running engine) requires
 //! PROVENANCE-TYPED POSITIVE evidence for every precondition; an incomplete,
 //! partial, or absent fact set yields OWNED, never SHARED. This module turns
-//! the five facts into the pre-composition verdict [`mode`](super::mode)
+//! the facts into the pre-composition verdict [`mode`](super::mode)
 //! consumes. The runtime facts are supplied by the live editor-attach
 //! integration; this layer is pure logic over the typed inputs.
 //!
 //! ## Why typed facts, not bare bools
 //!
 //! Each fact is a DISTINCT two-state type carrying its positive evidence, not a
-//! `bool`. Five `bool`s at a call site are trivially swappable (pass the proxy
-//! flag where the gate flag belongs and nothing complains); five distinct fact
+//! `bool`. A row of `bool`s at a call site is trivially swappable (pass the proxy
+//! flag where the gate flag belongs and nothing complains); distinct fact
 //! types make that swap a COMPILE error. And the composition's OWNED output can
 //! only ever be a [`ProjectEligibility::Owned`] carrying an
 //! [`EligibilityFailure`] — the restricted eligibility-INPUT set — so a derived
@@ -21,6 +21,10 @@
 //! discipline in [`mode`](super::mode).
 
 use std::sync::Arc;
+
+use verter_workspace::{
+    GeneratedUnitAdmission, GeneratedUnitAdmissionFingerprint, GeneratedUnitNonAdmissionReason,
+};
 
 use crate::file_artifact_store::ProjectIdentity;
 
@@ -71,6 +75,50 @@ pub enum BindingFact {
     Bound(ProjectIdentity),
     /// The carrier source has no resolved configured-project binding.
     NotBound,
+}
+
+/// The generated-unit admission fact: is the SELECTED generated-unit topology —
+/// the exact set of generated units a SHARED serve would write into the editor's
+/// engine — admitted to its owning configured project?
+///
+/// This is NOT "the files are named like companions", and it is NOT the binding
+/// fact: a project can own a carrier SOURCE ([`BindingFact::Bound`]) while its
+/// `include`/`files` admit none of the units generated for it. A unit written
+/// into an engine whose configured project does not admit it lands in an inferred
+/// project, so SHARED requires the positive proof. `Admitted` carries the
+/// admission's fingerprint (the identity the decision was proven under);
+/// `NotAdmitted` carries the closed refusal reason; `Unproven` is the absence of
+/// any proof (no write set, no snapshot, an unevaluated carrier). Both negative
+/// states decide OWNED, each under its own reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeneratedUnitAdmissionFact {
+    /// Every generated unit of the selected write set is admitted to the owning
+    /// configured project; the payload is that admission's fingerprint.
+    Admitted(GeneratedUnitAdmissionFingerprint),
+    /// At least one generated unit is not admitted; the payload is why.
+    NotAdmitted(GeneratedUnitNonAdmissionReason),
+    /// No admission proof exists for the selected write set.
+    Unproven,
+}
+
+impl GeneratedUnitAdmissionFact {
+    /// Derive the fact from the workspace admission query's outcome.
+    #[must_use]
+    pub fn from_admission(admission: &GeneratedUnitAdmission) -> Self {
+        match admission {
+            GeneratedUnitAdmission::Admitted(admitted) => Self::Admitted(admitted.fingerprint()),
+            GeneratedUnitAdmission::NotAdmitted(refusal) => Self::NotAdmitted(refusal.reason()),
+        }
+    }
+
+    /// The admission fingerprint IFF the fact is positive.
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<GeneratedUnitAdmissionFingerprint> {
+        match self {
+            Self::Admitted(fingerprint) => Some(*fingerprint),
+            Self::NotAdmitted(_) | Self::Unproven => None,
+        }
+    }
 }
 
 /// The proxy/interposition-availability fact: can Verter interpose the editor's
@@ -131,10 +179,10 @@ impl EditorBindingFact {
     }
 }
 
-/// The five SHARED-precondition facts for one project, gathered as typed inputs.
+/// The SHARED-precondition facts for one project, gathered as typed inputs.
 ///
 /// [`compose_eligibility`] reduces these to a [`ProjectEligibility`]. There is no
-/// bare-bool constructor: each field is its own fact type, so the five cannot be
+/// bare-bool constructor: each field is its own fact type, so they cannot be
 /// positionally confused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EligibilityFacts {
@@ -144,17 +192,20 @@ pub struct EligibilityFacts {
     pub attach: AttachFact,
     /// The configured-project binding presence.
     pub binding: BindingFact,
+    /// The generated-unit admission to the bound project.
+    pub generated_units: GeneratedUnitAdmissionFact,
     /// The proxy/interposition availability.
     pub proxy: ProxyFact,
     /// The editor-binding-identity agreement.
     pub editor_binding: EditorBindingFact,
 }
 
-/// Compose a per-project [`ProjectEligibility`] from the five typed facts.
+/// Compose a per-project [`ProjectEligibility`] from the typed facts.
 ///
 /// SHARED requires ALL-positive evidence: only when the gate is `Cleared`, the
-/// attach is `Live`, the binding is `Bound`, the proxy is `Available`, and the
-/// editor binding is `Matched` does this return [`ProjectEligibility::Eligible`].
+/// attach is `Live`, the binding is `Bound`, the generated units are `Admitted`,
+/// the proxy is `Available`, and the editor binding is `Matched` does this return
+/// [`ProjectEligibility::Eligible`].
 /// ANY missing/negative fact yields [`ProjectEligibility::Owned`] carrying the
 /// matching [`EligibilityFailure`], evaluated in the STRICT precedence the
 /// failure enum encodes:
@@ -162,8 +213,11 @@ pub struct EligibilityFacts {
 /// 1. [`EligibilityFailure::VersionGateNotGreen`]
 /// 2. [`EligibilityFailure::AttachNotLive`]
 /// 3. [`EligibilityFailure::ProjectNotBound`]
-/// 4. [`EligibilityFailure::ProxyUnavailable`]
-/// 5. [`EligibilityFailure::EditorBindingMismatch`]
+/// 4. [`EligibilityFailure::GeneratedUnitsNotAdmitted`] /
+///    [`EligibilityFailure::GeneratedUnitAdmissionUnproven`] — evaluated right
+///    after the binding it qualifies (admission is meaningless without an owner)
+/// 5. [`EligibilityFailure::ProxyUnavailable`]
+/// 6. [`EligibilityFailure::EditorBindingMismatch`]
 ///
 /// The OWNED arm can only carry an [`EligibilityFailure`] (the restricted
 /// eligibility-INPUT set), so a derived decision reason
@@ -182,6 +236,17 @@ pub fn compose_eligibility(facts: &EligibilityFacts) -> ProjectEligibility {
     }
     if matches!(facts.binding, BindingFact::NotBound) {
         return ProjectEligibility::Owned(EligibilityFailure::ProjectNotBound);
+    }
+    match facts.generated_units {
+        GeneratedUnitAdmissionFact::Admitted(_) => {}
+        GeneratedUnitAdmissionFact::NotAdmitted(reason) => {
+            return ProjectEligibility::Owned(EligibilityFailure::GeneratedUnitsNotAdmitted(
+                reason,
+            ));
+        }
+        GeneratedUnitAdmissionFact::Unproven => {
+            return ProjectEligibility::Owned(EligibilityFailure::GeneratedUnitAdmissionUnproven);
+        }
     }
     if matches!(facts.proxy, ProxyFact::Unavailable) {
         return ProjectEligibility::Owned(EligibilityFailure::ProxyUnavailable);

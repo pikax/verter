@@ -35,7 +35,7 @@
 //! awaited. The crate denies `clippy::await_holding_lock` to keep this enforced.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
@@ -574,6 +574,21 @@ where
         F: FnOnce(Arc<P>) -> Fut,
         Fut: Future<Output = Result<T, TypeProviderError>>,
     {
+        self.run_guarded_with_fallback(fp, || Ok(fail_closed()), run)
+            .await
+    }
+
+    /// Diagnostics cannot equate quarantine with a completed, clean check.
+    async fn run_guarded_with_fallback<T, F, Fut>(
+        &self,
+        fp: QueryFingerprint,
+        fail_closed: impl FnOnce() -> Result<T, TypeProviderError>,
+        run: F,
+    ) -> Result<T, TypeProviderError>
+    where
+        F: FnOnce(Arc<P>) -> Fut,
+        Fut: Future<Output = Result<T, TypeProviderError>>,
+    {
         let provider = self.get_inner().await?;
         let quarantined = {
             let watch = self
@@ -592,7 +607,7 @@ where
                 fp.path,
                 fp.offset,
             );
-            return Ok(fail_closed());
+            return fail_closed();
         }
         let guard = InFlightGuard::begin(Arc::clone(&self.state.query_watch), fp);
         let result = run(provider).await;
@@ -613,8 +628,16 @@ async fn run_actor<P>(
     P: TypeProvider + Send + Sync + 'static,
 {
     let mut state = DesiredState::default();
+    let mut queued = VecDeque::new();
 
-    while let Some(command) = command_rx.recv().await {
+    loop {
+        let command = match queued.pop_front() {
+            Some(command) => command,
+            None => match command_rx.recv().await {
+                Some(command) => command,
+                None => return,
+            },
+        };
         match command {
             Command::Mutate {
                 mutation,
@@ -627,25 +650,42 @@ async fn run_actor<P>(
                     let guard = inner.read().await;
                     guard.clone()
                 };
-                let result = match live {
-                    Some(provider) => forward(provider.as_ref(), &mutation, lane).await,
+                let (result, crashed) = match live {
+                    Some(provider) => {
+                        let forwarding = forward(provider.as_ref(), &mutation, lane);
+                        tokio::pin!(forwarding);
+                        loop {
+                            tokio::select! {
+                                result = &mut forwarding => break (result, None),
+                                Some(command) = command_rx.recv() => {
+                                    match command {
+                                        Command::Crashed { ack } => break (
+                                            Err(TypeProviderError::new("provider crashed during state update")),
+                                            Some(ack),
+                                        ),
+                                        // Preserve mutation order while remaining receptive to
+                                        // lifecycle control. A wedged forward must not prevent
+                                        // the shutdown that releases the failed transport.
+                                        command => queued.push_back(command),
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // No live provider yet (mid-restart): the mutation is now in
                     // the desired-state set and will be replayed on go-live.
-                    None => Ok(()),
+                    None => (Ok(()), None),
                 };
+                if let Some(crashed) = crashed {
+                    // The forwarding future has been dropped, but its desired
+                    // state and all queued mutations survive for the new engine.
+                    retire_provider(&inner).await;
+                    let _ = crashed.send(());
+                }
                 let _ = ack.send(result);
             }
             Command::Crashed { ack } => {
-                let crashed = {
-                    let mut guard = inner.write().await;
-                    guard.take()
-                };
-                if let Some(provider) = crashed {
-                    // Clear the live cell before awaiting teardown so queries fail
-                    // closed. Owned providers then kill/reap their crashed child under
-                    // their bounded shutdown contract before respawn is admitted.
-                    let _ = provider.shutdown().await;
-                }
+                retire_provider(&inner).await;
                 let _ = ack.send(());
             }
             Command::GoLive { provider, ack } => {
@@ -660,6 +700,15 @@ async fn run_actor<P>(
                 let _ = ack.send(());
             }
         }
+    }
+}
+
+async fn retire_provider<P: TypeProvider>(inner: &RwLock<Option<Arc<P>>>) {
+    // Fail queries closed before bounded teardown, without holding the live
+    // cell's lock while killing and reaping the failed child.
+    let crashed = inner.write().await.take();
+    if let Some(provider) = crashed {
+        let _ = provider.shutdown().await;
     }
 }
 
@@ -682,7 +731,9 @@ impl DesiredState {
             DesiredMutation::Load { path, content } => {
                 self.cache_file(path, content, Some(CachedFileMode::Load))
             }
-            DesiredMutation::Update { path, content } => self.cache_file(path, content, None),
+            DesiredMutation::Update { path, content } => {
+                self.cache_file(path, content, Some(CachedFileMode::Open))
+            }
             DesiredMutation::Close { path } => {
                 self.files.remove(path);
                 // A closed companion must not be replayed as a carrier after a
@@ -760,7 +811,7 @@ impl DesiredState {
     }
 
     /// Insert/refresh a file, preserving `open` > `load` priority: an opened file
-    /// is never downgraded to load-only, and an update keeps the existing mode.
+    /// is never downgraded to load-only. Editor updates promote loads to open.
     fn cache_file(&mut self, path: &str, content: &str, mode: Option<CachedFileMode>) {
         match self.files.entry(path.to_string()) {
             Entry::Occupied(mut entry) => {

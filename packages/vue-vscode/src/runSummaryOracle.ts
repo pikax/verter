@@ -15,6 +15,11 @@
  *     row as a statically declared product-gap skip. Legacy multi-fixture suites may
  *     report inapplicable rows as pending, but must still prove a real pass.
  *
+ * Product-gap CANARIES are the executed counterpart of a skipped gap: a canary runs
+ * and is expected to fail. Its failure is tolerated (and never counted as a pass); its
+ * PASS fails the run, so a repaired defect cannot stay hidden behind a manifest entry;
+ * and a canary that never executed in an unfiltered run is a stale entry and fails too.
+ *
  * Split out of `runTests.ts` (whose `main()` auto-runs) so the oracle is unit-testable
  * without launching the editor host; the poll window is injectable so the missing-summary
  * path is testable without the 8s production wait.
@@ -32,6 +37,8 @@ export interface RunSummary {
   failedTests?: RunSummaryFailure[];
   /** Route-approved product gaps skipped before their test bodies executed. */
   skippedProductGaps?: ProductGapSkip[];
+  /** Route-approved canaries that executed and failed, as the runner classified them. */
+  failingProductGapCanaries?: ProductGapSkip[];
   fixture?: string;
   typeProvider?: string;
   loadedFiles?: string[];
@@ -49,10 +56,80 @@ export interface ProductGapSkip {
   readonly issue: string;
 }
 
+/**
+ * One canary: the tracked defect, and the failure that defect produces in this test.
+ * Only that failure is tolerated — any other failure of the same test is a regression.
+ */
+export interface ProductGapCanary {
+  readonly issue: string;
+  readonly failure: RegExp;
+}
+
+/** `test ID` -> the canary declared for it. */
+export type ProductGapCanaryManifest = Readonly<Record<string, ProductGapCanary>>;
+
+/** Whether `failure` is the test-body failure `canary` is declared to expect. */
+export function isExpectedCanaryFailure(
+  canary: ProductGapCanary | undefined,
+  failure: RunSummaryFailure,
+): boolean {
+  return canary !== undefined && failure.kind === "test" && canary.failure.test(failure.err ?? "");
+}
+
+/** Where each canary of a route manifest landed in one run. */
+export interface ProductGapCanaryOutcome {
+  /** Canaries whose test body ran and failed: tolerated, reported as degraded coverage. */
+  readonly stillFailing: readonly ProductGapSkip[];
+  /** Canaries whose test body ran and passed: the defect is fixed and the entry is stale. */
+  readonly unexpectedlyPassing: readonly ProductGapSkip[];
+  /** Every recorded failure that is not a canary's own expected test-body failure. */
+  readonly blockingFailures: readonly RunSummaryFailure[];
+}
+
+/** The manifest file a canary message points the reader at. */
+export const PRODUCT_GAP_CANARY_MANIFEST = "e2e/lib/knownProductGapManifest.ts";
+
+/**
+ * Classify a run against a canary manifest. Only a canary's own TEST-body failure that
+ * matches its declared failure is tolerated; a hook failure attributed to the same
+ * title, and any other failure of the canary's test, stays blocking.
+ */
+export function classifyProductGapCanaries(
+  summary: Pick<RunSummary, "passedTestIds" | "failedTests">,
+  canaries: ProductGapCanaryManifest,
+): ProductGapCanaryOutcome {
+  const isCanaryFailure = (failure: RunSummaryFailure): boolean =>
+    failure.id !== undefined && isExpectedCanaryFailure(canaries[failure.id], failure);
+  const failedTests = summary.failedTests ?? [];
+  const failedIds = new Set(failedTests.filter(isCanaryFailure).map((failure) => failure.id));
+  const passedIds = new Set(summary.passedTestIds ?? []);
+  const rows = Object.entries(canaries).map(([id, { issue }]) => ({ id, issue }));
+  return {
+    stillFailing: rows.filter((row) => failedIds.has(row.id)),
+    unexpectedlyPassing: rows.filter((row) => passedIds.has(row.id)),
+    blockingFailures: failedTests.filter((failure) => !isCanaryFailure(failure)),
+  };
+}
+
+/** The operator-facing verdict for a canary that passed. */
+export function unexpectedCanaryPassMessage(rows: readonly ProductGapSkip[]): string {
+  return (
+    `canary test(s) PASSED: ${rows.map((row) => `${row.id} (${row.issue})`).join(", ")} — ` +
+    `the defect is fixed; remove the canary entry from ${PRODUCT_GAP_CANARY_MANIFEST} so the ` +
+    "case is a normal required test again"
+  );
+}
+
 /** The sidecar paths derived from a run's log file. */
 export function runSummaryPath(logFile: string): string {
   return `${logFile}.runsummary`;
 }
+
+/** Parse the run summary a completed run wrote beside its log. */
+export function readRunSummary(logFile: string): RunSummary {
+  return JSON.parse(fs.readFileSync(runSummaryPath(logFile), "utf-8")) as RunSummary;
+}
+
 /**
  * Delete the log and run-summary sidecar before a run, so stale evidence
  * from a prior run can never be read after a current zero-exit crash. Best-effort: a
@@ -110,6 +187,17 @@ export interface EnforceRunSummaryOptions {
    * Requires `requiredTestIds`; all failures, hooks, and newly red rows stay fatal.
    */
   allowedProductGaps?: Readonly<Record<string, string>>;
+  /**
+   * The route's COMPLETE canary manifest (`test ID` -> `ISSUE-*`): tests that execute
+   * and are expected to fail. A failing canary is tolerated, a passing one fails the
+   * run, and one that never executed is a stale entry. Requires `requiredTestIds`.
+   */
+  allowedProductGapCanaries?: ProductGapCanaryManifest;
+  /**
+   * The run selected a subset of the route inventory. A canary outside
+   * `requiredTestIds` is then not evaluated; in an unfiltered run it is stale.
+   */
+  selectionFiltered?: boolean;
   /** Exact compiled suite-file inventory the fixture was required to load. */
   requiredLoadedFiles?: readonly string[];
 }
@@ -142,7 +230,7 @@ export async function enforceRunSummary(
         `(vacuous pass refused; every required E2E run must write a summary)`,
     );
   }
-  const summary = JSON.parse(fs.readFileSync(summaryPath, "utf-8")) as RunSummary;
+  const summary = readRunSummary(logFile);
   const failureCount = summary.failures ?? 0;
   const failedTests = summary.failedTests ?? [];
   const failedDetail =
@@ -175,9 +263,80 @@ export async function enforceRunSummary(
     }
   }
 
-  if (failureCount > 0) {
+  const declaredCanaries = summary.failingProductGapCanaries ?? [];
+  if (!opts.allowedProductGapCanaries && declaredCanaries.length > 0) {
+    throw new Error(`${label}: run summary declares canary failures without a route manifest`);
+  }
+  if (opts.allowedProductGapCanaries && !opts.requiredTestIds) {
+    throw new Error(`${label}: canary classification requires an exact required test manifest`);
+  }
+  const allCanaries = opts.allowedProductGapCanaries ?? {};
+  const invalidCanaries = Object.entries(allCanaries).filter(
+    ([, canary]) => !/^ISSUE-[A-Za-z0-9_-]+$/.test(canary.issue),
+  );
+  if (invalidCanaries.length > 0) {
     throw new Error(
-      `${label}: ${failureCount} test(s) failed (per run summary); details: ${failedDetail}`,
+      `${label}: canary manifest contains invalid rows: ` +
+        invalidCanaries.map(([id, canary]) => `${id}=${canary.issue}`).join(", "),
+    );
+  }
+  const gapAndCanary = Object.keys(allCanaries).filter(
+    (id) => opts.allowedProductGaps?.[id] !== undefined,
+  );
+  if (gapAndCanary.length > 0) {
+    throw new Error(
+      `${label}: test(s) declared as both a skipped product gap and a canary: ` +
+        gapAndCanary.join(", "),
+    );
+  }
+  // A filtered selection evaluates only the canaries it selected; an unfiltered run
+  // evaluates the whole route manifest, so an entry naming no executed test is caught.
+  const selected = new Set(opts.requiredTestIds ?? []);
+  const evaluatedCanaries = Object.fromEntries(
+    Object.entries(allCanaries).filter(([id]) => !opts.selectionFiltered || selected.has(id)),
+  );
+  const canaryOutcome = classifyProductGapCanaries(summary, evaluatedCanaries);
+  const toleratedCanaryIds = canaryOutcome.stillFailing.map((row) => row.id);
+
+  // Only a canary's own test-body failure is subtracted; every other failure — and any
+  // failure the runner counted without recording — stays fatal.
+  const blockingFailureCount = failureCount - toleratedCanaryIds.length;
+  if (blockingFailureCount > 0) {
+    const blockingDetail =
+      toleratedCanaryIds.length === 0
+        ? failedDetail
+        : canaryOutcome.blockingFailures
+            .slice(0, 8)
+            .map((f) => `${f.id ?? "?"}: ${f.err ?? "unknown"}`)
+            .join(" || ") || "no detail recorded for the non-canary failure(s)";
+    throw new Error(
+      `${label}: ${blockingFailureCount} test(s) failed (per run summary); details: ${blockingDetail}`,
+    );
+  }
+  if (canaryOutcome.unexpectedlyPassing.length > 0) {
+    throw new Error(`${label}: ${unexpectedCanaryPassMessage(canaryOutcome.unexpectedlyPassing)}`);
+  }
+  const executedCanaryIds = new Set(toleratedCanaryIds);
+  const staleCanaries = Object.entries(evaluatedCanaries).filter(
+    ([id]) => !executedCanaryIds.has(id),
+  );
+  if (staleCanaries.length > 0) {
+    throw new Error(
+      `${label}: stale canary entr${staleCanaries.length === 1 ? "y" : "ies"} in ` +
+        `${PRODUCT_GAP_CANARY_MANIFEST}: ` +
+        staleCanaries.map(([id, canary]) => `${id} (${canary.issue})`).join(", ") +
+        " never executed in this run; a canary must name a registered test that runs on its route",
+    );
+  }
+  const declaredCanaryIds = declaredCanaries.map((row) => row.id).sort();
+  if (
+    declaredCanaryIds.join("\n") !== [...toleratedCanaryIds].sort().join("\n") ||
+    declaredCanaries.some((row) => evaluatedCanaries[row.id]?.issue !== row.issue)
+  ) {
+    throw new Error(
+      `${label}: canary failure manifest mismatch; runner declared: ` +
+        `${declaredCanaries.map((row) => `${row.id}=${row.issue}`).join(", ") || "none"}` +
+        `; recorded failures: ${toleratedCanaryIds.join(", ") || "none"}`,
     );
   }
 
@@ -292,7 +451,12 @@ export async function enforceRunSummary(
     if (required.size !== opts.requiredTestIds.length) {
       throw new Error(`${label}: required capability manifest itself contains duplicate IDs`);
     }
-    const outcomes = [...(summary.passedTestIds ?? []), ...skippedProductGapIds];
+    // A tolerated canary is accounted for, but only here: it never joins the passes.
+    const outcomes = [
+      ...(summary.passedTestIds ?? []),
+      ...skippedProductGapIds,
+      ...toleratedCanaryIds,
+    ];
     const counts = countIds(outcomes);
     const duplicates = duplicateIds(counts);
     const missing = opts.requiredTestIds.filter((id) => (counts.get(id) ?? 0) === 0);

@@ -3,7 +3,7 @@ import Card from './Card.vue'
 import Panel from './Panel.vue'
 import Row from './Row.vue'
 import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType, GlobalComponentKebabType as ___VERTER___GlobalComponentKebabType } from "@verter/types";
-import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
+import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, componentConstructor as ___VERTER___componentConstructor, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
 
 
@@ -17,15 +17,15 @@ void ___VERTER___directiveAccessor;
 
 {
 <>
-  <><Card></Card>
-    <>{"header"}{(() => { const { title } = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent(Card, {}), "header"); return (<>
+  {(() => { const ___VERTER___slotInstance138 = new (___VERTER___componentConstructor(Card))({}); return (<><Card></Card>
+    <>{"header"}{(() => { const { title } = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___slotInstance138, "header"); return (<>
       <><Row></Row>{ title }</>
     </>); })()}</>
     <>{"default"}
       <Panel />
       {"leading text"}
     </>
-  </>
+  </>); })()}
 </>
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp186>['$slots']['default']>, []);
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp138>['$slots']['header']>, []);

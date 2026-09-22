@@ -291,6 +291,17 @@ pub(super) fn process_tsx_script_only<'alloc>(
     }
 
     // Emit helper imports + type constructs (same as template-only and setup paths)
+    let hoisted_import_names: rustc_hash::FxHashSet<&str> = parse_result
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ScriptItem::Import(imp) => Some(imp.bindings.iter().map(|binding| binding.name)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let builtin_components =
+        &super::unbound_builtin_components(builtin_components, &hoisted_import_names);
     if needs_define_component_wrap {
         emit_helper_imports_with_define_component(
             out,

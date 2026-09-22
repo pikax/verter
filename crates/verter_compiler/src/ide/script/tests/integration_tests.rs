@@ -183,6 +183,166 @@ const x = 1
     );
 }
 
+/// The generated `vue` import line for built-in components, if any. It is
+/// emitted after the generated helper imports, which is what tells it apart
+/// from an authored `vue` import hoisted above them.
+fn generated_builtin_import(code: &str) -> Option<&str> {
+    code.lines()
+        .skip_while(|line| !line.contains("___VERTER___shallowUnwrapRef"))
+        .skip(1)
+        .take_while(|line| line.starts_with("import "))
+        .find(|line| line.ends_with("} from \"vue\";"))
+}
+
+#[test]
+fn builtin_already_bound_by_the_author_is_not_imported_again() {
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+import { defineAsyncComponent, Suspense } from "vue";
+const AsyncBit = defineAsyncComponent(async () => ({ template: "<span/>" }));
+</script>
+<template><Teleport to="body"><Suspense><AsyncBit /></Suspense></Teleport></template>"#,
+    );
+    assert_eq!(
+        generated_builtin_import(&code),
+        Some(r#"import { Teleport } from "vue";"#),
+        "only the unbound built-in is imported: {code}"
+    );
+}
+
+#[test]
+fn builtin_authored_under_an_alias_is_still_imported_by_its_own_name() {
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+import { Suspense as Pending } from "vue";
+void Pending;
+</script>
+<template><Suspense><div/></Suspense></template>"#,
+    );
+    assert_eq!(
+        generated_builtin_import(&code),
+        Some(r#"import { Suspense } from "vue";"#),
+        "an alias leaves the built-in's own name unbound: {code}"
+    );
+}
+
+#[test]
+fn builtin_bound_in_a_plain_script_is_not_imported_again() {
+    for source in [
+        r#"<script lang="ts">
+import { Suspense } from "vue";
+export default { components: { Suspense } };
+</script>
+<template><Suspense><div/></Suspense></template>"#,
+        r#"<script lang="ts">
+import { Suspense } from "vue";
+export const marker = Suspense;
+</script>
+<script setup lang="ts">
+const x = 1;
+</script>
+<template><Suspense><div>{{ x }}</div></Suspense></template>"#,
+    ] {
+        let (code, _) = gen_tsx_script(source);
+        assert_eq!(
+            generated_builtin_import(&code),
+            None,
+            "the authored import already binds the name: {code}"
+        );
+    }
+}
+
+// ── `defineAsyncComponent` bindings render as components ────────
+
+const ASYNC_COMPONENT_HELPER_IMPORT: &str =
+    r#"import { asyncComponent as ___VERTER___asyncComponent } from "@verter/types";"#;
+
+#[test]
+fn vue_async_component_binding_is_normalized_for_the_template() {
+    for (source, binding) in [
+        (
+            r#"<script setup lang="ts">
+import { defineAsyncComponent } from "vue";
+const AsyncBit = defineAsyncComponent(async () => ({ template: "<span/>" }));
+</script>
+<template><AsyncBit /></template>"#,
+            "AsyncBit",
+        ),
+        (
+            r#"<script setup lang="ts">
+import { defineAsyncComponent as lazy } from "vue";
+const Aliased = lazy(() => import("./Other.vue"));
+</script>
+<template><Aliased /></template>"#,
+            "Aliased",
+        ),
+        (
+            r#"<script setup lang="ts">
+import * as Vue from "vue";
+const Spaced = Vue.defineAsyncComponent(() => import("./Other.vue"));
+</script>
+<template><Spaced /></template>"#,
+            "Spaced",
+        ),
+    ] {
+        let (code, _) = gen_tsx_script(source);
+        assert!(
+            code.contains(&format!("{binding}: ___VERTER___asyncComponent({binding})")),
+            "the template-facing binding is normalized: {code}"
+        );
+        assert!(
+            !code.contains(&format!("{binding} as unknown as typeof {binding}")),
+            "the raw loader type must not reach the template: {code}"
+        );
+        assert_eq!(
+            code.matches(ASYNC_COMPONENT_HELPER_IMPORT).count(),
+            1,
+            "the helper is imported exactly once: {code}"
+        );
+    }
+}
+
+#[test]
+fn only_a_proven_vue_async_component_call_is_normalized() {
+    for source in [
+        // A same-name function that is not Vue's.
+        r#"<script setup lang="ts">
+import { defineAsyncComponent } from "./local";
+const Local = defineAsyncComponent(() => 1);
+</script>
+<template><Local /></template>"#,
+        // Declared in the file itself.
+        r#"<script setup lang="ts">
+function defineAsyncComponent<T>(value: T) { return value; }
+const Local = defineAsyncComponent({ a: 1 });
+</script>
+<template>{{ Local }}</template>"#,
+        // A type-only import cannot be the callee of a runtime call.
+        r#"<script setup lang="ts">
+import type { defineAsyncComponent } from "vue";
+declare const make: typeof defineAsyncComponent;
+const Local = make(() => import("./Other.vue"));
+</script>
+<template><Local /></template>"#,
+        // An ordinary binding keeps its ordinary expression type.
+        r#"<script setup lang="ts">
+import { ref } from "vue";
+const Local = ref({ template: "<i/>" });
+</script>
+<template>{{ Local }}</template>"#,
+    ] {
+        let (code, _) = gen_tsx_script(source);
+        assert!(
+            code.contains("Local: Local as unknown as typeof Local"),
+            "an unproven binding keeps its own type: {code}"
+        );
+        assert!(
+            !code.contains("___VERTER___asyncComponent"),
+            "the helper is neither used nor imported: {code}"
+        );
+    }
+}
+
 #[test]
 fn no_builtin_import_when_not_used() {
     let (code, _) = gen_tsx_script(

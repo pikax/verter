@@ -514,7 +514,24 @@ impl VerterLanguageServer {
             .is_enabled()
             .then(|| self.interaction_trace.snapshot());
 
+        let diagnostics = self
+            .documents
+            .open_uris()
+            .into_iter()
+            .filter_map(|uri| {
+                let parsed: Uri = uri.parse().ok()?;
+                let document = self.documents.snapshot_identity(&parsed)?;
+                Some((
+                    uri,
+                    serde_json::json!({
+                        "version": document.version,
+                        "ready": self.documents.diagnostics_ready(&parsed),
+                    }),
+                ))
+            })
+            .collect();
         Ok(StatisticsSnapshot {
+            diagnostics,
             enabled: self.statistics.is_enabled(),
             session: StatisticsSession { by_type, by_file },
             interaction_trace,

@@ -143,6 +143,56 @@ async fn initialized_non_owning_transport_serves_hover_without_initialize_or_chi
 }
 
 #[tokio::test]
+async fn failed_diagnostic_pulls_never_reuse_push_cache() {
+    let (provider_side, mut peer) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+    let path = if cfg!(windows) {
+        "D:/w/control.ts"
+    } else {
+        "/w/control.ts"
+    };
+    provider.diagnostics_cache.lock().await.insert(
+        normalize_file_uri(&TsgoTypeProvider::path_to_uri(path)),
+        vec![TypeDiagnostic {
+            message: "old dependency error".into(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: 0,
+            end: 1,
+            code: Some("2322".into()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+    let server = async {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        for _ in 0..2 {
+            let request = loop {
+                if let Some(request) = framer.next_message().unwrap() {
+                    break request;
+                }
+                let n = peer.read(&mut chunk).await.unwrap();
+                assert_ne!(n, 0);
+                framer.push(&chunk[..n]);
+            };
+            assert_eq!(request["method"], "textDocument/diagnostic");
+            peer.write_all(&encode_message(&serde_json::json!({
+                "jsonrpc": "2.0", "id": request["id"],
+                "error": { "code": -32603, "message": "diagnostics unavailable" },
+            })))
+            .await
+            .unwrap();
+        }
+    };
+    let queries = async {
+        assert!(provider.get_diagnostics(path).await.is_err());
+        assert!(provider.get_diagnostics_background(path).await.is_err());
+    };
+    tokio::join!(server, queries);
+}
+
+#[tokio::test]
 async fn initialized_non_owning_transport_pulls_diagnostics_strictly() {
     let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
     let (read, write) = tokio::io::split(provider_side);
@@ -3345,16 +3395,17 @@ async fn test_provider_operations_fail_after_process_death() {
     let result = tokio::time::timeout(timeout, provider.close_file("test.tsx")).await;
     assert!(result.is_ok(), "close_file should not hang");
 
-    // On a dead process, the transport fails fast and diagnostics falls back to
-    // its cache without relying on a feature-request deadline.
+    // A dead provider cannot certify a current diagnostic result.
     let result = tokio::time::timeout(timeout, provider.get_diagnostics("test.tsx")).await;
     assert!(result.is_ok(), "get_diagnostics should not hang");
     let diags = result.unwrap();
+    assert!(diags.is_err(), "failed diagnostics are not a clean result");
+    let result =
+        tokio::time::timeout(timeout, provider.get_diagnostics_background("test.tsx")).await;
     assert!(
-        diags.is_ok(),
-        "get_diagnostics should succeed (cache fallback)"
+        result.unwrap().is_err(),
+        "background failure is not a clean result"
     );
-    assert!(diags.unwrap().is_empty(), "no cached diagnostics expected");
 }
 
 /// DISCRIMINATING (contents-cache false-miss across path forms): `load_file`

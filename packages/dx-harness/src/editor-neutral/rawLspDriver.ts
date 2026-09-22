@@ -194,6 +194,7 @@ function waitForRelayAdvertisement(controlDir: string, timeoutMs: number): Promi
 }
 
 function waitForDiagnosticActivitySettled(
+  client: LspClient,
   activity: DiagnosticActivity,
   expectedUris: ReadonlySet<string>,
   stableMs: number,
@@ -202,9 +203,31 @@ function waitForDiagnosticActivitySettled(
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = () => {
-      const missingUris = [...expectedUris].filter((uri) => !activity.publishedUris.has(uri));
-      if (missingUris.length === 0 && Date.now() - activity.lastAt >= stableMs) {
+    let receiptObservedAt: number | undefined;
+    const poll = async () => {
+      let snapshot: { diagnostics?: Record<string, { version: number; ready: boolean }> };
+      try {
+        snapshot = await client.sendRequest(
+          GET_STATISTICS_METHOD,
+          {},
+          Math.max(1, deadline - Date.now()),
+        );
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const missingUris = [...expectedUris].filter(
+        (uri) =>
+          !activity.publishedUris.has(uri) ||
+          !snapshot.diagnostics?.[uri]?.ready ||
+          snapshot.diagnostics[uri].version !== 1,
+      );
+      if (missingUris.length === 0) receiptObservedAt ??= Date.now();
+      else receiptObservedAt = undefined;
+      if (
+        receiptObservedAt !== undefined &&
+        Date.now() - Math.max(activity.lastAt, receiptObservedAt) >= stableMs
+      ) {
         if (timer) clearTimeout(timer);
         resolve();
         return;
@@ -218,7 +241,7 @@ function waitForDiagnosticActivitySettled(
         );
         return;
       }
-      timer = setTimeout(poll, 25);
+      timer = setTimeout(() => void poll(), 50);
       timer.unref?.();
     };
     poll();
@@ -441,20 +464,31 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
           },
         });
       }
+      let documentsRegistered = false;
       const settled = await pollUntilQuiesced(
-        async () =>
-          extractQuiescenceCounters(await client.sendRequest(GET_STATISTICS_METHOD, {}, 10_000)),
+        async () => {
+          const snapshot = (await client.sendRequest(GET_STATISTICS_METHOD, {}, 10_000)) as {
+            diagnostics?: Record<string, { version: number }>;
+          };
+          // didOpen notifications can still be queued while host counters are
+          // unchanged. Start the quiet window only after every buffer commits.
+          documentsRegistered = documents.every(
+            (document) => snapshot.diagnostics?.[document.uri]?.version === 1,
+          );
+          return extractQuiescenceCounters(snapshot);
+        },
         () => [],
-        { timeoutMs: 45_000 },
+        { timeoutMs: 45_000, prerequisitesReady: () => documentsRegistered },
       );
       if (!settled.quiesced) {
         throw new Error(`raw LSP did not quiesce after opening contract documents`);
       }
       // Diagnostics are push-delivered independently of the statistics counters.
-      // Require a stable activity window before an empty array can be observed;
+      // Require a completed provider receipt and a stable editor activity window;
       // otherwise an initial empty publication can race the provider's later
       // semantic result and make a deliberate-error control vacuous.
       await waitForDiagnosticActivitySettled(
+        client,
         diagnosticActivity,
         new Set(documents.map((document) => document.uri)),
         600,
@@ -465,7 +499,9 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
       await client.kill().catch(() => {});
       await relay?.kill().catch(() => {});
       if (sharedTemp) RawEditorNeutralLspDriver.removeOwnedSharedTemp(sharedTemp);
-      throw error;
+      throw new Error(`${String(error)}\nLSP stderr:\n${client.stderr.text().slice(-16_000)}`, {
+        cause: error,
+      });
     }
   }
 

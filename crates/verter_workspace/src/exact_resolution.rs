@@ -525,9 +525,13 @@ impl EdgeStore {
                 }
             }
         }
-        // The owner being removed is also a possible dep target.
-        self.reverse_deps_canonical.remove(canonical_id);
-        self.reverse_deps_by_stem.remove(canonical_id);
+        // The buckets that name this file as a dep TARGET are left alone: they
+        // mirror the importers' forward state, which still names it. Dropping
+        // them would strand those importers permanently — re-recording an
+        // importer's unchanged edges is an idempotent no-op — so a delete, or
+        // the remove-then-reload of a disk change, would hide every importer
+        // from the affected-files query. Each importer retracts its own entry
+        // when its edges change or it is removed.
     }
 
     /// Remove all state for files under a directory prefix.

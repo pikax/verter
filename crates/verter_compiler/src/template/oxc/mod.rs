@@ -421,11 +421,6 @@ fn parse_element<'alloc>(
                 source_type,
                 active_locals!(),
             );
-            // Add v-slot locals to owned_locals
-            let locals = owned_locals.as_mut().unwrap();
-            for local_span in &parsed.locals {
-                locals.push(local_span.slice(input));
-            }
             Some(OxcParsedVSlot {
                 parsed,
                 dynamic_name,
@@ -511,6 +506,14 @@ fn parse_element<'alloc>(
                 arg,
                 exp,
             });
+        }
+    }
+
+    // Props use the parent scope; only descendants see this element's slot parameters.
+    if let Some(slot) = &v_slot {
+        let locals = owned_locals.as_mut().unwrap();
+        for local_span in &slot.parsed.locals {
+            locals.push(local_span.slice(input));
         }
     }
 
