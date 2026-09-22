@@ -16,6 +16,22 @@ pnpm exec vitest run path/to/test.ts           # One test file
 
 Tests are co-located as `*.spec.ts` files next to their source files. Type tests in `packages/types/` use `vitest --typecheck`.
 
+### Public Type Contracts
+
+Vitest does not evaluate type-level assertions and the package builds exclude
+spec files, so type-only contract fixtures need their own TypeScript project.
+`packages/component-meta` checks `test/*.test-d.ts` through
+`tsconfig.contract-tests.json`:
+
+```bash
+pnpm --filter @verter/component-meta build      # the fixtures assert built dist declarations too
+pnpm --filter @verter/component-meta test:types
+```
+
+CI runs that script in the *JS Build & Test* lane, after the TypeScript
+packages are built. A type contract that no lane compiles is not a check — see
+[Removing a Mechanism](./removing-a-mechanism.md).
+
 ### Sourcemap Testing
 
 For testing sourcemap accuracy (see `macros.map.spec.ts` for examples):

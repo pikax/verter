@@ -76,7 +76,8 @@
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "test": "vitest --run --exclude '**/native-eval.spec.ts' --exclude '**/published-exports.artifact.spec.ts' --exclude '**/checker.benchmark.spec.ts'",
-    "test:native": "vitest --run native-eval published-exports.artifact"
+    "test:native": "vitest --run native-eval published-exports.artifact",
+    "test:types": "tsc --noEmit -p tsconfig.contract-tests.json"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.12.0",
