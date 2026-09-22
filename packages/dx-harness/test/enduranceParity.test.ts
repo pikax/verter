@@ -25,6 +25,8 @@ import {
   churnCarrierContent,
   DEFAULT_ENDURANCE_LANE,
   decideChurnGrowth,
+  describeProcessTreeRss,
+  sampleProcessTreeRss,
   heavyUpdateFixture,
   loadEnduranceConfig,
   parseProviderRuntimeAttestation,
@@ -36,6 +38,7 @@ import {
   type EnduranceConfig,
   type EnduranceLane,
   type EnduranceProbe,
+  type ProcessTreeRssDeps,
   type ScenarioContext,
 } from "../src/endurance/index.js";
 
@@ -824,19 +827,114 @@ describe("scale corpus framework/mode parity", () => {
   });
 });
 
+describe("process-tree RSS sampling", () => {
+  const SERVER = 4000;
+  const PROVIDER = 4001;
+  const table: readonly { pid: number; ppid: number; image: string }[] = [
+    { pid: 1, ppid: 0, image: "init" },
+    { pid: SERVER, ppid: 1, image: "verter-lsp" },
+    { pid: PROVIDER, ppid: SERVER, image: "tsgo" },
+  ];
+  const deps = (
+    rows: readonly { pid: number; ppid: number; image: string }[] | null,
+    rss: Record<number, number | null>,
+  ): ProcessTreeRssDeps => ({
+    snapshotProcessTable: async () => rows,
+    readProcessRssBytes: async (pid: number) => rss[pid] ?? null,
+  });
+
+  it("sums the server and its provider child when the whole tree is readable", async () => {
+    const sample = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: 300 }),
+    );
+    expect(sample.observable).toBe(true);
+    expect(sample.totalBytes).toBe(500);
+    expect(sample.unavailable).toBeNull();
+    expect(sample.members.map((member) => member.pid).sort()).toEqual([SERVER, PROVIDER]);
+  });
+
+  it("reports a missing process table as UNAVAILABLE, not a root-only reading", async () => {
+    // Without the table the tree's MEMBERSHIP is unknown: the provider child may
+    // be retaining every document version and nothing here can see it. A
+    // root-only figure would be flat and would bless exactly that session.
+    const sample = await sampleProcessTreeRss(SERVER, deps(null, { [SERVER]: 200 }));
+    expect(sample.observable).toBe(false);
+    expect(sample.totalBytes).toBeNull();
+    expect(sample.unavailable?.kind).toBe("topology-unavailable");
+  });
+
+  it("reports a discovered-but-unreadable provider child as UNAVAILABLE", async () => {
+    // The member is KNOWN to be in the tree, so omitting its bytes is not a
+    // narrower measurement — it is a wrong one.
+    const sample = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: null }),
+    );
+    expect(sample.observable).toBe(false);
+    expect(sample.totalBytes).toBeNull();
+    expect(sample.unavailable?.kind).toBe("member-unreadable");
+    expect(sample.unreadablePids).toEqual([PROVIDER]);
+    expect(describeProcessTreeRss(sample)).toContain("UNAVAILABLE");
+  });
+
+  it("cannot satisfy the growth bound from an incomplete tree", async () => {
+    // The end-to-end leg of the same defect: an incomplete sample must not be
+    // able to produce a passing growth verdict at either checkpoint.
+    const complete = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: 300 }),
+    );
+    const partial = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: null }),
+    );
+    for (const [baseline, final] of [
+      [complete, partial],
+      [partial, complete],
+    ] as const) {
+      const verdict = decideChurnGrowth(baseline, final, 1.25, 64 * 1024 ** 2);
+      expect(verdict.observable).toBe(false);
+      expect(verdict.pass).toBe(false);
+      expect(verdict.detail).toContain("NOT evaluated");
+    }
+  });
+
+  it("cannot satisfy the growth bound when a baseline member left the tree", async () => {
+    // A provider that respawned between the checkpoints takes its retained
+    // bytes with it, so the surviving figure understates the session. The
+    // comparison is refused rather than read as improvement.
+    const baseline = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: 300 }),
+    );
+    const final = await sampleProcessTreeRss(
+      SERVER,
+      deps([table[0], table[1]], { [SERVER]: 210 }),
+    );
+    expect(final.observable).toBe(true);
+    const verdict = decideChurnGrowth(baseline, final, 1.25, 64 * 1024 ** 2);
+    expect(verdict.observable).toBe(false);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.detail).toContain(String(PROVIDER));
+  });
+});
+
 describe("churn growth verdict", () => {
   const observable = (totalBytes: number) => ({
-    observable: true,
+    observable: true as const,
     totalBytes,
     members: [{ pid: 1, image: "verter-lsp", rssBytes: totalBytes }],
     unreadablePids: [],
+    unavailable: null,
     atMs: 0,
   });
   const unobservable = {
-    observable: false,
+    observable: false as const,
     totalBytes: null,
     members: [{ pid: 1, image: null, rssBytes: null }],
     unreadablePids: [1],
+    unavailable: { kind: "member-unreadable" as const, detail: "pid 1 unreadable" },
     atMs: 0,
   };
   const MIB = 1024 ** 2;
@@ -874,6 +972,9 @@ describe("churn growth verdict", () => {
     expect(verdict.finalBytes).toBeNull();
     expect(verdict.allowedBytes).toBeNull();
     expect(verdict.detail).toContain("UNAVAILABLE");
+    // The bound was not evaluated, so it was not satisfied: the lane consuming
+    // this verdict must go red for a missing proof, never green.
+    expect(verdict.pass).toBe(false);
   });
 
   it("sizes the churn carrier so one retained version is measurable", () => {

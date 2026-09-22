@@ -54,8 +54,10 @@ export { RssSampler, readProcessRssBytes, type RssSample } from "./rss.js";
 export {
   describeProcessTreeRss,
   sampleProcessTreeRss,
+  type ProcessTreeRssDeps,
   type ProcessTreeRssMember,
   type ProcessTreeRssSample,
+  type ProcessTreeRssUnavailable,
 } from "./processTreeRss.js";
 
 export {

@@ -65,13 +65,20 @@ describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
         `  verdict:  ${result.growth.detail}`,
     );
 
-    if (!result.growth.observable) {
-      console.log(
-        `[endurance] ${result.growth.detail} (platform ${process.platform}) — ` +
-          "the growth bound is reported UNAVAILABLE, not satisfied",
-      );
-      return;
-    }
+    // An UNAVAILABLE metric is a missing proof, not a pass. WSP6-AC1 is a claim
+    // about the whole process tree after quiescence; a checkpoint that could not
+    // enumerate the tree, could not read a discovered member, or lost a baseline
+    // member before the final reading has not produced that evidence — and a
+    // root-only or provider-less reading is exactly the shape that stays flat
+    // while the type-provider child retains every document version. So the lane
+    // goes RED on an unevaluated bound rather than green on a narrower subset.
+    expect(
+      result.growth.observable,
+      `the process-tree growth bound was NOT evaluated on platform ${process.platform}: ` +
+        `${result.growth.detail}\n` +
+        `  baseline: ${describeProcessTreeRss(result.baseline)}\n` +
+        `  final:    ${describeProcessTreeRss(result.final)}`,
+    ).toBe(true);
     expect(result.quiescedAtBothCheckpoints, "both readings must follow host quiescence").toBe(
       true,
     );

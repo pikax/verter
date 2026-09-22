@@ -1011,7 +1011,7 @@ pub(super) async fn handle_did_close(
                     lease.retire();
                 }
             }
-            server.documents.did_close(uri);
+            server.documents.did_close_fenced(uri).await;
             drop(document_commit_guard);
             server.cached_verter_diags.remove(uri.as_str());
             return;
@@ -1071,7 +1071,7 @@ pub(super) async fn handle_did_close(
         if let (Some(canonical_id), Some(generation)) = (canonical_id.as_ref(), close_generation) {
             server.close_ide_sync_open_generation(canonical_id, generation);
         }
-        server.documents.did_close(uri);
+        server.documents.did_close_fenced(uri).await;
         drop(document_commit_guard);
     }
 

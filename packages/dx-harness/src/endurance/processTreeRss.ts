@@ -13,17 +13,37 @@
  * tree membership is re-derived on EVERY sample, so a provider that respawned
  * between two samples is still attributed to the tree.
  *
- * Non-observability is explicit and never silently passes: a platform that
- * cannot enumerate the process table, or a tree in which no member's RSS could
- * be read, returns `observable: false` with `totalBytes: null`. A caller must
- * label the metric unavailable rather than compare against a fabricated zero.
+ * ## Completeness is the whole point, so a PARTIAL reading is not a reading
+ *
+ * The question this instrument answers is "what does the WHOLE session retain",
+ * and the type-provider engine — the member most likely to retain a per-version
+ * copy of every document — is a CHILD. A sample that covers the server root but
+ * not that child is not a smaller measurement of the same thing; it is a
+ * measurement of a different thing that can be flat while the session grows
+ * without bound. Two failure modes therefore both make the sample UNAVAILABLE
+ * rather than narrower:
+ *
+ *  - the platform cannot enumerate the process table, so the tree's membership
+ *    is unknown and the root is all that could be sampled
+ *    ({@link ProcessTreeRssUnavailable.kind} `"topology-unavailable"`);
+ *  - a member WAS discovered but its RSS could not be read, so a known member's
+ *    bytes are missing from the sum (`"member-unreadable"`).
+ *
+ * `totalBytes` is `null` in both cases and callers must report the metric
+ * unavailable. Only a fully-observed tree yields a number, because only a fully
+ * observed tree is the quantity the acceptance bound is written about.
  *
  * Ownership: the process-table enumeration and descendant walk live with the
  * corpus gate ({@link ../corpus-gate/processTree.js}), which owns
  * process-topology discovery for the whole harness; this module adds no second
  * implementation of either.
  */
-import { descendantPids, processImage, snapshotProcessTable } from "../corpus-gate/processTree.js";
+import {
+  descendantPids,
+  processImage,
+  snapshotProcessTable,
+  type ProcessRow,
+} from "../corpus-gate/processTree.js";
 import { readProcessRssBytes } from "./rss.js";
 
 /** One tree member's reading within a single {@link sampleProcessTreeRss} pass. */
@@ -35,59 +55,128 @@ export interface ProcessTreeRssMember {
   readonly rssBytes: number | null;
 }
 
+/** Why a sample is not a usable whole-tree observation. */
+export interface ProcessTreeRssUnavailable {
+  /**
+   * `topology-unavailable`: the process table could not be enumerated, so the
+   * tree's MEMBERSHIP is unknown — the provider child may or may not exist and
+   * cannot be proven either way.
+   *
+   * `member-unreadable`: the membership is known, but at least one discovered
+   * member's RSS could not be read, so a member the tree definitely has is
+   * missing from the sum.
+   */
+  readonly kind: "topology-unavailable" | "member-unreadable";
+  readonly detail: string;
+}
+
 /** One aligned whole-tree reading. */
 export interface ProcessTreeRssSample {
   /**
-   * True when the platform enumerated the table AND at least one member's RSS
-   * was readable. False means the metric is UNAVAILABLE on this host — the
-   * caller must say so, never treat it as a passing measurement.
+   * True only when the platform enumerated the table AND every discovered
+   * member's RSS was read. False means the metric is UNAVAILABLE for this
+   * checkpoint — the caller must say so, never treat it as a passing
+   * measurement of a narrower tree.
    */
   readonly observable: boolean;
-  /** Sum over the members whose read succeeded, or null when not observable. */
+  /** The whole tree's resident bytes, or null when the sample is incomplete. */
   readonly totalBytes: number | null;
   readonly members: readonly ProcessTreeRssMember[];
   /** Members discovered in the tree whose RSS could not be read in this pass. */
   readonly unreadablePids: readonly number[];
+  /** Null exactly when {@link observable} is true. */
+  readonly unavailable: ProcessTreeRssUnavailable | null;
   readonly atMs: number;
 }
 
 /**
+ * The platform readers this module depends on, injectable so the incomplete
+ * paths — which cannot be provoked on a healthy host — are testable.
+ */
+export interface ProcessTreeRssDeps {
+  readonly snapshotProcessTable: () => Promise<readonly ProcessRow[] | null>;
+  readonly readProcessRssBytes: (pid: number) => Promise<number | null>;
+}
+
+const PLATFORM_DEPS: ProcessTreeRssDeps = { snapshotProcessTable, readProcessRssBytes };
+
+/**
  * Read the resident set of `rootPid` and every descendant of it, in one pass.
  *
- * `rootPid` itself is always a member even when the table is unavailable, so a
- * platform that can read one pid's RSS but not the process table still yields a
- * (narrower, honestly reported) figure instead of nothing.
+ * Returns an UNAVAILABLE sample (see {@link ProcessTreeRssUnavailable}) when the
+ * tree's membership cannot be established or any established member cannot be
+ * read. A narrower-but-honest figure is deliberately NOT offered: the caller's
+ * only use for the number is a whole-session growth bound, which a root-only or
+ * provider-less subset silently satisfies while the session leaks.
  */
-export async function sampleProcessTreeRss(rootPid: number): Promise<ProcessTreeRssSample> {
-  const rows = await snapshotProcessTable();
-  const pids = rows === null ? [rootPid] : [rootPid, ...descendantPids(rows, rootPid)];
+export async function sampleProcessTreeRss(
+  rootPid: number,
+  deps: ProcessTreeRssDeps = PLATFORM_DEPS,
+): Promise<ProcessTreeRssSample> {
+  const atMs = Date.now();
+  const rows = await deps.snapshotProcessTable();
+  if (rows === null) {
+    return {
+      observable: false,
+      totalBytes: null,
+      members: [],
+      unreadablePids: [],
+      unavailable: {
+        kind: "topology-unavailable",
+        detail:
+          `this platform (${process.platform}) could not enumerate the process table, so the ` +
+          `tree rooted at pid ${rootPid} has unknown membership — the type-provider child ` +
+          "cannot be proven present or absent, and a root-only reading is not a whole-tree one",
+      },
+      atMs,
+    };
+  }
+
+  const pids = [rootPid, ...descendantPids(rows, rootPid)];
   const members: ProcessTreeRssMember[] = [];
   const unreadablePids: number[] = [];
   let total = 0;
-  let readAny = false;
   for (const pid of pids) {
-    const rssBytes = await readProcessRssBytes(pid);
-    members.push({ pid, image: rows === null ? null : processImage(rows, pid), rssBytes });
+    const rssBytes = await deps.readProcessRssBytes(pid);
+    members.push({ pid, image: processImage(rows, pid), rssBytes });
     if (rssBytes === null) {
       unreadablePids.push(pid);
       continue;
     }
-    readAny = true;
     total += rssBytes;
   }
+  if (unreadablePids.length > 0) {
+    return {
+      observable: false,
+      totalBytes: null,
+      members,
+      unreadablePids,
+      unavailable: {
+        kind: "member-unreadable",
+        detail:
+          `${unreadablePids.length} of ${pids.length} discovered tree member(s) could not be ` +
+          `read (pid(s) ${unreadablePids.join(", ")}) — their bytes are missing from the sum, ` +
+          "so this is not a whole-tree observation",
+      },
+      atMs,
+    };
+  }
   return {
-    observable: readAny,
-    totalBytes: readAny ? total : null,
+    observable: true,
+    totalBytes: total,
     members,
     unreadablePids,
-    atMs: Date.now(),
+    unavailable: null,
+    atMs,
   };
 }
 
 /** Render a sample as a one-line evidence string (per-process, largest first). */
 export function describeProcessTreeRss(sample: ProcessTreeRssSample): string {
   if (!sample.observable) {
-    return `process-tree RSS unobservable (${sample.unreadablePids.length} unreadable pid(s))`;
+    return `process-tree RSS UNAVAILABLE (${sample.unavailable?.kind ?? "unknown"}): ${
+      sample.unavailable?.detail ?? "no detail"
+    }`;
   }
   const parts = [...sample.members]
     .filter((member): member is ProcessTreeRssMember & { rssBytes: number } =>

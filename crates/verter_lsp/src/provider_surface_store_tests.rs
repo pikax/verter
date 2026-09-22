@@ -396,6 +396,71 @@ fn byte_identical_resync_still_honors_captured_snapshot() {
     );
 }
 
+/// A byte-identical re-sync SHARES the immutable payload instead of rebuilding
+/// it, while still minting a fresh generation.
+///
+/// A re-sync is not necessarily a content change: a background re-sync, a
+/// reopen, or a request-driven resync of an unedited carrier all re-record the
+/// same bytes. Rebuilding for those allocates both UTF-16 line indexes (each
+/// roughly its source again), re-hashes both texts, re-wraps the source map and
+/// charges the aggregate account a second time — to produce a byte-for-byte
+/// duplicate of a payload the store already owns. The generation must still be
+/// fresh (it is the capture's basis identity), so the two facts have to hold
+/// together.
+///
+/// Discriminating: with an unconditional rebuild the payloads are distinct
+/// allocations (`Arc::ptr_eq` is false) and the identical re-sync costs a second
+/// full charge, so both the sharing and the flat-account assertions fail.
+#[test]
+fn byte_identical_resync_shares_the_payload_under_a_fresh_generation() {
+    let account = private_account();
+    let store = ProviderSurfaceStore::with_account(Arc::clone(&account));
+
+    let provider = "API IDENTICAL\n".repeat(64);
+    let carrier = "carrier identical\n".repeat(64);
+    let a = store.record(record_surface(&provider, &carrier));
+    let one_payload_bytes = account.snapshot().total_bytes();
+    assert!(
+        one_payload_bytes > 0,
+        "the first record charges its payload"
+    );
+
+    let b = store.record(record_surface(&provider, &carrier));
+
+    assert_ne!(
+        b.stamp.generation, a.stamp.generation,
+        "basis identity is preserved: an identical re-sync is still a fresh generation"
+    );
+    assert!(
+        Arc::ptr_eq(&a.payload, &b.payload),
+        "an identical re-sync must SHARE the immutable payload, not rebuild it"
+    );
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        one_payload_bytes,
+        "a shared payload is charged ONCE, not once per generation"
+    );
+
+    // Dropping the displaced generation must not release bytes the live
+    // generation still needs — the charge lives inside the shared payload, so it
+    // survives exactly as long as the last owner.
+    drop(a);
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        one_payload_bytes,
+        "the surviving generation keeps the shared payload charged"
+    );
+
+    // A genuine content change does NOT share: it is a different payload and is
+    // charged as one.
+    let changed = store.record(record_surface(&format!("{provider}// edit\n"), &carrier));
+    assert!(
+        !Arc::ptr_eq(&changed.payload, &b.payload),
+        "changed content must build its own payload"
+    );
+    assert_ne!(changed.stamp.content_hash, b.stamp.content_hash);
+}
+
 /// H5 fail-closed guard: a re-sync that changes the content (fresh generation AND
 /// a DIFFERENT content hash) is NOT honored — the captured offsets may index
 /// content the new source map does not describe, so the rename must DROP. This

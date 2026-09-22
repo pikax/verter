@@ -1775,3 +1775,6 @@ mod future_size_measure_tests;
 
 #[cfg(test)]
 mod request_surface_guard_tests;
+
+#[cfg(test)]
+mod retention_lifecycle_tests;

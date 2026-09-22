@@ -166,9 +166,10 @@ snapshot, owned by the `ShardEntry` so a second lease on the same
 snapshot never charges twice), and — outside `verter_session` —
 `verter_lsp`'s `ProviderSurfaceStore` (one `Pinned` charge per synced
 provider surface, riding INSIDE the `Arc`-shared
-`ProviderSurfaceSnapshot`, so the bytes are released exactly when the
-last owner drops it: the store's map slot, or an in-flight rename /
-navigation capture that outlived it). Pinned is the right class there for
+`ProviderSurfacePayload` — the snapshot's CONTENT half — so the bytes are
+released exactly when the last owner drops it: the store's map slot, an
+in-flight rename / navigation capture that outlived it, or another
+generation SHARING the same payload). Pinned is the right class there for
 the same reason as a parse-snapshot lease — a surface the provider is
 already holding must remain mappable, so refusing to retain it would mean
 silently losing the map a returned offset has to travel back through.
@@ -176,7 +177,12 @@ silently losing the map a returned offset has to travel back through.
 That store's own retention is bounded by REACHABILITY, not history: a
 `record` that supersedes a path's current generation, and a `forget` that
 retires one, each drop the store's reference to the displaced generation,
-so the map holds at most one entry per live path. A capture pins the
+so the map holds at most one entry per live path. A re-record whose bytes
+are IDENTICAL to the path's current payload SHARES that payload instead
+of rebuilding it, so a byte-identical re-sync mints a fresh generation
+(basis identity is preserved) while charging the account ONCE — not two
+fresh UTF-16 line indexes, two content hashes and a second reservation
+for bytes the account is already charging. A capture pins the
 `Arc`, never the map slot, so dropping the slot cannot invalidate an
 in-flight request. Records happen on every provider sync — i.e. every edit
 of every open carrier — so an insert-only map there retained every version

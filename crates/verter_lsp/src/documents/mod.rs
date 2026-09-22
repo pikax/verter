@@ -1204,7 +1204,32 @@ impl DocumentRegistry {
         self.did_change(uri, version, &text)
     }
 
+    /// Handle a document being closed, behind the diagnostics publication fence.
+    ///
+    /// This is the entry point the server's close lifecycle uses, and the reason
+    /// it exists is ORDERING, not bookkeeping: [`Self::publish_diagnostics`]
+    /// validates its publication and then AWAITS the outbound notification, so a
+    /// bare `did_close` landing inside that await window lets an
+    /// already-validated result reach the client for a document that is now
+    /// closed — a stale publication, suppressed only at the receipt commit,
+    /// which is too late. The publisher holds this same fence across its
+    /// validate-and-send, so the two are mutually exclusive: either the close
+    /// waits for a send that WAS current when it was validated, or the
+    /// publication reaches its fenced check after the close and drops.
+    ///
+    /// The fence covers only the bounded enqueue and the receipt commit —
+    /// provider computation never holds it — so a close never queues behind real
+    /// work.
+    pub async fn did_close_fenced(&self, uri: &Uri) {
+        let _fence = self.diagnostics_publication_fence().await;
+        self.did_close(uri);
+    }
+
     /// Handle a document being closed.
+    ///
+    /// Prefer [`Self::did_close_fenced`] from any async context that can race a
+    /// diagnostics publication; this bare form leaves the publication ordering to
+    /// the caller.
     pub fn did_close(&self, uri: &Uri) {
         // Fence any in-flight publication for this document, then drop the URI's
         // diagnostics bookkeeping outright — a closed document can have no

@@ -132,6 +132,49 @@ impl DocumentRegistry {
         state.receipts.remove(uri);
     }
 
+    /// Release a reservation whose publication will never run, but ONLY while
+    /// this caller still owns it.
+    ///
+    /// [`Self::admit_diagnostics_publication`] reserves the epoch BEFORE
+    /// capturing, because a suspended old capture must not be able to retire a
+    /// newer publication when it resumes. When the capture then fails — the
+    /// commonest cause being that the document is already CLOSED — the
+    /// reservation owns nothing: no publication carries that epoch, so nothing
+    /// will ever settle it. Left in place it is a permanent entry for a URI the
+    /// session no longer has open, which is exactly the accumulation
+    /// [`Self::release_diagnostics_state`] exists to prevent, re-created by the
+    /// next publication attempt after the close.
+    ///
+    /// The `== Some(&epoch)` test is what makes this safe: a newer publication,
+    /// invalidation or reopen has already replaced the entry, so this rollback
+    /// finds a different epoch and leaves it alone. It can only ever remove the
+    /// reservation it wrote itself.
+    fn rollback_unowned_reservation(&self, uri: &str, epoch: u64) {
+        let mut state = self.diagnostics_state.lock();
+        if state.epochs.get(uri) == Some(&epoch) {
+            state.epochs.remove(uri);
+            state.receipts.remove(uri);
+        }
+    }
+
+    /// The publication fence, held across a document CLOSE.
+    ///
+    /// A publication validates its epoch and then awaits the outbound
+    /// notification. A close landing inside that await window would otherwise let
+    /// the already-validated stale result reach the client, with only the receipt
+    /// commit suppressed — a stale publication, which the snapshot rules forbid
+    /// outright. Taking the same lock the publisher holds orders the two: either
+    /// the close waits for a publication that was current when it was validated,
+    /// or the publication finds the document closed at its (fenced) check and
+    /// drops. There is no window in between.
+    ///
+    /// The lock protects only the bounded enqueue and the receipt commit —
+    /// provider computation never holds it — so a close is never blocked behind
+    /// real work.
+    pub(crate) async fn diagnostics_publication_fence(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.diagnostics_publisher.lock().await
+    }
+
     /// How many documents the diagnostics state is currently tracking. Tests only:
     /// the live size must track the OPEN documents, never the documents the
     /// session has ever seen.
@@ -159,7 +202,12 @@ impl DocumentRegistry {
         // Reserve ownership before capture: a suspended old read must never
         // retire a newer publication when it resumes.
         let epoch = self.invalidate_diagnostics(uri.as_str());
-        let (snapshot, generation) = capture()?;
+        let Some((snapshot, generation)) = capture() else {
+            // No publication will carry this epoch, so nothing will ever settle
+            // it. Give it back — but only if it is still ours (see the method).
+            self.rollback_unowned_reservation(uri.as_str(), epoch);
+            return None;
+        };
         Some(DiagnosticPublication {
             snapshot,
             generation,
@@ -244,6 +292,142 @@ mod tests {
     use super::*;
     use tower_lsp_server::ls_types::TextDocumentItem;
     use verter_session::{HostConfig, VerterHost};
+
+    fn registry() -> DocumentRegistry {
+        DocumentRegistry::new(Arc::new(VerterHost::new_standalone(HostConfig::default())))
+    }
+
+    fn open(documents: &DocumentRegistry, uri: &Uri) {
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".into(),
+            version: 1,
+            text: "<template><p>x</p></template>".into(),
+        });
+    }
+
+    /// A publication ATTEMPT for a closed document must leave no state behind.
+    ///
+    /// Admission reserves the epoch before capturing, because a suspended old
+    /// capture must not be able to retire a newer publication. When the capture
+    /// then fails — a closed document has no snapshot identity — that reservation
+    /// owns nothing: no publication carries it, so nothing will ever settle it,
+    /// and it is a permanent entry for a URI the session no longer has open.
+    ///
+    /// Discriminating: without the rollback, the count after the refused
+    /// publication reads 1, and it stays 1 for the life of the session — the
+    /// close-time release is undone by the very next publication attempt that
+    /// races it.
+    #[test]
+    fn a_refused_publication_after_close_leaves_no_diagnostics_state() {
+        let documents = registry();
+        let uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+        open(&documents, &uri);
+        documents.did_close(&uri);
+        assert_eq!(documents.tracked_diagnostics_documents(), 0);
+
+        assert!(
+            documents.begin_diagnostics_publication(&uri).is_none(),
+            "a closed document has no snapshot identity to publish against"
+        );
+        assert_eq!(
+            documents.tracked_diagnostics_documents(),
+            0,
+            "a publication that could not be captured must not re-create the closed \
+             document's bookkeeping"
+        );
+    }
+
+    /// The rollback gives back ONLY the reservation its own caller wrote.
+    ///
+    /// A newer publication that took ownership while the older capture was
+    /// suspended must survive the older one's failure — otherwise the rollback
+    /// would un-fence a live publication, which is strictly worse than the leak
+    /// it repairs.
+    #[test]
+    fn a_rollback_never_removes_a_newer_publications_reservation() {
+        let documents = registry();
+        let uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+        open(&documents, &uri);
+
+        let mut newer = None;
+        let older = documents.admit_diagnostics_publication(&uri, || {
+            // A newer publication takes ownership while this capture is suspended,
+            // and only then does this one fail.
+            newer = documents.begin_diagnostics_publication(&uri);
+            None
+        });
+
+        assert!(older.is_none(), "the failed capture yields no publication");
+        let newer = newer.expect("the newer publication was admitted");
+        assert!(
+            documents.diagnostic_publication_is_current(&uri, &newer),
+            "the older capture's rollback must leave the newer reservation intact"
+        );
+    }
+
+    /// A close cannot slip between a publication's validity check and its send.
+    ///
+    /// `publish_diagnostics` validates the epoch/document and then AWAITS the
+    /// outbound notification. Both halves run inside the publication fence, and
+    /// the close lifecycle takes that same fence, so the two are mutually
+    /// exclusive — the whole point of `did_close_fenced`.
+    ///
+    /// Discriminating: with an unfenced close, the close below completes while
+    /// the simulated send is suspended, so the assertion that it is still pending
+    /// fails, and the publication's already-passed validity check would carry a
+    /// stale result to the client.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_close_cannot_land_inside_a_publications_send_window() {
+        let documents = Arc::new(registry());
+        let uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+        open(&documents, &uri);
+
+        let publication = documents
+            .begin_diagnostics_publication(&uri)
+            .expect("an open document admits a publication");
+
+        // Enter the fence exactly as `publish_diagnostics` does, validate, and
+        // then suspend where its outbound `.await` would be.
+        let fence = documents.diagnostics_publication_fence().await;
+        assert!(
+            documents.diagnostic_publication_is_current(&uri, &publication),
+            "the pre-send check passes for a document that is still open"
+        );
+
+        let closing = tokio::spawn({
+            let documents = Arc::clone(&documents);
+            let uri = uri.clone();
+            async move { documents.did_close_fenced(&uri).await }
+        });
+
+        // The close must NOT be able to complete while the send window is open.
+        // An UNFENCED close completes as soon as its task is scheduled, so this
+        // window only has to be long enough for that to have happened.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !closing.is_finished(),
+            "a close must not land between a publication's validity check and its send"
+        );
+        assert!(
+            documents.diagnostic_publication_is_current(&uri, &publication),
+            "the document the send was validated against is still the current one"
+        );
+
+        drop(fence);
+        closing
+            .await
+            .expect("the close completes once the fence clears");
+
+        assert!(
+            !documents.diagnostic_publication_is_current(&uri, &publication),
+            "after the close, the same publication is rejected at its fenced check"
+        );
+        assert_eq!(documents.tracked_diagnostics_documents(), 0);
+    }
 
     #[test]
     fn paused_diagnostics_admission_cannot_displace_a_newer_publication() {

@@ -161,17 +161,26 @@ export function churnFixture(
 
 /** The verdict of one baseline→final process-tree comparison. */
 export interface ChurnGrowthCheck {
-  /** False ⇒ the metric is UNAVAILABLE on this host; never a silent pass. */
+  /**
+   * True only when BOTH checkpoints observed the COMPLETE process tree and the
+   * two readings cover a comparable member set. False ⇒ the bound was not
+   * evaluated: the metric is UNAVAILABLE, which is reported as such and is never
+   * a measured pass.
+   */
   readonly observable: boolean;
   readonly baselineBytes: number | null;
   readonly finalBytes: number | null;
   readonly growthBytes: number | null;
-  /** `final / baseline`, or null when either reading is unavailable. */
+  /** `final / baseline`, or null when the comparison was not evaluated. */
   readonly ratio: number | null;
   readonly allowedFactor: number;
   readonly allowedFloorBytes: number;
   /** The largest `final` that passes: `baseline * factor + floor`. */
   readonly allowedBytes: number | null;
+  /**
+   * True only when the bound was EVALUATED and satisfied. An unavailable metric
+   * is `false`, so a lane that requires this proof cannot go green without it.
+   */
   readonly pass: boolean;
   readonly detail: string;
 }
@@ -180,10 +189,21 @@ export interface ChurnGrowthCheck {
  * Decide the growth verdict (pure — the arithmetic is unit-testable without a
  * server).
  *
- * An unobservable reading yields `pass: true` with `observable: false`: the
- * caller is required to report the metric as unavailable, which is the honest
- * outcome on a platform that cannot read process memory, and is distinct from
- * a measured pass.
+ * Three ways this refuses to produce a number, all reported as `observable:
+ * false, pass: false`:
+ *
+ *  1. either checkpoint is not a complete whole-tree observation (the platform
+ *     could not enumerate the table, or a discovered member was unreadable) —
+ *     a partial tree can be flat while the unmeasured member grows;
+ *  2. a process present at the BASELINE is gone from the FINAL tree — its bytes
+ *     left the comparison, which makes growth look smaller than it was. A
+ *     respawned provider is exactly this shape: the child that held every
+ *     retained version dies, and the session reads as bounded.
+ *
+ * "Unavailable" is distinct from "measured and within bound", and the lane that
+ * consumes this must surface it as a missing proof rather than a pass — the
+ * charter's acceptance criterion is the complete process-tree evidence, and a
+ * bound that was never evaluated has not been satisfied.
  */
 export function decideChurnGrowth(
   baseline: ProcessTreeRssSample,
@@ -191,23 +211,42 @@ export function decideChurnGrowth(
   allowedFactor: number,
   allowedFloorBytes: number,
 ): ChurnGrowthCheck {
-  const baselineBytes = baseline.observable ? baseline.totalBytes : null;
-  const finalBytes = final.observable ? final.totalBytes : null;
-  if (baselineBytes === null || finalBytes === null) {
-    return {
-      observable: false,
-      baselineBytes,
-      finalBytes,
-      growthBytes: null,
-      ratio: null,
-      allowedFactor,
-      allowedFloorBytes,
-      allowedBytes: null,
-      pass: true,
-      detail:
-        "process-tree resident memory is not readable on this host — the churn growth bound is UNAVAILABLE, not satisfied",
-    };
+  const unevaluated = (detail: string): ChurnGrowthCheck => ({
+    observable: false,
+    baselineBytes: baseline.observable ? baseline.totalBytes : null,
+    finalBytes: final.observable ? final.totalBytes : null,
+    growthBytes: null,
+    ratio: null,
+    allowedFactor,
+    allowedFloorBytes,
+    allowedBytes: null,
+    pass: false,
+    detail,
+  });
+
+  if (!baseline.observable || !final.observable) {
+    const which = !baseline.observable ? "baseline" : "final";
+    const sample = !baseline.observable ? baseline : final;
+    return unevaluated(
+      `the ${which} process-tree reading is UNAVAILABLE, so the churn growth bound was NOT ` +
+        `evaluated: ${sample.unavailable?.detail ?? "no detail"}`,
+    );
   }
+  const baselineBytes = baseline.totalBytes as number;
+  const finalBytes = final.totalBytes as number;
+
+  const finalPids = new Set(final.members.map((member) => member.pid));
+  const departed = baseline.members
+    .map((member) => member.pid)
+    .filter((pid) => !finalPids.has(pid));
+  if (departed.length > 0) {
+    return unevaluated(
+      `process(es) ${departed.join(", ")} were in the baseline tree and are absent from the ` +
+        "final tree, so their bytes left the comparison and the growth figure would understate " +
+        "retention — the churn growth bound was NOT evaluated",
+    );
+  }
+
   const allowedBytes = baselineBytes * allowedFactor + allowedFloorBytes;
   const pass = finalBytes <= allowedBytes;
   return {

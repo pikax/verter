@@ -187,11 +187,25 @@ pub struct ProviderSurfaceStamp {
 ///
 /// Not `Debug` — `ProviderPositionMapper` (held as `source_map`) is not `Debug`,
 /// and a snapshot is an internal mapping artifact, never logged structurally.
-pub struct ProviderSurfaceSnapshot {
-    pub stamp: ProviderSurfaceStamp,
-    pub kind: ProviderSurfaceKind,
-    /// The carrier canonical id (`/src/Child.vue`) that owns this surface.
-    pub source_canonical: Arc<str>,
+/// The immutable CONTENT payload of a provider surface: every byte the mapping
+/// reads, and every byte the retention account charges.
+///
+/// Split out from [`ProviderSurfaceSnapshot`] so it can be SHARED. A provider
+/// re-sync is not necessarily a content change — a background re-sync, a
+/// re-open, or a request-driven resync of an unedited carrier all re-record the
+/// same bytes — and each of those must still mint a FRESH generation, because
+/// the generation is the capture's basis identity and a captured snapshot is
+/// only honored across a bump when the content is proven identical. Rebuilding
+/// the payload for an identical re-record would allocate both UTF-16 line
+/// indexes (each roughly its source again), re-hash both texts, and re-charge
+/// the aggregate account, to arrive at a byte-for-byte duplicate of a payload
+/// the store already owns.
+///
+/// So an identical re-record clones this `Arc` instead. The fresh generation is
+/// on the snapshot; the payload underneath is the one already in memory, charged
+/// ONCE — the charge lives here, so the bytes are released exactly when the last
+/// snapshot sharing the payload drops.
+pub struct ProviderSurfacePayload {
     /// The exact provider content synced under `stamp.provider_path`.
     pub provider_content: Arc<str>,
     /// UTF-16 line index over `provider_content` — the source-map's generated
@@ -207,8 +221,72 @@ pub struct ProviderSurfaceSnapshot {
     /// UTF-16 line index over `carrier_source` — the source-map's source column
     /// space. The negotiated-encoding re-emission is derived at merge time.
     pub carrier_utf16_line_index: LineIndex,
+    /// Content hash of `provider_content`.
+    pub content_hash: ContentHash,
     /// Content hash of `carrier_source`.
     pub source_hash: ContentHash,
+    /// The `CodeTransform` source-map identity the payload was built under.
+    pub map_hash: Hash16,
+    /// The aggregate-account reservation covering THIS payload's bytes, held for
+    /// exactly as long as the payload itself.
+    ///
+    /// Private and never read: its whole job is `Drop`. Because the charge lives
+    /// inside the `Arc`-shared payload, the reservation is released precisely
+    /// when the LAST owner goes away — the store's map slot when no capture
+    /// outlived it, the final in-flight capture when one did, or the last
+    /// snapshot sharing the payload across an identical re-record. There is no
+    /// release call for an early-return path to skip, no way to release twice,
+    /// and a shared payload is charged ONCE rather than once per generation.
+    _retention: RetentionCharge,
+}
+
+impl ProviderSurfacePayload {
+    /// Whether this payload is byte-for-byte what `surface` would produce, so a
+    /// re-record can share it instead of rebuilding it.
+    ///
+    /// Compares the SOURCE bytes, not the derived hashes, because the derived
+    /// hashes are exactly what rebuilding would recompute. `Arc::ptr_eq` short-
+    /// circuits the common case (the producer handed back the same `Arc`); the
+    /// byte compare is the fallback, and both are far cheaper than the two line
+    /// indexes this decides whether to build.
+    ///
+    /// `map_hash` is the map's identity: identical provider content under a
+    /// DIFFERENT map identity is a different payload (the map is what the
+    /// offsets travel through), so it is compared rather than derived.
+    fn matches(&self, surface: &RecordSurface) -> bool {
+        self.map_hash == surface.map_hash
+            && self.source_map.is_some() == surface.source_map.is_some()
+            && str_eq(&self.provider_content, &surface.provider_content)
+            && str_eq(&self.carrier_source, &surface.carrier_source)
+    }
+}
+
+fn str_eq(left: &Arc<str>, right: &Arc<str>) -> bool {
+    Arc::ptr_eq(left, right) || **left == **right
+}
+
+/// An immutable, fully self-contained capture of one synced provider surface.
+///
+/// Holds everything needed to map a returned provider offset back onto the
+/// carrier source WITHOUT re-reading the host/VFS or the live `get_public_api()`
+/// at merge time, so the mapping is immune to any change that lands after
+/// capture. `Arc`-shared for cheap in-flight capture.
+///
+/// The content half lives behind [`ProviderSurfacePayload`], reached by `Deref`
+/// so every reader still writes `snapshot.provider_content`. What the split buys
+/// is that two generations of byte-identical content are two snapshots over ONE
+/// payload.
+///
+/// Not `Debug` — `ProviderPositionMapper` (held as `source_map`) is not `Debug`,
+/// and a snapshot is an internal mapping artifact, never logged structurally.
+pub struct ProviderSurfaceSnapshot {
+    pub stamp: ProviderSurfaceStamp,
+    pub kind: ProviderSurfaceKind,
+    /// The carrier canonical id (`/src/Child.vue`) that owns this surface.
+    pub source_canonical: Arc<str>,
+    /// The immutable content payload, shared with any other generation whose
+    /// bytes are identical.
+    pub payload: Arc<ProviderSurfacePayload>,
     /// The owning configured project (tsconfig URI) this surface is a member of
     /// — the project-owner column. On the WORKING live record path
     /// (`RecordSurface::carrier_legacy`) this is always `None`; only the
@@ -229,15 +307,14 @@ pub struct ProviderSurfaceSnapshot {
     /// carrier-text stability. `None` for surfaces recorded without dependency
     /// data (legacy `CarrierApi` path).
     pub engine_recheck: Option<EngineRecheckState>,
-    /// The aggregate-account reservation covering THIS snapshot's bytes, held for
-    /// exactly as long as the snapshot itself.
-    ///
-    /// Private and never read: its whole job is `Drop`. Because the charge lives
-    /// inside the `Arc`-shared snapshot, the reservation is released precisely
-    /// when the LAST owner goes away — the store's map slot when no capture
-    /// outlived it, or the final in-flight capture when one did. There is no
-    /// release call for an early-return path to skip, and no way to release twice.
-    _retention: RetentionCharge,
+}
+
+impl std::ops::Deref for ProviderSurfaceSnapshot {
+    type Target = ProviderSurfacePayload;
+
+    fn deref(&self) -> &Self::Target {
+        &self.payload
+    }
 }
 
 /// Bytes a [`LineIndex`] retains for a source of `source_len` bytes.
@@ -482,6 +559,28 @@ impl ProviderSurfaceStore {
         self.inner.snapshots.len()
     }
 
+    /// Weak handles to every snapshot the store currently owns, plus each one's
+    /// provider path.
+    ///
+    /// Tests only. A WEAK handle observes an allocation without owning it, which
+    /// is exactly the question an acceptance criterion about RELEASED handles has
+    /// to ask: after the store has moved on and the request that captured a
+    /// generation is gone, is that generation still alive anywhere in the
+    /// process? A byte total cannot answer it (another participant's activity
+    /// moves the same number), and a strong handle would itself be the owner
+    /// keeping the answer alive.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn weak_handles_to_retained_surfaces(
+        &self,
+    ) -> Vec<(Arc<str>, std::sync::Weak<ProviderSurfaceSnapshot>)> {
+        self.inner
+            .snapshots
+            .iter()
+            .map(|entry| (Arc::clone(&entry.key().0), Arc::downgrade(entry.value())))
+            .collect()
+    }
+
     /// Estimated bytes of the snapshots the store still owns.
     #[must_use]
     pub fn retained_surface_bytes(&self) -> usize {
@@ -521,37 +620,38 @@ impl ProviderSurfaceStore {
     /// displaced generation keeps it alive by itself and maps exactly as before —
     /// and the drop happens under the lifecycle WRITE lock, which every capture
     /// takes for read, so no capture can be mid-scan while it happens.
-    pub fn record(&self, surface: RecordSurface) -> Arc<ProviderSurfaceSnapshot> {
+    pub fn record(&self, mut surface: RecordSurface) -> Arc<ProviderSurfaceSnapshot> {
         let provider_path: Arc<str> = Arc::from(surface.provider_path.as_str());
 
-        // Compute the expensive derived data OUTSIDE the lifecycle lock.
-        let provider_utf16_line_index = LineIndex::new_utf16(&surface.provider_content);
-        let carrier_utf16_line_index = LineIndex::new_utf16(&surface.carrier_source);
-        let content_hash = ContentHash::of(&surface.provider_content);
-        let source_hash = ContentHash::of(&surface.carrier_source);
-        let source_map = surface.source_map.map(Arc::new);
-        let source_canonical: Arc<str> = Arc::from(surface.source_canonical.as_str());
+        // REUSE: a re-sync is not necessarily a content change. Before building
+        // anything, ask whether the path's CURRENT payload is already byte-for-
+        // byte what this record would produce; if it is, the new generation
+        // shares it. That skips both UTF-16 line indexes, both content hashes,
+        // the source-map `Arc`, and — because the charge lives inside the shared
+        // payload — a second reservation for bytes the account is already
+        // charging. The generation is still FRESH: basis identity is the
+        // snapshot's, and only the content underneath is shared.
+        let reusable = self
+            .current_snapshot_for(&provider_path)
+            .filter(|current| {
+                current.kind == surface.kind
+                    && *current.source_canonical == *surface.source_canonical
+                    && current.payload.matches(&surface)
+            })
+            .map(|current| Arc::clone(&current.payload));
 
-        // Reserve the snapshot's bytes BEFORE the lifecycle lock. The class is
-        // `Pinned`, so the reservation is unconditional and cannot fail: a surface
-        // the provider is already holding is an obligation this store must be able
-        // to map back, never a discretionary cache entry to decline. It still
-        // CONSUMES aggregate headroom, which is the point — provider-surface bytes
-        // push back on discretionary semantic retention instead of being invisible
-        // to it. The estimate is taken from the inputs, which are exactly the
-        // fields the snapshot is about to own.
-        let footprint = ENTRY_OVERHEAD_BYTES
-            + std::mem::size_of::<ProviderSurfaceSnapshot>()
-            + provider_path.len()
-            + source_canonical.len()
-            + surface.provider_content.len()
-            + line_index_footprint_bytes(surface.provider_content.len())
-            + surface.carrier_source.len()
-            + line_index_footprint_bytes(surface.carrier_source.len())
-            + source_map.as_ref().map_or(0, |_| {
-                source_map_footprint_bytes(surface.provider_content.len())
-            });
-        let retention = self.inner.account.get().pin(footprint);
+        let payload = match reusable {
+            Some(payload) => payload,
+            None => Arc::new(self.build_payload(
+                &provider_path,
+                surface.source_canonical.len(),
+                Arc::clone(&surface.provider_content),
+                surface.source_map.take(),
+                Arc::clone(&surface.carrier_source),
+                surface.map_hash,
+            )),
+        };
+        let source_canonical: Arc<str> = Arc::from(surface.source_canonical.as_str());
 
         let mut lifecycle = self.inner.lifecycle.write();
         // Assign the generation at the SAME linearization point as the state
@@ -563,22 +663,16 @@ impl ProviderSurfaceStore {
             stamp: ProviderSurfaceStamp {
                 provider_path: Arc::clone(&provider_path),
                 generation,
-                content_hash,
-                source_hash,
+                content_hash: payload.content_hash,
+                source_hash: payload.source_hash,
                 map_hash: surface.map_hash,
             },
             kind: surface.kind,
             source_canonical,
-            provider_content: surface.provider_content,
-            provider_utf16_line_index,
-            source_map,
-            carrier_source: surface.carrier_source,
-            carrier_utf16_line_index,
-            source_hash,
+            payload,
             project_owner: surface.project_owner,
             regen_key: surface.regen_key,
             engine_recheck: surface.engine_recheck,
-            _retention: retention,
         });
 
         // Publish the snapshot BEFORE pointing the lifecycle state at the new
@@ -609,6 +703,82 @@ impl ProviderSurfaceStore {
         }
         drop(lifecycle);
         snapshot
+    }
+
+    /// The snapshot a `Current` path resolves to right now, by interned key.
+    ///
+    /// Only used to decide payload reuse, so an absent or `Closing` path simply
+    /// means "nothing to reuse" — never a fallback that could vouch content.
+    fn current_snapshot_for(
+        &self,
+        provider_path: &Arc<str>,
+    ) -> Option<Arc<ProviderSurfaceSnapshot>> {
+        let generation = match self.inner.lifecycle.read().paths.get(provider_path) {
+            Some(ProviderPathState::Current { generation }) => *generation,
+            _ => return None,
+        };
+        self.inner
+            .snapshots
+            .get(&(Arc::clone(provider_path), generation))
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Build the immutable payload for a surface whose content the store does not
+    /// already hold.
+    ///
+    /// The UTF-16 line indexes and content hashes are computed HERE, once, so the
+    /// payload is self-contained: the merge never re-measures the live content.
+    /// All of it happens BEFORE the lifecycle lock, to keep the critical section
+    /// short.
+    ///
+    /// The reservation's class is `Pinned`, so it is unconditional and cannot
+    /// fail: a surface the provider is already holding is an obligation this
+    /// store must be able to map back, never a discretionary cache entry to
+    /// decline. It still CONSUMES aggregate headroom, which is the point —
+    /// provider-surface bytes push back on discretionary semantic retention
+    /// instead of being invisible to it.
+    fn build_payload(
+        &self,
+        provider_path: &Arc<str>,
+        source_canonical_len: usize,
+        provider_content: Arc<str>,
+        source_map: Option<ProviderPositionMapper>,
+        carrier_source: Arc<str>,
+        map_hash: Hash16,
+    ) -> ProviderSurfacePayload {
+        let provider_utf16_line_index = LineIndex::new_utf16(&provider_content);
+        let carrier_utf16_line_index = LineIndex::new_utf16(&carrier_source);
+        let content_hash = ContentHash::of(&provider_content);
+        let source_hash = ContentHash::of(&carrier_source);
+        let source_map = source_map.map(Arc::new);
+
+        // The estimate is taken from the inputs, which are exactly the fields the
+        // payload is about to own.
+        let footprint = ENTRY_OVERHEAD_BYTES
+            + std::mem::size_of::<ProviderSurfaceSnapshot>()
+            + std::mem::size_of::<ProviderSurfacePayload>()
+            + provider_path.len()
+            + source_canonical_len
+            + provider_content.len()
+            + line_index_footprint_bytes(provider_content.len())
+            + carrier_source.len()
+            + line_index_footprint_bytes(carrier_source.len())
+            + source_map
+                .as_ref()
+                .map_or(0, |_| source_map_footprint_bytes(provider_content.len()));
+        let retention = self.inner.account.get().pin(footprint);
+
+        ProviderSurfacePayload {
+            provider_content,
+            provider_utf16_line_index,
+            source_map,
+            carrier_source,
+            carrier_utf16_line_index,
+            content_hash,
+            source_hash,
+            map_hash,
+            _retention: retention,
+        }
     }
 
     /// Retire the ACTIVE generation for a provider path (its surface is CLOSING)
