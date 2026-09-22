@@ -24,7 +24,25 @@ name: Validation Probe
 on:
   push:
     branches: main
+  # A pull request runs the bounded smoke slice only when something the probe
+  # exercises changed: the compiler and its native binding (any crate, its
+  # manifests, the toolchain), the JS driver's install graph, the probe's own
+  # manifests and this workflow. A docs, editor-packaging or CI-helper change
+  # spends nothing here; main still runs the complete inventories.
   pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "packages/native/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".npmrc"
+      - ".nvmrc"
+      - ".github/workflows/validation-probe.yml"
   workflow_dispatch:
 
 concurrency:

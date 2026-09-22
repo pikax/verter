@@ -17,29 +17,61 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Every gate below is composed by `scripts/ci-impact.mjs` from TWO
+    # halves: the paths-filter outputs (which own every non-crate input) OR'd
+    # with the crate-graph impact lanes (which own `crates/**`). A consumer
+    # lane — the native binding, the wasm32 artifact, the debug and release
+    # LSP builds and everything behind them — therefore runs when a changed
+    # crate is in the transitive dependency closure of that lane's root
+    # crates, as `cargo metadata` reports it, rather than for any Rust change.
+    # Workspace manifests, the lockfile, the toolchain pin, scripts/, the
+    # workflows, the local actions, proc-macro crates and any path the
+    # classifier cannot place all force every impact-bearing gate on.
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      proto: ${{ steps.filter.outputs.proto }}
-      js: ${{ steps.filter.outputs.js }}
-      arch: ${{ steps.filter.outputs.arch }}
-      wasm: ${{ steps.filter.outputs.wasm }}
-      playground: ${{ steps.filter.outputs.playground }}
-      vscode: ${{ steps.filter.outputs.vscode }}
-      dx: ${{ steps.filter.outputs.dx }}
-      editor_lsp: ${{ steps.filter.outputs.editor_lsp }}
-      svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
-      svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
-      svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
-      editors: ${{ steps.filter.outputs.editors }}
-      jetbrains: ${{ steps.filter.outputs.jetbrains }}
+      rust: ${{ steps.gates.outputs.gate_rust }}
+      proto: ${{ steps.gates.outputs.gate_proto }}
+      js: ${{ steps.gates.outputs.gate_js }}
+      arch: ${{ steps.gates.outputs.gate_arch }}
+      wasm: ${{ steps.gates.outputs.gate_wasm }}
+      playground: ${{ steps.gates.outputs.gate_playground }}
+      vscode: ${{ steps.gates.outputs.gate_vscode }}
+      dx: ${{ steps.gates.outputs.gate_dx }}
+      editor_lsp: ${{ steps.gates.outputs.gate_editor_lsp }}
+      svelte_oracle: ${{ steps.gates.outputs.gate_svelte_oracle }}
+      svelte_client_smokes: ${{ steps.gates.outputs.gate_svelte_client_smokes }}
+      svelte_perf: ${{ steps.gates.outputs.gate_svelte_perf }}
+      editors: ${{ steps.gates.outputs.gate_editors }}
+      jetbrains: ${{ steps.gates.outputs.gate_jetbrains }}
+      native: ${{ steps.gates.outputs.gate_native }}
+      providers: ${{ steps.gates.outputs.gate_providers }}
+      compiler_contracts: ${{ steps.gates.outputs.gate_compiler_contracts }}
+      bf2: ${{ steps.gates.outputs.gate_bf2 }}
+      svelte_conformance: ${{ steps.gates.outputs.gate_svelte_conformance }}
+      # Subsystem gates say a subsystem CHANGED and drive its suites; artifact
+      # gates say an artifact is NEEDED and drive its producer, as the OR of
+      # every consumer's gate, so a consumer is never scheduled behind a
+      # producer that was not.
+      transport: ${{ steps.gates.outputs.gate_transport }}
+      native_artifact: ${{ steps.gates.outputs.gate_native_artifact }}
+      wasm_artifact: ${{ steps.gates.outputs.gate_wasm_artifact }}
+      impact_full: ${{ steps.gates.outputs.impact_full }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          # `any_files` feeds the crate-graph classifier below.
+          list-files: json
           filters: |
+            any:
+              - '**'
             rust:
               - 'crates/**'
+              # Read by Rust tests (`verter_source_policy_gate` validates the
+              # schemas; the style-IR corpora are read and `include_str!`-ed), so
+              # this lane owns them; nothing else does.
+              - 'schemas/**'
+              - 'test-corpora/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -100,6 +132,10 @@ jobs:
               - 'scripts/check-integration-test-layout.test.mjs'
               - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/provider-ci*.mjs'
+              # The lane classifier and the crate-graph library it composes
+              # gates from: their unit tests run in test:scripts:ci.
+              - 'scripts/ci-impact*.mjs'
+              - 'scripts/lib/crate-graph*.mjs'
               - 'scripts/svelte-golden-lib.mjs'
               - 'scripts/browser-host-gate.mjs'
               - 'scripts/browser-host-gate.test.mjs'
@@ -138,24 +174,17 @@ jobs:
               - '.github/actions/**'
             # Gates `wasm-build` ALONE, which both builds the browser artifact
             # and verifies the committed carrier fixture against it. So this
-            # filter decides whether that fixture check runs at all, and it must
-            # cover everything the artifact is built from — a crate that is in
-            # the build closure but not here changes carrier output while the
-            # check that would catch it is skipped.
-            #
-            # `crates/**` rather than an enumerated closure: the closure derived
-            # from `cargo metadata` (verter_wasm's transitive normal + build
-            # dependencies that are workspace members) is 27 crates, and an
-            # enumerated list silently goes stale the next time one of them
-            # takes a new dependency — the exact failure this check exists to
-            # end. A directory wildcard cannot drift. The cost is that
-            # `wasm-build` also runs for the 19 workspace crates outside the
-            # closure; over-running a cached build is cheap, under-running the
-            # freshness check is not. Manifests and the lockfile are included
-            # because a dependency bump (an OXC version, say) moves compiler
-            # output without touching a single crate path.
+            # gate decides whether that fixture check runs at all, and it must
+            # cover everything the artifact is built from. The crate half is
+            # verter_wasm's dependency closure as `cargo metadata` reports it
+            # (`scripts/ci-impact.mjs`), which cannot go stale the way an
+            # enumerated list did; the paths below are the non-crate inputs.
+            # Manifests and the lockfile are listed here too (and are classifier
+            # escape hatches) because a dependency bump moves compiler output
+            # without touching a single crate path.
             wasm:
-              - 'crates/**'
+              - 'scripts/capture-wasm-carrier-fixtures.mjs'
+              - 'scripts/wasm-js-boundary-lane.mjs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -168,49 +197,17 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
             playground:
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_session/**'
-              - 'crates/verter_workspace/**'
-              - 'crates/verter_semantic/**'
-              - 'crates/verter_ffi/**'
-              - 'crates/verter_diagnostics/**'
-              - 'crates/verter_actions/**'
-              - 'crates/verter_span/**'
-              - 'crates/verter_wasm/**'
-              - 'crates/verter_lsp/**'
               - 'packages/wasm/**'
               - 'packages/playground/**'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
             vscode:
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_session/**'
-              - 'crates/verter_workspace/**'
-              - 'crates/verter_semantic/**'
-              - 'crates/verter_ffi/**'
-              - 'crates/verter_diagnostics/**'
-              - 'crates/verter_actions/**'
-              - 'crates/verter_lsp/**'
-              - 'crates/verter_relay_shim/**'
-              - 'crates/verter_span/**'
-              - 'crates/verter_tsgo_api/**'
-              - 'crates/verter_type_runtime/**'
               - 'packages/vue-vscode/**'
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
             dx:
-              - 'crates/verter_dx_baseline/**'
-              - 'crates/verter_lsp/**'
-              # The crate that OWNS CompletionResolveData, is_actionable, tsserver
-              # completion parsing, offset stamping, and resolve routing — the
-              # exact logic the real-provider auto-import parity gate proves. A
-              # runtime-only resolve regression MUST trip this filter, or the
-              # parity gate would silently skip.
-              - 'crates/verter_type_runtime/**'
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
               # The tsserver carrier-membership plugin and the library it emits
@@ -228,33 +225,6 @@ jobs:
             # the contract drives the real compiler/LSP, provider plugin, relay,
             # and shared typed test substrate without an editor process.
             editor_lsp:
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_audit/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_ffi/**'
-              - 'crates/verter_language/**'
-              - 'crates/verter_macro_dto/**'
-              - 'crates/verter_no_storedspan/**'
-              - 'crates/verter_no_storedspan_derive/**'
-              - 'crates/verter_no_typeexpr/**'
-              - 'crates/verter_no_typeexpr_derive/**'
-              - 'crates/verter_protocol/**'
-              - 'crates/verter_scheduler/**'
-              - 'crates/verter_session/**'
-              - 'crates/verter_session_oracle_macro/**'
-              - 'crates/verter_session_query/**'
-              - 'crates/verter_workspace/**'
-              - 'crates/verter_semantic/**'
-              - 'crates/verter_diagnostics/**'
-              - 'crates/verter_actions/**'
-              - 'crates/verter_lsp/**'
-              - 'crates/verter_relay_shim/**'
-              - 'crates/verter_span/**'
-              - 'crates/verter_tsgo_api/**'
-              - 'crates/verter_type_expr/**'
-              - 'crates/verter_type_expr_oxc/**'
-              - 'crates/verter_type_runtime/**'
-              - 'crates/verter-editor-client/**'
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
               - 'packages/language-shared/**'
@@ -295,12 +265,12 @@ jobs:
             # These lanes used to live in four standalone workflows that each
             # built `verter-lsp --release` themselves — twelve uncached release
             # builds of the server per Rust change. They now share the single
-            # `build-editor-lsp` artifact below.
+            # `build-editor-lsp` artifact below, and the crate half of this
+            # gate is the verter_lsp + verter-editor-client dependency closure.
             editors:
               - 'editors/**'
               - 'extensions/lapce/**'
               - 'extensions/zed/**'
-              - 'crates/**'
               - 'scripts/editor-contracts/**'
               - 'packages/lsp-test-client/**'
               - 'Cargo.toml'
@@ -322,10 +292,6 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
             svelte_perf:
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_napi/**'
-              - 'packages/native/**'
               - 'packages/benchmark/package.json'
               - 'packages/benchmark/src/svelte-perf-*.ts'
               - 'packages/benchmark/src/svelte-perf-manifest.json'
@@ -336,6 +302,72 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+            # Non-crate inputs of the serial real-provider lane; its crate half
+            # is the verter_lsp / verter_type_runtime / verter_tsgo_api closure.
+            providers:
+              - 'packages/typescript-plugin/**'
+              - 'packages/language-shared/**'
+              - 'scripts/provider-ci*.mjs'
+              - '.npmrc'
+              - '.nvmrc'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            # Non-crate inputs of the native/WASM transport equivalence check;
+            # its crate half is either artifact's dependency closure.
+            transport:
+              - 'scripts/probe-transport-surface.mjs'
+              - 'packages/wasm/**'
+              - 'packages/native/**'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            # Non-crate inputs of the compile-contract lane (its runner and the
+            # lane self-test); its crate half is the runner crates plus every
+            # owner whose fixtures the runner compiles.
+            compiler_contracts:
+              - 'scripts/compile-contracts.mjs'
+              - 'scripts/compiler-ci-lane-selftest.mjs'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            # Non-crate inputs of the BF2 authoritative lane (its workspace-domain
+            # TypeScript observation resolves @verter/svelte-jsx and @verter/types);
+            # its crate half is verter_session's dependency closure.
+            bf2:
+              - 'packages/framework-conformance-harness/**'
+              - 'packages/language-shared/**'
+              - 'packages/svelte-jsx/**'
+              - 'packages/types/**'
+              - 'packages/typescript-plugin/**'
+              - 'scripts/bf2-authoritative.mjs'
+              - 'scripts/bf2-ci-lane-selftest.mjs'
+              - 'scripts/gate*.mjs'
+              - '.npmrc'
+              - '.nvmrc'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+
+      # The Rust half of every gate. `cargo metadata` needs the toolchain and
+      # the registry index (cached); the target directory is not needed.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: detect-changes
+          cache-targets: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Compose the lane gates from the path filters and the crate graph
+        id: gates
+        env:
+          CI_IMPACT_CHANGED_FILES_JSON: ${{ steps.filter.outputs.any_files }}
+          CI_IMPACT_FILTER_OUTPUTS_JSON: ${{ toJSON(steps.filter.outputs) }}
+        run: node scripts/ci-impact.mjs --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -608,57 +640,28 @@ jobs:
           reporter: java-junit
           fail-on-error: false
 
-  rust-tsserver-live:
-    name: Rust Test (tsserver)
+  # The real-provider lanes. Each engine's tests run exactly as before —
+  # serial libtest, explicitly initialized — but in ONE job: the workspace is
+  # compiled once for both engines instead of once per engine, and the
+  # account spends one runner slot instead of two. (Measured on a warm cache:
+  # about two minutes of compile per lane against roughly five minutes of
+  # tsserver tests and three and a half of tsgo tests, so the lane is bound
+  # by the serial suites, not by the compile the split used to duplicate.)
+  rust-providers-live:
+    name: Rust Test (providers)
     needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
+    if: needs.detect-changes.outputs.providers == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
     env:
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "verter-provider-tsserver-v1"
+      SCCACHE_GHA_VERSION: "verter-providers-v1"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: rust-provider-tsserver
-      - uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # The live tsserver tests resolve the plugin through its workspace probe
-      # location. pnpm install creates the symlink but not these build outputs.
-      - name: Build the tsserver plugin prerequisites
-        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
-      - name: Run serial tsserver provider tests
-        env:
-          VERTER_REQUIRE_TSSERVER: "1"
-        run: node scripts/provider-ci.mjs run tsserver
-      # These source-level plugin specs do not import @verter/native. The two
-      # src/tsc specs that do are retained in native-test below.
-      - name: Native-free TypeScript plugin tests
-        run: pnpm vitest run packages/typescript-plugin/src --exclude 'packages/typescript-plugin/src/tsc/**'
-  rust-tsgo-live:
-    name: Rust Test (tsgo)
-    needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 95
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: "verter-provider-tsgo-v1"
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: rust-provider-tsgo
+          key: rust-providers
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.17.0
@@ -669,18 +672,50 @@ jobs:
           cache: pnpm
       # The lockfile install provides the pinned project-local tsgo engine.
       - run: pnpm install --frozen-lockfile
+      # The live tsserver tests resolve the plugin through its workspace probe
+      # location. pnpm install creates the symlink but not these build outputs.
+      - name: Build the tsserver plugin prerequisites
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
+      - name: Run serial tsserver provider tests
+        id: tsserver
+        continue-on-error: true
+        env:
+          VERTER_REQUIRE_TSSERVER: "1"
+        run: node scripts/provider-ci.mjs run tsserver
+      # These source-level plugin specs do not import @verter/native. The two
+      # src/tsc specs that do are retained in native-test below.
+      - name: Native-free TypeScript plugin tests
+        id: plugin
+        continue-on-error: true
+        run: pnpm vitest run packages/typescript-plugin/src --exclude 'packages/typescript-plugin/src/tsc/**'
       - name: Run serial tsgo provider tests
+        id: tsgo
+        continue-on-error: true
         env:
           VERTER_REQUIRE_TSGO: "1"
         run: node scripts/provider-ci.mjs run tsgo
-
+      # Every engine's suite runs even when an earlier one failed, so one
+      # run reports every regression; the job's result is this verdict.
+      - name: Provider lane verdict
+        if: always()
+        env:
+          TSSERVER: ${{ steps.tsserver.outcome }}
+          PLUGIN: ${{ steps.plugin.outcome }}
+          TSGO: ${{ steps.tsgo.outcome }}
+        run: |
+          echo "tsserver: $TSSERVER | plugin tests: $PLUGIN | tsgo: $TSGO"
+          failed=0
+          for lane in "tsserver:$TSSERVER" "plugin:$PLUGIN" "tsgo:$TSGO"; do
+            case "$lane" in *:success) ;; *) echo "::error::${lane%%:*} lane did not succeed (${lane#*:})"; failed=1;; esac
+          done
+          exit "$failed"
   # Required and parallel with the shared archive build. Compile-fail fixtures
   # are standalone Cargo work, not test cases, so this job owns their cached
   # execution outside the nextest inventory.
   compiler-contracts:
     name: Compiler Contracts
     needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
+    if: needs.detect-changes.outputs.compiler_contracts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
     env:
@@ -734,7 +769,7 @@ jobs:
   bf2-authoritative:
     name: BF2 Authoritative
     needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
+    if: needs.detect-changes.outputs.bf2 == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
     env:
@@ -826,10 +861,14 @@ jobs:
         # src/tsc remains in native-test because those specs import .node code.
         run: pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts
       - name: Rust build-tooling helper self-tests (sccache-env, publish set)
-        # Explicit-path root vitest run: scripts/ is not a workspace package,
-        # so `pnpm -r run test` never reaches these specs — same convention as
-        # the carrier-routing guards step above.
-        run: pnpm run test:scripts
+        # Explicit-path root run: scripts/ is not a workspace package, so
+        # `pnpm -r run test` never reaches these specs — same convention as
+        # the carrier-routing guards step above. The CI variant omits the
+        # tests another required lane already owns (the ARH dirty twins in
+        # architecture-health, the lane self-tests in their lanes, the
+        # aggregate test in the step below); `test:scripts` keeps them for
+        # local runs.
+        run: pnpm run test:scripts:ci
       - name: CI aggregate completeness
         # Every job in this workflow must be listed in the `CI Required`
         # aggregate; the checker fails this lane when one is missing.
@@ -937,7 +976,7 @@ jobs:
   svelte-conformance:
     name: Svelte CSS Conformance (manifest + goldens drift)
     needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.svelte_oracle == 'true'
+    if: needs.detect-changes.outputs.svelte_conformance == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -991,14 +1030,18 @@ jobs:
           export LC_ALL=C
           pnpm exec vitest run test/svelte-client*-smoke.spec.ts
 
+  # The PR side of the Svelte compiler benchmark: the benchmark contract, the
+  # corpus against the official goldens, and the manifest's oracle proof.
+  # The MEASUREMENT (Verter within 1.10x of the official compiler's wall
+  # time and RSS) runs nightly in nightly.yml: a p50/p95 fence on a shared
+  # GitHub-hosted VM is not a per-PR correctness signal, and it cost a
+  # runner plus the release native build on every compiler change.
   svelte-compiler-benchmark:
-    name: Svelte Compiler Benchmark (Verter vs official)
-    needs: [detect-changes, build-native-node]
+    name: Svelte Compiler Benchmark contract
+    needs: detect-changes
     if: needs.detect-changes.outputs.svelte_perf == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
-    env:
-      CARGO_BUILD_JOBS: 2
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -1019,36 +1062,6 @@ jobs:
           cargo test -p verter_compiler --test main \
             cases::svelte_client_emit_topology::svelte_performance_manifest_is_oracle_proven_and_representative \
             -- --exact
-      # Shared with native-test rather than a second release build of the napi
-      # crate in this job.
-      - name: Download release native compiler
-        uses: ./.github/actions/download-artifact
-        with:
-          name: native-node
-          path: packages/native/dist
-      - name: Compare Verter and official Svelte compilers
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          pnpm --filter @verter/benchmark bench:svelte:compiler -- \
-            --json \
-            --require-immutable \
-            --out="$GITHUB_WORKSPACE/artifacts/svelte-compiler-benchmark.json"
-      - name: Ensure benchmark artifact exists
-        if: always()
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          result="$GITHUB_WORKSPACE/artifacts/svelte-compiler-benchmark.json"
-          if [ ! -f "$result" ]; then
-            printf '{"schemaVersion":3,"generatedAt":"%s","pass":false,"error":"Svelte compiler benchmark did not run to completion"}\n' \
-              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$result"
-          fi
-      - name: Upload Svelte compiler benchmark
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: svelte-compiler-benchmark
-          path: artifacts/svelte-compiler-benchmark.json
-          if-no-files-found: error
 
   # Consumes wasm-build's artifact rather than compiling wasm32 a second time.
   # These two jobs used to run `pnpm run build:wasm` independently, so any
@@ -1138,7 +1151,10 @@ jobs:
     name: WASM Build
     needs: detect-changes
     # Also runs for `playground`, which consumes this job's artifact.
-    if: needs.detect-changes.outputs.wasm == 'true' || needs.detect-changes.outputs.playground == 'true'
+    # The ARTIFACT gate: the OR of every consumer's gate (the wasm subsystem
+    # itself with the browser gate, the playground build, transport
+    # equivalence).
+    if: needs.detect-changes.outputs.wasm_artifact == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -1431,23 +1447,16 @@ jobs:
             /tmp/verter-e2e-*.log.runsummary
           if-no-files-found: ignore
 
-  # The ONE release build of the native N-API binding. `native-test` and
-  # `svelte-compiler-benchmark` each ran `pnpm run build:native` themselves, so
-  # any change matching both filters paid for two full release builds of the
-  # napi crate. Gated on the broader `rust || js` (native-test's closure gate),
-  # which is a superset of `svelte_perf`, so the producer is always present
-  # when either consumer runs.
+  # The ONE release build of the native N-API binding. Gated on `native`:
+  # verter_napi's dependency closure (any change to a crate the binding
+  # links), any JS change (native-test's closure spans the JS workspace
+  # deps it imports) and playground changes (its build consumes this
+  # artifact). A change to a crate the binding does not link — the LSP
+  # server, the MCP server, tooling crates — no longer pays this build.
   build-native-node:
     name: Build native binding
     needs: detect-changes
-    # Also runs for `playground`, which consumes this job's artifact to build
-    # the app — a playground-only change sets neither `rust` nor `js` (the `js`
-    # filter excludes packages/playground/**), and a skipped job skips its
-    # dependents, which would silently disable playground-test.
-    if: >-
-      needs.detect-changes.outputs.rust == 'true' ||
-      needs.detect-changes.outputs.js == 'true' ||
-      needs.detect-changes.outputs.playground == 'true'
+    if: needs.detect-changes.outputs.native_artifact == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -1474,14 +1483,13 @@ jobs:
   native-test:
     name: Native Package Tests
     needs: [detect-changes, build-native-node]
-    # Dependency-closure gate: this job builds the real native binding and
-    # drives the @verter/component-meta native-eval suite against it, whose
-    # dependency closure spans every workspace crate plus the JS workspace
-    # deps it imports (type-ir, proto, types, language-shared, root
-    # manifests/lockfile/tsconfig). A hand-written path subset silently
-    # skips the job for closure members it forgot, so the gate is the broad
-    # rust/js change outputs: ANY Rust or JS change runs native-eval.
-    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.js == 'true'
+    # Dependency-closure gate: this job drives the @verter/component-meta
+    # native-eval suite against the real native binding. Its crate half is
+    # verter_napi's dependency closure from `cargo metadata` (not a
+    # hand-written subset that can forget a member) and its JS half is any
+    # JS change (the JS workspace deps it imports: type-ir, proto, types,
+    # language-shared, root manifests/lockfile/tsconfig).
+    if: needs.detect-changes.outputs.native == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -1526,7 +1534,9 @@ jobs:
   transport-route-equivalence:
     name: Transport route equivalence
     needs: [detect-changes, wasm-build, build-native-node]
-    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.wasm == 'true'
+    # Either subsystem moving demands the comparison, and the `transport`
+    # gate feeds both artifact gates, so both producers are present.
+    if: needs.detect-changes.outputs.transport == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -1744,18 +1754,30 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  editor-helix:
-    name: Editor contract (Helix 25.07.1)
+  # One job, four editors. Each editor's steps are exactly the four former
+  # jobs' steps under a section marker; what changed is that the checkout,
+  # toolchain, caches, artifact download and fixture install happen once
+  # instead of four times, and the account spends one runner slot instead of
+  # four for roughly five minutes of actual contract work.
+  editor-contracts:
+    name: Editor contracts (Helix, Lapce, Zed, Neovim)
     needs: [detect-changes, build-editor-lsp]
     if: needs.detect-changes.outputs.editors == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-wasip1, wasm32-wasip2
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          key: editor-helix
+          key: editor-contracts
+          workspaces: |
+            . -> target
+            extensions/lapce -> target
+            extensions/zed -> target
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -1767,8 +1789,21 @@ jobs:
         with:
           name: editor-lsp
           path: target/release
+      - name: Make verter-lsp executable
+        run: chmod +x target/release/verter-lsp
 
+      - name: Install neutral-client fixture dependencies
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+          pnpm --filter @verter/lsp-test-client build
+
+      # ---------------------------------------------------------------- Helix
       - name: Install pinned Helix with checksum verification
+        id: helix-1
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -1782,6 +1817,9 @@ jobs:
           echo "HELIX_RUNTIME=${RUNNER_TEMP}/helix-25.07.1-x86_64-linux/runtime" >> "$GITHUB_ENV"
 
       - name: Provision the shipped Helix configuration and server
+        id: helix-2
+        continue-on-error: true
+        if: steps.helix-1.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -1794,6 +1832,9 @@ jobs:
           echo "${RUNNER_TEMP}/verter-bin" >> "$GITHUB_PATH"
 
       - name: Prove Vue and Svelte select only the executable Verter server
+        id: helix-3
+        continue-on-error: true
+        if: steps.helix-2.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -1811,18 +1852,16 @@ jobs:
       # Examples are not built by the workspace `cargo nextest run`, so this
       # target is NOT covered by rust-test above and is preserved here.
       - name: Test the exported rootless Helix shipping plan
+        id: helix-4
+        continue-on-error: true
+        if: steps.helix-3.outcome == 'success'
         shell: bash
         run: cargo test -p verter-editor-client --example helix_plan
 
-      - name: Install neutral-client fixture dependencies
-        shell: bash
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
-          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
-          pnpm --filter @verter/lsp-test-client build
-
       - name: Drive the parsed Helix shipping plan over stdio
+        id: helix-5
+        continue-on-error: true
+        if: steps.helix-4.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -1833,64 +1872,42 @@ jobs:
           cargo run --quiet -p verter-editor-client --example helix_plan -- "$bin" > "$plan"
           node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
 
-  editor-lapce:
-    name: Editor contract (Lapce volt)
-    needs: [detect-changes, build-editor-lsp]
-    if: needs.detect-changes.outputs.editors == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: wasm32-wasip1
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: editor-lapce
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Download shared verter-lsp
-        uses: ./.github/actions/download-artifact
-        with:
-          name: editor-lsp
-          path: target/release
-      - name: Make verter-lsp executable
-        run: chmod +x target/release/verter-lsp
-
+      # ---------------------------------------------------------------- Lapce
       # extensions/lapce is a SEPARATE cargo manifest, not a workspace member,
       # so none of the following is covered by rust-test / rust-clippy /
       # rust-fmt above.
       - name: Build the volt (wasm32-wasip1)
+        id: lapce-1
+        continue-on-error: true
         shell: bash
         run: cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release
 
-      - name: Run host-target unit tests
+      - name: Run host-target unit tests (Lapce)
+        id: lapce-2
+        continue-on-error: true
+        if: steps.lapce-1.outcome == 'success'
         shell: bash
         run: cargo test --manifest-path extensions/lapce/Cargo.toml
 
       - name: Clippy (wasm32-wasip1)
+        id: lapce-3
+        continue-on-error: true
+        if: steps.lapce-2.outcome == 'success'
         shell: bash
         run: cargo clippy --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 -- -D warnings
 
-      - name: Rustfmt check
+      - name: Rustfmt check (Lapce)
+        id: lapce-4
+        continue-on-error: true
+        if: steps.lapce-3.outcome == 'success'
         shell: bash
         working-directory: extensions/lapce
         run: cargo fmt --check
 
-      - name: Install JavaScript test dependencies
-        shell: bash
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
-          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
-          pnpm --filter @verter/lsp-test-client build
-
       - name: Drive the exact Lapce launch plan over stdio
+        id: lapce-5
+        continue-on-error: true
+        if: steps.lapce-4.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -1901,65 +1918,43 @@ jobs:
           cargo run --quiet --manifest-path extensions/lapce/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
           node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
 
-  editor-zed:
-    name: Editor contract (Zed extension)
-    needs: [detect-changes, build-editor-lsp]
-    if: needs.detect-changes.outputs.editors == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: wasm32-wasip2
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: editor-zed
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Download shared verter-lsp
-        uses: ./.github/actions/download-artifact
-        with:
-          name: editor-lsp
-          path: target/release
-      - name: Make verter-lsp executable
-        run: chmod +x target/release/verter-lsp
-
+      # ------------------------------------------------------------------ Zed
       # extensions/zed is a SEPARATE cargo manifest, not a workspace member, so
       # none of the following is covered by rust-test / rust-clippy / rust-fmt
       # above. A wasip1/wasip2 mismatch yields a `__wasi_init_tp` load error in
       # Zed, which only this build catches.
       - name: Build the extension (wasm32-wasip2)
+        id: zed-1
+        continue-on-error: true
         shell: bash
         run: cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release
 
-      - name: Run host-target unit tests
+      - name: Run host-target unit tests (Zed)
+        id: zed-2
+        continue-on-error: true
+        if: steps.zed-1.outcome == 'success'
         shell: bash
         run: cargo test --manifest-path extensions/zed/Cargo.toml
 
       - name: Clippy (wasm32-wasip2)
+        id: zed-3
+        continue-on-error: true
+        if: steps.zed-2.outcome == 'success'
         shell: bash
         run: cargo clippy --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 -- -D warnings
 
-      - name: Rustfmt check
+      - name: Rustfmt check (Zed)
+        id: zed-4
+        continue-on-error: true
+        if: steps.zed-3.outcome == 'success'
         shell: bash
         working-directory: extensions/zed
         run: cargo fmt --check
 
-      - name: Install JavaScript test dependencies
-        shell: bash
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
-          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
-          pnpm --filter @verter/lsp-test-client build
-
       - name: Drive the exact Zed launch plan over stdio
+        id: zed-5
+        continue-on-error: true
+        if: steps.zed-4.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -1970,45 +1965,23 @@ jobs:
           cargo run --quiet --manifest-path extensions/zed/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
           node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
 
-  editor-neovim:
-    name: Editor contract (Neovim plenary)
-    needs: [detect-changes, build-editor-lsp]
-    if: needs.detect-changes.outputs.editors == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Download shared verter-lsp
-        uses: ./.github/actions/download-artifact
-        with:
-          name: editor-lsp
-          path: target/release
-      - name: Make verter-lsp executable
-        run: chmod +x target/release/verter-lsp
-
-      - name: Install the pinned real-client fixture toolchain
-        uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: editors/nvim/tests/fixtures/real-client/package-lock.json
-
-      - name: Provision tsgo and framework types
-        working-directory: editors/nvim/tests/fixtures/real-client
-        run: npm ci --ignore-scripts
-
+      # --------------------------------------------------------------- Neovim
       # Single pinned stable release. The retired matrix also covered the
       # v0.11.0 floor and nightly; nightly in particular was an early-warning
       # lane for upstream LSP-client changes, and that signal is no longer
       # collected here.
       - name: Install Neovim
+        id: neovim-1
+        continue-on-error: true
         uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
           version: v0.12.3
 
       - name: Checkout plenary.nvim
+        id: neovim-2
+        continue-on-error: true
+        if: steps.neovim-1.outcome == 'success'
         uses: actions/checkout@v5
         with:
           repository: nvim-lua/plenary.nvim
@@ -2020,9 +1993,15 @@ jobs:
       # cannot match plenary's real (ANSI-coloured) output makes the job either
       # unpassable or unfailable, and both look like an ordinary red job.
       - name: Plenary verdict guard
+        id: neovim-3
+        continue-on-error: true
+        if: steps.neovim-2.outcome == 'success'
         run: node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs
 
       - name: Run plenary busted suite
+        id: neovim-4
+        continue-on-error: true
+        if: steps.neovim-3.outcome == 'success'
         shell: bash
         env:
           PLENARY_PATH: ${{ github.workspace }}/.ci/plenary.nvim
@@ -2084,7 +2063,37 @@ jobs:
             echo "::error::Neovim test output did not prove that any assertion-bearing test ran"
             exit 1
           fi
-
+      # Each editor's section ran even when an earlier editor failed, so one
+      # run reports every editor's regression; the job's result is this
+      # verdict. Every step of every section must have SUCCEEDED: a skipped
+      # step is a failure too (within a section a step only skips behind an
+      # earlier failure of that section), so an accidental `if:` can never
+      # green a section by skipping one of its steps.
+      - name: Editor contracts verdict
+        if: always()
+        env:
+          OUTCOMES: |
+            helix=${{ steps.helix-1.outcome }},${{ steps.helix-2.outcome }},${{ steps.helix-3.outcome }},${{ steps.helix-4.outcome }},${{ steps.helix-5.outcome }}
+            lapce=${{ steps.lapce-1.outcome }},${{ steps.lapce-2.outcome }},${{ steps.lapce-3.outcome }},${{ steps.lapce-4.outcome }},${{ steps.lapce-5.outcome }}
+            zed=${{ steps.zed-1.outcome }},${{ steps.zed-2.outcome }},${{ steps.zed-3.outcome }},${{ steps.zed-4.outcome }},${{ steps.zed-5.outcome }}
+            neovim=${{ steps.neovim-1.outcome }},${{ steps.neovim-2.outcome }},${{ steps.neovim-3.outcome }},${{ steps.neovim-4.outcome }}
+        run: |
+          echo "$OUTCOMES"
+          failed=0
+          while IFS='=' read -r editor outcomes; do
+            [ -z "$editor" ] && continue
+            ok=1
+            for outcome in ${outcomes//,/ }; do
+              [ "$outcome" = success ] || ok=0
+            done
+            if [ "$ok" = 1 ]; then
+              echo "$editor: ok ($outcomes)"
+            else
+              echo "::error::$editor contract did not succeed in every step ($outcomes)"
+              failed=1
+            fi
+          done <<< "$OUTCOMES"
+          exit "$failed"
   # ---------------------------------------------------------------------------
   # JetBrains plugin lane (JBT1): the pinned extensions/jetbrains Gradle
   # build. The jetbrains-product gate profile starts here — it runs the real
@@ -2145,8 +2154,7 @@ jobs:
       - rust-build-configs
       - rust-test-build
       - rust-test
-      - rust-tsserver-live
-      - rust-tsgo-live
+      - rust-providers-live
       - compiler-contracts
       - bf2-authoritative
       - js-build-test
@@ -2166,10 +2174,7 @@ jobs:
       - build-lsp-debug
       - build-native-node
       - build-editor-lsp
-      - editor-helix
-      - editor-lapce
-      - editor-zed
-      - editor-neovim
+      - editor-contracts
       - jetbrains-plugin
       - browser-host
     steps:
