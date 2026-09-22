@@ -1141,22 +1141,34 @@ impl CarrierPublicationStore {
         // Double-checked retained read: `produce` missed before the insert
         // above, but a previous leader may have retained and unlisted
         // between that miss and this leader's insert. Adopt the retained
-        // unit instead of parsing it a second time.
-        if let Some(candidate) = self.units.retained(artifact_id, accepted) {
-            match self.adopt_retained(candidate, accepted, request, artifact_id) {
-                StableAdoption::Adopted(outcome) => {
-                    if let PublicationOutcome::Adopted(envelope) = &outcome {
-                        self.finish_stable_parse(
-                            lane,
-                            key,
-                            StableParseOutcome::Parsed(Arc::clone(envelope.artifact())),
-                        );
-                    } else {
-                        self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
-                    }
-                    return StableShared::Done(outcome);
+        // unit instead of parsing it a second time. Guarded by the same
+        // catch_unwind discipline as the parse/publish steps below: a
+        // panic here must still reach `finish_stable_parse`, or this
+        // stable key is left listed forever against a dead `Producing`
+        // lane and every later publication of this unit joins it and
+        // blocks until its own request cancellation.
+        let double_check = catch_unwind(AssertUnwindSafe(|| {
+            self.units
+                .retained(artifact_id, accepted)
+                .map(|candidate| self.adopt_retained(candidate, accepted, request, artifact_id))
+        }));
+        match double_check {
+            Ok(Some(StableAdoption::Adopted(outcome))) => {
+                if let PublicationOutcome::Adopted(envelope) = &outcome {
+                    self.finish_stable_parse(
+                        lane,
+                        key,
+                        StableParseOutcome::Parsed(Arc::clone(envelope.artifact())),
+                    );
+                } else {
+                    self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
                 }
-                StableAdoption::Discarded => {}
+                return StableShared::Done(outcome);
+            }
+            Ok(Some(StableAdoption::Discarded)) | Ok(None) => {}
+            Err(_) => {
+                self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
+                return StableShared::Done(PublicationOutcome::WinnerPanicked);
             }
         }
         let shared = match catch_unwind(AssertUnwindSafe(|| {
@@ -1369,10 +1381,35 @@ impl CarrierPublicationStore {
             artifact_id,
             PublicationAuditKind::PublishFencePassed,
         );
+        // Rebind this lane's own snapshot into the envelope's embedded
+        // registered geometry, exactly like the retained-adoption path's
+        // `__rehome_registered` above: a parse shared from another lane
+        // leader still carries THAT leader's source-space snapshot id, so
+        // publishing it unrebound here would pair this lane's own
+        // `envelope.source` with a stale embedded snapshot identity. The
+        // artifact retained above stays the original, generation-independent
+        // parse product — only the published envelope is rehomed.
+        let rehomed = match artifact.__rehome_registered(accepted, &artifact_id.parse_key) {
+            Ok(rehomed) => Arc::new(rehomed),
+            // Exhaustive: every `SyntaxReject` arm means this lane's own
+            // `accepted` no longer matches the shared artifact's identity —
+            // matched by name (not `_`) so a new variant forces a decision
+            // here instead of silently inheriting a fallback.
+            Err(
+                verter_language::SyntaxReject::UnsupportedProfile { .. }
+                | verter_language::SyntaxReject::RejectedSyntax { .. }
+                | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
+                | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
+            ) => {
+                return PublicationOutcome::RegistryMismatch(
+                    RegistryMismatch::ProducerVersionMismatch,
+                );
+            }
+        };
         let envelope = Arc::new(FrameworkArtifactEnvelope {
             id: artifact_id.clone(),
             source: accepted.source().clone(),
-            artifact: Arc::clone(artifact),
+            artifact: rehomed,
         });
         self.audit
             .push(request, artifact_id, PublicationAuditKind::Published);
