@@ -168,7 +168,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface B {\n    b: 2;\n}\nexport declare function witness(): B;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Instance side of a CONSTRUCT-signature intersection: 7.0.2 reduces the instance type to B; the live rail answers the FIRST arm's instance instead (measured `DeclRef(A)`). Construct-signature intersection reduction is owed by the `SignaturesOfType` set authority over `ReduceIntersection`." },
+        verdict: Verdict::KnownOwed { note: "Instance side of a CONSTRUCT-signature intersection: 7.0.2 reduces the instance type to B; the consumer-expanded answer is the FIRST arm's instance instead (measured `DeclRef(A)`). Construct-signature intersection reduction is owed by the `SignaturesOfType` set authority over `ReduceIntersection`." },
     },
     Row {
         id: "SV04_mixin_intersection",
@@ -194,7 +194,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type WithDefault<T = string> = {\n    value: T;\n};\nexport declare function witness(): WithDefault<string>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Generic DEFAULT application (WithDefault bare -> WithDefault<string>): 7.0.2 applies the declared default; the live rail answers the BARE alias reference (measured `DeclRef(WithDefault)`), so the default is never applied. Owed by the binder-space default application." },
+        verdict: Verdict::KnownOwed { note: "Generic DEFAULT application (WithDefault bare -> WithDefault<string>): 7.0.2 applies the declared default; the consumer-expanded answer is the BARE alias reference (measured `DeclRef(WithDefault)`), so the default is never applied. Owed by the binder-space default application." },
     },
     Row {
         id: "SV06_default_references_binder",
@@ -207,7 +207,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type Chain<T, U = T[]> = {\n    self: T;\n    others: U;\n};\nexport declare function witness(): Chain<number, number[]>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A default REFERENCING ANOTHER BINDER (U = T[]): the recorded observation is the defaulted instantiation Chain<number, number[]>; the live rail expands the alias STRUCTURALLY instead (measured `{ self: number, others: Array(number) }`), losing the alias-applied form the checker prints. Owed by the binder-space default application." },
+        verdict: Verdict::KnownOwed { note: "A default REFERENCING ANOTHER BINDER (U = T[]): the recorded observation is the defaulted instantiation Chain<number, number[]>; the consumer-expanded answer is the alias EXPANSION instead (measured `{ self: number, others: Array(number) }`), losing the alias-applied form the checker prints. Owed by the binder-space default application." },
     },
     Row {
         id: "SV07_type_predicate",
@@ -220,7 +220,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Foo {\n    kind: 'foo';\n    n: number;\n}\nexport declare function isFoo(x: unknown): x is Foo;\nexport declare function witness(): typeof isFoo;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A TYPE-PREDICATE signature print ((x: unknown) => x is Foo): the live rail publishes an EMPTY surface (measured `{  }`, degraded) — the callable and its predicate are both lost. Predicate propagation into signature observations is owed by the `SignaturesOfType` result projection." },
+        verdict: Verdict::KnownOwed { note: "A TYPE-PREDICATE signature print ((x: unknown) => x is Foo): the consumer-expanded answer is an EMPTY surface (measured `{  }`, degraded) — the callable and its predicate are both lost. Predicate propagation into signature observations is owed by the `SignaturesOfType` result projection." },
     },
     Row {
         id: "SV08_assertion_signature",
@@ -233,7 +233,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Bar {\n    kind: 'bar';\n}\nexport declare function assertBar(x: unknown): asserts x is Bar;\nexport declare function witness(): typeof assertBar;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "An ASSERTION signature print (asserts x is Bar): the live rail publishes an EMPTY surface (measured `{  }`, degraded) — the same `SignaturesOfType` result-projection gap as the predicate twin." },
+        verdict: Verdict::KnownOwed { note: "An ASSERTION signature print (asserts x is Bar): the consumer-expanded answer is an EMPTY surface (measured `{  }`, degraded) — the same `SignaturesOfType` result-projection gap as the predicate twin." },
     },
     Row {
         id: "SV09_explicit_type_arguments",
@@ -272,7 +272,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function pickA<T extends {\n    a: 1;\n}>(v: T): T['a'];\nexport declare function witness(): 1;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the live rail answers an EMPTY surface (measured `{  }`), so the indexed access is never forced through the constraint. Owed by the constrained-substitution stage." },
+        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the consumer-expanded answer is an EMPTY surface (measured `{  }`), so the indexed access is never forced through the constraint. Owed by the constrained-substitution stage." },
     },
     Row {
         id: "SV12_grouping_witness_L",
@@ -402,7 +402,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: Some("Type instantiation is excessively deep and possibly infinite."),
         decl_emit: "interface Rec {\n    then(onfulfilled: (v: Rec) => void): void;\n}\nexport declare function witness(): Rec;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Recursive thenable: 7.0.2 itself refuses with diagnostic TS2589 — the recorded OBSERVATION is the diagnostic, not a type print. The live rail also REFUSES, publishing a typed gap (measured `Opaque(Miss)`) rather than fabricating a recovery type, and the row pins that non-answer. A checker-faithful recovery disposition is owed." },
+        verdict: Verdict::KnownOwed { note: "Recursive thenable: 7.0.2 itself refuses with diagnostic TS2589 — the recorded OBSERVATION is the diagnostic, not a type print. The rail also declines to answer: the structural-fact demand measures `Opaque(Miss)` — the substrate does not fabricate a recovery type — and the row pins that NON-ANSWER, not any particular termination mechanism. Whether the shared family cycle guard is what terminated it is NOT established by this row; a checker-faithful recovery disposition is owed." },
     },
     Row {
         id: "SV22_awaited_nested_promise",
@@ -428,7 +428,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: true,
         diagnostic: None,
         decl_emit: "export declare function witness<T>(v: Awaited<T>): Awaited<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Deferred generic: the witness signature is (v: Awaited<T>) => Awaited<T>; instantiating the binder at its constraint prints unknown. Deferred-symbolic instantiation through the constraint is owed." },
+        verdict: Verdict::KnownOwed { note: "Deferred generic: the witness signature is (v: Awaited<T>) => Awaited<T>; instantiating the binder at its constraint prints unknown. The consumer-expanded answer is `unknown`, which does not carry the declared-return structure this row compares against. Deferred-symbolic instantiation through the constraint is owed." },
     },
     Row {
         id: "SV24_awaited_constrained_generic",
@@ -441,7 +441,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T extends Promise<number>>(v: T): Promise<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained generic async wrap: Promise<Promise<number>> (the body returns v: T unreduced); the live rail publishes a typed gap instead (measured `Opaque(Miss)`). The async-wrap/constraint interaction is owed by the runtime/lib `Awaited` lane." },
+        verdict: Verdict::KnownOwed { note: "Constrained generic async wrap: Promise<Promise<number>> (the body returns v: T unreduced); the consumer-expanded answer is a typed gap instead (measured `Opaque(Miss)`). The async-wrap/constraint interaction is owed by the runtime/lib `Awaited` lane." },
     },
     Row {
         id: "SV25_generic_union_dedup",

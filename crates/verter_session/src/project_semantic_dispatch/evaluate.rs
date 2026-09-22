@@ -424,40 +424,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// test / integration targets, so this shim compiles for genuine test code
     /// in BOTH the unit (`cfg(test)`) and the integration build and is
     /// COMPILE-ABSENT in every production profile.
-    /// Test observation window for IDENTITY-CARRIER expansion: repeatedly
-    /// expand an alias/builtin instantiation carrier through the
-    /// `Instantiate` family until it stops being one, and answer with what
-    /// the carrier DENOTES.
-    ///
-    /// Publication deliberately KEEPS the carrier — the checker keeps the
-    /// alias label too, and a consumer expands on demand
-    /// ([`Self::expand_alias_instantiation_one_level`], the same route a
-    /// call/join takes). An evidence lane that compares a published
-    /// observation against a checker column PRINTED in reduced form has to
-    /// take that same consumer step, or it reads publication laziness as a
-    /// semantic difference.
-    ///
-    /// Bounded: an expansion that does not terminate (a carrier expanding
-    /// to a carrier) stops at the budget and answers the last node, so a
-    /// cyclic alias cannot hang a test. STRICTLY test-scoped for the same
-    /// reason as the sibling shim below, and gated on `cfg(test)` ALONE —
-    /// narrower than that sibling, because its only caller is the in-crate
-    /// signature-corpus driver, so a `test-support` lib build would carry
-    /// it with no user.
-    #[cfg(test)]
-    pub(crate) fn expand_identity_carrier_for_tests(&self, node: SemanticNodeId) -> SemanticNodeId {
-        const EXPANSION_BUDGET: usize = 16;
-        let mut current = node;
-        // bounded-loop: at most EXPANSION_BUDGET `Instantiate` expansions; a carrier that keeps expanding to a carrier stops at the budget and answers the last node it reached.
-        for _ in 0..EXPANSION_BUDGET {
-            match self.expand_alias_instantiation_one_level(current) {
-                Some(expanded) if expanded != current => current = expanded,
-                _ => break,
-            }
-        }
-        current
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn evaluate_deferred_semantic_node_with_context_for_tests(
         &self,

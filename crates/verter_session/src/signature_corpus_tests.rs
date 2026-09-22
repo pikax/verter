@@ -327,12 +327,24 @@ struct LiveProbeOutcome {
     /// substrate has not reduced the probe's outer operator), else
     /// `None`.
     deferred_operator: Option<std::sync::Arc<str>>,
-    /// The live rail REFUSED the probe: the expanded answer is a typed
-    /// gap (`Opaque` carrying a genuine error/miss `QueryError`, not one
-    /// of the non-error identity carriers). Where the CHECKER itself
-    /// refused to print a type, a refusal is an honest live answer —
-    /// distinct from both a reduction and a held carrier.
+    /// The rail answered the structural-fact demand with a SEMANTIC
+    /// non-answer: a `Partial` demand (truncated/faulted, no node at all),
+    /// or an `Opaque` carrier whose disposition is `OptionalAbsence` ("no
+    /// result under this view") or the §22 `Failure` error type.
+    ///
+    /// Deliberately NARROW. The other dispositions are excluded because
+    /// none of them is a refusal: `ExpandableDecl` and `RecursionCarrier`
+    /// DENOTE a type the rail has not finished reading (accepting them
+    /// would re-admit exactly the publication laziness this lane expands
+    /// away), and `ControlCarrier` / `Partial` / `UnsupportedSurface` are
+    /// resource or boundary control, not a semantic answer about the
+    /// program.
     refused: bool,
+    /// The audited flow-return BOUNDARY produced no result at all. This is
+    /// never an observation: it means the lane itself is broken (a renamed
+    /// probe function, a malformed probe module), so it fails EVERY row
+    /// rather than satisfying a row that pins a non-answer.
+    boundary_failed: bool,
     /// The rendered live answer (diagnostics only — never a comparison
     /// basis).
     rendered: Option<String>,
@@ -367,13 +379,14 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         crate::semantic_query::ReturnProjectionDemand::whole_return(),
     );
     let Ok(result) = carrier.as_result() else {
-        // The BOUNDARY refused before any node exists: a refusal, and the
-        // strongest one the rail has.
+        // The boundary produced NO result: the lane is broken, not the
+        // substrate answering. Reported as such, never as a refusal.
         return LiveProbeOutcome {
             matched_checker: false,
             matched_declared_return: false,
             deferred_operator: None,
-            refused: true,
+            refused: false,
+            boundary_failed: true,
             rendered: None,
             degraded: false,
         };
@@ -384,28 +397,64 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
     // Publication KEEPS an alias/builtin instantiation carrier: the
-    // checker keeps the alias label too, and a consumer expands it on
-    // demand through the `Instantiate` family. The recorded `checker`
-    // column, by contrast, is what 7.0.2 prints through the corpus's
-    // two-step wrapper — a REDUCED form. Comparing the published carrier
-    // against a reduced print measures publication laziness, not a
-    // semantic difference, and no row could ever match. Take the consumer
-    // step first, so both sides answer the same question.
-    let node = dispatch.expand_identity_carrier_for_tests(result.return_type());
+    // checker keeps the alias label too, and the carrier is resolved when
+    // a consumer DEMANDS the structural fact behind it. The recorded
+    // `checker` column, by contrast, is what 7.0.2 prints through the
+    // corpus's two-step wrapper — a REDUCED form. Comparing the published
+    // carrier against a reduced print measures publication laziness, not
+    // a semantic difference, and no row could ever match.
+    //
+    // A structural comparison IS a structural-fact demand, so make it one:
+    // `normalize_node_for_structural_fact_demand` is the production
+    // primitive for exactly this (evaluate deferred shells, resolve a
+    // residual `DeclRef` through `ResolveDecl` and a residual
+    // `InstantiationRef` through `Instantiate`), bounded by exact-identity
+    // cycle detection and fail-closed. It is not a second resolver, and
+    // this lane must not grow one: a hand-rolled expansion loop would
+    // drop the cycle detection and the typed `Partial` outcome, and a
+    // cyclic alias would silently decide the compared node by the
+    // iteration budget.
+    let demand = dispatch.normalize_node_for_structural_fact_demand(
+        result.return_type(),
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
+    // A `Partial` demand carries NO node: truncated or faulted, which is a
+    // semantic non-answer, not a type. Nothing to compare, so the row's
+    // structural bases stay false and only a non-answer pin is satisfied.
+    let Some(node) = demand.into_complete_node() else {
+        return LiveProbeOutcome {
+            matched_checker: false,
+            matched_declared_return: false,
+            deferred_operator: None,
+            refused: true,
+            boundary_failed: false,
+            rendered: Some("<partial structural-fact demand>".to_owned()),
+            degraded,
+        };
+    };
     let rendered = Some(render_node(&dispatch, node, 0));
     let (deferred_operator, refused) = match dispatch.graph().node_data(node) {
         Some(data) => match data.as_ref() {
             crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. } => {
                 (Some(std::sync::Arc::clone(&base.decl_name)), false)
             }
-            // An `Opaque` carrier is the rail publishing NO TYPE — a
-            // typed gap, whatever its disposition (a `Miss` is
-            // `OptionalAbsence`, a genuine failure is the §22 error
-            // type, a back-edge is a recursion carrier). All of them are
-            // honest non-answers; none of them is a type. The
-            // discrimination that matters is against a published TYPE,
-            // which is any other node data.
-            crate::semantic_query::SemanticNodeData::Opaque(_) => (None, true),
+            // Only a SEMANTIC non-answer counts as a refusal — see the
+            // `refused` field. An identity carrier that still denotes a
+            // type, or a resource/control sentinel, does not.
+            crate::semantic_query::SemanticNodeData::Opaque(error) => {
+                use crate::project_semantic_dispatch::query_error_disposition::{
+                    query_error_disposition, QueryErrorDisposition,
+                };
+                (
+                    None,
+                    matches!(
+                        query_error_disposition(error),
+                        QueryErrorDisposition::OptionalAbsence | QueryErrorDisposition::Failure
+                    ),
+                )
+            }
             _ => (None, false),
         },
         None => (None, false),
@@ -452,6 +501,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         matched_declared_return,
         deferred_operator,
         refused,
+        boundary_failed: false,
         rendered,
         degraded,
     }
@@ -489,9 +539,21 @@ fn recorded_signature_return<'a>(decl_emit: &'a str, fn_name: &str) -> Option<&'
 /// here instead of a prose report — in BOTH directions.
 /// One row's verdict evaluation: `Some(failure)` when the live answer to
 /// the recorded probe contradicts the row's recorded verdict (either
-/// direction), or when a diagnostic row's recorded refusal is no longer
-/// pinned by a deferred live carrier.
+/// direction), when a diagnostic row's recorded refusal is no longer
+/// pinned by a live non-answer, or when the observation lane itself
+/// failed to produce a result.
 fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
+    // A broken lane is never evidence. Checked FIRST and for EVERY row, so
+    // a boundary that answers nothing cannot satisfy a row that pins a
+    // non-answer — the row would report green having observed nothing.
+    if live.boundary_failed {
+        return Some(format!(
+            "{}: the audited flow-return boundary produced NO result for the probe `{}`, so \
+             this row observed nothing. The observation lane is broken (the probe module or \
+             its `__sig_probe_lane` entry), not the substrate answering",
+            row.id, row.probe
+        ));
+    }
     {
         let rendered = live.rendered.as_deref().unwrap_or("<no value>");
         let note = match row.verdict {
@@ -596,6 +658,63 @@ fn signature_corpus_live_answers_follow_their_verdicts() {
 /// corpus driver's row-flip mechanism honest — a later block implementing
 /// a probe reduction flips its row through THIS rail, never a prose
 /// report.
+/// A BROKEN observation lane is not a refusal.
+///
+/// A diagnostic row pins the checker's refusal with a live non-answer, so
+/// the one thing that must never satisfy it is "the boundary produced
+/// nothing": the row would report green having observed no program at
+/// all. The `refused` disjunct makes that reachable, so it is pinned here
+/// rather than left to inspection — the outcome is constructed directly
+/// because a genuinely broken lane cannot be provoked from a well-formed
+/// corpus row.
+#[test]
+fn a_boundary_failure_never_satisfies_a_diagnostic_row() {
+    use crate::signature_corpus_rows_tests::Family;
+    let row = Row {
+        id: "SV_CONTROL_boundary_failure",
+        family: Family::UnionValuedThen,
+        source: "export function witness() { return 1; }",
+        probe: "Awaited<ReturnType<typeof witness>>",
+        checker: "",
+        checker_is_any: false,
+        checker_is_never: false,
+        checker_display_only: false,
+        diagnostic: Some("Type instantiation is excessively deep and possibly infinite."),
+        decl_emit: "export declare function witness(): number;\n",
+        verdict: Verdict::KnownOwed {
+            note: "control: the lane is broken",
+        },
+    };
+    let broken = LiveProbeOutcome {
+        matched_checker: false,
+        matched_declared_return: false,
+        deferred_operator: None,
+        refused: false,
+        boundary_failed: true,
+        rendered: None,
+        degraded: false,
+    };
+    assert!(
+        verdict_failure(&row, &broken)
+            .is_some_and(|failure| failure.contains("produced NO result")),
+        "a boundary that answered nothing must fail the row, never pin its refusal"
+    );
+    // The same row IS satisfied by a genuine semantic non-answer, so the
+    // check above discriminates a broken lane from a real refusal rather
+    // than simply rejecting everything.
+    let refused = LiveProbeOutcome {
+        refused: true,
+        boundary_failed: false,
+        rendered: Some("Opaque(Miss)".to_owned()),
+        ..broken
+    };
+    assert_eq!(
+        verdict_failure(&row, &refused),
+        None,
+        "a typed gap where the checker refused is an honest live non-answer"
+    );
+}
+
 #[test]
 fn signature_corpus_flip_law_fires_in_both_directions() {
     use crate::signature_corpus_rows_tests::Family;
