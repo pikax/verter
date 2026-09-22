@@ -819,15 +819,16 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "resolve_enum_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
         },
-        // ResolveOverloadSet { callee, type_args, context } — resolves a
-        // callee's overload set. Signature lowering resolves imported
-        // references but reads no parsed body skeleton at query time, so
-        // `R T L J` (no `P`). LIVE producer: the execute arm projects the
-        // callee's ordered VISIBLE signature group (call bucket first, then
-        // construct; trailing implementations already hidden by the typeof
-        // projection's visibility rule), instantiating per candidate under
-        // explicit `type_args`; a callee with no signature group is an
-        // honest Miss. Value domain is `OverloadSet`, NOT `TypeNode` — the
+        // ResolveOverloadSet { callee, kind, type_args, context } — resolves
+        // the candidates of ONE of a callee's signature buckets (`kind`).
+        // Signature lowering resolves imported references but reads no
+        // parsed body skeleton at query time, so `R T L J` (no `P`). LIVE
+        // producer: the execute arm projects the callee's ordered VISIBLE
+        // signatures of that bucket (trailing implementations already
+        // hidden by the typeof projection's visibility rule), instantiating
+        // per candidate under explicit `type_args`; a bucket with no
+        // signature is an honest Miss, and the other bucket is never read.
+        // Value domain is `OverloadSet`, NOT `TypeNode` — the
         // boundary `execute` wrap converts the group-bearing node into
         // `OverloadSet(Arc<[SignatureRef]>)`. Carries no `mode` → no demand
         // axes (substitution is carried by `type_args` on the key).

@@ -26292,10 +26292,10 @@ fn barrel_keyed_class_surface_composes_under_export_target_identity() {
 
 // =============================================================================
 // ResolveOverloadSet — the live signature-group reducer. The value domain is
-// `OverloadSet(Arc<[SignatureRef]>)`: the callee's ordered VISIBLE signature
-// group (call bucket first, then construct), produced through the ONE shared
-// engine. The LAST element is the last visible overload — the projection the
-// signature utilities (and U6's call resolution) select from.
+// `OverloadSet(Arc<[SignatureRef]>)`: the callee's ordered VISIBLE signatures
+// of ONE requested bucket (call or construct), produced through the ONE
+// shared engine. The LAST element is the last visible overload — the
+// projection the signature utilities (and call resolution) select from.
 // =============================================================================
 
 fn typeof_value_node(
@@ -26337,9 +26337,26 @@ fn overload_set_key_for(
     callee: SemanticNodeId,
     type_args: Vec<SemanticNodeId>,
 ) -> SemanticQueryKey {
+    overload_set_key_of_kind(
+        host,
+        canonical,
+        callee,
+        crate::semantic_query::SignatureKind::Call,
+        type_args,
+    )
+}
+
+fn overload_set_key_of_kind(
+    host: &VerterHost,
+    canonical: &str,
+    callee: SemanticNodeId,
+    kind: crate::semantic_query::SignatureKind,
+    type_args: Vec<SemanticNodeId>,
+) -> SemanticQueryKey {
     let env = host.host_view_env_hashes_for(canonical);
     SemanticQueryKey::ResolveOverloadSet {
         callee,
+        kind,
         type_args: Arc::from(type_args.into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
@@ -26604,29 +26621,53 @@ fn resolve_overload_set_lone_bodied_signature_is_visible() {
     assert_eq!(refs.len(), 1, "a lone bodied signature IS the visible set");
 }
 
-/// A call+construct hybrid orders the CALL bucket before the CONSTRUCT
-/// bucket: `hybrid`'s call signature (returns `string`) precedes its
-/// construct signature (returns the instance object).
+/// A call+construct hybrid exposes each bucket as its OWN set: the call
+/// set of `hybrid` is exactly its call signature (returns `string`) and the
+/// construct set exactly its construct signature (returns the instance
+/// object) — neither set carries the other bucket's candidate.
+///
+/// Mutation recipe: read both buckets into one flat set and each set
+/// reports two candidates.
 #[test]
-fn resolve_overload_set_orders_call_then_construct_buckets() {
+fn resolve_overload_set_serves_each_bucket_separately() {
     let host = class_mech_host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "hybrid");
-    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
-    let refs = execute_overload_set(&dispatch, key)
-        .unwrap_or_else(|err| panic!("hybrid overload set must resolve, got {err:?}"));
-    assert_eq!(refs.len(), 2, "one call + one construct signature");
+    let call_key = overload_set_key_of_kind(
+        &host,
+        "/w/class_mech.ts",
+        callee,
+        crate::semantic_query::SignatureKind::Call,
+        Vec::new(),
+    );
+    let refs = execute_overload_set(&dispatch, call_key)
+        .unwrap_or_else(|err| panic!("hybrid call set must resolve, got {err:?}"));
+    assert_eq!(refs.len(), 1, "the call set is the one call signature");
     assert_eq!(
         signature_return_data(&host, &refs[0]),
         SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
-        "call bucket first"
+        "the call signature returns `string`"
+    );
+    let construct_key = overload_set_key_of_kind(
+        &host,
+        "/w/class_mech.ts",
+        callee,
+        crate::semantic_query::SignatureKind::Construct,
+        Vec::new(),
+    );
+    let refs = execute_overload_set(&dispatch, construct_key)
+        .unwrap_or_else(|err| panic!("hybrid construct set must resolve, got {err:?}"));
+    assert_eq!(
+        refs.len(),
+        1,
+        "the construct set is the one construct signature"
     );
     assert!(
         matches!(
-            signature_return_data(&host, &refs[1]),
+            signature_return_data(&host, &refs[0]),
             SemanticNodeData::Object(_)
         ),
-        "construct bucket second (returns the instance object)"
+        "the construct signature returns the instance object"
     );
 }
 

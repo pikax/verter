@@ -10859,6 +10859,7 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::ResolveOverloadSet => (
                 SemanticQueryKey::ResolveOverloadSet {
                     callee: node(1),
+                    kind: crate::semantic_query::SignatureKind::Call,
                     type_args: nodes(&[]),
                     context: OverloadSetContext {
                         resolve_env_hash: h16(0),
@@ -10867,6 +10868,7 @@ mod prepared_identity_bijection {
                 },
                 SemanticQueryKey::ResolveOverloadSet {
                     callee: node(2),
+                    kind: crate::semantic_query::SignatureKind::Call,
                     type_args: nodes(&[]),
                     context: OverloadSetContext {
                         resolve_env_hash: h16(0),

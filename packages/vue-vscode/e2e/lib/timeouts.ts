@@ -322,6 +322,9 @@ export const POLL_BUDGETS = {
   // ── lib/** ───────────────────────────────────────────────────
   frameworkContractSettle: { budgetMs: 10_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   parityHarnessSettle: { budgetMs: 12_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
+  // The parity harness settles (`settledDiagnostics`, `assertHasErrorMatching`);
+  // the style-css parity suite awaits them under a declared 20s.
+  parityDiagnosticsSettle: { budgetMs: 12_000, parentTimeoutMs: 20_000 },
   completionContractSettle: { budgetMs: 8_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
 } as const satisfies Record<string, PollBudgetSpec>;
 
