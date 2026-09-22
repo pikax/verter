@@ -62,6 +62,16 @@ pub struct IntrinsicSurfaceResult {
     pub members: Vec<crate::resolver_core::IntrinsicSurfaceMember>,
     pub attr_names: Vec<String>,
     pub event_names: Vec<String>,
+    /// The workspace content generation this surface was projected under.
+    ///
+    /// The version axis lives HERE, on the value, and not in
+    /// [`crate::resolver_core::FallthroughNodeKey::IntrinsicSurfaceLoad`]:
+    /// a superseded surface is REPLACED under its stable
+    /// `(project_anchor, tag)` key instead of accumulating one dead map
+    /// entry per edit. The reader compares it against the live generation
+    /// and retires the entry on a mismatch, so a stale surface is never
+    /// served — the node carries no validated fact signature of its own.
+    pub cache_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +164,17 @@ impl FallthroughResolverState {
         self.cache.remove(key);
     }
 
+    /// Retire a node whose own value-carried version axis no longer matches
+    /// the live one.
+    ///
+    /// Used by the intrinsic-surface reader: that node carries an EMPTY
+    /// validated-fact signature, so the store view can never reject it and the
+    /// superseded candidate would otherwise stay warm under its stable key
+    /// forever, shadowing the fresh one on every later read.
+    pub(crate) fn retire_node(&self, key: &FallthroughNodeKey) {
+        self.cache.remove(key);
+    }
+
     /// Number of KEYS currently warm in the fallthrough node cache.
     ///
     /// The admission observable: a no-poison refusal is visible as a count that
@@ -243,8 +264,13 @@ impl FallthroughResolverState {
             return;
         }
         // An empty validated-fact signature is true for every future view.
-        // The intrinsic surface is the sole exception: its key carries the
-        // project cache generation that changes with its source registry.
+        // The intrinsic surface is the sole exception: its VALUE carries the
+        // project cache generation that changes with its source registry, and
+        // its reader retires the entry the moment that generation no longer
+        // matches the live one (`intrinsic_members_for_tag`). The version axis
+        // is deliberately NOT in the key: a generation-keyed entry is never
+        // superseded, so an editing session accumulates one whole dead
+        // intrinsic surface per tag per edit.
         // Consumed bindings have no such version axis and must recompute until
         // their producer supplies a real fact root.
         if !result.facts.is_empty()
@@ -302,14 +328,13 @@ pub fn root_follow_key(
     }
 }
 
-pub fn intrinsic_surface_key(
-    project_anchor: &str,
-    cache_generation: u64,
-    tag: &str,
-) -> FallthroughNodeKey {
+/// The STABLE identity of one project's intrinsic surface for one tag.
+///
+/// Deliberately carries no generation: see
+/// [`FallthroughNodeKey::IntrinsicSurfaceLoad`].
+pub fn intrinsic_surface_key(project_anchor: &str, tag: &str) -> FallthroughNodeKey {
     FallthroughNodeKey::IntrinsicSurfaceLoad {
         project_anchor: project_anchor.to_string(),
-        cache_generation,
         tag: tag.to_string(),
     }
 }
@@ -490,14 +515,14 @@ mod tests {
 
     #[test]
     fn intrinsic_surface_key_keyed_by_tag() {
-        let key_div = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "div");
-        let key_span = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "span");
+        let key_div = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "div");
+        let key_span = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "span");
         assert_ne!(key_div, key_span);
 
-        let key_div2 = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "div");
+        let key_div2 = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "div");
         assert_eq!(key_div, key_div2);
 
-        let key_other_project = intrinsic_surface_key("/other|/other/tsconfig.json", 7, "div");
+        let key_other_project = intrinsic_surface_key("/other|/other/tsconfig.json", "div");
         assert_ne!(
             key_div, key_other_project,
             "project-owned intrinsic caches must not be shared across projects"

@@ -743,11 +743,15 @@ pub enum FallthroughNodeKey {
         branch_key: String,
         overrides: FallthroughOverrideIdentity,
     },
-    IntrinsicSurfaceLoad {
-        project_anchor: String,
-        cache_generation: u64,
-        tag: String,
-    },
+    /// One project's intrinsic-element surface for one tag.
+    ///
+    /// Content-free by construction (R6): the workspace content generation
+    /// the surface was projected under rides on the VALUE
+    /// ([`crate::resolver_core::fallthrough_resolver::IntrinsicSurfaceResult::cache_generation`]),
+    /// never here. A generation in the key mints a BRAND-NEW map entry on
+    /// every edit anywhere in the workspace and retires none, so an editing
+    /// session retains one whole intrinsic surface per tag per keystroke.
+    IntrinsicSurfaceLoad { project_anchor: String, tag: String },
 }
 
 impl FallthroughNodeKey {

@@ -3343,9 +3343,9 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
     // is what isolates the rail under test: the ONLY thing that can refuse this
     // admission is the typed cold-compute completeness.
     let (anchor, generation) = host.project_intrinsic_cache_anchor(canonical);
-    let key = intrinsic_surface_key(&anchor, generation, "div");
+    let key = intrinsic_surface_key(&anchor, "div");
     let members = host.intrinsic_members_for_tag("div");
-    let node = host.build_runtime_intrinsic_surface_node(&members);
+    let node = host.build_runtime_intrinsic_surface_node(&members, generation);
     host.resolver_runtime()
         .fallthrough
         .compute_and_maybe_admit(&host, || ((), Some((key.clone(), node))));
@@ -18678,5 +18678,70 @@ fn overlay_structure_grammar_comes_from_registered_catalog_identity() {
         host.registered_overlay_structure(miss_canonical, vue_src, &unregistered, &view)
             .is_none(),
         "a carrier row without a registered frontend catalog row must fail closed",
+    );
+}
+
+/// An editing session must not retain one whole intrinsic-element surface per
+/// keystroke.
+///
+/// `intrinsic_members_for_tag` is reached once per native template element on
+/// every fallthrough resolve, and it caches the projected surface in the shared
+/// fallthrough-node cache. That cache is a MAP: a key that carries the
+/// workspace content generation is never superseded by a later one, so every
+/// edit anywhere in the workspace minted a brand-new entry holding a complete
+/// intrinsic surface (`div`'s whole attribute + listener member list) and
+/// retired none. Over a long editing session that is an unbounded retained-byte
+/// slope with no plateau — the exact shape the bounded-memory contract forbids.
+///
+/// Discriminating: the assertion is on the cache's KEY count across many edits,
+/// not on a byte figure, so it fails deterministically on a per-generation key
+/// and cannot pass by accident. With the generation in the key the count climbs
+/// by one per edit; with the version axis on the VALUE the count is flat
+/// because each edit REPLACES the superseded surface under its stable key.
+///
+/// The freshness leg is asserted alongside it: the surface served after the
+/// edits is still a resolved one, so the bound is not bought by serving nothing.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeated_edits_do_not_retain_one_intrinsic_surface_per_generation() {
+    const EDITS: usize = 24;
+
+    fn source(revision: usize) -> String {
+        format!(
+            r#"<script setup lang="ts">
+defineProps<{{ label?: string }}>()
+const revision = {revision}
+</script>
+<template><div :title="label">{{{{ revision }}}}</div></template>"#
+        )
+    }
+
+    let host = make_host();
+    let canonical = "/src/Churn.vue";
+    upsert_vue(&host, canonical, &source(0));
+    assert!(
+        host.resolve_fallthrough_surface(canonical).is_some(),
+        "the fixture must resolve a fallthrough surface for a single native root"
+    );
+    let after_first = host.resolver_runtime().fallthrough.cached_node_count();
+    assert!(
+        after_first > 0,
+        "the first resolve must have warmed at least one fallthrough node"
+    );
+
+    for revision in 1..=EDITS {
+        upsert_vue(&host, canonical, &source(revision));
+        assert!(
+            host.resolve_fallthrough_surface(canonical).is_some(),
+            "revision {revision} must still resolve a fallthrough surface"
+        );
+    }
+
+    let after_edits = host.resolver_runtime().fallthrough.cached_node_count();
+    assert!(
+        after_edits <= after_first,
+        "{EDITS} edits must not grow the fallthrough node cache — it held {after_first} keys \
+         after one resolve and {after_edits} after {EDITS} more, i.e. one retained intrinsic \
+         surface per content generation"
     );
 }
