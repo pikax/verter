@@ -66,11 +66,21 @@ an undecided relation is never guessed. Both thread `CanonicalEvidence` to
 
 `ProjectSemanticDispatch::intern_normalized_union_or_intersection` is the
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
-through. The only composite construction deliberately outside it is the
-`CompositeList::ordered_carrier` mint for same-name method **overload groups**
-(`walk.rs`, `build.rs`) — an ordered carrier is an authored overload sequence,
-not a commutative intersection, and routing it through the reducer would change
-the origin category and therefore node identity.
+through. Two composite constructions are deliberately outside it, both
+`CompositeList::ordered_carrier` mints, and both for the same reason — an
+ordered carrier is an authored sequence, not a commutative intersection, and
+routing it through the reducer would change the origin category and therefore
+node identity:
+
+1. same-name method **overload groups** (`walk.rs`, `build.rs`);
+2. a **possibly-callable member-value intersection** (`walk.rs`
+   `merge_value_nodes_recursive`). Call resolution over an intersection tries
+   arms in declaration order, so a commutative sort would break overload
+   precedence. The classification (`value_may_contribute_call_signatures`)
+   fails CLOSED on anything undecidable from the graph alone, and callable
+   merging itself belongs to `SignaturesOfType` →
+   `signature_kernel::discovery::intersection_signatures`, never to a local
+   concatenation of signature nodes (§15).
 
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,

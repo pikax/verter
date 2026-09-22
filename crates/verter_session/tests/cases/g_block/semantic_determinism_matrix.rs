@@ -555,7 +555,10 @@ struct MatrixRow {
     /// The §5.9 first-column text (abbreviated to its stable prefix).
     perturbation: &'static str,
     /// The executable driver test for a row replayable today, else the
-    /// `#[ignore]` reason naming the successor block.
+    /// `#[ignore]` reason naming the MISSING PUBLIC SURFACE that keeps the
+    /// row undrivable (or the fail-closed condition it hits) — never a
+    /// coordination identifier, which tells a reader nothing about what
+    /// has to be built. Enforced below.
     driver: Driver,
 }
 
