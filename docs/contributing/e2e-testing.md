@@ -159,8 +159,25 @@ the non-vacuity receipt.
 The VS Code job:
 
 1. Prepares the LSP binary, extension bundle, and compiled E2E tests once
-2. Downloads those artifacts into the E2E job
-3. Runs the fixture matrix against each applicable provider with `xvfb-run` (headless display)
+2. Derives the shard plan from the one route inventory (`buildE2eCiShards` in
+   `e2e/lib/routeInventory.ts`): the required routes are bin-packed by a per-fixture duration
+   weight into a small number of balanced shards, so each runner sets up once and runs several
+   routes back to back instead of one runner per route
+3. Downloads those artifacts into each shard job
+4. Runs the shard's exact route list with `xvfb-run` (headless display), passed as `E2E_ROUTES`
+
+`E2E_ROUTES` is a comma-separated list of `<fixture>@<provider>` labels and is the selector a shard
+runs with. It cannot be combined with `E2E_FIXTURE` / `E2E_TYPE_PROVIDER`, and an empty, duplicated
+or unknown entry fails the run before anything launches. To reproduce one shard locally, copy its
+route list from the job name's step log:
+
+```bash
+E2E_ROUTES=monorepo@tsgo,tsconfig-extends@tsgo pnpm --filter verter-vscode test:e2e:run
+```
+
+Per-route diagnostics (timing, logs, run summaries) are written per route label inside the shard's
+`e2e-diagnostics-shard-<n>` artifact. Acquiring the VS Code host is retried a bounded number of
+times because that download is infrastructure, not product; nothing after acquisition is retried.
 
 See `.github/workflows/ci.yml` jobs `editor-neutral-lsp` and `vscode-e2e`.
 
