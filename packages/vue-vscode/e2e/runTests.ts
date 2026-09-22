@@ -27,13 +27,7 @@ import {
   type ParityFixture,
   type ParityTestInventory,
 } from "./lib/parityTestInventory";
-import {
-  e2eRouteLabel,
-  parseE2eRouteLabel,
-  selectE2eRoutes,
-  selectE2eRoutesByLabels,
-  type E2eRoute,
-} from "./lib/routeInventory";
+import { e2eRouteLabel, selectE2eRunRoutes, type E2eRoute } from "./lib/routeInventory";
 import { installFixtureDeps } from "./lib/fixtureDeps";
 import {
   E2E_BASE_SERVER_PROFILE_ENV,
@@ -196,33 +190,6 @@ function requiredParityRun(
     fixture as ParityFixture,
     onlyPattern,
   );
-}
-
-/**
- * Select a non-empty subset of the canonical route inventory. A fixture-only
- * selector expands to every applicable provider instead of inventing an auto route.
- */
-function selectRoutes(options: {
-  readonly fixtureArg?: string;
-  readonly envRoutes?: string;
-  readonly envFixture?: string;
-  readonly envTypeProvider?: string;
-}): E2eRoute[] {
-  if (options.fixtureArg?.includes("@")) return [parseE2eRouteLabel(options.fixtureArg)];
-  // A CI shard receives its exact route list; it is never combined with the
-  // fixture/provider selectors, which describe a different kind of selection.
-  if (options.envRoutes) {
-    if (options.fixtureArg || options.envFixture || options.envTypeProvider) {
-      throw new Error(
-        "E2E_ROUTES cannot be combined with --fixture, E2E_FIXTURE or E2E_TYPE_PROVIDER",
-      );
-    }
-    return selectE2eRoutesByLabels(options.envRoutes);
-  }
-  return selectE2eRoutes({
-    fixture: options.fixtureArg ?? options.envFixture,
-    typeProvider: options.envTypeProvider,
-  });
 }
 
 /**
@@ -411,7 +378,7 @@ async function main() {
   const envRoutes = readE2eEnv("ROUTES");
   const envFixture = readE2eEnv("FIXTURE");
   const envTypeProvider = readE2eEnv("TYPE_PROVIDER");
-  const routesToRun = selectRoutes({
+  const routesToRun = selectE2eRunRoutes({
     fixtureArg: fixtureArg?.replace("--fixture=", ""),
     envRoutes,
     envFixture,

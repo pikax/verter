@@ -33,6 +33,7 @@ import {
   resolveE2eFixtureSelection,
   selectE2eRoutes,
   selectE2eRoutesByLabels,
+  selectE2eRunRoutes,
 } from "./routeInventory";
 
 describe("VS Code E2E route inventory", () => {
@@ -116,6 +117,32 @@ describe("VS Code E2E route inventory", () => {
       expect(() => buildE2eCiShards(buildRequiredE2eRouteInventory().length + 1)).toThrow(
         /shard count/,
       );
+    });
+  });
+
+  describe("selectE2eRunRoutes", () => {
+    it("runs the required matrix when nothing selects, and one route for a labelled --fixture", () => {
+      expect(selectE2eRunRoutes({})).toEqual(buildRequiredE2eRouteInventory());
+      expect(selectE2eRunRoutes({ fixtureArg: "monorepo@tsgo" }).map(e2eRouteLabel)).toEqual([
+        "monorepo@tsgo",
+      ]);
+      expect(
+        selectE2eRunRoutes({ envRoutes: "monorepo@tsgo,no-config@off" }).map(e2eRouteLabel),
+      ).toEqual(["monorepo@tsgo", "no-config@off"]);
+    });
+
+    it("refuses E2E_ROUTES combined with any other selector, including a labelled --fixture", () => {
+      // The labelled `--fixture` used to win silently over E2E_ROUTES.
+      for (const conflict of [
+        { fixtureArg: "monorepo@tsserver" },
+        { fixtureArg: "monorepo" },
+        { envFixture: "monorepo" },
+        { envTypeProvider: "tsgo" },
+      ]) {
+        expect(() => selectE2eRunRoutes({ envRoutes: "monorepo@tsgo", ...conflict })).toThrow(
+          /E2E_ROUTES cannot be combined/,
+        );
+      }
     });
   });
 

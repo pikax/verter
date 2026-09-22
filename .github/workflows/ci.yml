@@ -72,6 +72,7 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             proto:
               - 'crates/verter_protocol/proto/**'
               - 'packages/proto/src/gen/**'
@@ -80,6 +81,7 @@ jobs:
               - 'package.json'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             js:
               - 'packages/**'
               - '!packages/playground/**'
@@ -106,6 +108,7 @@ jobs:
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH5/ARH7
             # verifiers). Their products join the live Rust tree — hotspot
             # sources, crate Cargo manifests and the cross-crate consumer
@@ -132,6 +135,7 @@ jobs:
               - 'performance-gates.toml'
               - 'scripts/validate-performance-gates.mjs'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Gates `wasm-build` ALONE, which both builds the browser artifact
             # and verifies the committed carrier fixture against it. So this
             # filter decides whether that fixture check runs at all, and it must
@@ -162,6 +166,7 @@ jobs:
               - 'tests/browser-host/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             playground:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -177,6 +182,7 @@ jobs:
               - 'packages/wasm/**'
               - 'packages/playground/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             vscode:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -195,6 +201,7 @@ jobs:
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             dx:
               - 'crates/verter_dx_baseline/**'
               - 'crates/verter_lsp/**'
@@ -215,6 +222,7 @@ jobs:
               - 'packages/language-shared/**'
               - 'scripts/dx/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Dependency closure for the editor-neutral raw-LSP contract. This is
             # intentionally broader than either the VS Code or DX-only filters:
             # the contract drives the real compiler/LSP, provider plugin, relay,
@@ -260,6 +268,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             svelte_oracle:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/svelte-golden-lib.mjs'
@@ -273,6 +282,7 @@ jobs:
               - 'crates/verter_compiler/Cargo.toml'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             svelte_client_smokes:
               - 'crates/verter_compiler/src/svelte/**'
               - 'packages/svelte-runtime-tests/**'
@@ -280,6 +290,7 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Editor-client integration surface (Helix / Lapce / Zed / Neovim).
             # These lanes used to live in four standalone workflows that each
             # built `verter-lsp --release` themselves — twelve uncached release
@@ -295,6 +306,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # JetBrains plugin lane (JBT1+): the pinned Gradle build resolves
             # its own WebStorm SDK; only the plugin tree, its gate and the
             # supported-IDE declaration feed it.
@@ -308,6 +320,7 @@ jobs:
               - '.nvmrc'
               - '.gitattributes'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             svelte_perf:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -322,6 +335,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in

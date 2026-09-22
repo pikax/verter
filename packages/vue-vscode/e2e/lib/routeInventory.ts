@@ -266,6 +266,36 @@ export function selectE2eRoutesByLabels(labels: string): E2eRoute[] {
 }
 
 /**
+ * Resolve what one `runTests` invocation runs from its selectors. `E2E_ROUTES`
+ * (a CI shard's exact list) is mutually exclusive with every other selector,
+ * whichever form the other one takes — a labelled `--fixture=<f>@<p>` included —
+ * so a stray environment variable can never silently override the list a
+ * shard was handed, nor the other way round. Otherwise a labelled `--fixture`
+ * names one route, and the fixture/provider selectors expand as before; no
+ * selector at all is the required matrix.
+ */
+export function selectE2eRunRoutes(options: {
+  readonly fixtureArg?: string;
+  readonly envRoutes?: string;
+  readonly envFixture?: string;
+  readonly envTypeProvider?: string;
+}): E2eRoute[] {
+  if (options.envRoutes) {
+    if (options.fixtureArg || options.envFixture || options.envTypeProvider) {
+      throw new Error(
+        "E2E_ROUTES cannot be combined with --fixture, E2E_FIXTURE or E2E_TYPE_PROVIDER",
+      );
+    }
+    return selectE2eRoutesByLabels(options.envRoutes);
+  }
+  if (options.fixtureArg?.includes("@")) return [parseE2eRouteLabel(options.fixtureArg)];
+  return selectE2eRoutes({
+    fixture: options.fixtureArg ?? options.envFixture,
+    typeProvider: options.envTypeProvider,
+  });
+}
+
+/**
  * Relative per-route duration weights used ONLY to balance CI shards. A weight
  * is roughly the route's wall-clock minutes inside one launched VS Code host;
  * the parity workloads dominate, the topology fixtures sit in the middle, and
