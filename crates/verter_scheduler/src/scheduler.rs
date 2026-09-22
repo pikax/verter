@@ -1212,6 +1212,18 @@ pub struct Scheduler {
     /// from every build without it.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) batch_admit_seam: BatchAdmitSeamHook,
+    /// Test-only monotonic count of inbox teardown wakes posted by
+    /// [`Self::reset`], bumped AFTER the send. The inbox message itself
+    /// is consumable — any cooperative pump may swallow it — so a test
+    /// that must release a rendezvous only once the wake is provably
+    /// posted cannot observe the inbox directly: an empty inbox means
+    /// "not yet sent" and "already swallowed" alike, and a non-empty one
+    /// may hold an unrelated `StageComplete`. This counter is the
+    /// edge-triggered, non-consumable observation of that same event.
+    /// `cfg`-gated to `test` / the opt-in `test-support` feature; absent
+    /// from every build without it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) reset_wake_posts: AtomicU64,
     /// Test-only monotonic counter bumped once per admission-lock
     /// acquisition inside [`Self::handle_new_request_batch`] (co-located
     /// with the `dag.lock()` call via [`Self::acquire_dag_for_admission`]
@@ -1426,6 +1438,8 @@ impl Scheduler {
             #[cfg(any(test, feature = "test-support"))]
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
+            reset_wake_posts: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             batch_admit_epoch_trace: Mutex::new(None),
@@ -1522,6 +1536,8 @@ impl Scheduler {
             dispatch_pause: DispatchPauseHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             batch_admit_seam: BatchAdmitSeamHook::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            reset_wake_posts: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -2202,6 +2218,8 @@ impl Scheduler {
         self.shutdown.store(true, Ordering::Release);
         let _ = self.driver_teardown.0.try_send(());
         let _ = self.inbox.sender.send(Submission::Wake);
+        #[cfg(any(test, feature = "test-support"))]
+        self.reset_wake_posts.fetch_add(1, Ordering::Release);
         if let Some(handle) = self.driver_handle.lock().take() {
             if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
                 let _ = handle.join();
@@ -5973,6 +5991,17 @@ impl Scheduler {
         self.dag.lock().pending_len()
     }
 
+    /// Test-only: how many times [`Self::reset`] has posted its inbox
+    /// teardown wake. Observing this instead of the inbox itself is what
+    /// lets a teardown test release a rendezvous exactly once the wake is
+    /// posted, whether or not a concurrent pump has already swallowed it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_reset_wake_posts(&self) -> u64 {
+        self.reset_wake_posts.load(Ordering::Acquire)
+    }
+
     /// Test-only: release the parked driver from the dispatch pause.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -9637,11 +9666,19 @@ mod tests {
             };
             // Wait for the observed event instead of a fixed sleep:
             // `reset()` stores `shutdown`, sends the teardown signal, then
-            // posts the inbox wake in that order, so a non-empty inbox
+            // posts the inbox wake in that order, so one posted wake
             // proves all three already happened and the pause can be
             // released into the exact swallowed-wake window under test.
+            //
+            // The observation is the post COUNT, never the inbox itself:
+            // the paused driver re-drains the inbox every couple of
+            // milliseconds, so an empty inbox cannot distinguish "the wake
+            // is not sent yet" from "the wake was already swallowed" — the
+            // very state this test exists to enter — and a non-empty inbox
+            // may only hold a worker's `StageComplete`, releasing the pause
+            // before `reset()` has signalled anything at all.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while sched.inbox.receiver.is_empty() {
+            while sched.test_reset_wake_posts() == 0 {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "reset() did not post the inbox wake before the deadline"
