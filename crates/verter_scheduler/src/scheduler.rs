@@ -1178,6 +1178,16 @@ pub struct Scheduler {
     /// Driver thread handle (native only).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) driver_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Serializes concurrent `reset()` calls (native only).
+    ///
+    /// `reset()` takes `&self`, so two threads may enter it at once. The
+    /// driver handle is `take()`n exactly once: the loser would skip the
+    /// join and clear `nodes`/the DAG while the still-running driver is
+    /// pumping. Holding this guard for the whole body turns the second
+    /// reset into a full, ordered rerun after the first has joined the
+    /// driver and finished clearing — never an overlap.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) reset_serial: Mutex<()>,
     /// Out-of-band teardown signal for the parked driver (native only).
     ///
     /// The submission inbox is a MULTI-consumer channel: every
@@ -1431,6 +1441,8 @@ impl Scheduler {
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            reset_serial: Mutex::new(()),
             driver_teardown: crossbeam_channel::bounded(1),
             counters: SchedulerCounters::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1529,6 +1541,8 @@ impl Scheduler {
             shutdown: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             driver_handle: Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            reset_serial: Mutex::new(()),
             #[cfg(not(target_arch = "wasm32"))]
             driver_teardown: crossbeam_channel::bounded(1),
             counters: SchedulerCounters::default(),
@@ -2212,6 +2226,12 @@ impl Scheduler {
     /// the clear phase because the driver thread is joined first.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reset(&self) {
+        // Serialize concurrent resets: the driver handle is `take()`n
+        // exactly once, so without this the loser would skip the join and
+        // clear `nodes`/the DAG while the still-running driver pumps.
+        // Held for the whole body; `reset()` never re-enters itself and
+        // the driver never calls it, so this cannot deadlock.
+        let _serial = self.reset_serial.lock();
         // 1. Stop the driver thread. The dedicated teardown signal — not
         //    the inbox wake, which any cooperative pump may consume first —
         //    is what guarantees a parked driver observes this.
@@ -9656,6 +9676,12 @@ mod tests {
 
             // Tear down while the driver sits in that re-draining park, so
             // the inbox wake is gone before the driver parks on it.
+            //
+            // The baseline is captured BEFORE the resetter spawns: the
+            // counter bump is the first thing `reset()` does after two
+            // non-blocking sends, so a fast resetter could post before a
+            // later read and the delta-wait would spin to its deadline.
+            let wake_baseline = sched.test_reset_wake_posts();
             let resetter = {
                 let sched = Arc::clone(&sched);
                 std::thread::spawn(move || {
@@ -9677,8 +9703,14 @@ mod tests {
             // very state this test exists to enter — and a non-empty inbox
             // may only hold a worker's `StageComplete`, releasing the pause
             // before `reset()` has signalled anything at all.
+            //
+            // The comparison is delta-based, never `== 0`: the counter is
+            // monotonic across the scheduler's lifetime, so a reused
+            // scheduler that already reset before would sit at 1, 2, ...
+            // and a hardcoded zero-check would fall through without
+            // waiting for the new wake at all.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while sched.test_reset_wake_posts() == 0 {
+            while sched.test_reset_wake_posts() == wake_baseline {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "reset() did not post the inbox wake before the deadline"
