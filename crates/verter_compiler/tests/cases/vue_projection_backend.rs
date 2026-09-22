@@ -1084,11 +1084,14 @@ fn options_projection_reads_admitted_carrier_blocks() {
 #[test]
 fn binding_views_reads_admitted_carrier_blocks() {
     use verter_compiler::framework_common::vue_projection_backend::{
-        BindingKind, BindingUsageSet, ViewSnapshotKind, WriteDomain, WriteRejection,
+        BindingKind, ViewSnapshotKind, WriteDomain, WriteRejection,
     };
     use verter_compiler::framework_common::SetupProjectionRefusal;
 
     const SFC: &str = concat!(
+        "<template>\n",
+        "<button @click=\"count++\">{{ doubled }}</button>\n",
+        "</template>\n",
         "<script setup lang=\"ts\">\n",
         "import { ref, computed } from 'vue';\n",
         "const count = ref(0);\n",
@@ -1122,14 +1125,20 @@ fn binding_views_reads_admitted_carrier_blocks() {
         WriteDomain::SetterParam(domain) => assert_eq!(domain, "string"),
         other => panic!("setter domain must be the declared type, got {other:?}"),
     }
-    let declared: Vec<String> = views
-        .read
-        .bindings
+    // Usage is accounted from the admitted carrier's own regions through
+    // the owned backend boundary: no caller-supplied name slices.
+    let usage = VueProjectionBackend
+        .binding_usage(SFC, &artifact)
+        .expect("usage");
+    let count_use = usage
+        .used
         .iter()
-        .map(|binding| binding.name.clone())
-        .collect();
-    let usage = BindingUsageSet::from_authored_references(&declared, &["count"], &[], &[]);
-    assert!(usage.is_used("count"));
+        .find(|binding| binding.name == "count")
+        .expect("count");
+    assert!(
+        count_use.regions.template && count_use.regions.script,
+        "count is referenced in the admitted template and script"
+    );
     assert!(usage.unused().contains(&"nested"));
     assert_eq!(
         VueProjectionBackend

@@ -47,6 +47,7 @@ export const DIRTY_UNIVERSAL_MUTABLE_ALIAS = { write: { universalMutableAlias: t
 export const DIRTY_SYNTHETIC_VOID_READS = { usage: { syntheticVoidReads: true } };
 export const DIRTY_IMMUTABLE_SNAPSHOT = { read: { snapshotKind: "immutable" } };
 export const DIRTY_READ_TYPE_WRITE_DOMAIN = { write: { setterDomain: "readType" } };
+export const DIRTY_CONST_PLAIN_WRITABLE = { write: { constPlainMutable: true } };
 
 const RUST_CASES = Object.freeze({
   "STP15-read-ref": [
@@ -128,6 +129,18 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
     ]),
     discriminators: Object.freeze(["stp15_setter_domain_uses_declared_setter_type"]),
   }),
+  DIRTY_CONST_PLAIN_WRITABLE: Object.freeze({
+    patches: Object.freeze([
+      Object.freeze({
+        find: "BindingKind::Plain => projection.write.immutable.push(name),",
+        replace: `BindingKind::Plain => projection.write.writable.push(WritableBinding {
+            name,
+            domain: WriteDomain::PlainAssign,
+        }),`,
+      }),
+    ]),
+    discriminators: Object.freeze(["stp15_const_plain_bindings_refuse_template_writes"]),
+  }),
 });
 const DIRTY_TWIN_DISCRIMINATORS = Object.freeze({
   DIRTY_UNIVERSAL_MUTABLE_ALIAS: Object.freeze([
@@ -143,6 +156,7 @@ const DIRTY_TWIN_DISCRIMINATORS = Object.freeze({
     "stp15_setter_domain_uses_declared_setter_type",
     "binding_views_reads_admitted_carrier_blocks",
   ]),
+  DIRTY_CONST_PLAIN_WRITABLE: Object.freeze(["stp15_const_plain_bindings_refuse_template_writes"]),
 });
 
 export function dirtyTwinExpectations() {
@@ -201,7 +215,9 @@ export function validateStp15Products({ repoRoot = REPO_ROOT } = {}) {
 export function runRustCases(repoRoot = REPO_ROOT) {
   // Both runs compile the owning crate (physical syntactic proof) and
   // execute the binding-views suites: unit facts plus the production
-  // `binding_views` path over real admitted `.vue` carrier bytes.
+  // `binding_views` path over real admitted `.vue` carrier bytes. Each
+  // lane keeps its own result so a zero-test lane cannot hide behind the
+  // other lane's passes.
   const invocations = [
     ["test", "-p", "verter_compiler", "--lib", "ide::vue_projection::binding_views"],
     [
@@ -213,24 +229,34 @@ export function runRustCases(repoRoot = REPO_ROOT) {
       "binding_views_reads_admitted_carrier_blocks",
     ],
   ];
-  const results = invocations.map((args) =>
-    spawnSync("cargo", [...args, "--", "--test-threads=1"], {
+  const lanes = invocations.map((args) => {
+    const result = spawnSync("cargo", [...args, "--", "--test-threads=1"], {
       cwd: repoRoot,
       encoding: "utf8",
       windowsHide: true,
       timeout: 300000,
       env: process.env,
-    }),
-  );
+    });
+    return {
+      status: result.status,
+      error: result.error,
+      stdout: `${result.stdout || ""}${result.stderr || ""}`,
+    };
+  });
   return {
-    status: results.every((result) => result.status === 0) ? 0 : 1,
-    error: results.find((result) => result.error)?.error,
-    stdout: results.map((result) => `${result.stdout || ""}${result.stderr || ""}`).join("\n"),
+    status: lanes.every((lane) => lane.status === 0) ? 0 : 1,
+    error: lanes.find((lane) => lane.error)?.error,
+    stdout: lanes.map((lane) => lane.stdout).join("\n"),
+    lanes,
   };
 }
 
 function testPassed(output, name) {
   return output.includes(`${name} ... ok`) && !output.includes(`${name} ... FAILED`);
+}
+
+function testFailed(output, name) {
+  return output.includes(`${name} ... FAILED`);
 }
 
 export function assertRustCases(run) {
@@ -239,12 +265,28 @@ export function assertRustCases(run) {
     return STP15_MANDATORY_CASES.map((id) => err(id, "missing-check", run.error.message));
   }
   const output = String(run.stdout || "");
-  if (run.status !== 0 || !/test result: ok\. [1-9]\d* passed; 0 failed/.test(output)) {
-    return STP15_MANDATORY_CASES.map((id) =>
+  // Per-lane evidence: each cargo lane must report its own passing
+  // `test result` line, so a zero-test carrier lane fails instead of
+  // hiding behind the lib lane's passes.
+  const lanes = Array.isArray(run.lanes) ? run.lanes : [{ status: run.status, stdout: output }];
+  for (const [index, lane] of lanes.entries()) {
+    const laneOutput = String(lane.stdout || "");
+    if (lane.status !== 0 || !/test result: ok\. [1-9]\d* passed; 0 failed/.test(laneOutput)) {
+      return STP15_MANDATORY_CASES.map((id) =>
+        err(
+          id,
+          "rust-case",
+          `cargo lane ${index} did not execute its binding-views cases (status=${lane.status})`,
+        ),
+      );
+    }
+  }
+  if (!testPassed(output, "binding_views_reads_admitted_carrier_blocks")) {
+    errors.push(
       err(
-        id,
+        "STP15-read-ref",
         "rust-case",
-        `cargo test did not complete the binding-views cases (status=${run.status})`,
+        "the production carrier lane did not execute binding_views_reads_admitted_carrier_blocks",
       ),
     );
   }
@@ -262,6 +304,7 @@ export function assertRustCases(run) {
     DIRTY_SYNTHETIC_VOID_READS,
     DIRTY_IMMUTABLE_SNAPSHOT,
     DIRTY_READ_TYPE_WRITE_DOMAIN,
+    DIRTY_CONST_PLAIN_WRITABLE,
   };
   for (const [twin, value] of Object.entries(twins)) {
     if (value === undefined) {
@@ -357,19 +400,21 @@ export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
       );
       continue;
     }
-    const cleanPass =
-      run.status === 0 && spec.discriminators.every((name) => testPassed(output, name));
-    if (cleanPass) {
+    // Rejection proof requires each discriminator to FAIL for the stated
+    // mutation: a nonzero status alone is not proof, since an unrelated
+    // compile error or sibling failure also exits nonzero while the
+    // owning discriminator still passes.
+    const rejected =
+      run.status !== 0 && spec.discriminators.every((name) => testFailed(output, name));
+    if (!rejected) {
       errors.push(
         err(
           "STP15-mutation",
           "dirty-twin-unproven",
-          `${twin} applied but its discriminators still passed: the mutation is not discriminated`,
+          `${twin} applied but its discriminators did not all fail: the mutation is not discriminated`,
         ),
       );
     }
-    // Otherwise the applied twin failed its discriminators: rejected for
-    // the stated reason, as required.
   }
   if (fs.readFileSync(abs, "utf8") !== original) {
     fs.writeFileSync(abs, original);

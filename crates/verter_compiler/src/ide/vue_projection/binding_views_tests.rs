@@ -633,3 +633,84 @@ function bump() { count.value++; }
         "unmentioned names never join the population"
     );
 }
+
+#[test]
+fn stp15_defineprops_rest_spread_binds_a_readonly_row() {
+    let content = "const { title, ...rest } = defineProps<{ title: string }>();\n";
+    let projection = project_setup(content);
+    let rest = projection.read.lookup("rest").expect("rest");
+    assert_eq!(
+        rest.kind,
+        BindingKind::Readonly,
+        "a rest-spread local holds readonly prop copies"
+    );
+    assert_eq!(
+        projection.write.write_target("rest"),
+        Err(WriteRejection::ReadonlyProp),
+        "a rest-spread local is never a writable assignment target"
+    );
+}
+
+#[test]
+fn stp15_type_only_imports_bind_no_read_row() {
+    let content = "import type { Foo } from './types';\nimport { type Bar, ref } from 'vue';\nconst count = ref(0);\n";
+    let projection = project_setup(content);
+    assert!(
+        projection.read.lookup("Foo").is_none(),
+        "`import type` names are not template-visible reads"
+    );
+    assert!(
+        projection.read.lookup("Bar").is_none(),
+        "inline `type` specifiers are not template-visible reads"
+    );
+    assert!(
+        projection.read.lookup("count").is_some(),
+        "runtime bindings still bind"
+    );
+    assert!(
+        projection.read.lookup("ref").is_some(),
+        "runtime imports still bind"
+    );
+}
+
+#[test]
+fn stp15_non_factory_import_is_an_ordinary_binding() {
+    let content = "import { watch } from 'vue';\nconst stop = watch(count);\n";
+    let projection = project_setup(content);
+    let stop = projection.read.lookup("stop").expect("stop");
+    assert_eq!(
+        stop.kind,
+        BindingKind::Plain,
+        "`watch` is outside the cited factory table, so the call is ordinary"
+    );
+    assert!(
+        !stop.unwrapped,
+        "a non-factory result never reads unwrapped"
+    );
+}
+
+#[test]
+fn stp15_options_writable_computed_uses_declared_setter_domain() {
+    let normal = block(
+        "export default { computed: { label: { get(): number { return 1; }, set(v: string) {} } } };\n",
+    );
+    let projection = project_binding_views(Some(normal), None, None).expect("projects");
+    let label = projection.read.lookup("label").expect("label");
+    assert_eq!(
+        label.kind,
+        BindingKind::Computed { setter: true },
+        "an Options computed with `set` is writable"
+    );
+    match &projection
+        .write
+        .write_target("label")
+        .expect("label")
+        .domain
+    {
+        WriteDomain::SetterParam(domain) => assert_eq!(
+            domain, "string",
+            "an Options setter records its declared annotation, not the read type"
+        ),
+        other => panic!("Options setter domain must be the declared type, got {other:?}"),
+    }
+}

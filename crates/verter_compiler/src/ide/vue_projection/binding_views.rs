@@ -231,12 +231,25 @@ pub struct UsedBinding {
 }
 
 /// Lexical identifier mentions in template markup: ASCII word scan over
-/// authored bytes. Words that cannot start an identifier (leading digit)
-/// are dropped; everything else is a candidate the accounting core matches
-/// against declared names.
+/// authored bytes with HTML comments (`<!-- ... -->`) removed first, so
+/// commented-out names never count as uses. Words that cannot start an
+/// identifier (leading digit) are dropped; everything else is a candidate
+/// the accounting core matches against declared names. Attribute strings
+/// may still over-approximate; undeclared words are ignored, never
+/// invented into the population.
 fn template_mentions(template: &str) -> FxHashSet<String> {
+    let mut visible = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("<!--") {
+        visible.push_str(&rest[..open]);
+        rest = match rest[open + "<!--".len()..].find("-->") {
+            Some(close) => &rest[open + "<!--".len() + close + "-->".len()..],
+            None => break,
+        };
+    }
+    visible.push_str(rest);
     let mut names = FxHashSet::default();
-    for word in template.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+    for word in visible.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
         if word.is_empty() || word.as_bytes()[0].is_ascii_digit() {
             continue;
         }
@@ -349,13 +362,13 @@ impl BindingUsageSet {
 
     /// Account usage from authored region text instead of caller-supplied
     /// slices: template markup mentions, script identifier references, and
-    /// style `v-bind()` names. Template and style collection is a lexical
-    /// mention scan over authored bytes (strings and comments may
-    /// over-approximate; undeclared words are still ignored, never
-    /// invented into the population). Script collection walks the parsed
-    /// AST for identifier references, so declarations never count as uses.
-    /// An unparseable script contributes no script references rather than
-    /// synthetic ones.
+    /// style `v-bind()` names. Template collection is a lexical mention
+    /// scan over authored bytes with HTML comments removed (attribute
+    /// strings may still over-approximate; undeclared words are ignored,
+    /// never invented into the population). Script collection walks the
+    /// parsed AST for identifier references, so declarations never count
+    /// as uses. An unparseable script contributes no script references
+    /// rather than synthetic ones.
     #[must_use]
     pub fn from_region_text(
         declared: &[String],
@@ -400,11 +413,16 @@ pub struct BindingViewsProjection {
 
 /// Vue reactivity factories recognised at setup scope by binding (not by
 /// bare spelling). The membership is Vue's public Composition API surface
-/// (`ref`, `computed`, `reactive`, `readonly`, `toRefs`) plus the
-/// `<script setup>` compile-time macros (`defineProps`, `defineModel`,
-/// `withDefaults`); each entry is checked against an actual `from 'vue'`
-/// import or a free reference by [`factory_export`], so the table is
-/// verified against the parsed imports rather than trusted on spelling.
+/// (`ref`, `computed`, `reactive`, `readonly`, `toRefs`,
+/// <https://vuejs.org/api/reactivity-core.html>) plus the `<script setup>`
+/// compile-time macros (`defineProps`, `defineModel`, `withDefaults`,
+/// <https://vuejs.org/api/sfc-script-setup.html>); the pinned engine
+/// `vue@3.6.0-rc.5` (`tests/sfc-projection/STP1/products/engine-matrix.json`)
+/// exports the same runtime surface. Each entry is checked against an
+/// actual `from 'vue'` import or a free reference by [`factory_export`],
+/// so the table is verified against the parsed imports rather than
+/// trusted on spelling; a name outside the table (for example `watch`)
+/// resolves to no factory and classifies as an ordinary binding.
 const FACTORY_EXPORTS: [&str; 8] = [
     "ref",
     "computed",
@@ -998,8 +1016,8 @@ fn collect_props_call(
         return;
     }
     let aliases = props_aliases(id, base);
-    for (name, _) in props {
-        if let Some((_, local, range)) = aliases.iter().find(|(key, _, _)| key == &name) {
+    for (name, _) in &props {
+        if let Some((_, local, range)) = aliases.iter().find(|(key, _, _)| key == name) {
             push_binding(
                 projection,
                 local.clone(),
@@ -1008,6 +1026,17 @@ fn collect_props_call(
                 None,
                 true,
             );
+        }
+    }
+    // Rest-pattern locals (`...rest`) are real setup bindings holding
+    // readonly prop copies, not declared prop keys: they never match the
+    // loop above, so record them explicitly as readonly rows. Other
+    // non-prop sibling names stay row-less by contract.
+    if let BindingPattern::ObjectPattern(object) = id {
+        if let Some(rest) = &object.rest {
+            for (name, range) in pattern_names(&rest.argument, base) {
+                push_binding(projection, name, BindingKind::Readonly, range, None, true);
+            }
         }
     }
 }
@@ -1109,7 +1138,7 @@ fn project_options_members(
                     member.name.clone(),
                     BindingKind::Computed { setter },
                     range,
-                    None,
+                    member.setter_domain.clone(),
                     true,
                 );
             }
@@ -1172,12 +1201,20 @@ fn classify_setup_body(
                 }
             }
             Statement::ImportDeclaration(import) => {
+                // Type-only imports bind no runtime value: `import type`
+                // names are never template-visible reads.
+                if import.import_kind.is_type() {
+                    continue;
+                }
                 let Some(specifiers) = &import.specifiers else {
                     continue;
                 };
                 for specifier in specifiers {
                     let (local, span) = match specifier {
                         ImportDeclarationSpecifier::ImportSpecifier(spec) => {
+                            if spec.import_kind.is_type() {
+                                continue;
+                            }
                             (spec.local.name.as_str(), spec.local.span)
                         }
                         ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {

@@ -197,6 +197,58 @@ impl VueProjectionBackend {
         project_binding_views(normal, setup, generic)
     }
 
+    /// Actual usage accounting over the admitted carrier's own regions:
+    /// declared names come from [`project_binding_views`] read rows while
+    /// template, script and style bytes are sliced from the admitted
+    /// parse, never caller-supplied. Dormant relative to
+    /// [`Self::project_ide`]; STP58 owns Vue atomic activation.
+    pub fn binding_usage(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<BindingUsageSet, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        let exact_source = artifact.carrier_source().as_ref() == source;
+        if !exact_source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        let script = [
+            normal.as_ref().map(|block| block.content),
+            setup.as_ref().map(|block| block.content),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+        let views = project_binding_views(normal, setup, generic)?;
+        let declared: Vec<String> = views
+            .read
+            .bindings
+            .iter()
+            .map(|binding| binding.name.clone())
+            .collect();
+        let template = parsed
+            .template_ast()
+            .and_then(|ast| ast.root.content.as_ref())
+            .and_then(|content| source.get(content.start as usize..content.end as usize))
+            .unwrap_or("");
+        let mut style = String::new();
+        for node in parsed.style_nodes() {
+            if let Some(span) = node.content {
+                if let Some(text) = source.get(span.start as usize..span.end as usize) {
+                    style.push_str(text);
+                    style.push('\n');
+                }
+            }
+        }
+        Ok(BindingUsageSet::from_region_text(
+            &declared, template, &script, &style,
+        ))
+    }
+
     /// Binder-aware public dependency capture for the admitted parse: the
     /// free bindings of each public type surface, the script declarations
     /// reachable from them, and the binder parameters each lifted declaration
