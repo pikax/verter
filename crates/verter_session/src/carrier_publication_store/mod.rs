@@ -22,7 +22,9 @@ use verter_scheduler::cancellation::CancellationToken;
 
 use crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort;
 use crate::types::MetaProvenance;
-use persistence::{CarrierStableUnitStore, InMemoryStableUnitStore};
+use persistence::{
+    CarrierStableUnitStore, InMemoryStableUnitStore, RetainedStableUnit, StableUnitKey,
+};
 
 pub(crate) type RegisteredEnvelopeIngest =
     Arc<parking_lot::Mutex<rustc_hash::FxHashMap<String, RegisteredFileStructure>>>;
@@ -694,10 +696,62 @@ impl PublicationLane {
     }
 }
 
+/// One in-flight parse of one immutable stable unit, shared by every
+/// publication lane whose generation carries identical bytes.
+///
+/// Publication lanes are keyed by [`FrameworkArtifactId`], which is
+/// snapshot-bound by design: two generations of identical bytes own two
+/// lanes and would each run the parser. The stable key drops the
+/// incarnation/generation axes, so concurrent generations of one unit join
+/// one parse. The shared product is the snapshot-independent parse
+/// artifact; each lane still validates currency, builds its own envelope
+/// for its own snapshot, and retains independently.
+#[derive(Clone)]
+enum StableParseOutcome {
+    Parsed(Arc<FrameworkParseArtifact>),
+    Rejected(Arc<verter_language::SyntaxReject>),
+    Panicked,
+}
+
+enum StableParseState {
+    Producing,
+    Ready(StableParseOutcome),
+}
+
+struct StableParseLane {
+    state: Mutex<StableParseState>,
+    wake: Condvar,
+}
+
+impl StableParseLane {
+    fn producing() -> Self {
+        Self {
+            state: Mutex::new(StableParseState::Producing),
+            wake: Condvar::new(),
+        }
+    }
+}
+
+/// What a lane leader does with a retained candidate: adopt it, or discard
+/// it and proceed to fresh production.
+enum StableAdoption {
+    Adopted(PublicationOutcome),
+    Discarded,
+}
+
+/// What the stable-key singleflight hands back: the shared parse product
+/// (the caller runs its own currency fence and publishes its own
+/// envelope), or an already-terminal outcome.
+enum StableShared {
+    Parsed(Arc<FrameworkParseArtifact>),
+    Done(PublicationOutcome),
+}
+
 pub struct CarrierPublicationStore {
     source_authority: Arc<RegisteredSourceAuthority>,
     grammar_authority: Arc<CarrierGrammarAuthority>,
     lanes: Mutex<HashMap<FrameworkArtifactId, Arc<PublicationLane>>>,
+    stable_parses: Mutex<HashMap<StableUnitKey, Arc<StableParseLane>>>,
     units: Arc<dyn CarrierStableUnitStore>,
     provenance: Arc<MetaProvenance>,
     audit: PublicationAuditLog,
@@ -763,6 +817,7 @@ impl CarrierPublicationStore {
             source_authority,
             grammar_authority,
             lanes: Mutex::new(HashMap::new()),
+            stable_parses: Mutex::new(HashMap::new()),
             units,
             provenance,
             audit: PublicationAuditLog::default(),
@@ -954,87 +1009,246 @@ impl CarrierPublicationStore {
             );
         }
         if let Some(candidate) = self.units.retained(artifact_id, accepted) {
-            self.audit.push(
-                request,
-                artifact_id,
-                PublicationAuditKind::PersistentCandidateFound,
-            );
-            let rejection = match candidate.validate(
-                accepted,
-                artifact_id,
-                current_persisted_carrier_artifact_cohort(),
-            ) {
-                Ok(()) => {
-                    let artifact = match candidate
-                        .artifact
-                        .__rehome_registered(accepted, &artifact_id.parse_key)
-                    {
-                        Ok(artifact) => artifact,
-                        // Exhaustive: every `SyntaxReject` arm means the persisted
-                        // candidate no longer matches `accepted`'s live identity —
-                        // fall back to fresh production. Matched by name (not `_`)
-                        // so a new `SyntaxReject` variant forces a decision here
-                        // instead of silently inheriting the fallback.
-                        Err(
-                            verter_language::SyntaxReject::UnsupportedProfile { .. }
-                            | verter_language::SyntaxReject::RejectedSyntax { .. }
-                            | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
-                            | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
-                        ) => {
-                            self.audit.push(
-                                request,
-                                artifact_id,
-                                PublicationAuditKind::PersistentAdoptionRejected(
-                                    PersistentAdoptionRejection::ParserValidationFailed,
-                                ),
-                            );
-                            self.units.discard(artifact_id, accepted);
-                            self.audit.push(
-                                request,
-                                artifact_id,
-                                PublicationAuditKind::PersistentCandidateDiscarded,
-                            );
-                            return self.produce_fresh(accepted, request, artifact_id);
-                        }
-                    };
-                    let envelope = Arc::new(FrameworkArtifactEnvelope {
-                        id: artifact_id.clone(),
-                        source: accepted.source().clone(),
-                        artifact: Arc::new(artifact),
-                    });
-                    self.audit.push(
-                        request,
-                        artifact_id,
-                        PublicationAuditKind::PersistentAdoptionAccepted,
-                    );
-                    self.audit
-                        .push(request, artifact_id, PublicationAuditKind::Adopted);
-                    return PublicationOutcome::Adopted(envelope);
-                }
-                Err(rejection) => rejection,
-            };
-            self.units.discard(artifact_id, accepted);
-            self.audit.push(
-                request,
-                artifact_id,
-                PublicationAuditKind::PersistentAdoptionRejected(rejection),
-            );
-            self.audit.push(
-                request,
-                artifact_id,
-                PublicationAuditKind::PersistentCandidateDiscarded,
-            );
+            match self.adopt_retained(candidate, accepted, request, artifact_id) {
+                StableAdoption::Adopted(outcome) => return outcome,
+                StableAdoption::Discarded => {}
+            }
         }
 
         self.produce_fresh(accepted, request, artifact_id)
     }
 
-    fn produce_fresh(
+    /// Adopt a retained stable unit for this lane's own snapshot: the
+    /// envelope is bound to the CALLER's snapshot, never the generation the
+    /// unit was parsed from. A discard falls through to fresh production.
+    fn adopt_retained(
+        &self,
+        candidate: RetainedStableUnit,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> StableAdoption {
+        self.audit.push(
+            request,
+            artifact_id,
+            PublicationAuditKind::PersistentCandidateFound,
+        );
+        let rejection = match candidate.validate(
+            accepted,
+            artifact_id,
+            current_persisted_carrier_artifact_cohort(),
+        ) {
+            Ok(()) => {
+                let artifact = match candidate
+                    .artifact
+                    .__rehome_registered(accepted, &artifact_id.parse_key)
+                {
+                    Ok(artifact) => artifact,
+                    // Exhaustive: every `SyntaxReject` arm means the persisted
+                    // candidate no longer matches `accepted`'s live identity —
+                    // fall back to fresh production. Matched by name (not `_`)
+                    // so a new `SyntaxReject` variant forces a decision here
+                    // instead of silently inheriting the fallback.
+                    Err(
+                        verter_language::SyntaxReject::UnsupportedProfile { .. }
+                        | verter_language::SyntaxReject::RejectedSyntax { .. }
+                        | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
+                        | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
+                    ) => {
+                        self.audit.push(
+                            request,
+                            artifact_id,
+                            PublicationAuditKind::PersistentAdoptionRejected(
+                                PersistentAdoptionRejection::ParserValidationFailed,
+                            ),
+                        );
+                        self.units.discard(artifact_id, accepted);
+                        self.audit.push(
+                            request,
+                            artifact_id,
+                            PublicationAuditKind::PersistentCandidateDiscarded,
+                        );
+                        return StableAdoption::Discarded;
+                    }
+                };
+                let envelope = Arc::new(FrameworkArtifactEnvelope {
+                    id: artifact_id.clone(),
+                    source: accepted.source().clone(),
+                    artifact: Arc::new(artifact),
+                });
+                self.audit.push(
+                    request,
+                    artifact_id,
+                    PublicationAuditKind::PersistentAdoptionAccepted,
+                );
+                self.audit
+                    .push(request, artifact_id, PublicationAuditKind::Adopted);
+                return StableAdoption::Adopted(PublicationOutcome::Adopted(envelope));
+            }
+            Err(rejection) => rejection,
+        };
+        self.units.discard(artifact_id, accepted);
+        self.audit.push(
+            request,
+            artifact_id,
+            PublicationAuditKind::PersistentAdoptionRejected(rejection),
+        );
+        self.audit.push(
+            request,
+            artifact_id,
+            PublicationAuditKind::PersistentCandidateDiscarded,
+        );
+        StableAdoption::Discarded
+    }
+
+    /// Run the parser exactly once per stable unit across concurrent lanes.
+    /// The first lane leader to insert the stable key parses; every other
+    /// lane leader with identical bytes waits for that product and then runs
+    /// its own currency fence and envelope publication below.
+    fn shared_parse(
+        &self,
+        key: &StableUnitKey,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> StableShared {
+        let lane = match self.stable_parses.lock() {
+            Ok(mut inflight) => {
+                if let Some(lane) = inflight.get(key) {
+                    Arc::clone(lane)
+                } else {
+                    let lane = Arc::new(StableParseLane::producing());
+                    inflight.insert(key.clone(), Arc::clone(&lane));
+                    drop(inflight);
+                    return self.lead_stable_parse(&lane, key, accepted, request, artifact_id);
+                }
+            }
+            Err(_) => return StableShared::Done(PublicationOutcome::Closed),
+        };
+        self.await_stable_parse(&lane, request, artifact_id)
+    }
+
+    fn lead_stable_parse(
+        &self,
+        lane: &Arc<StableParseLane>,
+        key: &StableUnitKey,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> StableShared {
+        // No second retained read here: `produce` already missed, and a
+        // blocking store must observe exactly one read per lane leader.
+        // The race this could theoretically lose (a unit retained between
+        // that miss and the insert above) is closed the other way: the
+        // entry stays listed until this leader retains below, so a
+        // newcomer either joins this lane or arrives after the retain and
+        // adopts — it never starts a second parse of the same unit.
+        let shared = match catch_unwind(AssertUnwindSafe(|| {
+            self.parse_stable_unit(accepted, request, artifact_id)
+        })) {
+            Ok(shared) => shared,
+            Err(_) => StableParseOutcome::Panicked,
+        };
+        match shared {
+            StableParseOutcome::Parsed(artifact) => {
+                // Publish before unlisting so joiners observe the product,
+                // but keep the entry listed until this leader retains below:
+                // a newcomer in between either joins this lane or lands on
+                // the double-checked retained read — never on a second
+                // parse of the same unit.
+                if let Ok(mut state) = lane.state.lock() {
+                    *state =
+                        StableParseState::Ready(StableParseOutcome::Parsed(Arc::clone(&artifact)));
+                }
+                lane.wake.notify_all();
+                let outcome = self.publish_shared(&artifact, accepted, request, artifact_id);
+                if let Ok(mut inflight) = self.stable_parses.lock() {
+                    inflight.remove(key);
+                }
+                StableShared::Done(outcome)
+            }
+            StableParseOutcome::Rejected(reject) => {
+                let outcome = PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(
+                    Arc::clone(&reject),
+                ));
+                self.finish_stable_parse(lane, key, StableParseOutcome::Rejected(reject));
+                StableShared::Done(outcome)
+            }
+            StableParseOutcome::Panicked => {
+                self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
+                StableShared::Done(PublicationOutcome::WinnerPanicked)
+            }
+        }
+    }
+
+    fn await_stable_parse(
+        &self,
+        lane: &Arc<StableParseLane>,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> StableShared {
+        let mut state = match lane.state.lock() {
+            Ok(state) => state,
+            Err(_) => return StableShared::Done(PublicationOutcome::Closed),
+        };
+        loop {
+            if request.cancellation.is_cancelled() {
+                self.audit.push(
+                    request,
+                    artifact_id,
+                    PublicationAuditKind::WaiterDetachedCancelled,
+                );
+                return StableShared::Done(PublicationOutcome::Cancelled);
+            }
+            match &*state {
+                StableParseState::Ready(outcome) => {
+                    return match outcome.clone() {
+                        StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
+                        StableParseOutcome::Rejected(reject) => StableShared::Done(
+                            PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
+                        ),
+                        StableParseOutcome::Panicked => {
+                            StableShared::Done(PublicationOutcome::WinnerPanicked)
+                        }
+                    };
+                }
+                StableParseState::Producing => {}
+            }
+            let waited = lane.wake.wait_timeout(state, Duration::from_millis(5));
+            state = match waited {
+                Ok((state, _)) => state,
+                Err(_) => return StableShared::Done(PublicationOutcome::Closed),
+            };
+        }
+    }
+
+    fn finish_stable_parse(
+        &self,
+        lane: &Arc<StableParseLane>,
+        key: &StableUnitKey,
+        outcome: StableParseOutcome,
+    ) {
+        // Publish before unlisting: a newcomer that misses the entry must
+        // land on the double-checked retained read (or a fresh in-flight
+        // lane), never on a removed-but-unpublished parse.
+        if let Ok(mut state) = lane.state.lock() {
+            *state = StableParseState::Ready(outcome);
+        }
+        lane.wake.notify_all();
+        if let Ok(mut inflight) = self.stable_parses.lock() {
+            inflight.remove(key);
+        }
+    }
+
+    /// The one parser run for this stable unit: provenance counters and the
+    /// `ParserStarted`/`ParserFinished` bracket fire once here, on the
+    /// stable leader only.
+    fn parse_stable_unit(
         &self,
         accepted: &AcceptedRegisteredCarrierSource,
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
-    ) -> PublicationOutcome {
+    ) -> StableParseOutcome {
         use std::sync::atomic::Ordering::Relaxed;
         self.provenance.carrier_parses.fetch_add(1, Relaxed);
         if accepted.grammar().adapter_id().is_vue() {
@@ -1053,14 +1267,40 @@ impl CarrierPublicationStore {
                     // success and the reject path.
                     self.audit
                         .push(request, artifact_id, PublicationAuditKind::ParserFinished);
-                    return PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(
-                        Arc::new(reject),
-                    ));
+                    return StableParseOutcome::Rejected(Arc::new(reject));
                 }
             };
         let artifact = Arc::new(projection.into_framework_parse_artifact());
         self.audit
             .push(request, artifact_id, PublicationAuditKind::ParserFinished);
+        StableParseOutcome::Parsed(artifact)
+    }
+
+    fn produce_fresh(
+        &self,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> PublicationOutcome {
+        let key = StableUnitKey::new(artifact_id, accepted);
+        let artifact = match self.shared_parse(&key, accepted, request, artifact_id) {
+            StableShared::Parsed(artifact) => artifact,
+            StableShared::Done(outcome) => return outcome,
+        };
+        self.publish_shared(&artifact, accepted, request, artifact_id)
+    }
+
+    /// Per-lane publication of a shared stable-unit product: this lane's own
+    /// currency fence, its own snapshot-bound envelope, and its own retain.
+    /// Every lane leader runs this — the stable leader and each joiner — so
+    /// sharing a parse never shares currency or provenance.
+    fn publish_shared(
+        &self,
+        artifact: &Arc<FrameworkParseArtifact>,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> PublicationOutcome {
         if artifact.parse_key() != &artifact_id.parse_key
             || artifact.adapter_id() != &artifact_id.adapter_id
             || artifact.language_id() != &artifact_id.language_id
@@ -1089,7 +1329,7 @@ impl CarrierPublicationStore {
         let envelope = Arc::new(FrameworkArtifactEnvelope {
             id: artifact_id.clone(),
             source: accepted.source().clone(),
-            artifact,
+            artifact: Arc::clone(artifact),
         });
         self.units.retain(
             artifact_id,

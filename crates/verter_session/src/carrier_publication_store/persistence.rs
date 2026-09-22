@@ -40,7 +40,7 @@ use super::{FrameworkArtifactId, PersistentAdoptionRejection};
 /// absent: two generations of identical bytes are two publications of ONE
 /// unit, and keying on them would re-parse every revisit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct StableUnitKey {
+pub(crate) struct StableUnitKey {
     source_hash: WholeSourceHash,
     language: FileLanguage,
     grammar_fingerprint: verter_language::carrier_grammar::CarrierGrammarFingerprint,
@@ -49,7 +49,10 @@ struct StableUnitKey {
 }
 
 impl StableUnitKey {
-    fn new(id: &FrameworkArtifactId, accepted: &AcceptedRegisteredCarrierSource) -> Self {
+    pub(crate) fn new(
+        id: &FrameworkArtifactId,
+        accepted: &AcceptedRegisteredCarrierSource,
+    ) -> Self {
         Self {
             source_hash: accepted.source().content_hash(),
             language: accepted.source().resolved_file_language().clone(),

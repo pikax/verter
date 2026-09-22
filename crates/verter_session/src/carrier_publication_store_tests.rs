@@ -1090,3 +1090,142 @@ fn vue_parse_time_error_diagnostic_still_fails_close_ide_compile() {
          (unchanged pre-existing Vue behavior, out of this fix's scope)"
     );
 }
+
+/// Concurrent generations of identical bytes are two publications of ONE
+/// stable unit. Each round admits a first generation while current, then a
+/// second registration steals currency mid-parse: both lane leaders hold
+/// distinct lanes and both miss the retained store at the same instant
+/// (rendezvous), so without stable-key in-flight coordination each runs the
+/// parser — two parses per round, one discarded as superseded. One parse
+/// per round must serve both generations; the winner publishes or adopts
+/// its own generation's envelope. Fresh bytes per round keep every round
+/// discriminating; a shared store keeps the total exactly one parse per
+/// round on fixed code under every schedule (overlap joins the in-flight
+/// parse, serialization adopts the retained unit).
+#[test]
+fn concurrent_differing_generations_of_one_content_parse_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// Parks both lane leaders inside `retained` until both have arrived so
+    /// both miss together, then delegates to a real bounded store.
+    struct RendezvousUnits {
+        inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore,
+        arrivals: AtomicUsize,
+        departures: AtomicUsize,
+    }
+
+    fn rendezvous(counter: &AtomicUsize, parties: usize, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while counter.load(Ordering::SeqCst) < parties {
+            if Instant::now() > deadline {
+                panic!("rendezvous timed out {what}");
+            }
+            thread::yield_now();
+        }
+    }
+
+    impl crate::carrier_publication_store::persistence::CarrierStableUnitStore for RendezvousUnits {
+        fn retained(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
+            // Both lane leaders arrive, then both read, then both leave:
+            // neither can retain before the other has missed, so the two
+            // misses overlap deterministically.
+            self.arrivals.fetch_add(1, Ordering::SeqCst);
+            rendezvous(&self.arrivals, 2, "waiting for both lane leaders");
+            let unit = self.inner.retained(id, accepted);
+            self.departures.fetch_add(1, Ordering::SeqCst);
+            rendezvous(&self.departures, 2, "waiting for both retained reads");
+            unit
+        }
+
+        fn retain(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+            artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+            cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
+        ) {
+            self.inner.retain(id, accepted, artifact, cohort);
+        }
+
+        fn discard(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        ) {
+            self.inner.discard(id, accepted);
+        }
+    }
+
+    fn wait_for_leaders(store: &CarrierPublicationStore, count: u64, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while store.audit_snapshot().leaders < count {
+            if Instant::now() > deadline {
+                panic!("timed out waiting for {what}");
+            }
+            thread::yield_now();
+        }
+    }
+
+    const ROUNDS: u64 = 2;
+    // Large enough that the stable leader's parse outlasts any thread
+    // wakeup skew after the rendezvous release: the joiner always lands
+    // inside the in-flight parse instead of after it.
+    const ELEMENTS: usize = 30_000;
+    let (source, grammar) = authorities();
+    let units = Arc::new(RendezvousUnits {
+        inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default(),
+        arrivals: AtomicUsize::new(0),
+        departures: AtomicUsize::new(0),
+    });
+    let store = Arc::new(CarrierPublicationStore::with_dependencies(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        units.clone(),
+        Arc::new(crate::types::MetaProvenance::default()),
+    ));
+    for round in 0..ROUNDS {
+        units.arrivals.store(0, Ordering::SeqCst);
+        units.departures.store(0, Ordering::SeqCst);
+        let bytes = format!(
+            "<template>{}</template>",
+            format!("<p>round {round}</p>").repeat(ELEMENTS)
+        );
+        let first_generation = round * 2 + 1;
+        let second_generation = round * 2 + 2;
+        let first = accepted(&source, &grammar, first_generation, &bytes);
+        let leader_store = Arc::clone(&store);
+        let leader = thread::spawn(move || leader_store.publish_or_get(&first, request(1, &first)));
+        // `leaders` proves the first generation was admitted while current
+        // (past the currency entry checks) before the second registration
+        // steals currency mid-parse.
+        wait_for_leaders(&store, round * 2 + 1, "the first generation's admission");
+        let second = accepted(&source, &grammar, second_generation, &bytes);
+        let waiter_store = Arc::clone(&store);
+        let waiter =
+            thread::spawn(move || waiter_store.publish_or_get(&second, request(2, &second)));
+        let leader_outcome = leader.join().expect("leader worker");
+        assert!(
+            matches!(leader_outcome, PublicationOutcome::Superseded(_)),
+            "round {round}: the first generation loses currency to the mid-parse registration, got {leader_outcome:?}"
+        );
+        let envelope = match waiter.join().expect("waiter worker") {
+            PublicationOutcome::Published(envelope) => envelope,
+            other => panic!("round {round}: the current generation must publish, got {other:?}"),
+        };
+        assert_eq!(
+            envelope.source().generation(),
+            SourceGeneration::new(second_generation),
+            "round {round}: a shared parse must still serve the winning generation's own snapshot"
+        );
+    }
+    let audit = store.audit_snapshot();
+    assert_eq!(
+        audit.parser_started, ROUNDS,
+        "each round's immutable stable unit must parse exactly once across its concurrent generations, got {audit:?}"
+    );
+}
