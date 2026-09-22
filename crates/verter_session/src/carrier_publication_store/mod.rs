@@ -22,7 +22,7 @@ use verter_scheduler::cancellation::CancellationToken;
 
 use crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort;
 use crate::types::MetaProvenance;
-use persistence::{CarrierPersistence, InMemoryCarrierPersistence};
+use persistence::{CarrierStableUnitStore, InMemoryStableUnitStore};
 
 pub(crate) type RegisteredEnvelopeIngest =
     Arc<parking_lot::Mutex<rustc_hash::FxHashMap<String, RegisteredFileStructure>>>;
@@ -42,6 +42,18 @@ pub(crate) struct CarrierPublicationHostHandles {
 }
 
 pub const MAX_PUBLICATION_COORDINATION_RETRIES: usize = 3;
+
+/// How many distinct immutable carrier stable units one publication store
+/// keeps addressable before evicting the least recently used one.
+///
+/// A unit is one already-parsed carrier artifact, addressed by the content /
+/// grammar / parse identity of its source rather than by the registered
+/// snapshot generation it came from. The bound exists so that a long editing
+/// session — which registers a new generation on every keystroke and revisits
+/// earlier bytes on every undo — reuses its open files' units without the
+/// store growing once per generation ever seen. Override with
+/// [`CarrierPublicationStore::with_stable_unit_retention`].
+pub const DEFAULT_STABLE_UNIT_RETENTION: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AuditRequestId(u64);
@@ -686,7 +698,7 @@ pub struct CarrierPublicationStore {
     source_authority: Arc<RegisteredSourceAuthority>,
     grammar_authority: Arc<CarrierGrammarAuthority>,
     lanes: Mutex<HashMap<FrameworkArtifactId, Arc<PublicationLane>>>,
-    persistence: Arc<dyn CarrierPersistence>,
+    units: Arc<dyn CarrierStableUnitStore>,
     provenance: Arc<MetaProvenance>,
     audit: PublicationAuditLog,
 }
@@ -707,7 +719,23 @@ impl CarrierPublicationStore {
         Self::with_dependencies(
             source_authority,
             grammar_authority,
-            Arc::new(InMemoryCarrierPersistence::default()),
+            Arc::new(InMemoryStableUnitStore::default()),
+            Arc::new(MetaProvenance::default()),
+        )
+    }
+
+    /// Same as [`Self::new`] with an explicit stable-unit retention count —
+    /// how many distinct immutable carrier units this store keeps addressable
+    /// before evicting the least recently used one. Zero retains nothing.
+    pub fn with_stable_unit_retention(
+        source_authority: Arc<RegisteredSourceAuthority>,
+        grammar_authority: Arc<CarrierGrammarAuthority>,
+        retention: usize,
+    ) -> Self {
+        Self::with_dependencies(
+            source_authority,
+            grammar_authority,
+            Arc::new(InMemoryStableUnitStore::with_capacity(retention)),
             Arc::new(MetaProvenance::default()),
         )
     }
@@ -720,7 +748,7 @@ impl CarrierPublicationStore {
         Self::with_dependencies(
             source_authority,
             grammar_authority,
-            Arc::new(InMemoryCarrierPersistence::default()),
+            Arc::new(InMemoryStableUnitStore::default()),
             provenance,
         )
     }
@@ -728,14 +756,14 @@ impl CarrierPublicationStore {
     pub(crate) fn with_dependencies(
         source_authority: Arc<RegisteredSourceAuthority>,
         grammar_authority: Arc<CarrierGrammarAuthority>,
-        persistence: Arc<dyn CarrierPersistence>,
+        units: Arc<dyn CarrierStableUnitStore>,
         provenance: Arc<MetaProvenance>,
     ) -> Self {
         Self {
             source_authority,
             grammar_authority,
             lanes: Mutex::new(HashMap::new()),
-            persistence,
+            units,
             provenance,
             audit: PublicationAuditLog::default(),
         }
@@ -925,7 +953,7 @@ impl CarrierPublicationStore {
                 RegisteredCarrierUnsupported::NoRegisteredProducer,
             );
         }
-        if let Some(candidate) = self.persistence.take_candidate(artifact_id, accepted) {
+        if let Some(candidate) = self.units.retained(artifact_id, accepted) {
             self.audit.push(
                 request,
                 artifact_id,
@@ -960,6 +988,7 @@ impl CarrierPublicationStore {
                                     PersistentAdoptionRejection::ParserValidationFailed,
                                 ),
                             );
+                            self.units.discard(artifact_id, accepted);
                             self.audit.push(
                                 request,
                                 artifact_id,
@@ -984,6 +1013,7 @@ impl CarrierPublicationStore {
                 }
                 Err(rejection) => rejection,
             };
+            self.units.discard(artifact_id, accepted);
             self.audit.push(
                 request,
                 artifact_id,
@@ -1061,7 +1091,7 @@ impl CarrierPublicationStore {
             source: accepted.source().clone(),
             artifact,
         });
-        self.persistence.store_success(
+        self.units.retain(
             artifact_id,
             accepted,
             envelope.artifact(),

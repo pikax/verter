@@ -300,9 +300,8 @@ fn registered_structure_views_resolve_noncanonical_alias_spelling() {
 
 #[test]
 fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
-    let persistence = Arc::new(
-        crate::carrier_publication_store::persistence::InMemoryCarrierPersistence::default(),
-    );
+    let persistence =
+        Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default());
     let (first_source, first_grammar) = authorities();
     let first = accepted(
         &first_source,
@@ -351,23 +350,30 @@ struct BlockingPersistence {
     release: Arc<Barrier>,
 }
 
-impl crate::carrier_publication_store::persistence::CarrierPersistence for BlockingPersistence {
-    fn take_candidate(
+impl crate::carrier_publication_store::persistence::CarrierStableUnitStore for BlockingPersistence {
+    fn retained(
         &self,
         _id: &crate::carrier_publication_store::FrameworkArtifactId,
         _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-    ) -> Option<crate::carrier_publication_store::persistence::PersistedCarrierCandidate> {
+    ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
         self.entered.wait();
         self.release.wait();
         None
     }
 
-    fn store_success(
+    fn retain(
         &self,
         _id: &crate::carrier_publication_store::FrameworkArtifactId,
         _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
         _artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         _cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
+    ) {
+    }
+
+    fn discard(
+        &self,
+        _id: &crate::carrier_publication_store::FrameworkArtifactId,
+        _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
     ) {
     }
 }
@@ -605,27 +611,27 @@ fn grammar_revision_keys_a_new_publication_lane() {
 
 #[derive(Default)]
 struct CorruptingPersistence {
-    inner: crate::carrier_publication_store::persistence::InMemoryCarrierPersistence,
+    inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore,
     corrupt_next: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
 struct ProducerDriftPersistence {
-    inner: crate::carrier_publication_store::persistence::InMemoryCarrierPersistence,
+    inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore,
     replacement:
         std::sync::Mutex<Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>>,
 }
 
-impl crate::carrier_publication_store::persistence::CarrierPersistence
+impl crate::carrier_publication_store::persistence::CarrierStableUnitStore
     for ProducerDriftPersistence
 {
-    fn take_candidate(
+    fn retained(
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
         accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-    ) -> Option<crate::carrier_publication_store::persistence::PersistedCarrierCandidate> {
+    ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
         let mut candidate =
-            crate::carrier_publication_store::persistence::CarrierPersistence::take_candidate(
+            crate::carrier_publication_store::persistence::CarrierStableUnitStore::retained(
                 &self.inner,
                 id,
                 accepted,
@@ -636,19 +642,31 @@ impl crate::carrier_publication_store::persistence::CarrierPersistence
         Some(candidate)
     }
 
-    fn store_success(
+    fn retain(
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
         accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
         artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
     ) {
-        crate::carrier_publication_store::persistence::CarrierPersistence::store_success(
+        crate::carrier_publication_store::persistence::CarrierStableUnitStore::retain(
             &self.inner,
             id,
             accepted,
             artifact,
             cohort,
+        );
+    }
+
+    fn discard(
+        &self,
+        id: &crate::carrier_publication_store::FrameworkArtifactId,
+        accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+    ) {
+        crate::carrier_publication_store::persistence::CarrierStableUnitStore::discard(
+            &self.inner,
+            id,
+            accepted,
         );
     }
 }
@@ -713,16 +731,18 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
     )));
 }
 
-impl crate::carrier_publication_store::persistence::CarrierPersistence for CorruptingPersistence {
-    fn take_candidate(
+impl crate::carrier_publication_store::persistence::CarrierStableUnitStore
+    for CorruptingPersistence
+{
+    fn retained(
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
         accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-    ) -> Option<crate::carrier_publication_store::persistence::PersistedCarrierCandidate> {
+    ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
         use std::sync::atomic::Ordering;
 
         let mut candidate =
-            crate::carrier_publication_store::persistence::CarrierPersistence::take_candidate(
+            crate::carrier_publication_store::persistence::CarrierStableUnitStore::retained(
                 &self.inner,
                 id,
                 accepted,
@@ -733,19 +753,31 @@ impl crate::carrier_publication_store::persistence::CarrierPersistence for Corru
         Some(candidate)
     }
 
-    fn store_success(
+    fn retain(
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
         accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
         artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
     ) {
-        crate::carrier_publication_store::persistence::CarrierPersistence::store_success(
+        crate::carrier_publication_store::persistence::CarrierStableUnitStore::retain(
             &self.inner,
             id,
             accepted,
             artifact,
             cohort,
+        );
+    }
+
+    fn discard(
+        &self,
+        id: &crate::carrier_publication_store::FrameworkArtifactId,
+        accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+    ) {
+        crate::carrier_publication_store::persistence::CarrierStableUnitStore::discard(
+            &self.inner,
+            id,
+            accepted,
         );
     }
 }
@@ -802,21 +834,30 @@ fn rejected_persistent_candidate_is_discarded_then_parsed_in_the_same_lane() {
 
 struct PanickingPersistence;
 
-impl crate::carrier_publication_store::persistence::CarrierPersistence for PanickingPersistence {
-    fn take_candidate(
+impl crate::carrier_publication_store::persistence::CarrierStableUnitStore
+    for PanickingPersistence
+{
+    fn retained(
         &self,
         _id: &crate::carrier_publication_store::FrameworkArtifactId,
         _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
-    ) -> Option<crate::carrier_publication_store::persistence::PersistedCarrierCandidate> {
+    ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
         panic!("injected persistence panic")
     }
 
-    fn store_success(
+    fn retain(
         &self,
         _id: &crate::carrier_publication_store::FrameworkArtifactId,
         _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
         _artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
         _cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
+    ) {
+    }
+
+    fn discard(
+        &self,
+        _id: &crate::carrier_publication_store::FrameworkArtifactId,
+        _accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
     ) {
     }
 }
@@ -860,9 +901,7 @@ fn cancelled_request_never_enters_a_publication_lane() {
     let store = CarrierPublicationStore::with_dependencies(
         source,
         grammar,
-        Arc::new(
-            crate::carrier_publication_store::persistence::InMemoryCarrierPersistence::default(),
-        ),
+        Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default()),
         Arc::clone(&provenance),
     );
     let cancellation = verter_scheduler::cancellation::CancellationToken::new();
@@ -895,9 +934,7 @@ fn elected_publication_parses_once_and_warm_get_does_not_reparse() {
     let store = CarrierPublicationStore::with_dependencies(
         source,
         grammar,
-        Arc::new(
-            crate::carrier_publication_store::persistence::InMemoryCarrierPersistence::default(),
-        ),
+        Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default()),
         Arc::clone(&provenance),
     );
     let first = store.publish_or_get(&accepted, request(1, &accepted));
