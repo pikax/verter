@@ -1389,21 +1389,39 @@ impl CarrierPublicationStore {
         // `envelope.source` with a stale embedded snapshot identity. The
         // artifact retained above stays the original, generation-independent
         // parse product — only the published envelope is rehomed.
-        let rehomed = match artifact.__rehome_registered(accepted, &artifact_id.parse_key) {
-            Ok(rehomed) => Arc::new(rehomed),
-            // Exhaustive: every `SyntaxReject` arm means this lane's own
-            // `accepted` no longer matches the shared artifact's identity —
-            // matched by name (not `_`) so a new variant forces a decision
-            // here instead of silently inheriting a fallback.
-            Err(
-                verter_language::SyntaxReject::UnsupportedProfile { .. }
-                | verter_language::SyntaxReject::RejectedSyntax { .. }
-                | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
-                | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
-            ) => {
-                return PublicationOutcome::RegistryMismatch(
-                    RegistryMismatch::ProducerVersionMismatch,
-                );
+        //
+        // The stable leader publishing its own freshly-parsed artifact is
+        // already bound to `accepted`'s own snapshot (it was parsed from
+        // exactly this `accepted` in `parse_stable_unit`): rehoming there is
+        // an identity no-op that still pays a full inventory geometry copy
+        // plus a structure-hash recompute. Skip it whenever the embedded
+        // registered snapshot already matches this lane's own — every other
+        // route (a joiner sharing a different lane's parse, or an adopted
+        // retained unit) still rehomes.
+        let already_homed = matches!(
+            artifact.inventory().source_spaces().first().map(|space| &space.identity),
+            Some(verter_language::SourceSpaceIdentity::RegisteredSnapshot { snapshot })
+                if snapshot == accepted.source().snapshot_id()
+        );
+        let rehomed = if already_homed {
+            Arc::clone(artifact)
+        } else {
+            match artifact.__rehome_registered(accepted, &artifact_id.parse_key) {
+                Ok(rehomed) => Arc::new(rehomed),
+                // Exhaustive: every `SyntaxReject` arm means this lane's own
+                // `accepted` no longer matches the shared artifact's identity —
+                // matched by name (not `_`) so a new variant forces a decision
+                // here instead of silently inheriting a fallback.
+                Err(
+                    verter_language::SyntaxReject::UnsupportedProfile { .. }
+                    | verter_language::SyntaxReject::RejectedSyntax { .. }
+                    | verter_language::SyntaxReject::UnmappedDiagnostic { .. }
+                    | verter_language::SyntaxReject::InvalidCarrierGeometry { .. },
+                ) => {
+                    return PublicationOutcome::RegistryMismatch(
+                        RegistryMismatch::ProducerVersionMismatch,
+                    );
+                }
             }
         };
         let envelope = Arc::new(FrameworkArtifactEnvelope {

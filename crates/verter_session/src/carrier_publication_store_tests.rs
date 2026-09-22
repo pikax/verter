@@ -1242,6 +1242,23 @@ fn concurrent_differing_generations_of_one_content_parse_once() {
             SourceGeneration::new(second_generation),
             "round {round}: a shared parse must still serve the winning generation's own snapshot"
         );
+        // The envelope's own generation is only half the provenance
+        // contract: a shared parse must also carry the winning generation's
+        // own embedded registered-snapshot identity, not a cross-lane
+        // snapshot inherited from whichever lane actually ran the parser.
+        // Without `publish_shared`'s rehome, a joiner that shares another
+        // lane's parse would publish that lane's embedded snapshot id here.
+        let verter_language::SourceSpaceIdentity::RegisteredSnapshot { snapshot } =
+            &envelope.artifact().inventory().source_spaces()[0].identity
+        else {
+            panic!("round {round}: expected a RegisteredSnapshot source space identity");
+        };
+        assert_eq!(
+            snapshot.generation(),
+            SourceGeneration::new(second_generation),
+            "round {round}: a shared parse's embedded registered snapshot must be rehomed to \
+             the winning generation's own identity, not inherited from whichever lane parsed it"
+        );
     }
     let audit = store.audit_snapshot();
     assert_eq!(
