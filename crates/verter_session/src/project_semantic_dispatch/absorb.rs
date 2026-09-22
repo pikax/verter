@@ -338,23 +338,29 @@ impl ProjectSemanticDispatch<'_> {
     ) -> Option<SemanticNodeId> {
         let source = *args.first()?;
         let (kind, _) = self.peek_special(source)?;
+        if let (Some(utility), 1) = (
+            super::signature_utility::SignatureUtility::from_builtin_name(name),
+            args.len(),
+        ) {
+            use super::signature_utility::SignatureUtilityProjection as Projection;
+            return match (utility.projection(), kind) {
+                (Projection::Result, SpecialKind::Any) => {
+                    Some(self.primitive_node(PrimitiveKind::Any))
+                }
+                (Projection::ParameterTuple, SpecialKind::Any) => {
+                    let element = self.primitive_node(PrimitiveKind::Unknown);
+                    Some(self.graph().intern_node(SemanticNodeData::Array {
+                        element,
+                        readonly: false,
+                    }))
+                }
+                (Projection::Result | Projection::ParameterTuple, SpecialKind::Never) => {
+                    Some(self.primitive_node(PrimitiveKind::Never))
+                }
+                _ => None,
+            };
+        }
         match (name, args.len(), kind) {
-            ("ReturnType" | "InstanceType", 1, SpecialKind::Any) => {
-                Some(self.primitive_node(PrimitiveKind::Any))
-            }
-            ("ReturnType" | "InstanceType", 1, SpecialKind::Never) => {
-                Some(self.primitive_node(PrimitiveKind::Never))
-            }
-            ("Parameters" | "ConstructorParameters", 1, SpecialKind::Any) => {
-                let element = self.primitive_node(PrimitiveKind::Unknown);
-                Some(self.graph().intern_node(SemanticNodeData::Array {
-                    element,
-                    readonly: false,
-                }))
-            }
-            ("Parameters" | "ConstructorParameters", 1, SpecialKind::Never) => {
-                Some(self.primitive_node(PrimitiveKind::Never))
-            }
             ("Partial" | "Required", 1, SpecialKind::Any) => {
                 Some(self.any_index_signature_object(&[PrimitiveKind::String]))
             }

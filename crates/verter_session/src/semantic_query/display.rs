@@ -347,7 +347,6 @@ pub fn display(
         SemanticQueryValue::ResolveCall(result) => {
             let return_type = match result.as_ref() {
                 crate::semantic_query::ResolvedCallResult::Selected { return_type, .. }
-                | crate::semantic_query::ResolvedCallResult::UnionSelected { return_type, .. }
                 | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
                     *return_type
                 }

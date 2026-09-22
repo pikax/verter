@@ -1957,58 +1957,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ))
     }
 
-    /// `ResolveOverloadSet` — the live signature-group reducer.
+    /// `ResolveOverloadSet` — the ordered candidates of one callee.
     ///
-    /// Resolves the already-resolved `callee` node to its ordered VISIBLE
-    /// signature group and returns the group-bearing node (the public
-    /// `execute` boundary converts it into the
-    /// `OverloadSet(Arc<[SignatureRef]>)` value domain — call bucket
-    /// first, then construct). Visibility is build_typeof's projection
-    /// rule, applied UPSTREAM where the callee node was produced: a lone
-    /// signature is visible even if bodied; a multi-signature group
-    /// carries every bodiless overload in source order with the trailing
-    /// implementation already hidden — this reducer never re-derives it.
-    /// The LAST element is therefore the last visible overload (the
-    /// signature-utility selection rule; U6's call resolution reads the
-    /// same order first-applicable).
+    /// The candidates are the callee's shared signature list
+    /// (`SignaturesOfType`), call bucket first, then construct; the public
+    /// `execute` boundary converts the produced group node into the
+    /// `OverloadSet(Arc<[SignatureRef]>)` value domain. Carrier settlement,
+    /// alias and constraint hops, apparent globals, and the union and
+    /// intersection procedures all belong to the list: a union callee
+    /// arrives as its common or synthesized union signatures, never as
+    /// per-arm buckets. Visibility is `build_typeof`'s projection rule,
+    /// applied upstream where the callee node was produced.
     ///
-    /// - The callee settles through the ONE shared signature-source rail
-    ///   ([`Self::resolve_signature_source_carrier`]) — the same demand
-    ///   point the signature utilities (`ReturnType` / `Parameters` / …)
-    ///   use. The rails share the FUNCTION, not the CONTEXT: the
-    ///   utilities pass their caller's context, this reducer always
-    ///   passes the non-published structural transit (the key is
-    ///   mode-erased). A carrier-shaped callee (`DeclRef` to an
-    ///   annotation-typed overloaded interface, `InstantiationRef` to a
-    ///   generic one) still settles to the same signature group on both
-    ///   rails because `Instantiate` of a signature-bearing decl is
-    ///   mode-stable.
-    /// - `Alias` chains unwrap (cycle-guarded, mirroring
-    ///   `select_signature_function`).
-    /// - A callee with no signature group (no `Function`, no signature-
-    ///   bearing `Object`) is an honest `Miss` — never a fabricated empty
-    ///   set.
-    /// - Non-empty `type_args` instantiate each candidate positionally
-    ///   through the shared `apply_typeof_instantiation_args`; a candidate
-    ///   that cannot accept the argument list (non-generic, unsatisfied
-    ///   arity) DROPS from the set (TS overload resolution under explicit
-    ///   type arguments); all-dropped is an honest `Miss`.
-    ///
-    /// A UNION callee is ONE composite union-signature group: every arm
-    /// settles to its OWN ordered bucket through the same rail, and the
-    /// produced node is the arm-group union the value boundary converts
-    /// into arm-tagged candidates (declaration order applies WITHIN an
-    /// arm; arm order is never overload precedence). A non-callable arm
-    /// is an honest `Miss`.
+    /// - A callee whose list is complete and empty is an honest `Miss`.
+    /// - A list that did not settle is a `Miss` that is never admitted.
+    /// - Non-empty `type_args` instantiate each candidate positionally; a
+    ///   candidate that cannot accept the argument list DROPS from the set
+    ///   (TS overload resolution under explicit type arguments);
+    ///   all-dropped is an honest `Miss`.
     ///
     /// Self-version rooting: on the file-derived origins of EVERY input
-    /// node — the callee AND each explicit type argument (the node-keyed
-    /// rooting rule `NormalizeUnion` uses; the produced value semantically
-    /// depends on the arg nodes, so they root too) — plus, for a union,
-    /// each settled arm node's origin, collected transitively so a
-    /// scope-less composite roots on every file leaf. An incomplete or
-    /// empty self-root proof is `cache_suppress`ed: origin is provenance,
-    /// never the admission oracle.
+    /// node — the callee AND each explicit type argument — plus the
+    /// produced group, collected transitively so a scope-less composite
+    /// roots on every file leaf. An incomplete self-root proof is
+    /// `cache_suppress`ed: origin is provenance, never the admission
+    /// oracle.
     pub(super) fn build_resolve_overload_set(
         &self,
         callee: SemanticNodeId,
@@ -2017,104 +1990,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             (QueryResult::Error(QueryError::Miss), empty_signature()).into()
         };
-        // Settle the callee through the ONE shared signature-source rail —
-        // the same demand point the signature utilities use. The deferred
-        // evaluator alone deliberately leaves `DeclRef` / `InstantiationRef`
-        // carriers symbolic (the intermediate indexed-access preservation
-        // carve-out), but an overload-set read IS a demand point: an
-        // annotation-typed callee (`declare const x: Overloaded`) arrives as
-        // a carrier and must resolve to its signature-bearing surface here,
-        // exactly as it does for `ReturnType` / `Parameters` — one rail, no
-        // divergence. The key is mode-erased (no projection context), so the
-        // settlement runs under the non-published `StructuralTransit` context
-        // (`Shallow`) — the shallow-by-default-consistent choice: the reducer
-        // needs the structural signature group, never a published member
-        // surface. An unsettleable carrier stays non-signature and misses
-        // honestly below.
-        let settled = self.resolve_signature_source_carrier(
-            callee,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        );
-        // A UNION callee is ONE composite union-signature group: each arm
-        // settles to its OWN ordered signature group (declaration order
-        // applies independently within an arm; arm order is never overload
-        // precedence). A non-callable arm makes the whole callee an honest
-        // `Miss` (the executor's `NotCallable`). Nested unions and alias
-        // hops flatten into the arm list.
-        let mut arms: Vec<SemanticNodeId> = Vec::new();
-        {
-            let mut stack = vec![settled];
-            let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-            while let Some(node) = stack.pop() {
-                if !seen.insert(node) {
-                    continue;
-                }
-                match self.graph().node_data(node).as_deref() {
-                    Some(SemanticNodeData::Alias(target)) => stack.push(*target),
-                    Some(SemanticNodeData::Union(members)) => {
-                        // Preserve stored arm order (the stack pops last
-                        // first, so push reversed).
-                        for member in members.iter().rev() {
-                            stack.push(*member);
-                        }
-                    }
-                    _ => arms.push(node),
-                }
-            }
-        }
-        if arms.len() > 1 {
-            let mut arm_group_nodes = Vec::with_capacity(arms.len());
-            for arm in arms {
-                let arm = self.resolve_signature_source_carrier(
-                    arm,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                );
-                let Some((group_node, call_sigs, construct_sigs)) =
-                    self.settle_signature_group(arm)
-                else {
-                    // A non-callable arm makes the whole union non-callable.
-                    return miss();
-                };
-                let arm_node = if type_args.is_empty() {
-                    group_node
-                } else {
-                    match self.instantiate_overload_group(&call_sigs, &construct_sigs, type_args) {
-                        Some(node) => node,
-                        None => return miss(),
-                    }
-                };
-                arm_group_nodes.push(arm_node);
-            }
-            // Canonical construction: the per-arm overload-set union of a
-            // union callee (arm order carries no overload precedence).
-            let result_node = self.intern_normalized_union_or_intersection(&arm_group_nodes, true);
-            let root_nodes = std::iter::once(callee)
-                .chain(type_args.iter().copied())
-                .chain(arm_group_nodes.iter().copied());
-            let (observed_self_roots, proof_complete) =
-                match self.transitive_self_roots_from_nodes(root_nodes) {
-                    Ok(roots) => (roots, true),
-                    Err(_) => (Vec::new(), false),
-                };
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                    QueryResult::Value(result_node),
-                    self.project_generation_signature(),
-                ))
-                .with_observed_self_roots(observed_self_roots);
-            output.cache_suppress |= !proof_complete;
+        // The candidates ARE the shared signature list of the callee, call
+        // bucket first, then construct. The list owns carrier settlement,
+        // alias and constraint hops, apparent globals, and the union and
+        // intersection procedures; this reducer chooses nothing.
+        let Ok((call_sigs, construct_sigs)) = self.shared_signature_buckets(callee) else {
+            // An unsettled list is never a proven-empty one: the miss is
+            // not admitted, so the next read settles it again.
+            let mut output = miss();
+            output.cache_suppress = true;
             return output;
+        };
+        if call_sigs.is_empty() && construct_sigs.is_empty() {
+            return miss();
         }
-        let Some(single) = arms.first().copied() else {
-            return miss();
-        };
-        let Some((group_node, call_sigs, construct_sigs)) = self.settle_signature_group(single)
-        else {
-            return miss();
-        };
-
         let result_node = if type_args.is_empty() {
-            group_node
+            self.overload_group_node(call_sigs, construct_sigs)
         } else {
             match self.instantiate_overload_group(&call_sigs, &construct_sigs, type_args) {
                 Some(node) => node,
@@ -2140,65 +2031,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output
     }
 
-    /// Unwrap alias chains to the signature-group-bearing node and read its
-    /// ordered call/construct buckets. `None` when the node carries no
-    /// signature group (never a fabricated empty set).
-    pub(crate) fn settle_signature_group(
+    /// The group-bearing node of one ordered candidate list: a lone
+    /// signature IS its group, anything else is a signature-only surface.
+    fn overload_group_node(
         &self,
-        node: SemanticNodeId,
-    ) -> Option<(SemanticNodeId, Vec<SemanticNodeId>, Vec<SemanticNodeId>)> {
-        let mut group_node = node;
-        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let (call_sigs, construct_sigs): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) = loop {
-            if !visited.insert(group_node) {
-                return None;
-            }
-            let data = self.graph().node_data(group_node)?;
-            match &*data {
-                SemanticNodeData::Alias(target) => {
-                    let target = *target;
-                    drop(data);
-                    group_node = target;
-                }
-                // A direct signature callee routes into ITS OWN kind's
-                // bucket — a construct signature is a construct overload
-                // set, never a call one.
-                SemanticNodeData::Signature { kind, .. } => match kind {
-                    crate::semantic_query::SignatureKind::Call => {
-                        break (vec![group_node], Vec::new())
-                    }
-                    crate::semantic_query::SignatureKind::Construct => {
-                        break (Vec::new(), vec![group_node])
-                    }
+        call_sigs: Vec<SemanticNodeId>,
+        construct_sigs: Vec<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        match (call_sigs.as_slice(), construct_sigs.as_slice()) {
+            ([lone], []) | ([], [lone]) => *lone,
+            _ => self.graph().intern_node(SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from(Vec::new().into_boxed_slice()),
+                    call_signatures: Arc::from(call_sigs.into_boxed_slice()),
+                    construct_signatures: Arc::from(construct_sigs.into_boxed_slice()),
+                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
                 },
-                // The sealed index-composed carrier is its own one-element
-                // bucket, read through the `ResolveOverloadSet` witness.
-                SemanticNodeData::DeferredCallable(callable) => {
-                    match callable
-                        .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
-                        .kind
-                    {
-                        crate::semantic_query::SignatureKind::Call => {
-                            break (vec![group_node], Vec::new())
-                        }
-                        crate::semantic_query::SignatureKind::Construct => {
-                            break (Vec::new(), vec![group_node])
-                        }
-                    }
-                }
-                SemanticNodeData::Object(surface) => {
-                    break (
-                        surface.call_signatures.to_vec(),
-                        surface.construct_signatures.to_vec(),
-                    )
-                }
-                _ => return None,
-            }
-        };
-        if call_sigs.is_empty() && construct_sigs.is_empty() {
-            return None;
+            )),
         }
-        Some((group_node, call_sigs, construct_sigs))
     }
 
     /// Apply explicit type arguments to an ordered overload group:
@@ -2217,25 +2069,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let instantiated_calls = instantiate(call_sigs);
         let instantiated_constructs = instantiate(construct_sigs);
-        match (
-            instantiated_calls.as_slice(),
-            instantiated_constructs.as_slice(),
-        ) {
-            ([], []) => None,
-            // A lone instantiated signature IS the group node — no
-            // synthetic surface wrapper for the single-candidate case.
-            ([lone], []) | ([], [lone]) => Some(*lone),
-            _ => Some(self.graph().intern_node(SemanticNodeData::Object(
-                crate::semantic_query::surface_view! {
-                    members: Arc::from(Vec::new().into_boxed_slice()),
-                    call_signatures: Arc::from(instantiated_calls.into_boxed_slice()),
-                    construct_signatures: Arc::from(instantiated_constructs.into_boxed_slice()),
-                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature: false,
-                },
-            ))),
+        if instantiated_calls.is_empty() && instantiated_constructs.is_empty() {
+            return None;
         }
+        Some(self.overload_group_node(instantiated_calls, instantiated_constructs))
     }
 
     /// Lower the class's OWN constructor-object surface — the prepared
@@ -5637,6 +5474,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Value(absorbed), fence, false);
         }
 
+        // ---- Function-signature utilities ----
+        // One keyed read over the shared signature list: the subject settles
+        // at this demand point (a decl-placeholder / alias-shell / `DeclRef`
+        // carrier argument resolves to its signature-bearing surface), a union
+        // subject distributes arm by arm under the same context, and the
+        // utility infers from it. An unanswerable subject publishes the opaque
+        // shell so downstream consumers still see an `Instantiate` edge
+        // anchored to the utility identity.
+        if let (Some(utility), [subject]) = (
+            super::signature_utility::SignatureUtility::from_builtin_name(name),
+            args.as_ref(),
+        ) {
+            let source_resolved = self.resolve_signature_source_carrier(*subject, context);
+            let result = self
+                .resolve_signature_utility(utility, source_resolved, context)
+                .unwrap_or_else(|| self.opaque(QueryError::Miss));
+            record_utility_edges(result);
+            return (QueryResult::Value(result), fence, false);
+        }
+
         match name {
             // ---- Mapper-based utilities ----
             "Partial" if args.len() == 1 => {
@@ -5808,125 +5665,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Reuse the node we already resolved above — do NOT re-evaluate
                     // `args[0]` from scratch inside `apply_string_intrinsic`.
                     self.apply_string_intrinsic(name, resolved_arg, context)
-                };
-                record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
-            }
-
-            // ---- Function-signature utilities ----
-            // `ReturnType<F>` / `Parameters<F>` inspect call signatures;
-            // `ConstructorParameters<C>` / `InstanceType<C>` inspect
-            // construct signatures. Resolves when the argument is a
-            // canonical `Function` node directly, or an `Object` surface
-            // carrying exactly one call / construct signature and no
-            // user-level members. Typical entry: `ReturnType<typeof fn>`
-            // where `build_typeof` produced an Object with a single
-            // lowered call signature, or `ReturnType<() => T>` where
-            // lowering produced a `Function` node straight away.
-            //
-            // When the argument does not match either shape the branch
-            // falls through to the opaque shell so downstream consumers
-            // still see an `Instantiate` edge anchored to the utility
-            // identity.
-            "ReturnType" | "InstanceType" if args.len() == 1 => {
-                // Demand-point source resolution: a decl-placeholder /
-                // alias-shell / `DeclRef` carrier argument
-                // (`ReturnType<Handler>` where `Handler` is a
-                // function-type alias) settles to its canonical Function
-                // carrier before the signature walk. Bucket selection:
-                // `ReturnType` reads the CALL bucket, `InstanceType` the
-                // CONSTRUCT bucket — hybrids and member-bearing
-                // constructor objects select per kind, never per shape.
-                let bucket = if name == "ReturnType" {
-                    SignatureBucket::Call
-                } else {
-                    SignatureBucket::Construct
-                };
-                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                if let Some(function_node) = self.select_signature_function(source_resolved, bucket)
-                {
-                    if let Some(SemanticNodeData::Signature { return_type, .. }) =
-                        self.graph().node_data(function_node).as_deref()
-                    {
-                        // Free signature generics instantiate at `unknown`
-                        // (the sb15 rule: `ReturnType<typeof id>` over
-                        // `id<T>(x: T): T` is `unknown`).
-                        let id = self.instantiate_free_signature_params_at_unknown(
-                            function_node,
-                            *return_type,
-                        );
-                        record_utility_edges(id);
-                        return (QueryResult::Value(id), fence, false);
-                    }
-                }
-                let result = self.opaque(QueryError::Miss);
-                record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
-            }
-            "Parameters" | "ConstructorParameters" if args.len() == 1 => {
-                // Demand-point source resolution + bucket selection — see
-                // ReturnType/InstanceType above.
-                let bucket = if name == "Parameters" {
-                    SignatureBucket::Call
-                } else {
-                    SignatureBucket::Construct
-                };
-                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                if let Some(function_node) = self.select_signature_function(source_resolved, bucket)
-                {
-                    if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
-                        let tuple_id = self
-                            .instantiate_free_signature_params_at_unknown(function_node, tuple_id);
-                        record_utility_edges(tuple_id);
-                        return (QueryResult::Value(tuple_id), fence, false);
-                    }
-                }
-                let result = self.opaque(QueryError::Miss);
-                record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
-            }
-
-            // `ThisParameterType<F>` reads the authored `this` receiver the
-            // call signature preserves; a signature with no authored `this`
-            // has none, which is `unknown`. `OmitThisParameter<F>` republishes
-            // the same call signature with that receiver removed, and is the
-            // identity on a signature that has none.
-            "ThisParameterType" | "OmitThisParameter" if args.len() == 1 => {
-                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
-                let receiver = self
-                    .select_signature_function(source_resolved, SignatureBucket::Call)
-                    .and_then(|function_node| {
-                        let data = self.graph().node_data(function_node)?;
-                        let SemanticNodeData::Signature { params, .. } = &*data else {
-                            return None;
-                        };
-                        let params = Arc::clone(params);
-                        drop(data);
-                        Some((function_node, params))
-                    });
-                let result = match (name, receiver) {
-                    ("ThisParameterType", Some((_, params))) => {
-                        match crate::semantic_query::split_this_receiver(&params).0 {
-                            Some(receiver) => receiver.ty,
-                            None => self
-                                .graph()
-                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
-                        }
-                    }
-                    ("ThisParameterType", None) => self
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
-                    (_, Some((function_node, params))) => {
-                        match crate::semantic_query::split_this_receiver(&params) {
-                            (Some(_), ordinary) => {
-                                self.intern_signature_without_receiver(function_node, ordinary)
-                            }
-                            // No authored receiver: `OmitThisParameter` is the
-                            // identity on its argument.
-                            (None, _) => source_resolved,
-                        }
-                    }
-                    (_, None) => source_resolved,
                 };
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
@@ -6489,45 +6227,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Resolve `node` to the SELECTED `SemanticNodeData::Signature` node via
-    /// signature-kind BUCKET selection — the one shared rule for the
-    /// function-signature utilities. `Parameters` / `ReturnType` read the
-    /// CALL bucket; `ConstructorParameters` / `InstanceType` read the
-    /// CONSTRUCT bucket.
-    ///
-    /// - A direct `Signature` node is selected only when its `kind` matches
-    ///   the requested bucket: a `Call` bucket reads call signatures, a
-    ///   `Construct` bucket construct signatures
-    ///   (`ConstructorParameters<new (…) => R>` reads the constructor and
-    ///   never a call signature).
-    /// - An `Object` surface selects from the REQUESTED bucket only. The
-    ///   surface MAY carry user-level members (a class's static surface)
-    ///   and MAY carry both buckets (a call+construct hybrid) — selection
-    ///   never requires the other bucket or the member list to be empty.
-    /// - A multi-signature bucket is a visibility-filtered overload group;
-    ///   per TS, the signature utilities read the LAST visible overload.
-    ///   That filter is this function's PRECONDITION, not its job, and it
-    ///   has exactly one implementation — `semantic_query::
-    ///   visible_overload_ordinals` — which BOTH producers of a
-    ///   multi-signature bucket call: `build_typeof` for a top-level
-    ///   function group, and `SurfaceView::project_known_key_overload_group`
-    ///   for a method-position group. The member carrier once fed this
-    ///   function an UNFILTERED bucket, so for a bodied group the "last
-    ///   visible overload" was the implementation and `ReturnType<C['m']>`
-    ///   read `any`.
-    /// - `Alias` chains unwrap (cycle guarded).
-    ///
-    /// Returns `None` when the shape carries no signature in the requested
-    /// bucket — callers fall through to the utility's `Opaque(Miss)` shell.
-    pub(super) fn select_signature_function(
-        &self,
-        node: SemanticNodeId,
-        bucket: SignatureBucket,
-    ) -> Option<SemanticNodeId> {
-        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        self.select_signature_function_inner(node, bucket, &mut visited)
-    }
-
     /// Re-intern a call-kind `Signature` node as its CONSTRUCT twin
     /// (identical params/return/type-params/spans). Non-signature nodes
     /// (and already-construct signatures) pass through unchanged — used by
@@ -6564,116 +6263,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         drop(data);
         graph.intern_preserving_scope(node, twin)
-    }
-
-    /// How many signatures the `bucket` group of a resolved callee
-    /// carries — the CALL-site overload-visibility oracle.
-    ///
-    /// [`Self::select_signature_function`] deliberately selects the LAST
-    /// signature of an overload group, which is what a signature UTILITY
-    /// wants (`ReturnType<typeof f>` over an overloaded `f` IS the last
-    /// overload's return). A CALL is the opposite: TypeScript picks the
-    /// FIRST signature whose parameters accept the arguments, which
-    /// needs argument-driven overload resolution. This substrate does not
-    /// perform it, so a call whose callee carries more than one signature
-    /// is not answerable, and this is how a call site asks — WITHOUT
-    /// changing what the utility selects.
-    pub(super) fn signature_bucket_arity(
-        &self,
-        node: SemanticNodeId,
-        bucket: SignatureBucket,
-    ) -> usize {
-        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        self.signature_bucket_arity_inner(node, bucket, &mut visited)
-    }
-
-    fn signature_bucket_arity_inner(
-        &self,
-        node: SemanticNodeId,
-        bucket: SignatureBucket,
-        visited: &mut FxHashSet<SemanticNodeId>,
-    ) -> usize {
-        if !visited.insert(node) {
-            return 0;
-        }
-        let Some(data) = self.graph().node_data(node) else {
-            return 0;
-        };
-        match &*data {
-            SemanticNodeData::Signature { kind, .. } => {
-                let matches_bucket = match bucket {
-                    SignatureBucket::Call => {
-                        matches!(kind, crate::semantic_query::SignatureKind::Call)
-                    }
-                    SignatureBucket::Construct => {
-                        matches!(kind, crate::semantic_query::SignatureKind::Construct)
-                    }
-                };
-                usize::from(matches_bucket)
-            }
-            SemanticNodeData::Alias(target) => {
-                let target = *target;
-                drop(data);
-                self.signature_bucket_arity_inner(target, bucket, visited)
-            }
-            SemanticNodeData::Object(surface) => {
-                let group = match bucket {
-                    SignatureBucket::Call => &surface.call_signatures,
-                    SignatureBucket::Construct => &surface.construct_signatures,
-                };
-                if group.len() > 1 {
-                    return group.len();
-                }
-                let Some(selected) = group.last().copied() else {
-                    return 0;
-                };
-                drop(data);
-                self.signature_bucket_arity_inner(selected, bucket, visited)
-            }
-            _ => 0,
-        }
-    }
-
-    fn select_signature_function_inner(
-        &self,
-        node: SemanticNodeId,
-        bucket: SignatureBucket,
-        visited: &mut FxHashSet<SemanticNodeId>,
-    ) -> Option<SemanticNodeId> {
-        if !visited.insert(node) {
-            return None;
-        }
-        let data = self.graph().node_data(node)?;
-        match &*data {
-            // Kind-aware selection: a `Call` bucket reads only call
-            // signatures; a `Construct` bucket only construct signatures
-            // (`ConstructorParameters<new (…) => R>` reads the constructor,
-            // and never a call signature).
-            SemanticNodeData::Signature { kind, .. } => {
-                let matches_bucket = match bucket {
-                    SignatureBucket::Call => {
-                        matches!(kind, crate::semantic_query::SignatureKind::Call)
-                    }
-                    SignatureBucket::Construct => {
-                        matches!(kind, crate::semantic_query::SignatureKind::Construct)
-                    }
-                };
-                matches_bucket.then_some(node)
-            }
-            SemanticNodeData::Alias(target) => {
-                self.select_signature_function_inner(*target, bucket, visited)
-            }
-            SemanticNodeData::Object(surface) => {
-                let group = match bucket {
-                    SignatureBucket::Call => &surface.call_signatures,
-                    SignatureBucket::Construct => &surface.construct_signatures,
-                };
-                let selected = *group.last()?;
-                drop(data);
-                self.select_signature_function_inner(selected, bucket, visited)
-            }
-            _ => None,
-        }
     }
 
     /// Instantiate a signature-utility extraction at `unknown`: every type
@@ -7442,7 +7031,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// (kind, return type and carrier, binders, occurrence, spans) is carried
     /// through unchanged: the signature is the same occurrence minus its
     /// receiver slot.
-    fn intern_signature_without_receiver(
+    pub(super) fn intern_signature_without_receiver(
         &self,
         function_node: SemanticNodeId,
         ordinary: &[crate::semantic_query::FunctionParam],
@@ -7477,7 +7066,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.graph().intern_preserving_scope(function_node, rebuilt)
     }
 
-    fn intern_function_params_tuple(
+    pub(super) fn intern_function_params_tuple(
         &self,
         function_node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
@@ -12515,17 +12104,6 @@ pub(super) fn mapped_produced_key_inherits_declaration_site(
     source_key: &PropertyKey,
 ) -> bool {
     produced_key == source_key
-}
-
-/// The signature-kind bucket a function-signature utility selects from —
-/// `Parameters` / `ReturnType` read [`Call`](Self::Call);
-/// `ConstructorParameters` / `InstanceType` read
-/// [`Construct`](Self::Construct). See
-/// [`ProjectSemanticDispatch::select_signature_function`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SignatureBucket {
-    Call,
-    Construct,
 }
 
 #[cfg(test)]

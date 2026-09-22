@@ -2147,7 +2147,10 @@ const ROW_MECHANISM_OVERRIDE = new Map([
 const MECHANISM_TO_KEYS = new Map([
   // Zero-row substrate mechanisms.
   ["LedgerCoverageGate", []],
-  ["QueryValueDomainFoundation", ["ResolveDecl", "TypeOf", "NormalizeUnion", "ReduceIntersection"]],
+  [
+    "QueryValueDomainFoundation",
+    ["ResolveDecl", "TypeOf", "NormalizeUnion", "ReduceIntersection", "SignaturesOfType"],
+  ],
   // The algebra closure owns ONE key of its own — the demand-scoped
   // truthiness-domain classifier. The normalization queries it closes
   // construction over stay owned by the value-domain foundation it is a
@@ -2316,6 +2319,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2342,6 +2346,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2365,6 +2370,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2388,6 +2394,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2414,6 +2421,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2440,6 +2448,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2466,6 +2475,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2489,6 +2499,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2515,6 +2526,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2537,6 +2549,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "ProjectPath",
         "LowerLocator",
         "FlowReturn",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
@@ -2562,6 +2575,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2589,6 +2603,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2615,6 +2630,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2641,6 +2657,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2664,6 +2681,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2690,6 +2708,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2716,6 +2735,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "LowerLocator",
         "FlowReturn",
         "ResolveCall",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: [
         "QueryValueDomainFoundation",
@@ -2731,7 +2751,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.QUERY_VALUE_DOMAIN: `ReturnType<typeof voidCallback>` preserves the declared `void` return of the `() => void` function-type alias; the measured dispatch trace is a pure decl/typeof projection with no call-site resolution, so the row is re-homed off U6.CALL_RESOLVE onto the value-domain foundation that produces it. Proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3107,6 +3133,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "ProjectPath",
         "ResolveClassSurface",
         "LowerLocator",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
@@ -3128,6 +3155,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "ProjectPath",
         "ResolveClassSurface",
         "LowerLocator",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
@@ -3142,7 +3170,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `ReturnType<typeof lookup>` selects the LAST VISIBLE overload of the ordered declaration group (implementation hidden) and projects `boolean`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3156,7 +3190,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "SignaturesOfType"],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `ConstructorParameters<Ctor>` reduces the construct signature to the labelled tuple `[id: string]` via the construct bucket, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3170,7 +3204,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "SignaturesOfType"],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `InstanceType<Ctor>` materialises the construct signature's declared return object, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3184,7 +3218,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `Parameters<typeof callable>` picks the CALL bucket of the hybrid call+construct interface (`[a: number]`), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3198,7 +3238,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `ReturnType<typeof callable>` picks the CALL bucket of the hybrid interface and projects `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3212,7 +3258,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `ConstructorParameters<typeof callable>` picks the CONSTRUCT bucket of the hybrid interface (`[b: string]`), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3226,7 +3278,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `InstanceType<typeof callable>` picks the CONSTRUCT bucket of the hybrid interface and materialises `{ value: number }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3247,6 +3305,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "ProjectPath",
         "ResolveClassSurface",
         "LowerLocator",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
@@ -3268,6 +3327,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "ProjectPath",
         "ResolveClassSurface",
         "LowerLocator",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
@@ -3279,7 +3339,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::RelationSemantics)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES-era E1 grammar: `ReturnType<typeof sb15>` over the self-recursive generic instantiates the bare-generic declared `T` return at `unknown` (recursion is NOT a substitution event), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3290,7 +3356,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::RelationSemantics)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "SignaturesOfType"],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `ConstructorParameters<NumberBoxCtor>` reduces the construct signature to its parameter tuple via the construct bucket, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3301,7 +3367,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "QueryValueDomainFoundation",
       proof: "ProofRequirement::Ts7Oracle(OracleId::RelationSemantics)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator"],
+      semantic_queries: ["ResolveDecl", "Instantiate", "LowerLocator", "SignaturesOfType"],
       consumed_mechanisms: [],
       unblocker:
         "lifted by U2.CLASS_SURFACES: `InstanceType<NumberBoxCtor>` materialises the construct signature's declared instance shape, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3312,7 +3378,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "IndexedAccess",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         'lifted by U2.CLASS_SURFACES: `ReturnType<MethodHost["tag"]>` is decoration-invariant — the projection ignores the identity method decorator and preserves the literal `"tag"` return, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
@@ -3323,7 +3395,13 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "IndexedAccess", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "IndexedAccess",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         'lifted by U2.CLASS_SURFACES: `ReturnType<MetadataAware["describe"]>` is decoration-invariant — the metadata-reading class decorator does not rewrite the surface, so the literal union `"ready" | "pending"` survives, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
@@ -3451,6 +3529,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "FlowReturn",
         "LowerLocator",
         "ClassifyTruthinessDomain",
+        "SignaturesOfType",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation", "CanonicalTypeAlgebraClosure"],
       unblocker:
@@ -3462,7 +3541,14 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "ReturnPathPeekerTwoFrontier",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ValueInference)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "FlowReturn", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "FlowReturn",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof directArrow>` solves the arrow expression body through the demand-sliced FlowReturn dispatch with return-position literal widening (`ok: true` widens to `boolean`; the pre-substrate tree returned a semantic miss), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3476,7 +3562,14 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "ReturnPathPeekerTwoFrontier",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ValueInference)",
-      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "FlowReturn", "LowerLocator"],
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "FlowReturn",
+        "LowerLocator",
+        "SignaturesOfType",
+      ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
         "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof directArrow>` substitutes the parameter references in the returned object (`input: string`; optional `count` injects `number | undefined`) through the demand-sliced FlowReturn dispatch, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
@@ -3577,6 +3670,9 @@ const KEY_OWNING_BLOCK = new Map([
   ["TypeOf", "U2QueryValueDomain"],
   ["NormalizeUnion", "U2QueryValueDomain"],
   ["ReduceIntersection", "U2QueryValueDomain"],
+  // Shared signature discovery is value-domain substrate: the signature
+  // utilities and call/construct resolution both read it.
+  ["SignaturesOfType", "U2QueryValueDomain"],
   // Generic substitution is a value-domain instantiation produced by
   // U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation inference.
   ["Instantiate", "U2QueryValueDomain"],

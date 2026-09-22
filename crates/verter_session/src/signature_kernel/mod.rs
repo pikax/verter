@@ -49,7 +49,10 @@ pub use records::{
     LAYOUT_READY_SET, LAYOUT_SIGNATURE_CANDIDATE, LAYOUT_SIGNATURE_SET_REF,
 };
 #[allow(unused_imports)]
-pub use result::{ReadSignatureResultKey, ResultDemand, SignatureResultValue, SignatureSetValue};
+pub use result::{
+    ReadSignatureResultKey, ResultDemand, SignatureCandidateNodes, SignatureResultValue,
+    SignatureSetValue,
+};
 #[allow(unused_imports)]
 pub use substitution::{
     compose_canonical, CallSubstitution, SubstError, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH,

@@ -1764,7 +1764,7 @@ export function ovSingleImplGroup(x: OvSingleImpl["m"]) {
 
 // The signature UTILITIES over the same carrier, forced to MATERIALIZE by
 // a projection ON the utility's result — the end-to-end route
-// `select_signature_function` serves.
+// signature-utility inference serves.
 export function ovImplReturnProj(x: ReturnType<OvImpl["m"]>["length"]) {
   return x;
 }
@@ -5273,8 +5273,8 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
 /// The group now projects as the canonical overload-group carrier — an
 /// object whose CALL SIGNATURES are the contributors, the same shape
 /// `build_typeof` mints for a top-level function overload group — so the
-/// existing size gate (`signature_bucket_arity(.., Call) > 1`) sees the
-/// real arity and `select_signature_function` keeps reading the LAST
+/// existing size gate (more than one call signature) sees the
+/// real arity and signature-utility inference keeps reading the LAST
 /// overload for the signature utilities, exactly as it does for `f`.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
@@ -5527,7 +5527,7 @@ fn shape_of(ty: &TypeExpr) -> String {
 /// size gate filtered on `visibility.is_public() && method_kind ==
 /// Method` and stopped there. `build_typeof` additionally HIDES the
 /// trailing implementation signature of a multi-signature group, and
-/// `select_signature_function` documents that filter as its PRECONDITION
+/// signature-utility inference documents that filter as its PRECONDITION
 /// before reading the LAST overload. The carrier fed it an unfiltered
 /// bucket, so for a group with an implementation the LAST overload WAS
 /// the implementation:
@@ -5545,7 +5545,7 @@ fn shape_of(ty: &TypeExpr) -> String {
 /// signature TypeScript hides. Two claims made when the carrier landed
 /// are corrected with it: it was NOT "byte-identical in shape to what
 /// `build_typeof` mints" (that producer filtered and this one did not),
-/// and `select_signature_function` did NOT read "the last overload
+/// and signature-utility inference did NOT read "the last overload
 /// exactly as it does for `f`" (for a bodied group it read the
 /// implementation). The rule now has ONE home,
 /// `semantic_query::visible_overload_ordinals`, and both producers call
@@ -5574,7 +5574,7 @@ fn shape_of(ty: &TypeExpr) -> String {
 ///
 /// Mutation recipe: dropping `!has_implementation_body` from
 /// `visible_overload_ordinals` puts `(x: any): any` back as `OvImpl`'s
-/// third signature AND flips the `select_signature_function` rows to
+/// third signature AND flips the signature-utility inference rows to
 /// `any` / `[x: any]`; replacing its all-bodied fallback with an empty
 /// selection flips `OvSingleImpl` and `OvLoneImpl`.
 #[test]
@@ -5636,7 +5636,7 @@ fn method_overload_group_carrier_hides_the_implementation_signature() {
         vec![(NodeShape::Primitive(PrimitiveKind::String), literal("OA"))],
     );
 
-    // END TO END: the utility route. `select_signature_function` reads
+    // END TO END: the utility route. signature-utility inference reads
     // the LAST visible overload, which is what `ReturnType<C['m']>` and
     // `Parameters<C['m']>` publish.
     for (name, expected_param, expected_return) in [
@@ -5651,7 +5651,10 @@ fn method_overload_group_carrier_hides_the_implementation_signature() {
                 let base = indexed_access_object(dispatch, node);
                 let projected = project_member_path(dispatch, base, "m");
                 let selected = dispatch
-                    .select_signature_function(projected, super::build::SignatureBucket::Call)
+                    .utility_inference_signature(
+                        projected,
+                        crate::semantic_query::SignatureKind::Call,
+                    )
                     .unwrap_or_else(|| panic!("{name}: the group must select a signature"));
                 let parts = signature_parts(dispatch, selected);
                 assert_eq!(
