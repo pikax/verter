@@ -15,15 +15,21 @@
 //!    row's probe in TYPE position (a declared binding annotated with
 //!    the probe, read back through the public audited flow-return
 //!    boundary — never the witness's own return, which for wrapper
-//!    probes like `Awaited<ReturnType<...>>` is a different question).
-//!    The comparison bases are STRUCTURAL only — the typed
+//!    probes like `Awaited<ReturnType<...>>` is a different question),
+//!    then EXPANDED the way a consumer expands it: publication keeps an
+//!    alias/builtin instantiation carrier (the checker keeps the alias
+//!    label too) and the `Instantiate` family reduces it on demand,
+//!    while the recorded `checker` column is a REDUCED print, so both
+//!    sides have to be brought to the same question before they are
+//!    comparable. The comparison bases are STRUCTURAL only — the typed
 //!    checker-syntax projection of the recorded `checker` text, the
 //!    recorded `decl_emit` signature return where the checker column is
 //!    a display-only binder instantiation (checker print output — never
 //!    a live basis itself) or a recorded refusal
 //!    (compared ORDER-SENSITIVELY — the declaration bytes carry union
 //!    arm order as a structured field), and for diagnostic rows the
-//!    recorded refusal pinned by a deferred carrier. A
+//!    recorded refusal pinned by a live NON-ANSWER (the probe held
+//!    deferred, or a typed gap). A
 //!    `MatchesChecker` row fails when the live answer stops matching,
 //!    and an owed/degraded row fails when the live answer STARTS
 //!    matching — a later block that changes an answer FLIPS A ROW here
@@ -321,6 +327,12 @@ struct LiveProbeOutcome {
     /// substrate has not reduced the probe's outer operator), else
     /// `None`.
     deferred_operator: Option<std::sync::Arc<str>>,
+    /// The live rail REFUSED the probe: the expanded answer is a typed
+    /// gap (`Opaque` carrying a genuine error/miss `QueryError`, not one
+    /// of the non-error identity carriers). Where the CHECKER itself
+    /// refused to print a type, a refusal is an honest live answer —
+    /// distinct from both a reduction and a held carrier.
+    refused: bool,
     /// The rendered live answer (diagnostics only — never a comparison
     /// basis).
     rendered: Option<String>,
@@ -355,10 +367,13 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         crate::semantic_query::ReturnProjectionDemand::whole_return(),
     );
     let Ok(result) = carrier.as_result() else {
+        // The BOUNDARY refused before any node exists: a refusal, and the
+        // strongest one the rail has.
         return LiveProbeOutcome {
             matched_checker: false,
             matched_declared_return: false,
             deferred_operator: None,
+            refused: true,
             rendered: None,
             degraded: false,
         };
@@ -368,16 +383,32 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
-    let node = result.return_type();
+    // Publication KEEPS an alias/builtin instantiation carrier: the
+    // checker keeps the alias label too, and a consumer expands it on
+    // demand through the `Instantiate` family. The recorded `checker`
+    // column, by contrast, is what 7.0.2 prints through the corpus's
+    // two-step wrapper — a REDUCED form. Comparing the published carrier
+    // against a reduced print measures publication laziness, not a
+    // semantic difference, and no row could ever match. Take the consumer
+    // step first, so both sides answer the same question.
+    let node = dispatch.expand_identity_carrier_for_tests(result.return_type());
     let rendered = Some(render_node(&dispatch, node, 0));
-    let deferred_operator = match dispatch.graph().node_data(node) {
+    let (deferred_operator, refused) = match dispatch.graph().node_data(node) {
         Some(data) => match data.as_ref() {
             crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. } => {
-                Some(std::sync::Arc::clone(&base.decl_name))
+                (Some(std::sync::Arc::clone(&base.decl_name)), false)
             }
-            _ => None,
+            // An `Opaque` carrier is the rail publishing NO TYPE — a
+            // typed gap, whatever its disposition (a `Miss` is
+            // `OptionalAbsence`, a genuine failure is the §22 error
+            // type, a back-edge is a recursion carrier). All of them are
+            // honest non-answers; none of them is a type. The
+            // discrimination that matters is against a published TYPE,
+            // which is any other node data.
+            crate::semantic_query::SemanticNodeData::Opaque(_) => (None, true),
+            _ => (None, false),
         },
-        None => None,
+        None => (None, false),
     };
     let structural_match = |text: &str, ordered: bool| {
         let parsed = checker_syntax::parse(text).unwrap_or_else(|err| {
@@ -420,6 +451,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         matched_checker,
         matched_declared_return,
         deferred_operator,
+        refused,
         rendered,
         degraded,
     }
@@ -514,19 +546,24 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
         };
         let note = note.map(|note| format!("{}: {note}", row.id));
         // The diagnostic row pins the recorded REFUSAL: 7.0.2 printed no
-        // type (TS2589), so the only honest live answer is the probe held
-        // DEFERRED by its outer operator. A reduction to any value — or a
-        // clean structural match of a type — flips the row for a re-pin
-        // and a ledger review against the recorded refusal.
+        // type (TS2589), so an honest live answer is a NON-ANSWER — the
+        // probe held DEFERRED by its outer operator, or the typed gap the
+        // rail publishes when its cycle guard terminates the recursive
+        // thenable (`docs/evidence/signature-kernel/semantic-difference-ledger.md`
+        // SDL-4: "an error recovery is not a type this substrate fabricates
+        // clean and warm"). Both are refusals; neither fabricates a type
+        // where the checker printed none. A reduction to an actual VALUE
+        // flips the row for a re-pin and a ledger review.
         if let Some(diagnostic) = row.diagnostic {
             let outer_operator = row.probe.split('<').next().unwrap_or("");
-            if live.deferred_operator.as_deref() != Some(outer_operator) {
+            let held_deferred = live.deferred_operator.as_deref() == Some(outer_operator);
+            if !held_deferred && !live.refused {
                 return Some(format!(
                     "{}: the recorded observation is the checker's REFUSAL (`{diagnostic}`) \
-                     but the live answer to the probe `{}` is no longer the deferred \
-                     `{outer_operator}` carrier — measured `{}`. The substrate now has a \
-                     disposition where the checker refused; re-pin the row and review the \
-                     semantic-difference ledger",
+                     but the live answer to the probe `{}` is neither the deferred \
+                     `{outer_operator}` carrier nor a typed gap — measured `{}`. The \
+                     substrate now publishes a TYPE where the checker refused; re-pin the \
+                     row and review the semantic-difference ledger",
                     row.id, row.probe, rendered
                 ));
             }

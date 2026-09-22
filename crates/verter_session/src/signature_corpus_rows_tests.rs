@@ -142,7 +142,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface ThenableUnion {\n    then(onfulfilled: (v: number | string) => void): void;\n}\nexport declare function witness(): ThenableUnion;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "The union-valued then residual: the recorded observation is the DISTRIBUTED fulfillment union (Awaited over a thenable whose fulfillment arm is itself a union). The thenable-protocol observation lane does not yet read this shape." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV02_then_union_mixed_arm",
@@ -155,7 +155,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(v: Promise<number> | string): string | Promise<number>;\n",
-        verdict: Verdict::KnownOwed { note: "Awaited over a mixed union arm (Promise<number> | string): the recorded answer distributes. The runtime `Awaited` unwrap at the return boundary does not yet distribute over a mixed union arm." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV03_construct_intersection",
@@ -168,7 +168,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface B {\n    b: 2;\n}\nexport declare function witness(): B;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Instance side of a CONSTRUCT-signature intersection: 7.0.2 reduces the instance type to B. Construct-signature intersection reduction is owed by the `SignaturesOfType` set authority over `ReduceIntersection`." },
+        verdict: Verdict::KnownOwed { note: "Instance side of a CONSTRUCT-signature intersection: 7.0.2 reduces the instance type to B; the live rail answers the FIRST arm's instance instead (measured `DeclRef(A)`). Construct-signature intersection reduction is owed by the `SignaturesOfType` set authority over `ReduceIntersection`." },
     },
     Row {
         id: "SV04_mixin_intersection",
@@ -181,7 +181,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Base {\n    label: string;\n}\nexport declare function Mixin<S extends new (...args: any[]) => Base>(Base: S): {\n    new (...args: any[]): {\n        extra: number;\n        label: string;\n    };\n} & S;\nexport declare function witness(): {\n    extra: number;\n    label: string;\n} & Base;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Mixin intersection witness (Mixin.(Anonymous class) & Base): the anonymous-class instance plus base intersection. Owed by the `SignaturesOfType` construct-signature/mixin semantics." },
+        verdict: Verdict::KnownOwed { note: "Mixin intersection witness (Mixin.(Anonymous class) & Base): the anonymous-class instance plus base intersection. The live rail publishes a typed gap instead (measured `Opaque(Miss)`, degraded). Owed by the `SignaturesOfType` construct-signature/mixin semantics." },
     },
     Row {
         id: "SV05_generic_default",
@@ -194,7 +194,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type WithDefault<T = string> = {\n    value: T;\n};\nexport declare function witness(): WithDefault<string>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Generic DEFAULT application (WithDefault bare -> WithDefault<string>): the deferred-default substitution stage keeps the alias applied form; owed by the binder-space default application." },
+        verdict: Verdict::KnownOwed { note: "Generic DEFAULT application (WithDefault bare -> WithDefault<string>): 7.0.2 applies the declared default; the live rail answers the BARE alias reference (measured `DeclRef(WithDefault)`), so the default is never applied. Owed by the binder-space default application." },
     },
     Row {
         id: "SV06_default_references_binder",
@@ -207,7 +207,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type Chain<T, U = T[]> = {\n    self: T;\n    others: U;\n};\nexport declare function witness(): Chain<number, number[]>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A default REFERENCING ANOTHER BINDER (U = T[]): the recorded observation is the defaulted instantiation Chain<number, number[]>. Owed by the binder-space default application." },
+        verdict: Verdict::KnownOwed { note: "A default REFERENCING ANOTHER BINDER (U = T[]): the recorded observation is the defaulted instantiation Chain<number, number[]>; the live rail expands the alias STRUCTURALLY instead (measured `{ self: number, others: Array(number) }`), losing the alias-applied form the checker prints. Owed by the binder-space default application." },
     },
     Row {
         id: "SV07_type_predicate",
@@ -220,7 +220,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Foo {\n    kind: 'foo';\n    n: number;\n}\nexport declare function isFoo(x: unknown): x is Foo;\nexport declare function witness(): typeof isFoo;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A TYPE-PREDICATE signature print ((x: unknown) => x is Foo): predicate propagation into signature observations is owed by the `SignaturesOfType` result projection." },
+        verdict: Verdict::KnownOwed { note: "A TYPE-PREDICATE signature print ((x: unknown) => x is Foo): the live rail publishes an EMPTY surface (measured `{  }`, degraded) — the callable and its predicate are both lost. Predicate propagation into signature observations is owed by the `SignaturesOfType` result projection." },
     },
     Row {
         id: "SV08_assertion_signature",
@@ -233,7 +233,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Bar {\n    kind: 'bar';\n}\nexport declare function assertBar(x: unknown): asserts x is Bar;\nexport declare function witness(): typeof assertBar;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "An ASSERTION signature print (asserts x is Bar): same `SignaturesOfType` result-projection gap as the predicate twin." },
+        verdict: Verdict::KnownOwed { note: "An ASSERTION signature print (asserts x is Bar): the live rail publishes an EMPTY surface (measured `{  }`, degraded) — the same `SignaturesOfType` result-projection gap as the predicate twin." },
     },
     Row {
         id: "SV09_explicit_type_arguments",
@@ -246,7 +246,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function identity<T>(v: T): T;\nexport declare function witness(): number;\n",
-        verdict: Verdict::KnownOwed { note: "Under the probe-driven observation lane the substrate DEFERS a type-position `ReturnType<typeof ...>` instantiation (measured `InstantiationRef(ReturnType)`); the witness's own return rail already answers `number`, but reducing the recorded PROBE question is owed by the `SignaturesOfType` type-position instantiation." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV10_nested_instantiation",
@@ -259,7 +259,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type F<T> = {\n    f: T;\n};\ntype G<U> = F<U[]>;\nexport declare function witness(): G<boolean>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "The nested-instantiation probe `ReturnType<typeof witness>` defers in type position (measured `InstantiationRef(ReturnType)`); the recorded answer is the alias-applied `G<boolean>`. Owed by the `SignaturesOfType` type-position instantiation with the alias-preserving display." },
+        verdict: Verdict::KnownOwed { note: "The nested-instantiation probe REDUCES now, but to the alias's EXPANSION (measured `{ f: Array(boolean) }`) where 7.0.2 prints the alias-applied `G<boolean>`. Preserving the alias-applied display through a type-position instantiation is owed by the `SignaturesOfType` result projection." },
     },
     Row {
         id: "SV11_constrained_substitution",
@@ -272,7 +272,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function pickA<T extends {\n    a: 1;\n}>(v: T): T['a'];\nexport declare function witness(): 1;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the current substrate defers the probe (measured `InstantiationRef(ReturnType)`, with the signature-level indexed-access shell behind it). Forcing the indexed access through the constraint is owed by the constrained-substitution stage." },
+        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the live rail answers an EMPTY surface (measured `{  }`), so the indexed access is never forced through the constraint. Owed by the constrained-substitution stage." },
     },
     Row {
         id: "SV12_grouping_witness_L",
@@ -285,7 +285,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): never;\n",
-        verdict: Verdict::KnownOwed { note: "GROUPING WITNESS L: 7.0.2 reduction-state witness only — L<a> is never. Grouping trees are preserved by `ReduceIntersection`; the live ReturnType reduction of L<'a'> is owed by the `SignaturesOfType` type-position instantiation over it." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV13_grouping_witness_R",
@@ -298,7 +298,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): never;\n",
-        verdict: Verdict::KnownOwed { note: "GROUPING WITNESS R: 7.0.2 reduction-state witness only — R<a> is never, matching L. Pair pin is signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair; the live ReturnType reduction is owed by the `SignaturesOfType` type-position instantiation over `ReduceIntersection`." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV14_transparent_group",
@@ -311,7 +311,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): {\n    a: 1;\n} & {\n    b: 2;\n};\n",
-        verdict: Verdict::KnownOwed { note: "The transparent intersection group records `{ a: 1 } & { b: 2 }` (declared order); the probe `ReturnType<typeof witness>` defers in type position (measured `InstantiationRef(ReturnType)`). Owed by the `SignaturesOfType` type-position instantiation — the intersection itself reduces through `ReduceIntersection` grouping once the ReturnType wrapper does." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV15_awaited_plain_primitive",
@@ -324,7 +324,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): number;\n",
-        verdict: Verdict::KnownOwed { note: "The `Awaited<...>` wrapper defers in type position (measured `InstantiationRef(Awaited)`); the witness's own return is already `number`. The runtime/lib `Awaited` instantiation through the probe lane is owed." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV16_awaited_plain_object",
@@ -337,7 +337,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): {\n    a: number;\n};\n",
-        verdict: Verdict::KnownOwed { note: "The `Awaited<...>` wrapper defers in type position (measured `InstantiationRef(Awaited)`); the object residual past the wrapper is owed by the runtime/lib `Awaited` instantiation." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV17_awaited_any",
@@ -350,7 +350,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(v: any): any;\n",
-        verdict: Verdict::KnownOwed { note: "The `Awaited<...>` wrapper defers in type position (measured `InstantiationRef(Awaited)`); the any-residual (`any` absorbs the wrapper) is owed by the runtime/lib `Awaited` instantiation." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV18_awaited_never",
@@ -363,7 +363,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(): never;\n",
-        verdict: Verdict::KnownOwed { note: "Awaited residual over never: the recorded answer is never (IsNever leg fires). A never-typed witness has no value rail to observe through the flow lane; the typed `never` carrier through the ordered reduction is owed." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV19_awaited_union_arm",
@@ -376,7 +376,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(v: Promise<number> | string): string | Promise<number>;\n",
-        verdict: Verdict::KnownOwed { note: "Awaited distributing over Promise<number> | string: owed by the runtime/lib `Awaited` union-then distribution." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV20_awaited_non_thenable_then",
@@ -389,7 +389,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface WeirdThen {\n    then(onfulfilled: (v: {\n        nested: 1;\n    }) => void, unused: number): void;\n}\nexport declare function witness(): WeirdThen;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Thenable with an extra non-callback parameter and an object fulfillment ({ nested: 1; }): the thenable-protocol shape reading is owed." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV21_awaited_recursive_thenable",
@@ -402,7 +402,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: Some("Type instantiation is excessively deep and possibly infinite."),
         decl_emit: "interface Rec {\n    then(onfulfilled: (v: Rec) => void): void;\n}\nexport declare function witness(): Rec;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Recursive thenable: 7.0.2 itself refuses with diagnostic TS2589 — the recorded OBSERVATION is the diagnostic, not a type print. The runtime-protocol recursive-thenable disposition is owed." },
+        verdict: Verdict::KnownOwed { note: "Recursive thenable: 7.0.2 itself refuses with diagnostic TS2589 — the recorded OBSERVATION is the diagnostic, not a type print. The live rail also REFUSES, publishing a typed gap (measured `Opaque(Miss)`) rather than fabricating a recovery type, and the row pins that non-answer. A checker-faithful recovery disposition is owed." },
     },
     Row {
         id: "SV22_awaited_nested_promise",
@@ -415,7 +415,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness(v: Promise<Promise<number>>): Promise<Promise<number>>;\n",
-        verdict: Verdict::KnownOwed { note: "Nested Promise<Promise<number>> collapses to number through recursive Awaited: owed by the runtime/lib `Awaited` recursive unwrap." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV23_awaited_deferred_generic",
@@ -441,7 +441,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T extends Promise<number>>(v: T): Promise<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained generic async wrap: Promise<Promise<number>> (the body returns v: T unreduced). The async-wrap/constraint interaction is owed by the runtime/lib `Awaited` lane." },
+        verdict: Verdict::KnownOwed { note: "Constrained generic async wrap: Promise<Promise<number>> (the body returns v: T unreduced); the live rail publishes a typed gap instead (measured `Opaque(Miss)`). The async-wrap/constraint interaction is owed by the runtime/lib `Awaited` lane." },
     },
     Row {
         id: "SV25_generic_union_dedup",
@@ -454,7 +454,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: true,
         diagnostic: None,
         decl_emit: "type A<T> = {\n    ka: T;\n};\ntype B<T> = {\n    kb: T;\n};\nexport declare function witness<T>(v: A<T> | B<T> | A<T>): A<T> | B<T>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Order-heavy generic union with a duplicate arm: 7.0.2 deduplicates A<T> | B<T> | A<T> to A<T> | B<T> preserving first occurrence, and instantiates T at unknown for the display. Authored-precedence-preserving union reduction is owed by `ReduceUnion`." },
+        verdict: Verdict::KnownOwed { note: "Order-heavy generic union with a duplicate arm: 7.0.2 deduplicates A<T> | B<T> | A<T> to A<T> | B<T> preserving FIRST occurrence; the live rail dedups but REVERSES the authored arm order (measured `B | A`). Authored-precedence-preserving union reduction is owed by `ReduceUnion`." },
     },
     Row {
         id: "SV26_literal_generic_union_order",
