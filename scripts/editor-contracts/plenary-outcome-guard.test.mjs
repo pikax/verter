@@ -34,9 +34,10 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const fixtures = path.join(repoRoot, "scripts", "editor-contracts", "fixtures");
 
+/** Each workflow's job that owns the plenary run (CI folds the four editors into one). */
 const WORKFLOWS = [
-  path.join(repoRoot, ".github", "workflows", "ci.yml"),
-  path.join(repoRoot, ".github", "workflows", "release.yml"),
+  { path: path.join(repoRoot, ".github", "workflows", "ci.yml"), job: "editor-contracts" },
+  { path: path.join(repoRoot, ".github", "workflows", "release.yml"), job: "editor-neovim" },
 ];
 
 /** The step whose `run:` block owns the verdict. */
@@ -54,16 +55,16 @@ const TAIL_ANCHOR = "rc=${rc:-0}";
  * available to these scripts, and a block scalar's extent is unambiguous from
  * indentation alone.
  */
-function extractRunBlock(workflowPath) {
+function extractRunBlock({ path: workflowPath, job }) {
   const lines = readFileSync(workflowPath, "utf-8").split("\n");
 
-  const jobAt = lines.findIndex((line) => line === "  editor-neovim:");
-  assert.notEqual(jobAt, -1, `${workflowPath}: no \`editor-neovim\` job`);
+  const jobAt = lines.findIndex((line) => line === `  ${job}:`);
+  assert.notEqual(jobAt, -1, `${workflowPath}: no \`${job}\` job`);
 
   const stepAt = lines.findIndex(
     (line, i) => i > jobAt && line.trimEnd().endsWith(`: ${STEP_NAME}`),
   );
-  assert.notEqual(stepAt, -1, `${workflowPath}: \`editor-neovim\` has no \`${STEP_NAME}\` step`);
+  assert.notEqual(stepAt, -1, `${workflowPath}: \`${job}\` has no \`${STEP_NAME}\` step`);
 
   const runAt = lines.findIndex((line, i) => i > stepAt && /^\s*run: \|\s*$/.test(line));
   assert.notEqual(runAt, -1, `${workflowPath}: \`${STEP_NAME}\` has no \`run: |\` block`);
@@ -90,8 +91,9 @@ function extractRunBlock(workflowPath) {
 }
 
 /** The verdict half of the run block: from {@link TAIL_ANCHOR} to the end. */
-function extractVerificationTail(workflowPath) {
-  const body = extractRunBlock(workflowPath);
+function extractVerificationTail(workflow) {
+  const workflowPath = workflow.path;
+  const body = extractRunBlock(workflow);
   const anchorAt = body.indexOf(TAIL_ANCHOR);
   assert.notEqual(
     anchorAt,
@@ -111,12 +113,10 @@ function extractVerificationTail(workflowPath) {
  * exit code alone cannot tell "detected the failure" from "could not find the
  * success proof".
  */
-function runVerdict(workflowPath, fixtureName) {
-  const script = [
-    "set -euo pipefail",
-    'out=$(cat "$1")',
-    extractVerificationTail(workflowPath),
-  ].join("\n");
+function runVerdict(workflow, fixtureName) {
+  const script = ["set -euo pipefail", 'out=$(cat "$1")', extractVerificationTail(workflow)].join(
+    "\n",
+  );
 
   try {
     const stdout = execFileSync("bash", ["-c", script, "bash", path.join(fixtures, fixtureName)], {
@@ -176,7 +176,7 @@ test("the committed transcripts really are ANSI-coloured and really differ", () 
 });
 
 for (const workflow of WORKFLOWS) {
-  const label = path.basename(workflow);
+  const label = `${path.basename(workflow.path)} (${workflow.job})`;
 
   test(`${label}: an all-pass suite is accepted`, bashTestOptions, () => {
     const { status, output } = runVerdict(workflow, ACCEPTED);

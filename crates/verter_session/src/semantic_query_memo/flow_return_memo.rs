@@ -53,7 +53,12 @@ impl SemanticGraphStore {
         // candidates record different materialised points, so a warm hit
         // must cover the caller's OWN demand point.
         let requested = MaterializedPoint::new(key.demand.point.clone());
-        let hit = self.modeless_family_warm_hit(ctx, &family, Some(&requested))?;
+        // Miss-neutral probe: a miss falls through to the owning
+        // cooperative dispatch, which records the single miss (see
+        // `get_validated_value_impl`'s `record_miss` contract).
+        let hit = self
+            .get_validated_value_impl(&family, ModeSlot::Single, &requested, ctx, None, false)?
+            .value;
         match hit {
             QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
                 verter_debug_assert!(

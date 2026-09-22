@@ -1055,38 +1055,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
 
-        // A candidate-set miss under a TRIPPED connected-demand ledger is
-        // the budget, never evidence that the callee carries no signature.
-        // A callee is `NotCallable` on a COMPLETE, empty shared signature
-        // list, and when the callee itself never resolved (a typed miss has
-        // no type to enumerate). Any other list that did not settle proves
-        // nothing about the callee.
-        let non_callable = || {
-            CandidateVerdict::Degraded(if self.connected_demand_tripped() {
-                ResolveCallFailure::Budget
-            } else if self.call_callee_is_unresolved(callee) {
-                ResolveCallFailure::NotCallable
-            } else {
-                match self.shared_signature_buckets(callee) {
-                    Ok(_) => ResolveCallFailure::NotCallable,
-                    Err(
-                        crate::semantic_query::IncompleteReason::Budget
-                        | crate::semantic_query::IncompleteReason::Cancelled,
-                    ) => ResolveCallFailure::Budget,
-                    Err(_) => ResolveCallFailure::Undecidable,
-                }
-            })
-        };
-        let Some(visible) =
-            self.acquire_call_candidates(callee, &explicit_type_args, key.context.resolve_env_hash)
-        else {
-            return non_callable();
+        // A call site demands exactly ITS bucket of the callee's shared
+        // signature list: the call bucket for a call, the construct bucket
+        // for `new`. The other bucket is never read, so its settlement
+        // never gates this call.
+        let bucket = signature_bucket(key.kind);
+        let visible = match self.acquire_call_candidates(
+            callee,
+            bucket,
+            &explicit_type_args,
+            key.context.resolve_env_hash,
+        ) {
+            CallCandidates::Candidates(visible) => visible,
+            failed => return CandidateVerdict::Degraded(self.candidate_failure(callee, failed)),
         };
         let raw = if key.explicit_type_args.is_empty() {
             Arc::clone(&visible)
         } else {
             match self.acquire_call_candidates(
                 callee,
+                bucket,
                 &Arc::<[SemanticNodeId]>::from([]),
                 key.context.resolve_env_hash,
             ) {
@@ -1095,7 +1083,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // it is paired positionally: a ROOTLESS candidate has no
                 // occurrence to pair by, and its raw form is the candidate
                 // at the same position in the equally-filtered list.
-                Some(raw) => Arc::from(
+                CallCandidates::Candidates(raw) => Arc::from(
                     raw.iter()
                         .filter(|candidate| {
                             self.instantiate_call_candidate(candidate.node, &explicit_type_args)
@@ -1105,7 +1093,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 ),
-                None => return non_callable(),
+                failed => {
+                    return CandidateVerdict::Degraded(self.candidate_failure(callee, failed))
+                }
             }
         };
 
@@ -1204,7 +1194,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Err(failure) => return CandidateVerdict::Degraded(failure),
         };
         let mut budget = CallResolutionBudget::default();
-        let mut saw_bucket = false;
 
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
         let bucket_kind = |node: SemanticNodeId| -> Option<SignatureKind> {
@@ -1216,19 +1205,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => None,
             }
         };
-        // The candidates are the callee's shared signature list in call-site
-        // order: the first applicable candidate of this call's bucket wins.
-        // A union callee arrives as its common or synthesized union
+        // The candidates are this call site's bucket of the callee's shared
+        // signature list, in list order: the first applicable candidate
+        // wins. A union callee arrives as its common or synthesized union
         // signatures, so there is no per-arm acceptance here.
         for (position, candidate) in visible.iter().enumerate() {
             let Some(kind) = bucket_kind(candidate.node) else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
-            // The bucket filter runs BEFORE the raw pairing: a candidate in
-            // the other bucket is not this call site's business, so a
-            // pairing failure on it can never decide the call.
-            if !call_bucket_matches(key.kind, kind) {
-                continue;
+            // The set was demanded for exactly this bucket; a candidate of
+            // the other bucket is a producer contract violation, and the
+            // call fails closed rather than deciding on it.
+            if kind != bucket {
+                return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             }
             // Pair the (possibly instantiated) candidate with its RAW form
             // through the content-free authored origin — instantiation
@@ -1249,7 +1238,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let Some(raw_candidate) = raw_candidate else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
-            saw_bucket = true;
             if !budget.start_candidate() {
                 self.abandon_call_sessions_since(session_watermark);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
@@ -1266,21 +1254,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        if !saw_bucket {
-            return non_callable();
-        }
+        // Every candidate of the bucket was a definite mismatch.
         CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
     }
 
+    /// Demand the ordered candidates of the callee's `bucket`, instantiated
+    /// under `type_args`, and classify a set that did not come back
+    /// through the SAME shared signature list the producer read — never
+    /// through the other bucket, whose settlement is not this call site's
+    /// business.
     fn acquire_call_candidates(
         &self,
         callee: SemanticNodeId,
+        bucket: SignatureKind,
         type_args: &Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
-    ) -> Option<Arc<[SignatureRef]>> {
-        match self
+    ) -> CallCandidates {
+        if let QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) = self
             .execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
                 callee,
+                kind: bucket,
                 type_args: Arc::clone(type_args),
                 context: crate::semantic_query::OverloadSetContext {
                     resolve_env_hash,
@@ -1289,8 +1282,60 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .value
         {
-            QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) => Some(candidates),
-            _ => None,
+            return CallCandidates::Candidates(candidates);
+        }
+        match self.shared_signature_nodes(callee, bucket) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.is_empty() => {
+                CallCandidates::Empty
+            }
+            super::signature_discovery::SharedSignatureNodes::Nodes(_) => {
+                if type_args.is_empty() {
+                    // A settled, non-empty list whose set still missed did
+                    // not settle as a set: nothing here proves the callee
+                    // either way.
+                    CallCandidates::Incomplete(
+                        crate::semantic_query::IncompleteReason::UnsettledInput,
+                    )
+                } else {
+                    CallCandidates::AllDropped
+                }
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(reason) => {
+                CallCandidates::Incomplete(reason)
+            }
+        }
+    }
+
+    /// The failure a call degrades to when its bucket produced no
+    /// candidates. A miss under a TRIPPED connected-demand ledger is the
+    /// budget, never evidence about the callee. A callee is `NotCallable`
+    /// only when it never resolved (a typed miss has no type to enumerate)
+    /// or when its requested bucket is COMPLETE and empty. Candidates that
+    /// every explicit type argument list rejected leave the callee callable
+    /// — the failure is the argument list's (`NoApplicableOverload`). A
+    /// bucket that did not settle proves nothing about the callee.
+    fn candidate_failure(
+        &self,
+        callee: SemanticNodeId,
+        candidates: CallCandidates,
+    ) -> ResolveCallFailure {
+        if self.connected_demand_tripped() {
+            return ResolveCallFailure::Budget;
+        }
+        if self.call_callee_is_unresolved(callee) {
+            return ResolveCallFailure::NotCallable;
+        }
+        match candidates {
+            CallCandidates::Candidates(_) => {
+                unreachable!("a produced candidate set is not a failure")
+            }
+            CallCandidates::Empty => ResolveCallFailure::NotCallable,
+            CallCandidates::AllDropped => ResolveCallFailure::NoApplicableOverload,
+            CallCandidates::Incomplete(
+                crate::semantic_query::IncompleteReason::Budget
+                | crate::semantic_query::IncompleteReason::Cancelled,
+            ) => ResolveCallFailure::Budget,
+            CallCandidates::Incomplete(_) => ResolveCallFailure::Undecidable,
         }
     }
 
@@ -2918,11 +2963,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 }
 
-fn call_bucket_matches(call: CallKind, signature: SignatureKind) -> bool {
-    matches!(
-        (call, signature),
-        (CallKind::Call, SignatureKind::Call) | (CallKind::Construct, SignatureKind::Construct)
-    )
+/// The outcome of demanding a call site's candidates from ITS bucket of the
+/// callee's shared signature list.
+enum CallCandidates {
+    /// The bucket's ordered visible candidates, instantiated under the
+    /// call's explicit type arguments when it carries any.
+    Candidates(Arc<[SignatureRef]>),
+    /// The bucket is complete and empty: the callee cannot be invoked this
+    /// way.
+    Empty,
+    /// The bucket has candidates, but the explicit type arguments dropped
+    /// every one: the callee stays callable, the argument list does not fit.
+    AllDropped,
+    /// The bucket did not settle; nothing here proves the callee either way.
+    Incomplete(crate::semantic_query::IncompleteReason),
+}
+
+/// The signature bucket a call site demands.
+fn signature_bucket(call: CallKind) -> SignatureKind {
+    match call {
+        CallKind::Call => SignatureKind::Call,
+        CallKind::Construct => SignatureKind::Construct,
+    }
 }
 
 fn decided_call_relation(

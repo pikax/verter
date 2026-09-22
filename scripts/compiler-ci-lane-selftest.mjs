@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { LANE_GATES } from "./ci-impact.mjs";
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
 
@@ -23,7 +25,9 @@ test("compile-contract cache belongs to the required standalone runner job", () 
   const successJob = yamlJob(workflow, "ci-success");
 
   assert.match(compilerJob, /needs:\s*detect-changes/);
-  assert.match(compilerJob, /needs\.detect-changes\.outputs\.rust\s*==\s*'true'/);
+  // Gated on the compile-contract owners' dependency closure, not on any
+  // Rust change: an LSP-only or tooling-crate change does not re-run them.
+  assert.match(compilerJob, /needs\.detect-changes\.outputs\.compiler_contracts\s*==\s*'true'/);
   assert.match(compilerJob, /target\/tests\/trybuild/);
   assert.match(compilerJob, /node scripts\/compile-contracts\.mjs/);
   assert.match(compilerJob, /generated_svelte_artifacts_match_their_authoritative_inputs/);
@@ -50,10 +54,17 @@ test("Svelte conformance runs for golden-generator changes", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const conformanceJob = yamlJob(workflow, "svelte-conformance");
 
+  // The gate is composed in detect-changes: the `svelte_oracle` path filter
+  // (golden generator, corpus, vendored oracle sources) OR the conformance
+  // crate's dependency closure. Both halves are asserted where they live.
   assert.match(
     conformanceJob,
-    /if:\s*needs\.detect-changes\.outputs\.rust\s*==\s*'true'\s*\|\|\s*needs\.detect-changes\.outputs\.svelte_oracle\s*==\s*'true'/,
+    /if:\s*needs\.detect-changes\.outputs\.svelte_conformance\s*==\s*'true'/,
   );
+  assert.deepEqual(LANE_GATES.svelte_conformance, {
+    filters: ["svelte_oracle"],
+    impact: ["svelte_conformance"],
+  });
   assert.match(conformanceJob, /gen-svelte-goldens\.mjs --conformance --check/);
 });
 

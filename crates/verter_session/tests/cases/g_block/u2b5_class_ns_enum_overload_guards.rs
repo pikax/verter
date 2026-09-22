@@ -22,7 +22,7 @@ use verter_session::semantic_query::{
     AmbientNamespaceContext, ClassSurfaceContext, ClassSurfaceSide, EnumContext,
     OverloadSetContext, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
     QueryResult, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticSymbolSpace, ValueRootKey,
+    SemanticSymbolSpace, SignatureKind, ValueRootKey,
 };
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
@@ -218,8 +218,17 @@ fn enum_key(canonical: &str, name: &str, resolve_env: u8) -> SemanticQueryKey {
 }
 
 fn overload_set_key(callee: SemanticNodeId, resolve_env: u8) -> SemanticQueryKey {
+    overload_set_key_of_kind(callee, SignatureKind::Call, resolve_env)
+}
+
+fn overload_set_key_of_kind(
+    callee: SemanticNodeId,
+    kind: SignatureKind,
+    resolve_env: u8,
+) -> SemanticQueryKey {
     SemanticQueryKey::ResolveOverloadSet {
         callee,
+        kind,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: OverloadSetContext {
             resolve_env_hash: hash16(resolve_env),
@@ -406,6 +415,14 @@ fn resolve_overload_set_key_covers_context() {
     assert_distinct_identity(&base, &overload_set_key(dummy_node(), 9));
     // callee is part of identity.
     assert_distinct_identity(&base, &overload_set_key(SemanticNodeId(2), 0));
+    // The requested signature bucket is part of identity: a callee's call
+    // set and construct set are distinct values (a hybrid carries both,
+    // and either bucket may settle while the other does not), so they
+    // must never share a slot.
+    assert_distinct_identity(
+        &base,
+        &overload_set_key_of_kind(dummy_node(), SignatureKind::Construct, 0),
+    );
 }
 
 // ---------------------------------------------------------------------------

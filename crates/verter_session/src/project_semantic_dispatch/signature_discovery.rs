@@ -257,6 +257,13 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
     }
 
     fn discover(&mut self, node: SemanticNodeId) -> Found {
+        // A lib runtime nominal's builtin-sentinel carrier is TERMINAL: it
+        // names a global interface, not a declaration with a body, so the
+        // global population answers for it BEFORE the settlement rail —
+        // which would resolve it to its unresolvable-declaration miss.
+        if let Some(found) = self.runtime_nominal_carrier(node) {
+            return found;
+        }
         let node = self.dispatch().resolve_signature_source_carrier(
             node,
             ProjectionReductionContext::structural_transit(),
@@ -420,6 +427,72 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             | SemanticNodeData::ImportType(_)
             | SemanticNodeData::RawFallback { .. } => unsettled(),
         }
+    }
+
+    /// [`Self::runtime_nominal`] over `node` when it IS a lib runtime
+    /// nominal's builtin-sentinel carrier, `None` for every other node. The
+    /// nominal's type ARGUMENTS travel with it: a generic augmentation
+    /// (`interface Promise<T> { (value: T): void }`) is instantiated with
+    /// them.
+    fn runtime_nominal_carrier(&mut self, node: SemanticNodeId) -> Option<Found> {
+        let d = self.dispatch();
+        let nominal = match d.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity })
+                if d.runtime_nominal_identity(identity).is_some() =>
+            {
+                (Arc::clone(&identity.decl_name), Vec::new())
+            }
+            Some(SemanticNodeData::InstantiationRef { base, args })
+                if d.runtime_nominal_identity(base).is_some() =>
+            {
+                (Arc::clone(&base.decl_name), args.iter().copied().collect())
+            }
+            _ => return None,
+        };
+        Some(self.runtime_nominal(&nominal.0, &nominal.1))
+    }
+
+    /// The signatures of a lib runtime nominal interface applied to
+    /// `type_arguments`.
+    ///
+    /// These are OPEN interfaces: the pristine lib declaration of `Function`
+    /// / `Date` / `Promise` declares no call signature, but a project's
+    /// `declare global` block can merge some in. The contributors come from
+    /// the shared augmentation folder, which also observes the augmenter-set
+    /// fingerprint so a later `declare global` invalidates the answer; only
+    /// with no contributor is the set empty. Each contributor's own
+    /// signatures are discovered through THIS walk, so an augmenter's
+    /// intersection / alias / overload shape is read exactly once, by the
+    /// one authority. A torn contributor is served but folds the no-warm
+    /// rail, exactly as the external augmentation path does.
+    fn runtime_nominal(&mut self, name: &str, type_arguments: &[SemanticNodeId]) -> Found {
+        let d = self.dispatch();
+        // Contributor discovery for `declare global` is the ingestion-time
+        // population: a program-root `.d.ts` that nothing imports is
+        // recorded when its artifact publishes, so lookup does not scan
+        // program membership. Compiler options (noLib / lib) come from the
+        // request's owning project, not the first workspace file.
+        let request_canonical = crate::request_context::current_request_canonical();
+        let Some(contributions) = d.collect_augmentation_contributions(
+            crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+            name,
+            type_arguments,
+            ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded),
+            request_canonical.as_deref().unwrap_or(""),
+        ) else {
+            return Ok(Vec::new());
+        };
+        if contributions.source_env_unobservable {
+            d.fold_into_top_build_local_taint(false, true);
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            );
+        }
+        let mut out = Vec::new();
+        for contributor in contributions.contributor_nodes {
+            out.extend(self.discover(contributor)?);
+        }
+        Ok(out)
     }
 
     /// Apparent-type signatures of a global wrapper interface, read from the
@@ -1040,6 +1113,60 @@ type AuthoredSignatureParts = (
     Arc<[crate::semantic_query::TypeParamDecl]>,
 );
 
+/// Void facts for a read that never asks for an arity minimum.
+/// [`PositionalShape::type_at`] and [`PositionalShape::receiver`] do not
+/// consult them; only the effective-minimum accessors do, and this shape is
+/// never asked for one.
+struct NoVoidFacts;
+
+impl crate::signature_kernel::SlotTypeFacts for NoVoidFacts {
+    fn accepts_void(&self, _ty: crate::signature_kernel::TypeToken) -> bool {
+        false
+    }
+}
+
+const NO_VOID_FACTS: NoVoidFacts = NoVoidFacts;
+
+/// The type one shared candidate declares at one argument position.
+#[derive(Debug, Clone)]
+pub(super) enum PositionalArgument {
+    /// The candidate declares nothing at that position and has no rest run.
+    Absent,
+    Type {
+        /// The declared type at the position.
+        ty: SemanticNodeId,
+        /// Its union arms without `null` / `undefined`, in union order; a
+        /// non-union is its own single arm, and an all-nullish type is the
+        /// empty list.
+        non_nullish_arms: Vec<SemanticNodeId>,
+    },
+}
+
+/// One candidate's positional slots as read under the pinned view, before
+/// any semantics is dispatched over them.
+struct RawPositional {
+    receiver: Option<SemanticNodeId>,
+    /// `None` when the candidate declares nothing at the position.
+    argument: Option<SemanticNodeId>,
+}
+
+/// One shared candidate's positional read.
+#[derive(Debug, Clone)]
+pub(super) struct PositionalRead {
+    /// The candidate's authored `this` receiver, if it declares one. NEVER a
+    /// positional slot — the positional model excludes it from every arity
+    /// and every position — so a consumer that must judge receiver
+    /// eligibility reads it here and asks the relation authority.
+    pub receiver: Option<SemanticNodeId>,
+    pub argument: PositionalArgument,
+}
+
+/// The positional read of every shared candidate of one subject: one read
+/// per candidate in candidate order (empty is a complete negative), or the
+/// reason the subject did not settle / a candidate's position carries no
+/// single type.
+pub(super) type SharedPositionalReads = Result<Vec<PositionalRead>, IncompleteReason>;
+
 /// The ordered shared candidates of one subject as graph signature nodes.
 pub(super) enum SharedSignatureNodes {
     /// Every candidate, in candidate order. Empty is a complete negative.
@@ -1110,6 +1237,175 @@ impl ProjectSemanticDispatch<'_> {
             nodes.push(node);
         }
         SharedSignatureNodes::Nodes(nodes)
+    }
+
+    /// The type at positional argument `position` of every shared candidate
+    /// of `subject`, in candidate order, read through the ONE positional
+    /// model ([`crate::signature_kernel::PositionalShape`]).
+    ///
+    /// This is the shape accessor every consumer that needs "the type an
+    /// argument lands on" reads: the receiver (`this`) is never a positional
+    /// slot and is reported separately, a leading array rest contributes its
+    /// element (`...cbs: F[]` at 0 is `F`), a fixed tuple rest is already
+    /// flattened into ordinary positions (`...args: [F, G]` at 0 is `F`), and
+    /// a position past the last declared parameter of a rest-less signature
+    /// is [`PositionalArgument::Absent`]. A still-generic rest and a rest run
+    /// with a required tail are not a single position: both are an
+    /// incomplete read rather than an invented type.
+    ///
+    /// An empty candidate list is a complete negative — `subject` carries no
+    /// signature of `kind`, which is also the answer for a provably
+    /// non-callable value (`any`, `never`, a primitive with no augmented
+    /// apparent call signature).
+    pub(super) fn shared_positional_reads(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        position: usize,
+    ) -> SharedPositionalReads {
+        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
+        use crate::signature_kernel::{PositionalShape, TypeAt};
+
+        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind,
+            context: SemanticContextId::production(),
+        });
+        let value = match read.value {
+            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value,
+            _ => {
+                return Err(if self.connected_demand_tripped() {
+                    IncompleteReason::Budget
+                } else {
+                    IncompleteReason::UnsettledInput
+                })
+            }
+        };
+        let store = self.graph().signature_store();
+        // Everything the positional model needs is read under ONE pinned
+        // view; no semantics is dispatched while it is held.
+        let raw: Result<Vec<RawPositional>, ()> = {
+            let view = SemanticReadView::pin(store);
+            let candidates: Vec<SignatureCandidate> = match view.read_set(value.set) {
+                Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
+                Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
+                Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
+                Err(_) => return Err(IncompleteReason::UnsettledInput),
+            };
+            let mut out = Vec::with_capacity(candidates.len());
+            let mut failed = false;
+            for candidate in &candidates {
+                let Ok(descriptor) = view.descriptor(candidate.signature) else {
+                    failed = true;
+                    break;
+                };
+                let Ok(template) = view.template(descriptor.template) else {
+                    failed = true;
+                    break;
+                };
+                let Ok(shape) = view.shape(template.input_shape) else {
+                    failed = true;
+                    break;
+                };
+                let Ok(layout) = view.layout(shape.parameter_layout) else {
+                    failed = true;
+                    break;
+                };
+                let receiver_slot = match shape.this_parameter {
+                    Some(id) => match view.slot(id) {
+                        Ok(slot) => Some(*slot),
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    },
+                    None => None,
+                };
+                let positional = PositionalShape::new(
+                    layout,
+                    receiver_slot,
+                    shape.signature_semantic_flags,
+                    &NO_VOID_FACTS,
+                );
+                let argument = match positional.type_at(position) {
+                    TypeAt::Absent => None,
+                    TypeAt::One(slot) => match view.type_token_node(slot.ty) {
+                        Ok(node) => Some(node),
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    },
+                    // A rest run with a required tail, and a still-generic
+                    // rest, are not a single positional type.
+                    TypeAt::Run { .. } | TypeAt::GenericRest { .. } => {
+                        failed = true;
+                        break;
+                    }
+                };
+                let receiver = match positional.receiver() {
+                    Some(slot) => match view.type_token_node(slot.ty) {
+                        Ok(node) => Some(node),
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    },
+                    None => None,
+                };
+                out.push(RawPositional { receiver, argument });
+            }
+            if failed {
+                Err(())
+            } else {
+                Ok(out)
+            }
+        };
+        let Ok(raw) = raw else {
+            return Err(IncompleteReason::UnsettledInput);
+        };
+        Ok(raw
+            .into_iter()
+            .map(|raw| PositionalRead {
+                receiver: raw.receiver,
+                argument: match raw.argument {
+                    None => PositionalArgument::Absent,
+                    Some(ty) => PositionalArgument::Type {
+                        ty,
+                        non_nullish_arms: self.non_nullish_arms(ty),
+                    },
+                },
+            })
+            .collect())
+    }
+
+    /// `node`'s union arms without `null` / `undefined` (the checker's
+    /// `NEUndefinedOrNull` facts); a non-union is its own single arm. The
+    /// nullish split belongs to the positional read because every consumer
+    /// of an argument position that may be omitted needs the same one.
+    fn non_nullish_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        let is_nullish = |arm: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        let members: Vec<SemanticNodeId> = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![resolved],
+        };
+        members
+            .into_iter()
+            .filter(|arm| !is_nullish(*arm))
+            .collect()
     }
 
     /// Both buckets of the subject's shared list as signature nodes, call
