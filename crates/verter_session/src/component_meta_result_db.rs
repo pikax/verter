@@ -911,7 +911,7 @@ impl<P> ComponentMetaResultDb<P> {
                 return false;
             }
         };
-        let outcome = self.inner.admit(key, owner_whole_hash, entry, Some(charge));
+        let outcome = self.inner.admit(key, owner_whole_hash, entry, charge);
         if outcome.evicted > 0 {
             self.stale_sweeps
                 .fetch_add(outcome.evicted as u64, Ordering::Relaxed);

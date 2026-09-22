@@ -180,6 +180,14 @@ uncharged arm. A test that needs deterministic pressure binds a private
 account explicitly (`with_account`, `with_account_for_test`,
 `ProjectTypeStore::with_retention_account`).
 
+The shared candidate substrate under those stores is closed the same way.
+`BoundedCandidateMap::admit` takes a `RetentionCharge` BY VALUE, not an
+`Option<RetentionCharge>`: a `RetentionCandidate` cannot be constructed
+without a granted reservation, so there is no admission path — production
+or test — that retains a candidate the account never saw. A caller with
+nothing meaningful to reserve mints a zero-byte charge from an account
+rather than skipping one.
+
 **The byte figures are estimates.** `RetainedFootprint` produces an
 accounting estimate; nothing in cache VALIDITY reads it, so an imprecise
 estimate costs hit rate and never correctness. Bytes reached only
