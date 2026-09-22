@@ -439,10 +439,14 @@ pub struct ComponentMetaResultDb<P> {
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
     /// The aggregate retained-byte account this cache admits against.
-    /// `None` only for a standalone Db built outside a
-    /// [`crate::project_type_store::ProjectTypeStore`] (substrate unit
-    /// fixtures), which retain nothing beyond the fixture's own lifetime.
-    retention_account: Option<Arc<crate::semantic_retention_account::SemanticRetentionAccount>>,
+    ///
+    /// There is no account-less result cache: the field carries a
+    /// [`StoreAccount`](crate::semantic_retention_account::StoreAccount),
+    /// whose `Default` is the ONE process-local account. A Db built
+    /// outside a [`crate::project_type_store::ProjectTypeStore`] therefore
+    /// admits against the same ceiling rather than retaining entries that
+    /// consume no aggregate headroom.
+    retention_account: crate::semantic_retention_account::StoreAccount,
 }
 
 impl<P> ComponentMetaResultDb<P> {
@@ -473,7 +477,7 @@ impl<P> ComponentMetaResultDb<P> {
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            None,
+            crate::semantic_retention_account::StoreAccount::default(),
         )
     }
 
@@ -489,8 +493,17 @@ impl<P> ComponentMetaResultDb<P> {
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            Some(retention_account),
+            crate::semantic_retention_account::StoreAccount::new(retention_account),
         )
+    }
+
+    /// The aggregate retained-byte account this cache admits against.
+    /// Always present; see the field docs.
+    #[must_use]
+    pub(crate) fn retention_account(
+        &self,
+    ) -> &Arc<crate::semantic_retention_account::SemanticRetentionAccount> {
+        self.retention_account.get()
     }
 
     /// Test-only constructor binding a specific retention account, so a
@@ -516,7 +529,7 @@ impl<P> ComponentMetaResultDb<P> {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             schema_version,
-            None,
+            crate::semantic_retention_account::StoreAccount::default(),
         )
     }
 
@@ -524,7 +537,7 @@ impl<P> ComponentMetaResultDb<P> {
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
         schema_version: u32,
-        retention_account: Option<Arc<crate::semantic_retention_account::SemanticRetentionAccount>>,
+        retention_account: crate::semantic_retention_account::StoreAccount,
     ) -> Self {
         Self {
             inner: BoundedCandidateMap::with_caps(
@@ -876,34 +889,27 @@ impl<P> ComponentMetaResultDb<P> {
     where
         P: crate::semantic_retention_account::RetainedFootprint,
     {
-        let charge = match &self.retention_account {
-            Some(account) => {
-                let bytes = {
-                    use crate::semantic_retention_account::RetainedFootprint as _;
-                    entry.retained_footprint_bytes()
-                };
-                match account.reserve(
-                    crate::semantic_retention_account::ChargeClass::Retained,
-                    bytes,
-                ) {
-                    crate::semantic_retention_account::RetentionAdmission::Admitted(charge) => {
-                        Some(charge)
-                    }
-                    crate::semantic_retention_account::RetentionAdmission::Refused(refusal) => {
-                        crate::cache_runtime::admission::propagate_non_admission(
-                            refusal.non_admission_reason(),
-                        );
-                        tracing::debug!(
-                            target: "verter::audit::record",
-                            file = %key.owner_canonical,
-                            refusal = %refusal,
-                            "skipping component-meta cache promotion: aggregate retention refusal",
-                        );
-                        return false;
-                    }
-                }
+        let bytes = {
+            use crate::semantic_retention_account::RetainedFootprint as _;
+            entry.retained_footprint_bytes()
+        };
+        let charge = match self.retention_account().reserve(
+            crate::semantic_retention_account::ChargeClass::Retained,
+            bytes,
+        ) {
+            crate::semantic_retention_account::RetentionAdmission::Admitted(charge) => charge,
+            crate::semantic_retention_account::RetentionAdmission::Refused(refusal) => {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    refusal.non_admission_reason(),
+                );
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %key.owner_canonical,
+                    refusal = %refusal,
+                    "skipping component-meta cache promotion: aggregate retention refusal",
+                );
+                return false;
             }
-            None => None,
         };
         let outcome = self.inner.admit(key, owner_whole_hash, entry, charge);
         if outcome.evicted > 0 {

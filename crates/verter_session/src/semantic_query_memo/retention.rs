@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::semantic_retention_account::{
     ChargeClass, RetainedFootprint, RetentionAdmission, RetentionCharge, RetentionRefusal,
-    SemanticRetentionAccount,
+    SemanticRetentionAccount, StoreAccount,
 };
 
 use super::{family::MemoEntry, SemanticGraphStore};
@@ -34,38 +34,39 @@ impl SemanticGraphStore {
 
     /// Construct a store charging `retention_account` for every memo
     /// candidate it publishes. The host builds every production store
-    /// through this (or [`Self::with_provenance`]), so no live memo can
-    /// grow without consuming aggregate headroom.
+    /// through this (or [`Self::with_provenance`]); a store built without
+    /// one charges the process-local account, so no live memo can grow
+    /// without consuming aggregate headroom.
     #[must_use]
     pub fn with_account(retention_account: Arc<SemanticRetentionAccount>) -> Self {
         Self {
-            retention_account: Some(retention_account),
+            retention_account: StoreAccount::new(retention_account),
             ..Default::default()
         }
     }
 
-    /// The aggregate retained-byte account this store charges, when it
-    /// has one.
-    pub(super) fn retention_account(&self) -> Option<&Arc<SemanticRetentionAccount>> {
-        self.retention_account.as_ref()
+    /// The aggregate retained-byte account this store charges. Always
+    /// present — an account-less memo store does not exist.
+    pub(crate) fn retention_account(&self) -> &Arc<SemanticRetentionAccount> {
+        self.retention_account.get()
     }
 
     /// Reserve `entry`'s estimated bytes against the store's aggregate
     /// account.
     ///
-    /// `Ok(None)` means the store owns no account (a fixture store) and
-    /// the publish proceeds uncharged. `Err` means the process declined
-    /// to retain this candidate: the caller must SKIP the publish and
-    /// return its complete value to the caller uncached.
+    /// `Err` means the process declined to retain this candidate: the
+    /// caller must SKIP the publish and return its complete value to the
+    /// caller uncached. There is no uncharged arm — every store owns an
+    /// account.
     pub(super) fn reserve_memo_candidate(
         &self,
         entry: &MemoEntry,
-    ) -> Result<Option<RetentionCharge>, RetentionRefusal> {
-        let Some(account) = self.retention_account.as_ref() else {
-            return Ok(None);
-        };
-        match account.reserve(ChargeClass::Retained, entry.retained_footprint_bytes()) {
-            RetentionAdmission::Admitted(charge) => Ok(Some(charge)),
+    ) -> Result<RetentionCharge, RetentionRefusal> {
+        match self
+            .retention_account()
+            .reserve(ChargeClass::Retained, entry.retained_footprint_bytes())
+        {
+            RetentionAdmission::Admitted(charge) => Ok(charge),
             RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),

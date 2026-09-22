@@ -587,6 +587,51 @@ impl SemanticRetentionAccount {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// StoreAccount — the store-side account handle
+// ──────────────────────────────────────────────────────────────────────
+
+/// The account handle a candidate-retaining store holds.
+///
+/// This is a HANDLE, never a second authority: [`SemanticRetentionAccount`]
+/// still owns every limit, admission decision and byte figure. What the
+/// handle adds is that it has NO account-less variant — a store field typed
+/// `StoreAccount` cannot be `None`, so "this store retains candidates but
+/// consumes no aggregate headroom" is unrepresentable rather than merely
+/// unused. That is the whole point: an optional account is a bypass route
+/// that compiles, and the only durable way to reject it is to delete the
+/// variant.
+///
+/// [`Default`] resolves to [`SemanticRetentionAccount::process_local`] —
+/// the ONE process account — and deliberately NOT to a freshly minted
+/// private account. A per-store account would be exactly the private byte
+/// quota beside the aggregate ceiling that the retention contract forbids:
+/// N stores would admit against N ceilings. A test that needs deterministic
+/// pressure binds its private account explicitly through [`Self::new`].
+#[derive(Debug, Clone)]
+pub struct StoreAccount(Arc<SemanticRetentionAccount>);
+
+impl Default for StoreAccount {
+    fn default() -> Self {
+        Self(SemanticRetentionAccount::process_local())
+    }
+}
+
+impl StoreAccount {
+    /// Bind an explicit account. Production hosts thread the project's
+    /// account — which IS the process-local one — through here.
+    #[must_use]
+    pub fn new(account: Arc<SemanticRetentionAccount>) -> Self {
+        Self(account)
+    }
+
+    /// The bound account. Always present; see the type docs.
+    #[must_use]
+    pub fn get(&self) -> &Arc<SemanticRetentionAccount> {
+        &self.0
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // RetentionCharge — the exactly-once release token
 // ──────────────────────────────────────────────────────────────────────
 

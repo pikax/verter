@@ -228,8 +228,7 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
     let member_unique = member.unique_retained_footprint_bytes();
     let batch = store
         .reserve_scc_batch(&[&member])
-        .expect("the member's incremental footprint is admitted")
-        .expect("the store owns an account");
+        .expect("the member's incremental footprint is admitted");
 
     assert_eq!(
         account.snapshot().retained_bytes,

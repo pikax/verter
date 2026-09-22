@@ -378,9 +378,11 @@ pub struct RetentionCandidate<D, V> {
     /// they are still resident and become reclaimable at the exact
     /// moment the last reader drops.
     ///
-    /// `None` for a substrate caller that owns no account (the generic
-    /// unit tests over this module).
-    _charge: Option<RetentionCharge>,
+    /// There is no account-less variant. A candidate cannot exist
+    /// without a granted reservation, so no reachable admission path —
+    /// production or test — can retain bytes the aggregate account did
+    /// not see.
+    _charge: RetentionCharge,
 }
 
 /// Outcome of a [`BoundedCandidateMap::admit`] call.
@@ -733,15 +735,17 @@ where
     /// candidate's payload. Admission control lives with the cache
     /// OWNER, which knows how to route a refusal back to its caller as
     /// an uncached result; the substrate's job is to hold the granted
-    /// charge for exactly the candidate's lifetime. Passing `None` means
-    /// the caller owns no retention account at all — the generic unit
-    /// tests over this module — never a production path opting out.
+    /// charge for exactly the candidate's lifetime. The parameter is
+    /// NOT optional: an account-less admission is unrepresentable, so no
+    /// caller can opt a retained candidate out of the aggregate account.
+    /// A caller with nothing meaningful to reserve mints a zero-byte
+    /// charge from an account rather than skipping one.
     pub fn admit(
         &self,
         key: K,
         discriminant: D,
         value: V,
-        charge: Option<RetentionCharge>,
+        charge: RetentionCharge,
     ) -> AdmitOutcome {
         // Hold the retention-gate read guard across the WHOLE map +
         // budget mutation: the slot push, the per-slot eviction, the
