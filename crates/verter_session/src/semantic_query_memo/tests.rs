@@ -2398,6 +2398,202 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
 }
 
+/// MODELESS WARM-HIT COUNTER RAIL — a `Relate`-family warm read through
+/// the modeless payload accessor must travel the ONE unified warm-hit
+/// implementation: it bumps `cache_counters.semantic_graph.hits` exactly
+/// once, like every other validated warm read.
+///
+/// DISCRIMINATES against a private modeless read path that duplicates the
+/// two-gate protocol outside `get_validated_value_impl`: such a duplicate
+/// validates and bubbles but never touches the per-request counters, so
+/// the delta below stays 0.
+#[test]
+fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let gen0 = host.project_type_store().current_project_generation();
+    store.insert_relation_payload_for_tests(
+        key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        gen0,
+    );
+    let before = rctx
+        .cache_counters
+        .semantic_graph
+        .hits
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        store.get_relation_payload(ctx, &key).is_some(),
+        "seeded relation entry must warm-hit"
+    );
+    let delta = rctx
+        .cache_counters
+        .semantic_graph
+        .hits
+        .load(std::sync::atomic::Ordering::Relaxed)
+        - before;
+    assert_eq!(
+        delta, 1,
+        "modeless warm hit must bump the unified per-request hit counter exactly once (got {delta})"
+    );
+}
+
+/// MODELESS PROBE MISS-NEUTRALITY — a `Relate`-family probe miss through
+/// the modeless payload accessor must NOT bump
+/// `cache_counters.semantic_graph.misses`. The probe never short-circuits
+/// a dispatch, so the owning cooperative cold path records the single
+/// miss; the full production sequence (probe miss → cooperative cold
+/// build) records exactly one miss, preserving the one-miss contract.
+///
+/// DISCRIMINATES against routing the modeless accessors through the
+/// counting arm of `get_validated_value_impl`: pre-fix the probe miss
+/// bumps the counter, so the probe-miss assertion fails (1, not 0) and
+/// the end-to-end sequence records 2 misses instead of 1.
+#[test]
+fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let rctx = RequestContext::new(7783, Arc::from("/w/modeless_miss.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let misses = || {
+        rctx.cache_counters
+            .semantic_graph
+            .misses
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+
+    // Production dispatch order: the modeless probe runs first.
+    assert!(
+        store.get_relation_payload(ctx, &key).is_none(),
+        "empty store must probe-miss"
+    );
+    assert_eq!(
+        misses(),
+        0,
+        "modeless probe miss must stay counter-neutral (got {})",
+        misses()
+    );
+
+    // ...then the owning cooperative cold build, which owns the one miss.
+    let _ = store.execute_cooperative_value(
+        ctx,
+        key.to_query_key(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(SemanticQueryValue::Relation(
+                    store.relation_payload_for_tests(
+                        crate::semantic_query::RelationOutcome::Assignable,
+                    ),
+                )),
+                empty_signature(),
+            )
+        },
+    );
+    assert_eq!(
+        misses(),
+        1,
+        "probe miss + one cold build must record exactly one miss (got {})",
+        misses()
+    );
+
+    // The now-warm entry still counts its hit through the probe.
+    let hits = || {
+        rctx.cache_counters
+            .semantic_graph
+            .hits
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    assert!(
+        store.get_relation_payload(ctx, &key).is_some(),
+        "cold-published entry must probe-hit"
+    );
+    assert_eq!(
+        hits(),
+        1,
+        "modeless warm hit must bump the hit counter exactly once (got {})",
+        hits()
+    );
+}
+
+/// MODELESS STALE-REJECTION COUNTEREXAMPLE (ARH10-AC2) — a relation entry
+/// published under generation `gen0` must NOT warm-hit through the
+/// modeless payload accessor after a project-generation bump (the
+/// edit/revert shape: same content, bumped world). The probe returns
+/// `None` instead of promoting the stale verdict as complete.
+///
+/// DISCRIMINATES against a modeless read that skips carrier validation:
+/// without the `validate_with_self_roots` gate the seeded entry would
+/// still hit post-bump and the final assertion would fail. (The partial
+/// arm — cancelled/partial results promoted as complete — is closed by
+/// the admission gate: `recursive_sentinel_does_not_promote_to_warm_memo`,
+/// `memo_admission_debug_asserts_against_partial_without_suppress`, and
+/// `partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds`
+/// prove partials never publish, so no modeless probe can ever observe
+/// one.)
+#[test]
+fn relation_modeless_probe_rejects_entry_after_generation_bump() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::resolver_core::FactVersionRef;
+
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let rctx = RequestContext::new(7784, Arc::from("/w/modeless_stale.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let gen0 = host.project_type_store().current_project_generation();
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        FactVersionRef::ProjectGeneration { generation: gen0 },
+    ]));
+    store.insert_relation_payload_for_tests(
+        key.clone(),
+        carrier,
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        gen0,
+    );
+    assert!(
+        store.get_relation_payload(ctx, &key).is_some(),
+        "seeded entry must warm-hit before the bump"
+    );
+    host.project_type_store().bump_project_generation();
+    assert!(
+        store.get_relation_payload(ctx, &key).is_none(),
+        "post-bump entry is stale: the modeless probe must reject it, never promote it as complete"
+    );
+}
+
 /// RELATION FAMILY RSS RAILS — a content invalidation drains relation
 /// entries through the SAME reverse-index rail every family uses: the
 /// publish registers the carrier's canonicals in `canonical_to_entries`,

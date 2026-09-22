@@ -13,6 +13,7 @@ use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
+use super::signature_discovery::PositionalArgument;
 use super::walk::PathWalker;
 use super::{
     empty_signature, utility_param_names, ConditionalBranchSelection, DispatchHost,
@@ -78,10 +79,10 @@ struct AugmentationStitch {
 /// ordered augmenter contributor nodes, one [`AugmentationContributorRoot`]
 /// per contributing augmenter, and whether any contributor's source-env
 /// identity was unobservable (torn state ⇒ no warm admission).
-struct AugmentationContributions {
-    contributor_nodes: Vec<SemanticNodeId>,
+pub(super) struct AugmentationContributions {
+    pub(super) contributor_nodes: Vec<SemanticNodeId>,
     contributor_roots: Vec<AugmentationContributorRoot>,
-    source_env_unobservable: bool,
+    pub(super) source_env_unobservable: bool,
 }
 
 /// Record a completed semantic augmentation stitch using the public typed
@@ -3662,7 +3663,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// stays unbound, as in `Instantiate`'s published modes.
     ///
     /// Returns `None` when no augmenter contributes.
-    fn collect_augmentation_contributions(
+    pub(super) fn collect_augmentation_contributions(
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,
         decl_name: &str,
@@ -10269,11 +10270,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::Array { .. },
             ) => true,
             // An object surface settles here only when it carries NO `then`
-            // member; a `then`-bearing surface goes to the thenable protocol.
-            Some(SemanticNodeData::Object(surface)) => !surface
-                .positive_members()
-                .iter()
-                .any(|member| member.string_name() == Some("then")),
+            // member; a `then`-bearing surface goes to the thenable
+            // protocol. Member PRESENCE only — no signature logic lives on
+            // this fast path.
+            Some(SemanticNodeData::Object(surface)) => then_members(surface).is_empty(),
             // A union settles only if EVERY arm does.
             Some(SemanticNodeData::Union(members)) => members
                 .iter()
@@ -10412,7 +10412,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
             SemanticNodeData::Object(surface) => {
-                let thenability = self.surface_thenability(surface);
+                self.note_awaited_evidence(surface.positive_members().iter().map(|m| m.value));
+                let thenability = self.surface_thenability(resolved, surface);
                 drop(data);
                 match thenability {
                     Thenability::NotThenable => Some(resolved),
@@ -10437,6 +10438,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
                 drop(data);
                 let body = self.declaration_carrier_body(resolved)?;
+                self.note_awaited_evidence([body]);
                 if self.same_node_payload(body, resolved) {
                     return None;
                 }
@@ -10498,67 +10500,176 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Bind the lexical demand scope to `node`'s declaring file for one
+    /// awaited protocol read, when nothing has bound a scope already.
+    ///
+    /// The protocol resolves apparent globals — a primitive's wrapper
+    /// interface, a lib runtime nominal's `declare global` contributors —
+    /// in the project owning the type's declaring file. Reached with no
+    /// request canonical and no enclosing demand site (a direct relation
+    /// execution), those lookups have no project to ask and refuse, turning
+    /// a decidable protocol answer into a miss.
+    fn awaited_demand_scope(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<super::LexicalDemandScopeGuard<'_>> {
+        if crate::request_context::current_request_canonical().is_some()
+            || !self.lexical_demand_scope.borrow().is_empty()
+        {
+            return None;
+        }
+        match self.graph().node_scope(node) {
+            Some(NodeScopeId::File { canonical_id, .. }) => Some(
+                super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, canonical_id),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Record that the awaited protocol READ `nodes`: their declaring files
+    /// join the relation's self-roots, so the entry's validity is a function
+    /// of the reads it actually performed rather than of the operand alone.
+    ///
+    /// Today's operands transitively carry the content version of everything
+    /// the protocol reaches through them, so this is defence in depth rather
+    /// than the only rail holding cross-file invalidation up (which
+    /// `awaited_result_follows_a_cross_file_then_edit_and_ignores_unrelated_ones`
+    /// pins end to end). It is deliberately narrow — only the nodes a read
+    /// returned — so it cannot degenerate into blanket invalidation.
+    fn note_awaited_evidence(&self, nodes: impl IntoIterator<Item = SemanticNodeId>) {
+        let roots = self.observed_self_roots_from_nodes(nodes);
+        if !roots.is_empty() {
+            self.deposit_operand_self_roots(&roots);
+        }
+    }
+
+    /// Whether the operand may call a `then` signature that declares
+    /// `receiver` as its `this`: the checker keeps only the `then`
+    /// signatures whose `this` the operand is assignable to. `None` is an
+    /// undecided judgement — never either answer.
+    ///
+    /// The judgement comes from the shared relation authority; a `void`
+    /// receiver is the checker's "no receiver requirement".
+    fn receiver_accepts_operand(
+        &self,
+        operand: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> Option<bool> {
+        if matches!(
+            self.graph().node_data(receiver).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Void))
+        ) {
+            return Some(true);
+        }
+        match self.execute_relate_pair(operand, receiver) {
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. } => {
+                Some(true)
+            }
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
+                Some(false)
+            }
+            // An assumed SCC edge is not a published proof, and a budget or
+            // deferred judgement is no fact at all.
+            _ => None,
+        }
+    }
+
     /// The checker's RUNTIME thenable protocol over one object surface
     /// (`getPromisedTypeOfPromise` + `isThenableType`).
     ///
     /// No `then` member, or a `then` with no call signature (`then: number`),
-    /// is not thenable. Otherwise the promised values are the union, over
-    /// EVERY `then` call signature, of the first parameter of every call
-    /// signature of its `onfulfilled` callback (nullish callback arms
-    /// removed; a parameterless callback promises `never`). A callable `then`
-    /// that yields no promised value is malformed, and so is an OPTIONAL
-    /// callable `then`: the checker finds no call signature on
-    /// `then | undefined` (no promise) yet still calls the operand thenable.
-    /// A union callback or a signature source that does not settle is
-    /// undecided.
-    fn surface_thenability(&self, surface: &crate::semantic_query::SurfaceView) -> Thenability {
-        let thens: Vec<&crate::semantic_query::SurfaceMember> = surface
-            .positive_members()
-            .iter()
-            .filter(|member| member.string_name() == Some("then"))
-            .collect();
+    /// is not thenable. A `then` signature whose declared `this` the operand
+    /// is not assignable to is dropped, and a `then` all of whose signatures
+    /// are dropped that way is malformed — the checker reports
+    /// "The 'this' context of type X is not assignable to method's 'this'"
+    /// and types the await `any`. Otherwise the promised values are the
+    /// union, over EVERY surviving `then` call signature, of the first
+    /// parameter of every call signature of its `onfulfilled` callback
+    /// (nullish callback arms removed; a parameterless callback promises
+    /// `never`). A callable `then` that yields no promised value is
+    /// malformed, and so is an OPTIONAL callable `then`: the checker finds
+    /// no call signature on `then | undefined` (no promise) yet still calls
+    /// the operand thenable. A union callback or a signature source that
+    /// does not settle is undecided.
+    ///
+    /// Every signature and every argument position here is read through the
+    /// shared discovery authority and the one positional model, so a union
+    /// `then`, an intersection callback, an overload set and a global
+    /// augmentation all decide the same way they do for any other consumer.
+    fn surface_thenability(
+        &self,
+        operand: SemanticNodeId,
+        surface: &crate::semantic_query::SurfaceView,
+    ) -> Thenability {
+        let thens = then_members(surface);
         if thens.is_empty() {
             return Thenability::NotThenable;
         }
+        let _demand_scope = self.awaited_demand_scope(operand);
         let optional = thens.iter().any(|member| member.optional);
-        let mut then_signatures = Vec::new();
-        for member in thens {
-            match self.awaited_call_signatures(member.value) {
-                Some(signatures) => then_signatures.extend(signatures),
-                None => return Thenability::Undecided,
+        let mut reads = Vec::new();
+        for member in &thens {
+            match self.shared_positional_reads(
+                member.value,
+                crate::semantic_query::SignatureKind::Call,
+                0,
+            ) {
+                Ok(found) => reads.extend(found),
+                Err(_) => return Thenability::Undecided,
             }
         }
-        if then_signatures.is_empty() {
+        if reads.is_empty() {
             return Thenability::NotThenable;
         }
         if optional {
             return Thenability::Malformed;
         }
+        let mut eligible = Vec::with_capacity(reads.len());
+        for read in reads {
+            match read.receiver {
+                None => eligible.push(read.argument),
+                Some(receiver) => match self.receiver_accepts_operand(operand, receiver) {
+                    Some(true) => eligible.push(read.argument),
+                    Some(false) => {}
+                    None => return Thenability::Undecided,
+                },
+            }
+        }
+        // Every `then` signature rejected the operand's receiver: the
+        // checker has no promise to adopt and types the await `any`.
+        if eligible.is_empty() {
+            return Thenability::Malformed;
+        }
         let mut promised = Vec::new();
-        for signature in then_signatures {
-            let onfulfilled = match self.first_parameter(signature) {
-                Some(FirstParameter::Type(onfulfilled)) => onfulfilled,
+        for argument in eligible {
+            let arms = match argument {
                 // `then()` names no callback: it contributes no promised value.
-                Some(FirstParameter::Absent) => continue,
-                None => return Thenability::Undecided,
+                PositionalArgument::Absent => continue,
+                PositionalArgument::Type {
+                    non_nullish_arms, ..
+                } => non_nullish_arms,
             };
-            let arms = self.non_nullish_arms(onfulfilled);
             let callback = match arms.as_slice() {
                 [] => continue,
                 [single] => *single,
                 _ => return Thenability::Undecided,
             };
-            let Some(callbacks) = self.awaited_call_signatures(callback) else {
-                return Thenability::Undecided;
+            self.note_awaited_evidence([callback]);
+            let callbacks = match self.shared_positional_reads(
+                callback,
+                crate::semantic_query::SignatureKind::Call,
+                0,
+            ) {
+                Ok(found) => found,
+                Err(_) => return Thenability::Undecided,
             };
-            for callback in callbacks {
-                match self.first_parameter(callback) {
-                    Some(FirstParameter::Type(value)) => promised.push(value),
-                    Some(FirstParameter::Absent) => promised.push(
+            for read in callbacks {
+                match read.argument {
+                    PositionalArgument::Type { ty, .. } => promised.push(ty),
+                    PositionalArgument::Absent => promised.push(
                         self.graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
                     ),
-                    None => return Thenability::Undecided,
                 }
             }
         }
@@ -10567,189 +10678,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             Thenability::Promised(promised)
         }
-    }
-
-    /// The call signatures of `node` for both thenable protocols: `Some(empty)`
-    /// for a provably non-callable settled value, `None` when the signature
-    /// source does not settle. Carriers settle through the ONE shared
-    /// signature-source rail ([`Self::resolve_signature_source_carrier`]),
-    /// whose cycle detection and connected work envelope bound the chain — no
-    /// private depth cap.
-    ///
-    /// An intersection carries every arm's call signatures in arm order (the
-    /// checker's `getSignaturesOfType` over an intersection). A lib runtime
-    /// nominal (`Function`, `Date`, `Promise`, …) is an OPEN interface: the
-    /// pristine lib declaration declares no call signature, but a project's
-    /// `declare global` block can merge some in. Its signatures are therefore
-    /// read from the global augmentation contributors through the shared
-    /// augmentation folder (`collect_augmentation_contributions`), which also
-    /// observes the augmenter-set fingerprint so a later `declare global`
-    /// invalidates the answer; only with no contributor is the set empty.
-    fn awaited_call_signatures(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
-        // Identity first: the rail would try to expand the lib nominal, and
-        // its answer (no call signature) never depends on the expansion.
-        let settled = self
-            .evaluate_deferred_semantic_node_with_context(
-                node,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            )
-            .into_active_query_build_node(self);
-        let nominal = match self.graph().node_data(settled).as_deref() {
-            Some(SemanticNodeData::DeclRef { identity })
-                if self.runtime_nominal_identity(identity).is_some() =>
-            {
-                Some((
-                    Arc::clone(&identity.decl_name),
-                    Arc::from(Vec::new().into_boxed_slice()),
-                ))
-            }
-            // The nominal's type ARGUMENTS travel with it: a generic
-            // augmentation (`interface Promise<T> { (value: T): void }`) is
-            // instantiated with them.
-            Some(SemanticNodeData::InstantiationRef { base, args })
-                if self.runtime_nominal_identity(base).is_some() =>
-            {
-                Some((Arc::clone(&base.decl_name), Arc::clone(args)))
-            }
-            _ => None,
-        };
-        if let Some((name, type_arguments)) = nominal {
-            return self.runtime_nominal_call_signatures(&name, &type_arguments);
-        }
-        let resolved = self.resolve_signature_source_carrier(
-            node,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
-            ),
-        );
-        let data = self.graph().node_data(resolved)?;
-        match data.as_ref() {
-            SemanticNodeData::Signature { kind, .. } => Some(match kind {
-                crate::semantic_query::SignatureKind::Call => vec![resolved],
-                crate::semantic_query::SignatureKind::Construct => Vec::new(),
-            }),
-            SemanticNodeData::Object(surface) => Some(surface.call_signatures.to_vec()),
-            SemanticNodeData::Primitive(_)
-            | SemanticNodeData::Literal(_)
-            | SemanticNodeData::TemplateLiteral { .. }
-            | SemanticNodeData::Array { .. }
-            | SemanticNodeData::Tuple { .. } => Some(Vec::new()),
-            SemanticNodeData::Intersection(arms) => {
-                let arms = arms.clone();
-                drop(data);
-                let mut signatures = Vec::new();
-                for arm in arms.iter() {
-                    signatures.extend(self.awaited_call_signatures(*arm)?);
-                }
-                Some(signatures)
-            }
-            _ => None,
-        }
-    }
-
-    /// The call signatures of the lib runtime nominal interface `name` applied
-    /// to `type_arguments`: the pristine lib declaration contributes none, and
-    /// every `declare global` augmentation of `name` contributes its own,
-    /// instantiated with those arguments. A torn contributor is served
-    /// but folds the no-warm rail, exactly as the external augmentation path
-    /// does.
-    fn runtime_nominal_call_signatures(
-        &self,
-        name: &str,
-        type_arguments: &[SemanticNodeId],
-    ) -> Option<Vec<SemanticNodeId>> {
-        // Contributor discovery for `declare global` is the ingestion-time
-        // population: a program-root `.d.ts` that nothing imports is
-        // recorded when its artifact publishes, so lookup does not scan
-        // program membership. Compiler options (noLib / lib) come from
-        // the request's owning project, not the first workspace file.
-        let request_canonical = crate::request_context::current_request_canonical();
-        let Some(AugmentationContributions {
-            contributor_nodes,
-            contributor_roots: _,
-            source_env_unobservable,
-        }) = self.collect_augmentation_contributions(
-            crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
-            name,
-            type_arguments,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
-            ),
-            request_canonical.as_deref().unwrap_or(""),
-        )
-        else {
-            return Some(Vec::new());
-        };
-        if source_env_unobservable {
-            self.fold_into_top_build_local_taint(false, true);
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
-            );
-        }
-        let mut signatures = Vec::new();
-        for contributor in contributor_nodes {
-            signatures.extend(self.awaited_call_signatures(contributor)?);
-        }
-        Some(signatures)
-    }
-
-    /// The type of a call signature's FIRST parameter, the way the checker's
-    /// `getTypeAtPosition(signature, 0)` reads it: a leading rest parameter
-    /// contributes its element (`...cbs: F[]` ⇒ `F`, `...args: [F, G]` ⇒ `F`).
-    /// `None` when `node` is not a signature or the rest type does not settle.
-    fn first_parameter(&self, node: SemanticNodeId) -> Option<FirstParameter> {
-        let (ty, rest) = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => match params.first() {
-                None => return Some(FirstParameter::Absent),
-                Some(param) => (param.ty, param.rest),
-            },
-            _ => return None,
-        };
-        if !rest {
-            return Some(FirstParameter::Type(ty));
-        }
-        let resolved = self
-            .evaluate_deferred_semantic_node_with_context(
-                ty,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            )
-            .into_active_query_build_node(self);
-        match self.graph().node_data(resolved).as_deref() {
-            Some(SemanticNodeData::Array { element, .. }) => Some(FirstParameter::Type(*element)),
-            Some(SemanticNodeData::Tuple { elements, .. }) => match elements.first() {
-                None => Some(FirstParameter::Absent),
-                Some(element) if !element.rest => Some(FirstParameter::Type(element.value)),
-                Some(_) => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// `node`'s union arms without `null` / `undefined` (the checker's
-    /// `NEUndefinedOrNull` facts); a non-union is its own single arm.
-    fn non_nullish_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        let resolved = self
-            .evaluate_deferred_semantic_node_with_context(
-                node,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            )
-            .into_active_query_build_node(self);
-        let is_nullish = |arm: SemanticNodeId| {
-            matches!(
-                self.graph().node_data(arm).as_deref(),
-                Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::Null | PrimitiveKind::Undefined
-                ))
-            )
-        };
-        let members = match self.graph().node_data(resolved).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-            _ => vec![resolved],
-        };
-        members
-            .into_iter()
-            .filter(|arm| !is_nullish(*arm))
-            .collect()
     }
 
     /// The single argument of an authored lib `Awaited<X>` carrier, by
@@ -10909,7 +10837,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Object(surface) => {
-                let outcome = self.lib_awaited_surface(surface);
+                let outcome = self.lib_awaited_surface(resolved, surface);
                 drop(data);
                 match outcome {
                     LibThen::NotMatched => LibAwaited::Reduced(resolved),
@@ -10922,34 +10850,94 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// `node`'s settled union arms, or `None` when it is not a union.
+    /// Settles through the shared deferred evaluator first, so an alias
+    /// carrier over a union answers as the union it denotes.
+    fn settled_union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
+        match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Union(members)) => Some(members.iter().copied().collect()),
+            _ => None,
+        }
+    }
+
+    /// The `F` the lib conditional infers from the `then` signatures of
+    /// `sources` (an overloaded `then` is several surface members carrying
+    /// one signature each, so they read as ONE source list): conditional
+    /// inference from a signature source reads its LAST signature.
+    ///
+    /// The outer `None` is an incomplete read; the inner `None` is "no call
+    /// signature at all", which does not satisfy the required member.
+    fn lib_inferred_onfulfilled(
+        &self,
+        sources: &[SemanticNodeId],
+    ) -> Option<Option<PositionalArgument>> {
+        let mut reads = Vec::new();
+        for source in sources {
+            match self.shared_positional_reads(
+                *source,
+                crate::semantic_query::SignatureKind::Call,
+                0,
+            ) {
+                Ok(found) => reads.extend(found),
+                Err(_) => return None,
+            }
+        }
+        Some(reads.pop().map(|read| read.argument))
+    }
+
     /// The `object & { then(onfulfilled: infer F, ...) }` branch of the lib
     /// conditional over one object surface.
-    fn lib_awaited_surface(&self, surface: &crate::semantic_query::SurfaceView) -> LibThen {
-        let thens: Vec<&crate::semantic_query::SurfaceMember> = surface
-            .positive_members()
-            .iter()
-            .filter(|member| member.string_name() == Some("then"))
-            .collect();
+    ///
+    /// Deliberately NOT the runtime protocol: this branch never filters a
+    /// `then` signature by receiver eligibility (tsc 7.0.2 types
+    /// `Awaited<{ y: 2; then(this: { x: 1 }, onfulfilled: (v: number) => void): void }>`
+    /// as `number`, where awaiting the same value is `any`).
+    fn lib_awaited_surface(
+        &self,
+        operand: SemanticNodeId,
+        surface: &crate::semantic_query::SurfaceView,
+    ) -> LibThen {
+        let thens = then_members(surface);
         // An absent or OPTIONAL `then` does not satisfy the required member.
         if thens.is_empty() || thens.iter().any(|member| member.optional) {
             return LibThen::NotMatched;
         }
+        let _demand_scope = self.awaited_demand_scope(operand);
+        self.note_awaited_evidence(thens.iter().map(|member| member.value));
         let never = self
             .graph()
             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+        let settled_then = |member: &crate::semantic_query::SurfaceMember| {
+            self.evaluate_deferred_semantic_node_with_context(
+                member.value,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self)
+        };
+        // A `then` typed by an open type parameter leaves the conditional's
+        // check type generic: the application is unresolved, and neither
+        // branch may be taken. The honest shell, never a guess either way.
+        if thens.iter().any(|member| {
+            matches!(
+                self.graph().node_data(settled_then(member)).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            )
+        }) {
+            return LibThen::Refused;
+        }
         // A `then` typed `any` or `never` is assignable to the required
         // method but infers no `onfulfilled`: `F` is `unknown`, so `never`
         // (tsc 7.0.2: `Awaited<{ then: any }>` is `never`; `then: unknown`
         // is not assignable and leaves the operand).
         if thens.iter().any(|member| {
-            let value = self
-                .evaluate_deferred_semantic_node_with_context(
-                    member.value,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                )
-                .into_active_query_build_node(self);
             matches!(
-                self.graph().node_data(value).as_deref(),
+                self.graph().node_data(settled_then(member)).as_deref(),
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::Any | PrimitiveKind::Never
                 ))
@@ -10957,61 +10945,77 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }) {
             return LibThen::Result(never);
         }
-        let mut signatures = Vec::new();
-        for member in thens {
-            match self.awaited_call_signatures(member.value) {
-                Some(found) => signatures.extend(found),
-                None => return LibThen::Refused,
-            }
-        }
-        // Inference from an overloaded source reads its LAST signature.
-        let Some(&then_signature) = signatures.last() else {
-            return LibThen::NotMatched;
+        // Inference from a UNION source collects one candidate per
+        // constituent, so `then: A | B` infers `F` as the union of each
+        // arm's first parameter and the distributed arm step below unions
+        // their results (tsc 7.0.2). Only a single, genuinely union-typed
+        // `then` takes that route; an overload set stays ONE source list
+        // whose LAST signature infers.
+        let then_sources: Vec<Vec<SemanticNodeId>> = match thens.as_slice() {
+            [only] => match self.settled_union_arms_of(only.value) {
+                Some(arms) => arms.iter().map(|arm| vec![*arm]).collect(),
+                None => vec![vec![only.value]],
+            },
+            members => vec![members.iter().map(|member| member.value).collect()],
         };
-        let onfulfilled = match self.first_parameter(then_signature) {
-            Some(FirstParameter::Type(onfulfilled)) => onfulfilled,
-            // `infer F` over a missing parameter is `unknown`, which is not a
-            // function: `never`.
-            Some(FirstParameter::Absent) => return LibThen::Result(never),
-            None => return LibThen::Refused,
-        };
-        // `F extends (value: infer V, ...) => any` distributes over `F`: a
-        // nullish or non-callable arm contributes `never`. An `any` arm takes
-        // BOTH branches with `V` inferred as `unknown`, so it contributes
-        // `Awaited<unknown>` (tsc 7.0.2: `then(onfulfilled: any)` is `unknown`).
         let mut results = Vec::new();
-        for arm in self.non_nullish_arms(onfulfilled) {
-            if matches!(
-                self.graph().node_data(arm).as_deref(),
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
-            ) {
-                let unknown = self
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-                match self.lib_awaited_read(unknown) {
+        for source in &then_sources {
+            let Some(inferred) = self.lib_inferred_onfulfilled(source) else {
+                return LibThen::Refused;
+            };
+            let onfulfilled = match inferred {
+                Some(PositionalArgument::Type {
+                    non_nullish_arms, ..
+                }) => non_nullish_arms,
+                // `infer F` over a missing parameter is `unknown`, which is
+                // not a function: `never`.
+                Some(PositionalArgument::Absent) => return LibThen::Result(never),
+                // No call signature: the required member is not matched.
+                None => return LibThen::NotMatched,
+            };
+            // `F extends (value: infer V, ...) => any` distributes over `F`:
+            // a nullish or non-callable arm contributes `never`. An `any` arm
+            // takes BOTH branches with `V` inferred as `unknown`, so it
+            // contributes `Awaited<unknown>` (tsc 7.0.2:
+            // `then(onfulfilled: any)` is `unknown`).
+            for arm in onfulfilled {
+                if matches!(
+                    self.graph().node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                ) {
+                    let unknown = self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+                    match self.lib_awaited_read(unknown) {
+                        Some(Some(node)) => results.push(node),
+                        Some(None) => return LibThen::Deferred,
+                        None => return LibThen::Refused,
+                    }
+                    continue;
+                }
+                self.note_awaited_evidence([arm]);
+                let callbacks = match self.shared_positional_reads(
+                    arm,
+                    crate::semantic_query::SignatureKind::Call,
+                    0,
+                ) {
+                    Ok(found) => found,
+                    Err(_) => return LibThen::Refused,
+                };
+                let Some(callback) = callbacks.last() else {
+                    continue;
+                };
+                let value = match &callback.argument {
+                    PositionalArgument::Type { ty, .. } => *ty,
+                    PositionalArgument::Absent => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+                };
+                match self.lib_awaited_read(value) {
                     Some(Some(node)) => results.push(node),
                     Some(None) => return LibThen::Deferred,
                     None => return LibThen::Refused,
                 }
-                continue;
-            }
-            let Some(callbacks) = self.awaited_call_signatures(arm) else {
-                return LibThen::Refused;
-            };
-            let Some(&callback) = callbacks.last() else {
-                continue;
-            };
-            let value = match self.first_parameter(callback) {
-                Some(FirstParameter::Type(value)) => value,
-                Some(FirstParameter::Absent) => self
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
-                None => return LibThen::Refused,
-            };
-            match self.lib_awaited_read(value) {
-                Some(Some(node)) => results.push(node),
-                Some(None) => return LibThen::Deferred,
-                None => return LibThen::Refused,
             }
         }
         LibThen::Result(match results.as_slice() {
@@ -12263,13 +12267,20 @@ enum LibThen {
     Refused,
 }
 
-/// A call signature's first parameter.
-#[derive(Debug)]
-enum FirstParameter {
-    /// The signature takes no parameter.
-    Absent,
-    /// The first parameter's type (a leading rest parameter's element).
-    Type(SemanticNodeId),
+/// The `then` members of one object surface, in surface order.
+///
+/// Member PRESENCE by name and nothing else: the settled fast path and both
+/// thenable readers agree on which members are `then` through this one
+/// definition, and every signature decision over those members belongs to
+/// the shared discovery authority.
+fn then_members(
+    surface: &crate::semantic_query::SurfaceView,
+) -> Vec<&crate::semantic_query::SurfaceMember> {
+    surface
+        .positive_members()
+        .iter()
+        .filter(|member| member.string_name() == Some("then"))
+        .collect()
 }
 
 /// An object surface's standing under the checker's RUNTIME thenable protocol.
