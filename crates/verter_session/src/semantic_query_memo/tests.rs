@@ -2398,6 +2398,60 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
 }
 
+/// MODELESS WARM-HIT COUNTER RAIL — a `Relate`-family warm read through
+/// the modeless payload accessor must travel the ONE unified warm-hit
+/// implementation: it bumps `cache_counters.semantic_graph.hits` exactly
+/// once, like every other validated warm read.
+///
+/// DISCRIMINATES against a private modeless read path that duplicates the
+/// two-gate protocol outside `get_validated_value_impl`: such a duplicate
+/// validates and bubbles but never touches the per-request counters, so
+/// the delta below stays 0.
+#[test]
+fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let gen0 = host.project_type_store().current_project_generation();
+    store.insert_relation_payload_for_tests(
+        key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        gen0,
+    );
+    let before = rctx
+        .cache_counters
+        .semantic_graph
+        .hits
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        store.get_relation_payload(ctx, &key).is_some(),
+        "seeded relation entry must warm-hit"
+    );
+    let delta = rctx
+        .cache_counters
+        .semantic_graph
+        .hits
+        .load(std::sync::atomic::Ordering::Relaxed)
+        - before;
+    assert_eq!(
+        delta, 1,
+        "modeless warm hit must bump the unified per-request hit counter exactly once (got {delta})"
+    );
+}
+
 /// RELATION FAMILY RSS RAILS — a content invalidation drains relation
 /// entries through the SAME reverse-index rail every family uses: the
 /// publish registers the carrier's canonicals in `canonical_to_entries`,

@@ -53,7 +53,9 @@ impl SemanticGraphStore {
         // candidates record different materialised points, so a warm hit
         // must cover the caller's OWN demand point.
         let requested = MaterializedPoint::new(key.demand.point.clone());
-        let hit = self.modeless_family_warm_hit(ctx, &family, Some(&requested))?;
+        let hit = self
+            .get_validated_value_impl(&family, ModeSlot::Single, &requested, ctx, None)?
+            .value;
         match hit {
             QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
                 verter_debug_assert!(
