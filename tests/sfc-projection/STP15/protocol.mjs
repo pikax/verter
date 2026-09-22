@@ -195,13 +195,15 @@ export function validateStp15Products({ repoRoot = REPO_ROOT } = {}) {
       errors.push(err("STP15-read-ref", "removed-fixture", "manifest.json is not valid JSON"));
     }
     if (manifest !== null) {
+      const mandatoryCases = Array.isArray(manifest.mandatoryCases) ? manifest.mandatoryCases : [];
+      const products = Array.isArray(manifest.products) ? manifest.products : [];
       for (const id of STP15_MANDATORY_CASES) {
-        if (!(manifest.mandatoryCases || []).includes(id)) {
+        if (!mandatoryCases.includes(id)) {
           errors.push(err(id, "unknown-row", `manifest is missing mandatory case ${id}`));
         }
       }
       for (const product of ACCEPTED_PRODUCTS) {
-        if (!(manifest.products || []).includes(product)) {
+        if (!products.includes(product)) {
           errors.push(
             err("STP15-read-ref", "removed-fixture", `manifest is missing product ${product}`),
           );
@@ -346,6 +348,31 @@ export function runDiscriminatorTests(repoRoot, names) {
   };
 }
 
+// Production carrier discriminators run in the `--test main` lane (the
+// carrier test lives in `tests/cases`, not in the lib), so a dirty twin
+// is rejected through the production carrier path, not just the unit
+// lane.
+const CARRIER_TEST = "binding_views_reads_admitted_carrier_blocks";
+
+export function runCarrierDiscriminatorTests(repoRoot, names) {
+  const result = spawnSync(
+    "cargo",
+    ["test", "-p", "verter_compiler", "--test", "main", "--", "--test-threads=1", ...names],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 300000,
+      env: process.env,
+    },
+  );
+  return {
+    status: result.status,
+    error: result.error,
+    stdout: `${result.stdout || ""}${result.stderr || ""}`,
+  };
+}
+
 export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
   const errors = [];
   const abs = path.join(repoRoot, BINDING_VIEWS_RS);
@@ -375,22 +402,39 @@ export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
       );
       continue;
     }
+    // Carrier expectations come from the twin table: names that are not
+    // lib discriminators run in the production `--test main` lane.
+    const carrierNames = (DIRTY_TWIN_DISCRIMINATORS[twin] || []).filter(
+      (name) => name === CARRIER_TEST && !spec.discriminators.includes(name),
+    );
+    const libNames = spec.discriminators.filter((name) => name !== CARRIER_TEST);
     fs.writeFileSync(abs, mutated);
     let run = null;
+    let carrierRun = null;
     try {
-      run = runDiscriminatorTests(repoRoot, spec.discriminators);
+      run = runDiscriminatorTests(repoRoot, libNames);
+      if (carrierNames.length > 0) {
+        carrierRun = runCarrierDiscriminatorTests(repoRoot, carrierNames);
+      }
     } finally {
       fs.writeFileSync(abs, original);
     }
-    if (run.error) {
+    if (run.error || carrierRun?.error) {
       errors.push(
-        err("STP15-mutation", "missing-check", `${twin} run failed to spawn: ${run.error.message}`),
+        err(
+          "STP15-mutation",
+          "missing-check",
+          `${twin} run failed to spawn: ${(run.error || carrierRun.error).message}`,
+        ),
       );
       continue;
     }
     const output = String(run.stdout || "");
-    const ran = spec.discriminators.some((name) => output.includes(name));
-    if (!ran) {
+    const carrierOutput = String(carrierRun?.stdout || "");
+    const ran = libNames.some((name) => output.includes(name));
+    const carrierRan =
+      carrierNames.length === 0 || carrierNames.some((name) => carrierOutput.includes(name));
+    if (!ran || !carrierRan) {
       errors.push(
         err(
           "STP15-mutation",
@@ -403,9 +447,13 @@ export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
     // Rejection proof requires each discriminator to FAIL for the stated
     // mutation: a nonzero status alone is not proof, since an unrelated
     // compile error or sibling failure also exits nonzero while the
-    // owning discriminator still passes.
+    // owning discriminator still passes. Carrier expectations must fail
+    // in the production `--test main` lane, not just the lib lane.
     const rejected =
-      run.status !== 0 && spec.discriminators.every((name) => testFailed(output, name));
+      run.status !== 0 &&
+      libNames.every((name) => testFailed(output, name)) &&
+      (carrierRun === null ||
+        (carrierRun.status !== 0 && carrierNames.every((name) => testFailed(carrierOutput, name))));
     if (!rejected) {
       errors.push(
         err(

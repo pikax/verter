@@ -714,3 +714,57 @@ fn stp15_options_writable_computed_uses_declared_setter_domain() {
         other => panic!("Options setter domain must be the declared type, got {other:?}"),
     }
 }
+
+#[test]
+fn stp15_destructured_ref_result_is_a_plain_binding() {
+    let projection = project_setup("import { ref } from 'vue';\nconst { value } = ref(0);\n");
+    let value = projection.read.lookup("value").expect("value");
+    assert_eq!(
+        value.kind,
+        BindingKind::Plain,
+        "a destructured `ref(...)` result holds the extracted value, not the ref object"
+    );
+    assert_eq!(
+        projection.write.write_target("value"),
+        Err(WriteRejection::ConstBinding),
+        "the `const` destructured value refuses template reassignment"
+    );
+}
+
+#[test]
+fn stp15_usage_ignores_static_markup_and_member_properties() {
+    let declared = ["foo".to_string(), "user".to_string()];
+    let template = r#"<p class="foo">foo {{ user.foo }}</p>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    let user = usage.used.iter().find(|u| u.name == "user").expect("user");
+    assert!(
+        user.regions.template,
+        "`{{ user.foo }}` counts as a template use of the root `user`"
+    );
+    assert!(
+        !usage.is_used("foo"),
+        "static markup text, static attributes and member properties never count as uses"
+    );
+}
+
+#[test]
+fn stp15_usage_ignores_shadowed_script_identifiers() {
+    let declared = ["foo".to_string()];
+    let script = "import { ref } from 'vue';\nconst foo = ref(0);\nfunction f(foo: number) { return foo + 1; }\n";
+    let usage = BindingUsageSet::from_region_text(&declared, "", script, "");
+    assert!(
+        !usage.is_used("foo"),
+        "a reference resolving to a shadowing parameter never marks the top-level binding as used"
+    );
+}
+
+#[test]
+fn stp15_usage_parses_tsx_script_blocks() {
+    let declared = ["count".to_string()];
+    let script = "import { ref } from 'vue';\nconst count = ref(0);\nconst node = <div />;\nfunction bump() { count.value++; }\n";
+    let usage = BindingUsageSet::from_region_text(&declared, "", script, "");
+    assert!(
+        usage.is_used("count"),
+        "valid references in an admitted TSX block count under the TSX fallback"
+    );
+}

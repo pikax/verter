@@ -230,13 +230,15 @@ pub struct UsedBinding {
     pub regions: UsageRegions,
 }
 
-/// Lexical identifier mentions in template markup: ASCII word scan over
-/// authored bytes with HTML comments (`<!-- ... -->`) removed first, so
-/// commented-out names never count as uses. Words that cannot start an
-/// identifier (leading digit) are dropped; everything else is a candidate
-/// the accounting core matches against declared names. Attribute strings
-/// may still over-approximate; undeclared words are ignored, never
-/// invented into the population.
+/// Root identifier references in binding-bearing template positions:
+/// `{{ ... }}` interpolation expressions and bound attribute values
+/// (`:prop`, `@event`, `#slot`, `v-...`). Each snippet parses as a
+/// freestanding program, so only resolved root references are collected:
+/// static markup text never counts, member properties (`user.foo`
+/// contributes `user`, never `foo`), and static attribute strings
+/// (`class="accent"`) are skipped outright. HTML comments are removed
+/// first. Undeclared words are ignored downstream, never invented into
+/// the population.
 fn template_mentions(template: &str) -> FxHashSet<String> {
     let mut visible = String::with_capacity(template.len());
     let mut rest = template;
@@ -248,17 +250,125 @@ fn template_mentions(template: &str) -> FxHashSet<String> {
         };
     }
     visible.push_str(rest);
-    let mut names = FxHashSet::default();
-    for word in visible.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
-        if word.is_empty() || word.as_bytes()[0].is_ascii_digit() {
-            continue;
+    let allocator = Allocator::default();
+    let mut scan = ScriptReferenceScan {
+        names: FxHashSet::default(),
+    };
+    // Interpolation expressions with brace-depth matching so object
+    // literals (`{{ { a: 1 }.a }}`) do not truncate the snippet.
+    let bytes = visible.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' && bytes.get(i + 1) == Some(&b'{') {
+            let mut depth = 2usize;
+            let mut j = i + 2;
+            while j < bytes.len() && depth > 0 {
+                if bytes[j] == b'{' {
+                    depth += 1;
+                } else if bytes[j] == b'}' {
+                    depth -= 1;
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                collect_snippet_references(&allocator, &visible[i + 2..j - 2], &mut scan);
+                i = j;
+                continue;
+            }
+            break;
         }
-        names.insert(word.to_string());
+        i += 1;
     }
-    names
+    // Bound attribute values inside tags; static attributes are skipped.
+    let mut tag = 0;
+    while let Some(open) = visible[tag..].find('<') {
+        let start = tag + open;
+        let Some(close) = find_tag_end(&visible[start..]) else {
+            break;
+        };
+        collect_bound_attribute_references(&allocator, &visible[start..start + close], &mut scan);
+        tag = start + close;
+    }
+    scan.names
 }
 
-/// Identifier references (never declarations) in one setup script.
+/// End of the tag starting at `text[0] == '<'`: the first `>` outside a
+/// quoted attribute value, as a byte offset past `>`.
+fn find_tag_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut quote = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if let Some(q) = quote {
+            if byte == q {
+                quote = None;
+            }
+        } else if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index + 1);
+        }
+    }
+    None
+}
+
+/// Identifier references inside bound attribute values (`:prop="..."`,
+/// `@event="..."`, `#slot="..."`, `v-...="..."`); static attributes
+/// contribute nothing. Values parse as freestanding programs so statement
+/// handlers (`bump(); count++`) and expressions both contribute.
+fn collect_bound_attribute_references(
+    allocator: &Allocator,
+    tag: &str,
+    scan: &mut ScriptReferenceScan,
+) {
+    let bytes = tag.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        let name_start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' {
+            i += 1;
+        }
+        if i == name_start {
+            i += 1;
+            continue;
+        }
+        let name = &tag[name_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                let value_start = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                let value = &tag[value_start..i];
+                i += 1;
+                value
+            } else {
+                let value_start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+                    i += 1;
+                }
+                &tag[value_start..i]
+            };
+            if !value.is_empty() && (name.starts_with([':', '@', '#']) || name.starts_with("v-")) {
+                collect_snippet_references(allocator, value, scan);
+            }
+        }
+    }
+}
+
+/// Identifier references (never declarations) in one script or template
+/// expression snippet.
 struct ScriptReferenceScan {
     names: FxHashSet<String>,
 }
@@ -270,19 +380,70 @@ impl<'a> Visit<'a> for ScriptReferenceScan {
     }
 }
 
-/// Script identifier references by name, or empty when the script does not
-/// parse (no synthetic references are invented for broken input).
-fn script_reference_names(script: &str) -> FxHashSet<String> {
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, script, SourceType::ts().with_module(true)).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return FxHashSet::default();
+/// Parse one reference snippet under the plain TS grammar, falling back to
+/// TSX so admitted TSX blocks (for example `const node = <div />`) still
+/// contribute references. Returns `None` when the snippet does not parse
+/// under either grammar.
+fn parse_reference_snippet<'a>(allocator: &'a Allocator, snippet: &'a str) -> Option<Program<'a>> {
+    for source_type in [SourceType::ts(), SourceType::tsx()] {
+        let parsed = Parser::new(allocator, snippet, source_type.with_module(true)).parse();
+        if !parsed.panicked && parsed.errors.is_empty() {
+            return Some(parsed.program);
+        }
     }
+    None
+}
+
+/// Collect root identifier references from one template expression
+/// snippet. Member properties resolve to their root object (`user.foo`
+/// contributes `user`, never `foo`); unparseable snippets contribute
+/// nothing rather than synthetic references.
+fn collect_snippet_references(
+    allocator: &Allocator,
+    snippet: &str,
+    scan: &mut ScriptReferenceScan,
+) {
+    let Some(program) = parse_reference_snippet(allocator, snippet) else {
+        return;
+    };
+    scan.visit_program(&program);
+}
+
+/// Script references resolved to the projected top-level declarations.
+/// References resolving through the semantic scope tree to a declared
+/// top-level symbol count; a shadowed identifier inside a nested scope
+/// resolves to its own symbol and never marks the top-level name as used.
+/// A declared name with no top-level symbol in this script (Options
+/// members, cross-block references) falls back to the name-based
+/// reference set so reachable uses are not lost. An unparseable script
+/// contributes no references rather than synthetic ones.
+fn script_reference_names(script: &str, declared: &[String]) -> FxHashSet<String> {
+    let allocator = Allocator::default();
+    let Some(program) = parse_reference_snippet(&allocator, script) else {
+        return FxHashSet::default();
+    };
     let mut scan = ScriptReferenceScan {
         names: FxHashSet::default(),
     };
-    scan.visit_program(&parsed.program);
-    scan.names
+    scan.visit_program(&program);
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&program)
+        .semantic;
+    let scoping = semantic.scoping();
+    let root = scoping.root_scope_id();
+    let mut names = FxHashSet::default();
+    for name in declared {
+        match scoping.get_binding(root, name.as_str().into()) {
+            Some(symbol) if !scoping.get_resolved_reference_ids(symbol).is_empty() => {
+                names.insert(name.clone());
+            }
+            None if scan.names.contains(name.as_str()) => {
+                names.insert(name.clone());
+            }
+            Some(_) | None => {}
+        }
+    }
+    names
 }
 
 /// Style `v-bind()` names: the only way authored style references script
@@ -361,14 +522,17 @@ impl BindingUsageSet {
     }
 
     /// Account usage from authored region text instead of caller-supplied
-    /// slices: template markup mentions, script identifier references, and
-    /// style `v-bind()` names. Template collection is a lexical mention
-    /// scan over authored bytes with HTML comments removed (attribute
-    /// strings may still over-approximate; undeclared words are ignored,
-    /// never invented into the population). Script collection walks the
-    /// parsed AST for identifier references, so declarations never count
-    /// as uses. An unparseable script contributes no script references
-    /// rather than synthetic ones.
+    /// slices: template root references, resolved script references, and
+    /// style `v-bind()` names. Template collection parses `{{ }}`
+    /// interpolations and bound attribute values as expressions over
+    /// authored bytes with HTML comments removed, so static markup and
+    /// member properties never count as uses. Script collection resolves
+    /// references through the semantic scope tree to the projected
+    /// top-level declarations, so declarations and shadowed identifiers
+    /// never count as uses; each block parses under TS with a TSX
+    /// fallback matching the admitted setup dialects. An unparseable
+    /// script contributes no script references rather than synthetic
+    /// ones.
     #[must_use]
     pub fn from_region_text(
         declared: &[String],
@@ -377,7 +541,7 @@ impl BindingUsageSet {
         style: &str,
     ) -> Self {
         let template_owned = template_mentions(template);
-        let script_owned = script_reference_names(script);
+        let script_owned = script_reference_names(script, declared);
         let style_owned = style_vbind_names(style);
         let template_refs: Vec<&str> = template_owned.iter().map(String::as_str).collect();
         let script_refs: Vec<&str> = script_owned.iter().map(String::as_str).collect();
@@ -742,8 +906,19 @@ fn classify_declarator(
     match factory_export(&call.callee, ctx.values, ctx.vue_imports) {
         Some("ref") => {
             // Top-level `ref` stays a ref: the template unwraps the member.
+            // A destructured `ref(...)` result holds the extracted value,
+            // not the ref object, so only a plain identifier keeps
+            // `BindingKind::Ref`; destructured names are plain bindings
+            // with the declaration mutability (`const` still refuses
+            // reassignment through `push_binding`).
+            let whole = matches!(id, BindingPattern::BindingIdentifier(_));
             for (name, range) in names {
-                push_binding(projection, name, BindingKind::Ref, range, None, ctx.mutable);
+                let kind = if whole {
+                    BindingKind::Ref
+                } else {
+                    BindingKind::Plain
+                };
+                push_binding(projection, name, kind, range, None, ctx.mutable);
             }
         }
         Some("toRefs") => {

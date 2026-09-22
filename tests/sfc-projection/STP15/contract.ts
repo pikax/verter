@@ -6,7 +6,7 @@
  * authored references only; TypeScript remains the type-answer owner.
  */
 export type { Instance as BindingViewsInstance } from "./probes/positive";
-export { countRef as scriptSideRef } from "./probes/positive";
+export { countRef as scriptSideRef } from "./probes/components/Counter.vue";
 
 export const acceptedProducts = [
   "TemplateReadView",
