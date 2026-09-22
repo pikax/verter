@@ -1028,3 +1028,51 @@ fn script_projection_reads_admitted_blocks_and_refuses_foreign_source() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// STP13: the production Options path runs on real Vue SFC carrier bytes,
+/// not on hand-built blocks. The normal script uses an aliased
+/// `defineComponent` import (binding-resolved, not text-matched); the setup
+/// half contributes template-visible locals while named module exports stay
+/// out of template scope.
+#[test]
+fn options_projection_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::OptionsTemplateBindingView;
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script lang=\"ts\">\n",
+        "import { defineComponent as dc } from 'vue';\n",
+        "export const storeKey = 'k';\n",
+        "export default dc({\n",
+        "  props: { title: String },\n",
+        "  methods: { increment(step?: number) { this.count += step ?? 1; } },\n",
+        "});\n",
+        "</script>\n",
+        "<script setup lang=\"ts\">\n",
+        "const local = 1;\n",
+        "</script>\n",
+    );
+    let artifact = registered_artifact("file:///options.vue", SFC);
+    let combined = VueProjectionBackend
+        .options_projection(SFC, &artifact)
+        .expect("projects");
+    let options = combined.options.as_ref().expect("options");
+    assert!(options.define_component_wrapped);
+    assert!(options.constructor_shaped);
+    assert!(options.members.iter().any(|member| member.name == "title"));
+    assert!(options
+        .members
+        .iter()
+        .any(|member| member.name == "increment"));
+    assert!(combined.named_exports.contains(&"storeKey".to_string()));
+    let view = OptionsTemplateBindingView::build(&combined);
+    assert!(view.is_template_visible("title"));
+    assert!(view.is_template_visible("local"));
+    assert!(!view.is_template_visible("storeKey"));
+    assert_eq!(
+        VueProjectionBackend
+            .options_projection("<script></script>", &artifact)
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
