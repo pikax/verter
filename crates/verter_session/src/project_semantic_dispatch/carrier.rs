@@ -1587,6 +1587,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Test-support view of the carrier-normalization prelude's
+    /// classification: normalize the key's carrier subject exactly as the
+    /// prelude does, then classify the NORMALIZED key. Both halves are
+    /// required — the classifier judges the post-normalization subject, so
+    /// classifying the raw key would judge a shape the prelude never sees.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn normalized_carrier_partial_reasons_for_tests(
+        &self,
+        key: SemanticQueryKey,
+    ) -> PartialReasonSet {
+        let normalized = self.normalize_carrier_subject_key(key);
+        self.carrier_normalization_partial_reasons(&normalized)
+    }
+
     /// Classify a failed carrier rewrite at the Vue runtime publication
     /// boundary.
     ///
@@ -1612,20 +1626,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// publication boundary, so `keyof typeof KIND` (and the empty-path /
     /// mapped-source shapes that reach here with `deferred_typeof == false`)
     /// would never warm.
-    /// Test-support view of the carrier-normalization prelude's
-    /// classification: normalize the key's carrier subject exactly as the
-    /// prelude does, then classify the NORMALIZED key. Both halves are
-    /// required — the classifier judges the post-normalization subject, so
-    /// classifying the raw key would judge a shape the prelude never sees.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn normalized_carrier_partial_reasons_for_tests(
-        &self,
-        key: SemanticQueryKey,
-    ) -> PartialReasonSet {
-        let normalized = self.normalize_carrier_subject_key(key);
-        self.carrier_normalization_partial_reasons(&normalized)
-    }
-
     pub(super) fn carrier_normalization_partial_reasons(
         &self,
         key: &SemanticQueryKey,
@@ -1679,9 +1679,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// CHEAP probe: does `key` carry a `BareRef` / `ImportType` carrier as its
-    /// SUBJECT node? Returns `true` only for a base-bearing key whose subject
-    /// node is one of the two unresolved-reference carriers — the exact set
+    /// CHEAP probe: does `key` carry a `BareRef` / `ImportType` / `TypeOf`
+    /// carrier as its SUBJECT node? Returns `true` only for a base-bearing key
+    /// whose subject node is one of the three unresolved-reference carriers —
+    /// a superset of the exact set
     /// [`Self::normalize_carrier_subject_key`] rewrites. A non-carrier key (the
     /// common case) returns `false` with one node-data shape check and NO
     /// resolution / tracer cost. Used to gate the traced normalization prelude

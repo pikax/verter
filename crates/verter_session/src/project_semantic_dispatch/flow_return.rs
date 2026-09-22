@@ -3145,13 +3145,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) {
             Ok(ok) => ok,
             Err(failure) => {
-                self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                self.abort_inline_flight(inline_flight.as_ref());
                 for member in &relation_members {
-                    self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                    self.abort_inline_flight(member.inline_flight.as_ref());
                 }
                 self.flow_return_abort_drained_flights(&flow_members);
                 for (_, member) in &call_members {
-                    self.resolve_call_abort_inline_flight(member.inline_flight.as_ref());
+                    self.abort_inline_flight(member.inline_flight.as_ref());
                     if let Some(session) = member.staged_session {
                         self.abandon_session(session);
                     }
@@ -3207,9 +3207,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             });
         if component_failed {
-            self.flow_return_abort_inline_flight(inline_flight.as_ref());
+            self.abort_inline_flight(inline_flight.as_ref());
             for member in &relation_members {
-                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                self.abort_inline_flight(member.inline_flight.as_ref());
             }
             self.flow_return_abort_drained_flights(&flow_members);
             self.resolve_call_abort_drained_flights(&call_results);
@@ -3303,7 +3303,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     member_batch_partial_reasons = outcome.flow_batch_partial_reasons;
                 }
                 Err(_) => {
-                    self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                    self.abort_inline_flight(inline_flight.as_ref());
                     let _ =
                         self.fail_flow_demand(flow_demand.as_ref(), FlowReturnFailure::Unresolved);
                     return FlowFramePop::RootClose(FlowRootClose::NoValue(
@@ -3394,7 +3394,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             );
                         }
                         _ => {
-                            self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                            self.abort_inline_flight(inline_flight.as_ref());
                             // The inline path produces NO memo read, so the
                             // universal read funnel never sees this refusal:
                             // fold it into the ENCLOSING build's rails here
