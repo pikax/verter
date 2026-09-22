@@ -9635,7 +9635,19 @@ mod tests {
                     started.elapsed()
                 })
             };
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Wait for the observed event instead of a fixed sleep:
+            // `reset()` stores `shutdown`, sends the teardown signal, then
+            // posts the inbox wake in that order, so a non-empty inbox
+            // proves all three already happened and the pause can be
+            // released into the exact swallowed-wake window under test.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while sched.inbox.receiver.is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "reset() did not post the inbox wake before the deadline"
+                );
+                std::thread::yield_now();
+            }
             sched.test_release_dispatch_pause();
 
             worst = worst.max(resetter.join().expect("teardown must not panic"));
