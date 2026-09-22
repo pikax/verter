@@ -5451,12 +5451,12 @@ pub enum SemanticQueryValue {
     /// nested `GraphDeclarationPart`). This value variant has no live producer
     /// and never crosses the wire — do not read it as the merge wire source.
     DeclarationAnalysis(DeclarationAnalysisValue),
-    /// An ordered set of call/construct signatures (an overload set) — the
+    /// An ordered set of signatures of ONE kind (an overload set) — the
     /// LIVE value domain of [`SemanticQueryKey::ResolveOverloadSet`]: the
-    /// callee's ordered VISIBLE signature group, call bucket first, then
-    /// construct (the `typeof` projection's visibility rule already hid
-    /// trailing implementation signatures). The last element is the last
-    /// visible overload.
+    /// callee's ordered VISIBLE signatures of the requested call or
+    /// construct bucket (the `typeof` projection's visibility rule already
+    /// hid trailing implementation signatures). The last element is the
+    /// last visible overload.
     OverloadSet(Arc<[SignatureRef]>),
     /// The public outcome of a relation query — the LIVE value domain of
     /// [`SemanticQueryKey::Relate`]. `execute(Relate)` produces and admits
@@ -7829,32 +7829,33 @@ pub enum SemanticQueryKey {
         enum_slot: ResolvedDeclSlotIdentity,
         context: EnumContext,
     },
-    /// Resolve a callee's overload set.
+    /// Resolve the ordered candidates of ONE of a callee's signature
+    /// buckets.
     ///
     /// `callee` is the already-resolved [`SemanticNodeId`] of the callee;
-    /// `type_args` are its call-site type arguments (part of semantic
-    /// identity); `context` carries only `resolve_env_hash` (`R`).
+    /// `kind` selects the bucket a call site demands — its CALL bucket for
+    /// an ordinary call, its CONSTRUCT bucket for a `new` expression — and
+    /// is part of semantic identity: the other bucket is not read, so its
+    /// settlement never gates this set; `type_args` are the call-site type
+    /// arguments (part of semantic identity); `context` carries only
+    /// `resolve_env_hash` (`R`).
     ///
-    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build
-    /// settles the callee through the ONE shared signature-source carrier
-    /// rail (`resolve_signature_source_carrier` — the same demand point the
-    /// signature utilities use; the rails share the FUNCTION, not the
-    /// CONTEXT — the utilities pass their caller's context while this key,
-    /// being mode-erased, always settles under structural transit — and a
-    /// `DeclRef` / `InstantiationRef` carrier callee still settles to the
-    /// same signature group on both because `Instantiate` of a
-    /// signature-bearing decl is mode-stable), unwraps
-    /// alias chains, and projects the ordered VISIBLE signature group —
-    /// call bucket first, then construct, with trailing implementation
-    /// signatures already hidden by the `typeof` projection's visibility
-    /// rule (a lone signature is visible even if bodied). The LAST element
-    /// is the last visible overload (the signature-utility selection rule;
-    /// U6 call resolution reads the same order first-applicable). Explicit
-    /// `type_args` instantiate each candidate positionally; candidates
-    /// that cannot accept the argument list drop from the set; all-dropped
-    /// — like a callee with no signature group — is an honest
-    /// [`QueryError::Miss`], NEVER a fabricated empty
-    /// `OverloadSet(Arc::from([]))`.
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The candidates
+    /// ARE the callee's shared signature list of `kind`
+    /// ([`SemanticQueryKey::SignaturesOfType`]), which owns carrier
+    /// settlement, alias and constraint hops, apparent globals, and the
+    /// union and intersection procedures (a union callee arrives as its
+    /// common or synthesized union signatures, never per-arm buckets),
+    /// with trailing implementation signatures already hidden by the
+    /// `typeof` projection's visibility rule (a lone signature is visible
+    /// even if bodied). The LAST element is the last visible overload (the
+    /// signature-utility selection rule; call resolution reads the same
+    /// order first-applicable). Explicit `type_args` instantiate each
+    /// candidate positionally; candidates that cannot accept the argument
+    /// list drop from the set; all-dropped — like a callee whose bucket is
+    /// complete and empty — is an honest [`QueryError::Miss`], NEVER a
+    /// fabricated empty `OverloadSet(Arc::from([]))`. A bucket that did
+    /// not settle is a `Miss` that is never admitted.
     ///
     /// **Value domain** [`SemanticQueryValueTag::OverloadSet`]
     /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`): the inner
@@ -7867,6 +7868,7 @@ pub enum SemanticQueryKey {
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     ResolveOverloadSet {
         callee: SemanticNodeId,
+        kind: SignatureKind,
         type_args: Arc<[SemanticNodeId]>,
         context: OverloadSetContext,
     },
