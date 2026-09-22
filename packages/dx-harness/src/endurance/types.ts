@@ -152,6 +152,37 @@ export interface EnduranceConfig {
   readonly scaleOpenFiles: number;
   /** Synthetic corpus size for the scale lane. */
   readonly scaleCorpusFiles: number;
+  /**
+   * Document open→edit→query→close cycles the CHURN lane runs
+   * (VERTER_ENDURANCE_CHURN_CYCLES, default 1000 — the long-editing-session
+   * figure the lane exists to bound).
+   */
+  readonly churnCycles: number;
+  /**
+   * Cycles run BEFORE the baseline reading (VERTER_ENDURANCE_CHURN_WARMUP_CYCLES,
+   * default 100). Every one-time cost — project load, provider program, lazily
+   * initialised caches — is inside the baseline, so the comparison measures
+   * retention rather than startup.
+   */
+  readonly churnWarmupCycles: number;
+  /**
+   * Blocks in the generated churn carrier (VERTER_ENDURANCE_CHURN_CARRIER_BLOCKS,
+   * default 140, ~230 source bytes each). Retention is per synced document
+   * version, so the per-cycle cost of a leak scales with the document: a tiny
+   * fixture would hide a real leak inside allocator noise.
+   */
+  readonly churnCarrierBlocks: number;
+  /** Final tree RSS must be <= baseline * this factor + the floor below. */
+  readonly churnGrowthFactor: number;
+  /**
+   * Absolute slack (bytes) added to the churn growth bound
+   * (VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES, default 64 MiB). The factor
+   * catches proportional growth on a large baseline; this keeps a small-baseline
+   * run from failing on allocator noise.
+   */
+  readonly churnGrowthFloorBytes: number;
+  /** Budget (ms) for reaching host quiescence before each churn memory reading. */
+  readonly churnQuiesceMs: number;
   /** Receipt destination (file path or directory), if set. */
   readonly receiptPath: string | null;
 }

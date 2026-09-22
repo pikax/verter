@@ -2005,8 +2005,6 @@ mod tests {
         assert!(!registry.snapshot_identity_is_current(&uri, &captured));
     }
 
-    /// Close/reopen resets the client's version sequence. Even identical text
-    /// at the same version is a distinct open-document lifetime (ABA fence).
     /// A closed document leaves no diagnostics bookkeeping behind.
     ///
     /// The epoch map fences in-flight publications, so it is written on every
@@ -2082,6 +2080,8 @@ mod tests {
         );
     }
 
+    /// Close/reopen resets the client's version sequence. Even identical text
+    /// at the same version is a distinct open-document lifetime (ABA fence).
     #[test]
     fn snapshot_identity_rejects_close_reopen_at_same_version() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(

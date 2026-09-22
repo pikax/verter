@@ -22,6 +22,9 @@ import {
   collectCorpusCarrierFiles,
   disposeWorkspace,
   deriveCorpusProbes,
+  churnCarrierContent,
+  DEFAULT_ENDURANCE_LANE,
+  decideChurnGrowth,
   heavyUpdateFixture,
   loadEnduranceConfig,
   parseProviderRuntimeAttestation,
@@ -818,5 +821,69 @@ describe("scale corpus framework/mode parity", () => {
         (probe) => probe.kind === "completion" && probe.label.includes("component attr completion"),
       ),
     ).toHaveLength(0);
+  });
+});
+
+describe("churn growth verdict", () => {
+  const observable = (totalBytes: number) => ({
+    observable: true,
+    totalBytes,
+    members: [{ pid: 1, image: "verter-lsp", rssBytes: totalBytes }],
+    unreadablePids: [],
+    atMs: 0,
+  });
+  const unobservable = {
+    observable: false,
+    totalBytes: null,
+    members: [{ pid: 1, image: null, rssBytes: null }],
+    unreadablePids: [1],
+    atMs: 0,
+  };
+  const MIB = 1024 ** 2;
+
+  it("fails a session that kept every churned document version", () => {
+    // 1000 cycles retaining ~300KiB per synced version against a 400MiB
+    // baseline: the shape of an insert-only surface store, and the exact
+    // failure this lane exists to produce.
+    const verdict = decideChurnGrowth(
+      observable(400 * MIB),
+      observable(700 * MIB),
+      1.25,
+      64 * MIB,
+    );
+    expect(verdict.observable).toBe(true);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.growthBytes).toBe(300 * MIB);
+    expect(verdict.detail).toContain("700.0MiB");
+  });
+
+  it("passes a bounded session that only wobbles inside the floor", () => {
+    const verdict = decideChurnGrowth(
+      observable(400 * MIB),
+      observable(412 * MIB),
+      1.25,
+      64 * MIB,
+    );
+    expect(verdict.pass).toBe(true);
+    expect(verdict.ratio).toBeCloseTo(1.03, 2);
+  });
+
+  it("reports an unreadable platform as UNAVAILABLE, never as a measured pass", () => {
+    const verdict = decideChurnGrowth(observable(400 * MIB), unobservable, 1.25, 64 * MIB);
+    expect(verdict.observable).toBe(false);
+    expect(verdict.finalBytes).toBeNull();
+    expect(verdict.allowedBytes).toBeNull();
+    expect(verdict.detail).toContain("UNAVAILABLE");
+  });
+
+  it("sizes the churn carrier so one retained version is measurable", () => {
+    // A leak is per synced version, so the fixture must be big enough that a
+    // thousand of them leave allocator noise behind. 140 blocks is ~32KiB of
+    // carrier source before the provider's generated surface.
+    const content = churnCarrierContent(140, DEFAULT_ENDURANCE_LANE);
+    expect(content.length).toBeGreaterThan(28 * 1024);
+    expect(content).toContain("interface ChurnProps {");
+    expect(content).toContain("churnField139?: string;");
+    expect(content).toContain("{{ churnHeadline }}");
   });
 });

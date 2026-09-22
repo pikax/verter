@@ -29,6 +29,12 @@
  *  - VERTER_ENDURANCE_SYNTHETIC_SCALE     "1" → generate a synthetic corpus for the scale lane
  *  - VERTER_ENDURANCE_SCALE_OPEN_FILES    files to open in the scale lane (default 40)
  *  - VERTER_ENDURANCE_SCALE_CORPUS_FILES  synthetic corpus size (default 300)
+ *  - VERTER_ENDURANCE_CHURN_CYCLES        open/edit/query/close cycles in the churn lane (default 1000)
+ *  - VERTER_ENDURANCE_CHURN_WARMUP_CYCLES cycles before the baseline memory reading (default 100)
+ *  - VERTER_ENDURANCE_CHURN_CARRIER_BLOCKS generated churn-carrier size in blocks (default 140)
+ *  - VERTER_ENDURANCE_CHURN_GROWTH_FACTOR  final/baseline tree-RSS bound (default 1.25)
+ *  - VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES absolute churn growth slack (default 64 MiB)
+ *  - VERTER_ENDURANCE_CHURN_QUIESCE_MS    quiescence budget before each churn reading (default 60000)
  *  - VERTER_ENDURANCE_RECEIPT             receipt destination (a `.json` file, or a directory)
  */
 import {
@@ -118,6 +124,17 @@ export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): Endur
     syntheticScale: env.VERTER_ENDURANCE_SYNTHETIC_SCALE === "1",
     scaleOpenFiles: readInt(env, "VERTER_ENDURANCE_SCALE_OPEN_FILES", 40, { min: 1 }),
     scaleCorpusFiles: readInt(env, "VERTER_ENDURANCE_SCALE_CORPUS_FILES", 300, { min: 2 }),
+    churnCycles: readInt(env, "VERTER_ENDURANCE_CHURN_CYCLES", 1_000, { min: 2 }),
+    churnWarmupCycles: readInt(env, "VERTER_ENDURANCE_CHURN_WARMUP_CYCLES", 100, { min: 1 }),
+    churnCarrierBlocks: readInt(env, "VERTER_ENDURANCE_CHURN_CARRIER_BLOCKS", 140, { min: 1 }),
+    churnGrowthFactor: readNumber(env, "VERTER_ENDURANCE_CHURN_GROWTH_FACTOR", 1.25, { min: 1 }),
+    churnGrowthFloorBytes: readInt(
+      env,
+      "VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES",
+      64 * 1024 ** 2,
+      { min: 1 },
+    ),
+    churnQuiesceMs: readInt(env, "VERTER_ENDURANCE_CHURN_QUIESCE_MS", 60_000, { min: 1000 }),
     receiptPath:
       env.VERTER_ENDURANCE_RECEIPT && env.VERTER_ENDURANCE_RECEIPT.length > 0
         ? env.VERTER_ENDURANCE_RECEIPT
