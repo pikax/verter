@@ -16,18 +16,24 @@ import {
 } from "./projectlessContractManifest";
 
 import {
+  E2E_CI_SHARD_COUNT,
+  E2E_FIXTURE_WEIGHTS,
   EDITOR_ACCEPTANCE_ROUTES,
   EXTENSION_ACCEPTANCE_ROUTES,
   NON_REQUIRED_E2E_ROUTES,
   STANDARD_E2E_FIXTURES,
   TYPE_PROVIDER_ROUTES,
+  buildE2eCiShards,
   buildE2eRouteInventory,
   buildGitHubActionsMatrix,
   buildRequiredE2eRouteInventory,
   e2eRouteLabel,
+  e2eRouteWeight,
   parseE2eRouteLabel,
   resolveE2eFixtureSelection,
   selectE2eRoutes,
+  selectE2eRoutesByLabels,
+  selectE2eRunRoutes,
 } from "./routeInventory";
 
 describe("VS Code E2E route inventory", () => {
@@ -49,12 +55,124 @@ describe("VS Code E2E route inventory", () => {
     expect(routes.filter((route) => route.typeProvider === "extension")).toHaveLength(1);
     expect(routes.filter((route) => route.typeProvider === "off")).toHaveLength(2);
     expect(new Set(labels).size).toBe(labels.length);
-    expect(matrix.include).toEqual(
-      buildRequiredE2eRouteInventory().map(({ fixture, typeProvider }) => ({
-        fixture,
-        type_provider: typeProvider,
-      })),
+
+    // The CI matrix is the required inventory, grouped into runner shards: every
+    // required route lands in exactly one shard and nothing outside it does.
+    expect(matrix.include).toHaveLength(E2E_CI_SHARD_COUNT);
+    const scheduled = matrix.include.flatMap((entry) => selectE2eRoutesByLabels(entry.routes));
+    const required = buildRequiredE2eRouteInventory();
+    expect(scheduled.map(e2eRouteLabel).sort()).toEqual(required.map(e2eRouteLabel).sort());
+    expect(matrix.include.map((entry) => entry.shard)).toEqual(
+      Array.from({ length: E2E_CI_SHARD_COUNT }, (_, index) => String(index + 1)),
     );
+    for (const entry of matrix.include) {
+      expect(entry.shard_count).toBe(String(E2E_CI_SHARD_COUNT));
+    }
+  });
+
+  describe("CI shards", () => {
+    it("weights every fixture the inventory declares, so a new fixture cannot be silently unbalanced", () => {
+      for (const { fixture } of buildE2eRouteInventory()) {
+        expect(E2E_FIXTURE_WEIGHTS[fixture], fixture).toBeGreaterThan(0);
+      }
+      expect(() => e2eRouteWeight({ fixture: "not-a-fixture", typeProvider: "tsgo" })).toThrow(
+        /no E2E duration weight/,
+      );
+    });
+
+    it("bin-packs the required routes by duration weight into balanced, deterministic shards", () => {
+      const shards = buildE2eCiShards();
+      const required = buildRequiredE2eRouteInventory();
+
+      expect(shards).toHaveLength(E2E_CI_SHARD_COUNT);
+      expect(shards.every((shard) => shard.routes.length > 0)).toBe(true);
+      expect(shards.flatMap((shard) => shard.routes.map(e2eRouteLabel)).sort()).toEqual(
+        required.map(e2eRouteLabel).sort(),
+      );
+      for (const { route } of NON_REQUIRED_E2E_ROUTES) {
+        expect(shards.flatMap((shard) => shard.routes)).not.toContainEqual(route);
+      }
+
+      // Balanced: the heaviest shard is within two weight units of the lightest.
+      // A naive `index % shardCount` assignment leaves the four parity routes
+      // (the heaviest by far) stacked on the same shards and fails this bound.
+      const loads = shards.map((shard) =>
+        shard.routes.reduce((sum, r) => sum + e2eRouteWeight(r), 0),
+      );
+      expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(2);
+      const heaviest = Math.max(...required.map(e2eRouteWeight));
+      const naive = Array.from({ length: E2E_CI_SHARD_COUNT }, (_, shard) =>
+        required
+          .filter((_, index) => index % E2E_CI_SHARD_COUNT === shard)
+          .reduce((sum, r) => sum + e2eRouteWeight(r), 0),
+      );
+      expect(Math.max(...naive) - Math.min(...naive)).toBeGreaterThanOrEqual(heaviest);
+
+      // Deterministic: the same inventory always yields the same partition.
+      expect(buildE2eCiShards()).toEqual(shards);
+    });
+
+    it("refuses a shard count that cannot hold the inventory", () => {
+      expect(() => buildE2eCiShards(0)).toThrow(/shard count/);
+      expect(() => buildE2eCiShards(buildRequiredE2eRouteInventory().length + 1)).toThrow(
+        /shard count/,
+      );
+    });
+  });
+
+  describe("selectE2eRunRoutes", () => {
+    it("runs the required matrix when nothing selects, and one route for a labelled --fixture", () => {
+      expect(selectE2eRunRoutes({})).toEqual(buildRequiredE2eRouteInventory());
+      expect(selectE2eRunRoutes({ fixtureArg: "monorepo@tsgo" }).map(e2eRouteLabel)).toEqual([
+        "monorepo@tsgo",
+      ]);
+      expect(
+        selectE2eRunRoutes({ envRoutes: "monorepo@tsgo,no-config@off" }).map(e2eRouteLabel),
+      ).toEqual(["monorepo@tsgo", "no-config@off"]);
+    });
+
+    it("treats an explicitly empty E2E_ROUTES as an error, never as the default matrix", () => {
+      // A shard whose matrix entry lost its routes must fail, not run every route.
+      expect(() => selectE2eRunRoutes({ envRoutes: "" })).toThrow(/at least one/);
+    });
+
+    it("refuses E2E_ROUTES combined with any other selector, including a labelled --fixture", () => {
+      // The labelled `--fixture` used to win silently over E2E_ROUTES.
+      for (const conflict of [
+        { fixtureArg: "monorepo@tsserver" },
+        { fixtureArg: "monorepo" },
+        { envFixture: "monorepo" },
+        { envTypeProvider: "tsgo" },
+      ]) {
+        expect(() => selectE2eRunRoutes({ envRoutes: "monorepo@tsgo", ...conflict })).toThrow(
+          /E2E_ROUTES cannot be combined/,
+        );
+      }
+    });
+  });
+
+  describe("selectE2eRoutesByLabels", () => {
+    it("selects exactly the listed routes in order, reaching deselected routes on demand", () => {
+      const routes = selectE2eRoutesByLabels(
+        "svelte-parity@tsgo, monorepo@tsserver,out-of-tree-monorepo@extension",
+      );
+      expect(routes.map(e2eRouteLabel)).toEqual([
+        "svelte-parity@tsgo",
+        "monorepo@tsserver",
+        "out-of-tree-monorepo@extension",
+      ]);
+    });
+
+    it("refuses an empty, duplicated, or unknown selection", () => {
+      expect(() => selectE2eRoutesByLabels("")).toThrow(/at least one/);
+      expect(() => selectE2eRoutesByLabels(" , ")).toThrow(/empty field/);
+      // An empty field is a malformed list, never silently dropped.
+      expect(() => selectE2eRoutesByLabels("monorepo@tsgo,,no-config@off")).toThrow(/empty/);
+      expect(() => selectE2eRoutesByLabels("monorepo@tsgo,")).toThrow(/empty/);
+      expect(() => selectE2eRoutesByLabels("monorepo@tsgo,monorepo@tsgo")).toThrow(/twice/);
+      expect(() => selectE2eRoutesByLabels("monorepo@nope")).toThrow(/Unsupported/);
+      expect(() => selectE2eRoutesByLabels("nope@tsgo")).toThrow(/matched nothing/);
+    });
   });
 
   it("keeps a deselected route selectable while excluding it from the required matrix", () => {

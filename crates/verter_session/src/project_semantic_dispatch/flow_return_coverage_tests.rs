@@ -5251,3 +5251,327 @@ fn augmented_generic_nominal_callbacks_bind_their_type_arguments() {
     assert_clean_warm(&host, GENERIC_CONSUMER, "r1", promise_number.clone());
     assert_clean_warm(&host, GENERIC_CONSUMER, "r2", promise_number);
 }
+
+/// Receiver-bearing and union-valued `then` members for
+/// [`awaited_receiver_and_union_then_oracle_matrix`].
+const RECEIVER_THENS: &str = "/ws/cov/receiver_thens.ts";
+const RECEIVER_THENS_SRC: &str = r#"
+type RecvOk = { x: 1; then(this: { x: 1 }, onfulfilled: (value: number) => void): void };
+type RecvBad = { y: 2; then(this: { x: 1 }, onfulfilled: (value: number) => void): void };
+type UnionThen = { then: ((cb: (v: number) => void) => void) | ((cb: (v: string) => void) => void) };
+declare const l1: Awaited<RecvOk>; export function f1() { return l1; }
+declare const l2: Awaited<RecvBad>; export function f2() { return l2; }
+declare const l3: Awaited<UnionThen>; export function f3() { return l3; }
+export async function r1(v: RecvOk) { return v; }
+export async function r2(v: RecvBad) { return v; }
+export async function r3(v: UnionThen) { return v; }
+"#;
+
+/// A `then` signature's declared `this` and a union-valued `then` member,
+/// through both awaited relations.
+///
+/// The RUNTIME relation keeps only the `then` signatures whose declared
+/// `this` the operand is assignable to, and a `then` all of whose signatures
+/// are rejected that way promises nothing: the checker reports
+/// "The 'this' context of type 'RecvBad' is not assignable to method's
+/// 'this' of type '{ x: 1; }'" (TS1058) and types the await `any` (`r2`).
+/// A compatible receiver adopts normally (`r1`), and the receiver is never
+/// the callback: reading position 0 as the `this` parameter would promise
+/// `{ x: 1 }` instead of `number`.
+///
+/// The LIB conditional does NOT model receiver eligibility at all: both `f1`
+/// and `f2` are `number`. That divergence is the point of keeping the two
+/// readers distinct.
+///
+/// A union-valued `then` decides in BOTH: the runtime relation reads the
+/// union's synthesized signature, whose `onfulfilled` intersects the arms,
+/// so every arm's callback contributes (`r3` is `string | number`); the lib
+/// conditional infers `F` per union constituent and the distributed arm step
+/// unions their results (`f3` is `string | number`).
+///
+/// Every `tsc` column is TypeScript 7.0.2: the `f` rows from declaration
+/// emit of the reading function, the `r` rows from the async declaration
+/// emit (`tsc --ignoreConfig --declaration --emitDeclarationOnly
+/// --target es2022 --strict`).
+#[test]
+fn awaited_receiver_and_union_then_oracle_matrix() {
+    let host = host_with(&[(RECEIVER_THENS, RECEIVER_THENS_SRC)]);
+    let mut failures = Vec::new();
+
+    let lib_rows: &[(&str, &str, TypeExpr)] = &[
+        ("f1", "number", number()),
+        ("f2", "number", number()),
+        (
+            "f3",
+            "string | number",
+            TypeExpr::Union(Arc::from(vec![string(), number()].into_boxed_slice())),
+        ),
+    ];
+    with_dispatch(&host, |dispatch| {
+        for (function, tsc, expected) in lib_rows {
+            let key = key_of(dispatch, RECEIVER_THENS, function);
+            let measured = match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(result),
+                    ..
+                }) => dispatch
+                    .declaration_carrier_body(result.return_type())
+                    .and_then(|body| host.project_node_to_type_expr_for_test(body)),
+                _ => None,
+            };
+            let matched = match (&measured, expected) {
+                (Some(TypeExpr::Union(members)), TypeExpr::Union(wanted)) => {
+                    members.len() == wanted.len() && wanted.iter().all(|arm| members.contains(arm))
+                }
+                (Some(ty), wanted) => ty == wanted,
+                (None, _) => false,
+            };
+            if !matched {
+                failures.push(format!("{function}: tsc `{tsc}`, measured {measured:?}"));
+            }
+        }
+    });
+
+    let runtime_rows: &[OracleRow<'_>] = &[
+        ("r1", "Promise<number>", &|ty: &TypeExpr| {
+            *ty == TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+            }
+        }),
+        ("r2", "Promise<any>", &|ty: &TypeExpr| {
+            *ty == TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(
+                    vec![TypeExpr::Primitive(PrimitiveName::Any)].into_boxed_slice(),
+                ),
+            }
+        }),
+        (
+            "r3",
+            "Promise<string | number>",
+            &|ty: &TypeExpr| match ty {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    name.as_ref() == "Promise"
+                        && type_arguments.len() == 1
+                        && matches!(
+                            &type_arguments[0],
+                            TypeExpr::Union(members)
+                                if members.len() == 2
+                                    && members.contains(&string())
+                                    && members.contains(&number())
+                        )
+                }
+                _ => false,
+            },
+        ),
+    ];
+    for (function, tsc, pinned) in runtime_rows {
+        let outcome = eval(&host, RECEIVER_THENS, function);
+        let ok = matches!(
+            &outcome,
+            Outcome::Value { ty, degradation: None, candidates: 1 } if pinned(ty)
+        );
+        if !ok {
+            failures.push(format!("{function}: tsc `{tsc}`, measured {outcome:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The file declaring a cross-file thenable's `then`, for
+/// [`awaited_result_roots_on_the_file_declaring_then`].
+const ROOT_THENABLE: &str = "/ws/cov/root_thenable.ts";
+const ROOT_THENABLE_NUMBER: &str =
+    "export type RootThenable = { then(onfulfilled: (value: number) => void): void };\n";
+const ROOT_THENABLE_STRING: &str =
+    "export type RootThenable = { then(onfulfilled: (value: string) => void): void };\n";
+/// A file the awaited answer does not depend on at all.
+const ROOT_UNRELATED: &str = "/ws/cov/root_unrelated.ts";
+const ROOT_UNRELATED_SRC: &str = "export const unrelated = 1;\n";
+const ROOT_CONSUMER: &str = "/ws/cov/root_consumer.ts";
+const ROOT_CONSUMER_SRC: &str = r#"
+import type { RootThenable } from "./root_thenable";
+export async function rootAwait(v: RootThenable) { return v; }
+"#;
+
+/// An awaited result follows an edit to the file declaring the thenable's
+/// `then`, and ignores an edit to a file it never read.
+///
+/// The operand of `rootAwait` is a carrier written in the CONSUMER, while
+/// the promised value is read out of a `then` declared in another file. The
+/// positive leg pins that the stale promised value is never served; the
+/// negative leg pins the other half, that validity stays PRECISE — an edit
+/// to a file the answer never read adds ZERO awaited-relation builds on the
+/// next demand, so nothing here degenerates into blanket invalidation.
+///
+/// Oracle (tsc 7.0.2, declaration emit): `Promise<number>` before the edit
+/// and `Promise<string>` after `then`'s callback parameter changes.
+#[test]
+fn awaited_result_follows_a_cross_file_then_edit_and_ignores_unrelated_ones() {
+    let host = host_with(&[
+        (ROOT_THENABLE, ROOT_THENABLE_NUMBER),
+        (ROOT_UNRELATED, ROOT_UNRELATED_SRC),
+        (ROOT_CONSUMER, ROOT_CONSUMER_SRC),
+    ]);
+    let promise_of = |inner: TypeExpr| TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![inner].into_boxed_slice()),
+    };
+    let upsert = |canonical: &str, source: &str| {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: lang(canonical),
+            aliases: Vec::new(),
+        });
+        host.ensure_indexed_ready(canonical)
+            .expect("the edited file must index");
+    };
+    let payload_builds = || {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .async_return_payload_count
+    };
+
+    assert_clean_warm(&host, ROOT_CONSUMER, "rootAwait", promise_of(number()));
+
+    // An unrelated edit: the answer never read that file, so the warm entry
+    // stays valid and the repeat demand pays no awaited-relation build.
+    upsert(ROOT_UNRELATED, "export const unrelated = 2;\n");
+    let before_unrelated = payload_builds();
+    assert_clean_warm(&host, ROOT_CONSUMER, "rootAwait", promise_of(number()));
+    assert_eq!(
+        payload_builds(),
+        before_unrelated,
+        "an edit to a file the awaited answer never read must not rebuild it"
+    );
+
+    // The declaring file's edit: the stale promised value must not be served.
+    // After the edit the slot legitimately holds the pre-edit candidate
+    // beside the new one, so the assertion is on the served value and its
+    // cleanliness, not on the candidate count.
+    upsert(ROOT_THENABLE, ROOT_THENABLE_STRING);
+    let after = eval(&host, ROOT_CONSUMER, "rootAwait");
+    assert!(
+        matches!(
+            &after,
+            Outcome::Value { ty, degradation: None, candidates }
+                if *ty == promise_of(string()) && *candidates >= 1
+        ),
+        "an edit to the file declaring `then` must retire the stale promised \
+         value, got {after:?}"
+    );
+}
+
+/// BOUNDED WORK on the ASYNC RETURN PAYLOAD relation: one build per
+/// publication level, and identical warm demand adds ZERO.
+///
+/// `X18_async_return`'s shape — `async function makeProps() { return { label:
+/// "x" } }` — publishes `Promise<{ label: string }>`, so the cold demand runs
+/// the payload relation exactly once over the joined object return. The
+/// counter is `async_return_payload_count`, deliberately separate from
+/// `awaited_normalize_count`: the two relations are distinct families (a
+/// naked type parameter is its own payload but stays `Awaited<T>` under
+/// normalization), and only a per-family counter can show that the async
+/// wrap did not silently route through the other one.
+///
+/// The load-bearing half is the second assertion: a warm family hit returns
+/// before the builder runs, so zero is observable only through this counter.
+#[test]
+fn async_return_payload_demand_is_bounded_cold_and_zero_warm() {
+    let host = ts_host();
+    let payload_builds = || {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .async_return_payload_count
+    };
+    let normalize_builds = || {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .awaited_normalize_count
+    };
+    let expected = TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+    };
+
+    let before_payload = payload_builds();
+    let before_normalize = normalize_builds();
+    assert_clean_warm(&host, CALLS, "callAsyncPlain", expected.clone());
+    let cold_payload = payload_builds();
+    assert_eq!(
+        cold_payload - before_payload,
+        1,
+        "the cold async wrap pays exactly one async-return-payload build"
+    );
+    assert_eq!(
+        normalize_builds(),
+        before_normalize,
+        "an async wrap with no await must not enter the normalization family"
+    );
+
+    // bounded-loop: three warm repeats, a fixed demand count
+    for _ in 0..3 {
+        assert_clean_warm(&host, CALLS, "callAsyncPlain", expected.clone());
+    }
+    assert_eq!(
+        payload_builds(),
+        cold_payload,
+        "identical warm demand must add ZERO async-return-payload builds"
+    );
+}
+
+/// A self-referential thenable for [`recursive_thenable_terminates_without_fabricating_a_type`].
+const RECURSIVE_THENABLE: &str = "/ws/cov/recursive_thenable.ts";
+const RECURSIVE_THENABLE_SRC: &str = r#"
+interface Rec { then(onfulfilled: (v: Rec) => void): void }
+export async function recAwait(v: Rec) { return v; }
+declare const l1: Awaited<Rec>; export function f1() { return l1; }
+"#;
+
+/// A thenable whose fulfillment callback takes the thenable itself
+/// TERMINATES, and never publishes a fabricated type.
+///
+/// tsc 7.0.2 rejects both readings and recovers with `any`: the async
+/// position is `Promise<any>` under TS1062 ("Type is referenced directly or
+/// indirectly in the fulfillment callback of its own 'then' method") and the
+/// authored `Awaited<Rec>` is `any` under TS2589. An error recovery is not a
+/// type this substrate may fabricate clean and warm, so the requirement here
+/// is the pair that IS decidable without the diagnostic channel: the read
+/// terminates, and whatever it publishes is not a confidently-wrong concrete
+/// answer.
+///
+/// The runtime relation refuses through the shared family cycle guard and
+/// the async wrap publishes the typed gap with ZERO candidates — never a
+/// clean, warm `Promise<any>` copied from the checker's error recovery. The
+/// lib conditional keeps the AUTHORED `Awaited<Rec>` application unreduced,
+/// which is the honest deferral, not a branch selection.
+#[test]
+fn recursive_thenable_terminates_without_fabricating_a_type() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    assert_degraded(
+        &host,
+        RECURSIVE_THENABLE,
+        "recAwait",
+        FlowReturnDegradation::UnresolvedValue,
+    );
+    let lib = eval(&host, RECURSIVE_THENABLE, "f1");
+    assert!(
+        matches!(
+            &lib,
+            Outcome::Value { ty, .. }
+                if matches!(ty, TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "Awaited" && type_arguments.len() == 1)
+        ),
+        "the lib conditional over a recursive thenable keeps its authored \
+         application rather than selecting a branch, got {lib:?}"
+    );
+}

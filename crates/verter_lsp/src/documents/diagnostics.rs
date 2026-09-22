@@ -22,11 +22,27 @@ pub(crate) struct DiagnosticsRefresh {
     epoch: u64,
 }
 
+/// What a document's last publication left behind. A COMPLETE receipt
+/// certifies the document (`diagnostics_ready`). An INCOMPLETE one — the
+/// provider batch could not be merged: no committed IDE surface at pull time,
+/// a refused commit, a surface superseded mid-flight — certifies nothing but
+/// records that the document is OWED a publication, so the generation advance
+/// that eventually settles its carrier re-arms it like any outdated receipt.
+/// Without that record an incomplete publication left nothing to outdate, and
+/// the open document stayed uncertified until the next editor signal, which an
+/// editor waiting on the receipt never sends.
+#[derive(Clone)]
+struct DiagnosticsReceipt {
+    publication: DiagnosticPublication,
+    surface: Option<Arc<ProviderSurfaceSnapshot>>,
+    complete: bool,
+}
+
 #[derive(Default)]
 pub(super) struct DiagnosticsState {
     next_epoch: u64,
     epochs: HashMap<String, u64>,
-    receipts: HashMap<String, (DiagnosticPublication, Option<Arc<ProviderSurfaceSnapshot>>)>,
+    receipts: HashMap<String, DiagnosticsReceipt>,
 }
 
 impl DocumentRegistry {
@@ -90,9 +106,28 @@ impl DocumentRegistry {
             .lock()
             .receipts
             .iter()
-            .filter_map(|(uri, (publication, _))| Some((uri.parse().ok()?, publication.clone())))
+            .filter_map(|(uri, receipt)| Some((uri.parse().ok()?, receipt.publication.clone())))
             .collect();
         for (uri, publication) in receipts {
+            self.refresh_superseded_diagnostics(&uri, &publication);
+        }
+    }
+
+    /// A background pass settled `canonical_id`'s carrier (the drain re-synced
+    /// it and advanced its diagnostics generation) with no publication in
+    /// flight to notice. If the open document holds a receipt that pass
+    /// outdated — complete or owed — replace it through the coordinator.
+    pub(crate) fn refresh_owed_diagnostics(&self, canonical_id: &str) {
+        let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
+            return;
+        };
+        let receipt = self
+            .diagnostics_state
+            .lock()
+            .receipts
+            .get(uri.as_str())
+            .map(|receipt| receipt.publication.clone());
+        if let Some(publication) = receipt {
             self.refresh_superseded_diagnostics(&uri, &publication);
         }
     }
@@ -177,12 +212,19 @@ impl DocumentRegistry {
         if state.epochs.get(uri.as_str()) == Some(&publication.epoch) {
             if complete {
                 tracing::debug!(uri = uri.as_str(), epoch = publication.epoch, generation = ?publication.generation, "diagnostics complete");
-                state
-                    .receipts
-                    .insert(uri.to_string(), (publication.clone(), surface));
             } else {
-                state.receipts.remove(uri.as_str());
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch, generation = ?publication.generation, "diagnostics incomplete; publication owed");
             }
+            // An incomplete publication is recorded as OWED rather than dropped:
+            // the generation advance that settles its carrier must find it.
+            state.receipts.insert(
+                uri.to_string(),
+                DiagnosticsReceipt {
+                    publication: publication.clone(),
+                    surface,
+                    complete,
+                },
+            );
         }
         drop(state);
         self.refresh_superseded_diagnostics(uri, publication);
@@ -196,10 +238,11 @@ impl DocumentRegistry {
             .receipts
             .get(uri.as_str())
             .cloned();
-        receipt.is_some_and(|(publication, surface)| {
-            self.diagnostic_publication_is_current(uri, &publication)
-                && self.semantic_diagnostics_ready(uri, publication.snapshot.revision)
-                && surface.is_none_or(|snapshot| {
+        receipt.is_some_and(|receipt| {
+            receipt.complete
+                && self.diagnostic_publication_is_current(uri, &receipt.publication)
+                && self.semantic_diagnostics_ready(uri, receipt.publication.snapshot.revision)
+                && receipt.surface.is_none_or(|snapshot| {
                     self.provider_surfaces
                         .captured_snapshot_still_honored(&snapshot)
                 })

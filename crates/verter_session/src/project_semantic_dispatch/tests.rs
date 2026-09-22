@@ -12040,10 +12040,20 @@ fn awaited_absorbs_lattice_extremes() {
 /// `awaited_thenable_protocol_oracle_matrix`). A `then` typed by an open
 /// type parameter cannot be enumerated, so that surface still defers to the
 /// `Opaque(Miss)` shell rather than guessing either way.
+///
+/// "`number` carries no call signature" is a fact about the project's global
+/// population (a `declare global { interface Number { (): void } }` would
+/// change it), so the read runs under a demand site — the one scope the
+/// shared signature authority resolves an apparent wrapper through.
 #[test]
 fn awaited_decides_then_bearing_surfaces_by_callability() {
     let host = host();
+    upsert_ts(&host, "/ws/awaited_callability.ts", "export const w = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _demand_scope = super::LexicalDemandScopeGuard::push(
+        &dispatch.lexical_demand_scope,
+        Arc::from("/ws/awaited_callability.ts"),
+    );
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let num = primitive(&graph, PrimitiveKind::Number);
     let not_thenable = simple_object(&graph, &[("then", num)]);
