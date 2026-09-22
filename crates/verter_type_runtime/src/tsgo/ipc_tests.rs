@@ -5250,6 +5250,75 @@ async fn content_cached_by_load_file_never_counts_as_delivered_to_the_child() {
     assert_eq!(frames[0].1["textDocument"]["text"], source);
 }
 
+/// A retract for a document the child does not hold sends NOTHING.
+///
+/// The ledger decides a close exactly as it decides a publication. `versions` is
+/// the open set: no row means the child never received a `didOpen` for this path
+/// — because the publication that owed one was refused, or because the document
+/// was already retracted. tsgo answers a `didClose` for such a path by PANICKING
+/// ("overlay not found for closed file"), which kills the engine and takes every
+/// open project's warm state with it; the restart then re-parses the whole
+/// workspace. Repeated open/close editing makes that a recurring cost, so the
+/// frame must not be sent.
+///
+/// The local content cache is still retired: a retract means the caller is done
+/// with the path either way, and `load_file` content for a never-delivered
+/// document is exactly the kind of state a close exists to release.
+#[tokio::test]
+async fn closing_a_document_the_child_never_opened_sends_no_frame() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/NeverOpened.vue.tsx";
+
+    // `load_file` caches content locally and tells the child nothing, so the path
+    // has content but no `versions` row — the child does not hold it.
+    provider
+        .load_file(path, "export const x = 1;\n")
+        .await
+        .unwrap();
+    assert!(drained_notifications(&mut stdin_rx).is_empty());
+
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a didClose for a document the child never opened panics tsgo; it must not be sent"
+    );
+    assert!(
+        !provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(path)),
+        "the retract must still release the local content cache"
+    );
+
+    // Positive control: a document the child DOES hold still gets its didClose,
+    // so the absence above is a real suppression rather than a dead transport.
+    provider
+        .open_file(path, "export const x = 1;\n")
+        .await
+        .unwrap();
+    assert_eq!(drained_notifications(&mut stdin_rx).len(), 1);
+    provider.close_file(path).await.unwrap();
+    let closed = drained_notifications(&mut stdin_rx);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, "textDocument/didClose");
+
+    // And the suppressed retract leaves no ledger residue that would make the
+    // next open look like a change over a buffer the child does not have.
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a duplicate close is a close of a document the child no longer holds"
+    );
+    provider
+        .open_file(path, "export const x = 2;\n")
+        .await
+        .unwrap();
+    let reopened = drained_notifications(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].0, "textDocument/didOpen");
+}
+
 /// tsgo must send NO `workspace/didChangeConfiguration`.
 ///
 /// Native tsgo treats that payload as user preferences: it cannot add compiler

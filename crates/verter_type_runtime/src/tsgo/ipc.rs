@@ -1019,6 +1019,14 @@ async fn deliver_document_sync(
 /// A refused `didClose` leaves the entry in place, which is the accurate record:
 /// the child still holds the document open, so the next sync must keep treating it
 /// as open rather than replaying a `didOpen` over a live buffer.
+///
+/// **The ledger owns this choice too.** `versions` is the open set, exactly as it
+/// is for [`deliver_document_sync`]: a path with no row is a document the child
+/// does not hold — its publication was refused, or it has already been retracted.
+/// A `didClose` for such a path is not a far-side no-op; tsgo PANICS with
+/// "overlay not found for closed file", the engine dies, and the restart re-reads
+/// the whole workspace while every open document waits. So a close with no
+/// recorded open sends NO frame and only releases the local content cache.
 async fn deliver_document_close(
     transport: &LspTransport,
     versions: &Mutex<HashMap<String, i32>>,
@@ -1029,6 +1037,11 @@ async fn deliver_document_close(
     let uri = TsgoTypeProvider::path_to_uri(path);
     let mut versions_guard = versions.lock().await;
     let mut contents_guard = contents.lock().await;
+
+    if !versions_guard.contains_key(path) {
+        contents_guard.remove(&contents_key(path));
+        return Ok(());
+    }
 
     transport.try_notify_with_priority(
         "textDocument/didClose",
