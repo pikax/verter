@@ -72,6 +72,7 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             proto:
               - 'crates/verter_protocol/proto/**'
               - 'packages/proto/src/gen/**'
@@ -80,6 +81,7 @@ jobs:
               - 'package.json'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             js:
               - 'packages/**'
               - '!packages/playground/**'
@@ -106,6 +108,7 @@ jobs:
               # release graph; release-only changes must execute that guard.
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH5/ARH7
             # verifiers). Their products join the live Rust tree — hotspot
             # sources, crate Cargo manifests and the cross-crate consumer
@@ -132,6 +135,7 @@ jobs:
               - 'performance-gates.toml'
               - 'scripts/validate-performance-gates.mjs'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Gates `wasm-build` ALONE, which both builds the browser artifact
             # and verifies the committed carrier fixture against it. So this
             # filter decides whether that fixture check runs at all, and it must
@@ -162,6 +166,7 @@ jobs:
               - 'tests/browser-host/**'
               - '.cargo/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             playground:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -177,6 +182,7 @@ jobs:
               - 'packages/wasm/**'
               - 'packages/playground/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             vscode:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -195,6 +201,7 @@ jobs:
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             dx:
               - 'crates/verter_dx_baseline/**'
               - 'crates/verter_lsp/**'
@@ -215,6 +222,7 @@ jobs:
               - 'packages/language-shared/**'
               - 'scripts/dx/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Dependency closure for the editor-neutral raw-LSP contract. This is
             # intentionally broader than either the VS Code or DX-only filters:
             # the contract drives the real compiler/LSP, provider plugin, relay,
@@ -260,6 +268,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             svelte_oracle:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/svelte-golden-lib.mjs'
@@ -273,6 +282,7 @@ jobs:
               - 'crates/verter_compiler/Cargo.toml'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             svelte_client_smokes:
               - 'crates/verter_compiler/src/svelte/**'
               - 'packages/svelte-runtime-tests/**'
@@ -280,6 +290,7 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # Editor-client integration surface (Helix / Lapce / Zed / Neovim).
             # These lanes used to live in four standalone workflows that each
             # built `verter-lsp --release` themselves — twelve uncached release
@@ -295,6 +306,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             # JetBrains plugin lane (JBT1+): the pinned Gradle build resolves
             # its own WebStorm SDK; only the plugin tree, its gate and the
             # supported-IDE declaration feed it.
@@ -308,6 +320,7 @@ jobs:
               - '.nvmrc'
               - '.gitattributes'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
             svelte_perf:
               - 'crates/verter_compiler/**'
               - 'crates/verter_parser/**'
@@ -322,6 +335,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              - '.github/actions/**'
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -562,7 +576,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Download the shared Rust test archive
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: rust-nextest-archive
           path: artifacts
@@ -1008,7 +1022,7 @@ jobs:
       # Shared with native-test rather than a second release build of the napi
       # crate in this job.
       - name: Download release native compiler
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: native-node
           path: packages/native/dist
@@ -1085,7 +1099,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Download WASM build
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: wasm-build
           path: packages/wasm
@@ -1106,7 +1120,7 @@ jobs:
       # imports (type-ir, proto, types, language-shared, component-meta,
       # unplugin) — the same set `build:workspace-deps` would build from source.
       - name: Download native binding
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: native-node
           path: packages/native/dist
@@ -1227,7 +1241,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Download WASM artifact
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: wasm-build
           path: packages/wasm
@@ -1329,14 +1343,14 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Download editor integration binaries
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
         run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
       - name: Download provider integration builds
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: vscode-e2e-build
           path: packages
@@ -1355,12 +1369,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The required route matrix runs as a small number of duration-balanced
+  # shards, not one runner per route. `build-vscode-e2e` derives the shards from
+  # the one route inventory (`buildE2eCiShards`); each shard checks out,
+  # installs, downloads the artifacts and acquires VS Code ONCE, then runs its
+  # exact route list back to back in one `runTests` process. One job per route
+  # paid that setup 32 times and, on an account with ~20 concurrent runners,
+  # queued the core Rust shards behind two-minute E2E jobs for tens of minutes.
+  # Per-route diagnostics (timing, logs, run summaries) are still written per
+  # route label inside the shard's artifact, so a failure is attributable.
   vscode-e2e:
-    name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
+    name: VS Code E2E (shard ${{ matrix.shard }}/${{ matrix.shard_count }})
     needs: [detect-changes, build-lsp-debug, build-vscode-e2e]
     if: needs.detect-changes.outputs.vscode == 'true' || needs.detect-changes.outputs.editor_lsp == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build-vscode-e2e.outputs.matrix) }}
@@ -1373,22 +1396,25 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Download editor integration binaries
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
         run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
       - name: Download built extension
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: vscode-e2e-build
           path: packages
-      - name: Run E2E tests (${{ matrix.fixture }} / ${{ matrix.type_provider }})
-        run: xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+      - name: Run E2E tests (shard ${{ matrix.shard }}/${{ matrix.shard_count }})
+        run: |
+          echo "Routes: ${E2E_ROUTES}"
+          xvfb-run -a pnpm --filter verter-vscode test:e2e:run
         env:
-          E2E_FIXTURE: ${{ matrix.fixture }}
-          E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}
+          # The exact route list this shard owns, as the matrix producer emitted
+          # it; the runner refuses an empty, duplicated or unknown entry.
+          E2E_ROUTES: ${{ matrix.routes }}
           # Keep the required matrix on the reviewed editor baseline. Local
           # reproduction can set the same variable or opt into another build.
           E2E_VSCODE_VERSION: "1.135.0"
@@ -1398,7 +1424,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: e2e-diagnostics-${{ matrix.fixture }}-${{ matrix.type_provider }}
+          name: e2e-diagnostics-shard-${{ matrix.shard }}
           path: |
             /tmp/verter-e2e-timing-*.json
             /tmp/verter-e2e-*.log
@@ -1469,7 +1495,7 @@ jobs:
       # The real .node comes from build-native-node, so this job needs no Rust
       # toolchain and no cargo cache.
       - name: Download native binding
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: native-node
           path: packages/native/dist
@@ -1518,12 +1544,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Download WASM build
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: wasm-build
           path: packages/wasm
       - name: Download native binding
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: native-node
           path: packages/native/dist
@@ -1600,7 +1626,7 @@ jobs:
       # was already doing; they now come from the shared build-lsp-debug
       # artifact, which removes the Rust toolchain from this job entirely.
       - name: Download debug LSP binaries
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: lsp-debug-bins
           path: target/debug
@@ -1737,7 +1763,7 @@ jobs:
           cache: pnpm
 
       - name: Download shared verter-lsp
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: editor-lsp
           path: target/release
@@ -1829,7 +1855,7 @@ jobs:
           cache: pnpm
 
       - name: Download shared verter-lsp
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: editor-lsp
           path: target/release
@@ -1897,7 +1923,7 @@ jobs:
           cache: pnpm
 
       - name: Download shared verter-lsp
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: editor-lsp
           path: target/release
@@ -1954,7 +1980,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download shared verter-lsp
-        uses: actions/download-artifact@v7
+        uses: ./.github/actions/download-artifact
         with:
           name: editor-lsp
           path: target/release

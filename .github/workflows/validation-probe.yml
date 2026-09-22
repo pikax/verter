@@ -130,6 +130,22 @@ jobs:
           path: target/validation-probe/summary.json
           if-no-files-found: error
 
+      # Non-gating observation artifact. The package run above already executes
+      # `observation_lane_emits_one_artifact`, which records correctness-labeled
+      # timings; a second job repeating the whole checkout, toolchain, install,
+      # addon build and corpus preparation only to run that one test again
+      # doubled this workflow's runner footprint for no extra evidence. Nothing
+      # here thresholds, rebaselines, or disposes on a number: a missing file
+      # fails because the artifact was not produced, never because a timing
+      # missed a budget.
+      - name: Upload the observation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation-probe/observations.json
+          if-no-files-found: error
+
       - name: Render the job summary
         if: always()
         run: |
@@ -141,67 +157,3 @@ jobs:
       - name: Lane disposition
         if: always()
         run: cargo run -p verter_validation_probe --bin validation-probe-summary -- --dispose
-
-  # Non-gating observation lane. Records correctness-labeled timings as an
-  # Actions artifact. Nothing here thresholds, rebaselines, or disposes on a
-  # number: a missing file fails the job because the artifact was not produced,
-  # never because a timing missed a budget.
-  observe:
-    name: Observation artifacts
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: validation-probe-observe
-      - uses: taiki-e/install-action@nextest
-
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v5
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build the native addon
-        run: pnpm --filter @verter/native build
-
-      - name: Check out the pinned Vue corpus
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ env.VUE_BENCHMARKS_REPO }}
-          ref: ${{ env.VUE_BENCHMARKS_REVISION }}
-          path: .integration-tests/repos/vue-benchmarks
-          persist-credentials: false
-
-      - name: Check out the pinned Svelte corpus
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ env.SVELTE_BENCHMARKS_REPO }}
-          ref: ${{ env.SVELTE_BENCHMARKS_REVISION }}
-          path: .integration-tests/repos/svelte-benchmarks
-          persist-credentials: false
-
-      - name: Generate the pinned Svelte corpus
-        working-directory: .integration-tests/repos/svelte-benchmarks
-        run: node scripts/generate.mjs --counts 50 --no-repeated
-
-      - name: Capture observation artifacts
-        env:
-          VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
-        run: cargo nextest run -p verter_validation_probe --features external-corpus -- observation_lane_emits_one_artifact
-
-      - name: Upload the observation artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/validation-probe/observations.json
-          if-no-files-found: error

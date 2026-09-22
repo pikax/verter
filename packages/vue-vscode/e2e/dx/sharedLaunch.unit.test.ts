@@ -9,6 +9,7 @@ import {
   copyLspBinaryToTemp,
   findLspBinary,
   resolveVscodeExecutablePath,
+  VSCODE_ACQUISITION_RETRY,
 } from "../sharedLaunch";
 
 const tmps: string[] = [];
@@ -167,5 +168,58 @@ describe("resolveVscodeExecutablePath", () => {
       existsSync: () => false,
     });
     expect(seen).toBe("1.95.0");
+  });
+
+  it("retries a failed VS Code acquisition a bounded number of times before giving up", async () => {
+    // Acquisition is a network download; a transient timeout there is not a
+    // product failure and must not fail the route. Assertions never retry.
+    let attempts = 0;
+    const waits: number[] = [];
+    const resolved = await resolveVscodeExecutablePath("stable", {
+      download: async () => {
+        attempts++;
+        if (attempts < 3)
+          throw Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" });
+        return "/opt/vscode/code";
+      },
+      platform: "linux",
+      existsSync: () => true,
+      retry: { attempts: 3, delayMs: 10, sleep: async (ms) => void waits.push(ms) },
+    });
+    expect(resolved).toBe("/opt/vscode/code");
+    expect(attempts).toBe(3);
+    expect(waits).toEqual([10, 20]);
+  });
+
+  it("surfaces the last acquisition error once the retry budget is exhausted", async () => {
+    let attempts = 0;
+    await expect(
+      resolveVscodeExecutablePath("stable", {
+        download: async () => {
+          attempts++;
+          throw new Error(`download failed #${attempts}`);
+        },
+        platform: "linux",
+        existsSync: () => true,
+        retry: { attempts: 3, delayMs: 1, sleep: async () => undefined },
+      }),
+    ).rejects.toThrow("download failed #3");
+    expect(attempts).toBe(3);
+  });
+
+  it("keeps the retry bounded when the configured attempt count is not finite", async () => {
+    let attempts = 0;
+    await expect(
+      resolveVscodeExecutablePath("stable", {
+        download: async () => {
+          attempts++;
+          throw new Error("never");
+        },
+        platform: "linux",
+        existsSync: () => true,
+        retry: { attempts: Number.POSITIVE_INFINITY, delayMs: 1, sleep: async () => undefined },
+      }),
+    ).rejects.toThrow("never");
+    expect(attempts).toBe(VSCODE_ACQUISITION_RETRY.attempts);
   });
 });

@@ -41,7 +41,9 @@ on:
     types: [created]
 
 concurrency:
-  group: integration-test-${{ github.ref }}
+  # A `/integration` comment fires with `github.ref` = the default branch, so
+  # keying on the ref alone made one PR's run cancel another's. Key on the PR.
+  group: integration-test-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -51,12 +53,17 @@ permissions:
   checks: write
 
 jobs:
-  # Check if workflow should run (for PR comment trigger)
+  # Check if workflow should run (for PR comment trigger). The command must be
+  # the comment's first token: a substring match fired on a review that merely
+  # mentioned `.github/workflows/integration-test.yml`. The job condition keeps
+  # an unrelated comment off a runner entirely (expressions have no regex, so
+  # it checks the prefix); the step below applies the exact command boundary
+  # and owns the permission check.
   check-trigger:
     name: Check Trigger
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: github.event_name == 'issue_comment'
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/integration')
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
       pr-number: ${{ steps.check.outputs.pr-number }}
@@ -67,9 +74,11 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const comment = context.payload.comment.body.toLowerCase();
+            const comment = context.payload.comment.body.trim();
             const isPR = !!context.payload.issue.pull_request;
-            const hasIntegrationCommand = comment.includes('/integration');
+            // The command is the whole first token: `/integration` alone or
+            // followed by whitespace, never a path or word that contains it.
+            const hasIntegrationCommand = isPR && /^\/integration(\s|$)/i.test(comment);
 
             if (!hasIntegrationCommand) {
               console.log('Not a PR comment with /integration command');
@@ -1126,13 +1135,16 @@ jobs:
         run: |
           cat report-${{ matrix.project.name }}.md >> $GITHUB_STEP_SUMMARY
 
-  # Aggregate results and create final summary
+  # Aggregate results and create final summary. Gated on setup having run:
+  # a trigger that never entered the test path (a rejected comment, a
+  # skipped setup) must not spend a runner to post an empty "0 passed"
+  # report as if it were green. Test failures still get their summary.
   summary:
     name: Generate Summary
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [test-project]
-    if: always()
+    needs: [setup, test-project]
+    if: always() && needs.setup.result == 'success'
     steps:
       - name: Download all reports
         uses: actions/download-artifact@v7
