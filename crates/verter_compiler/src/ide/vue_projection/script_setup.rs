@@ -513,16 +513,27 @@ fn project_setup(
 fn classify(statement: &Statement<'_>) -> SetupStatementKind {
     match statement {
         Statement::ImportDeclaration(import) => SetupStatementKind::Import {
-            names: import
-                .specifiers
-                .as_ref()
-                .map(|specifiers| {
-                    specifiers
-                        .iter()
-                        .map(|s| s.local().name.to_string())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            names: if import.import_kind.is_type() {
+                Vec::new()
+            } else {
+                import
+                    .specifiers
+                    .as_ref()
+                    .map(|specifiers| {
+                        specifiers
+                            .iter()
+                            .filter_map(|specifier| match specifier {
+                                ImportDeclarationSpecifier::ImportSpecifier(spec)
+                                    if spec.import_kind.is_type() =>
+                                {
+                                    None
+                                }
+                                _ => Some(specifier.local().name.to_string()),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
         },
         Statement::TSTypeAliasDeclaration(decl) => SetupStatementKind::TypeDeclaration {
             name: decl.id.name.to_string(),

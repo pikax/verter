@@ -88,9 +88,7 @@ fn stp11_scope_module_imports_exports_and_setup_locals_keep_scope() {
     assert_eq!(
         kinds,
         [
-            SetupStatementKind::Import {
-                names: vec!["B".into()]
-            },
+            SetupStatementKind::Import { names: vec![] },
             SetupStatementKind::TypeDeclaration {
                 name: "Local".into()
             },

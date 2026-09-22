@@ -311,6 +311,35 @@ fn stp13_identifier_setup_and_data_are_opaque() {
 }
 
 #[test]
+fn stp13_spread_mixins_are_opaque() {
+    let content =
+        "import { commonMixins } from './m';\nexport default { mixins: [...commonMixins] };";
+    let projection = project_options_block(ts(content)).expect("projects");
+    assert!(projection.mixins.is_empty());
+    assert!(projection.has_nonstatic_mixins);
+}
+
+#[test]
+fn stp13_emits_are_not_template_bindings() {
+    let combined = project_options_pair(Some(ts(OPTIONS_THIS)), None, None).expect("projects");
+    // Emit metadata stays on the component projection.
+    assert!(member_names(combined.options.as_ref().expect("options"))
+        .contains(&("change", OptionsMemberKind::Emit)));
+    let view = OptionsTemplateBindingView::build(&combined);
+    assert_eq!(view.lookup("change"), None);
+    assert!(!view.is_template_visible("change"));
+}
+
+#[test]
+fn stp13_setup_runtime_imports_are_template_visible_type_only_are_not() {
+    let setup = ts("import Button from './Button.vue';\nimport type { B } from './b';");
+    let combined = project_options_pair(None, Some(setup), None).expect("projects");
+    let view = OptionsTemplateBindingView::build(&combined);
+    assert_eq!(view.lookup("Button"), Some(&OptionsBindingKind::SetupLocal));
+    assert_eq!(view.lookup("B"), None);
+}
+
+#[test]
 fn stp13_opaque_sources_recorded_never_invented() {
     let normal = ts("import M from './m';\nexport default { data() { return {}; }, mixins: [M], extends: Base };");
     let combined = project_options_pair(Some(normal), None, None).expect("projects");

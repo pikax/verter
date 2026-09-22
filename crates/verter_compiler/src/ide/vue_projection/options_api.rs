@@ -153,8 +153,6 @@ pub enum OptionsBindingKind {
     Computed,
     /// Options `methods` member.
     Method,
-    /// Options `emits` entry.
-    Emit,
     /// `components` registration.
     Component,
     /// `directives` registration.
@@ -208,11 +206,12 @@ impl OptionsTemplateBindingView {
         }
         if let Some(options) = &combined.options {
             for member in &options.members {
+                // `emits` names component events, not template identifiers.
                 let kind = match member.kind {
                     OptionsMemberKind::Prop => OptionsBindingKind::Prop,
                     OptionsMemberKind::Computed { .. } => OptionsBindingKind::Computed,
                     OptionsMemberKind::Method => OptionsBindingKind::Method,
-                    OptionsMemberKind::Emit => OptionsBindingKind::Emit,
+                    OptionsMemberKind::Emit => continue,
                     OptionsMemberKind::Component => OptionsBindingKind::Component,
                     OptionsMemberKind::Directive => OptionsBindingKind::Directive,
                 };
