@@ -13,25 +13,34 @@
  * impacted when a directly changed crate is in the transitive dependency
  * closure of one of that lane's root crates.
  *
+ * Two kinds of gate come out of it (`LANE_GATES`):
+ *   - a SUBSYSTEM gate ("the native binding changed", "wasm changed") is the
+ *     OR of the lane's path-filter outputs and its impact lanes, and drives
+ *     the suites that prove that subsystem;
+ *   - an ARTIFACT gate ("the native artifact is needed") is the OR of the
+ *     gates of every consumer of that artifact, and drives the producer job,
+ *     so a consumer can never be scheduled behind a producer that was not.
+ *
  * Fail closed, never under-select:
- *   - every escape hatch of `scripts/lib/crate-graph.mjs` (workspace
- *     manifests and lockfile, nextest config, scripts/, proc-macro crates,
- *     generated bindings, the toolchain pin, `.cargo/`, the workflows and the
- *     local actions) turns EVERY impact-bearing lane on;
- *   - so does a changed path this module cannot classify;
+ *   - `ESCAPE_HATCHES` (workspace manifests and lockfile, nextest config,
+ *     the toolchain pin and `.cargo/`, the workflows and local actions, this
+ *     classifier and the crate-graph library it uses, proc-macro crates and
+ *     the foundational identity crate) turn EVERY impact-bearing lane on;
+ *   - a changed file that maps to no crate, is owned by no path filter and is
+ *     not a known non-input (docs, editor config, ...) does the same;
  *   - a lane root that is not a workspace member is a configuration error
  *     and refuses to run rather than yielding an always-false lane;
  *   - if `cargo metadata` itself cannot be read the CLI reports a full
  *     fallback with a warning rather than a narrowed selection.
  *
- * The final job gates are `composeLaneGates`: each gate is the OR of its
- * path-filter outputs and its impact lanes, so the path filters keep owning
- * every non-crate input and this module owns only `crates/**`.
+ * The lane roots are derived from the lanes' own inventories where one
+ * exists (the provider selectors, the compile-contract owners), so the test
+ * authority and the selection authority cannot drift apart.
  *
  * Usage (CI):
  *   CI_IMPACT_CHANGED_FILES_JSON='[...]' CI_IMPACT_FILTER_OUTPUTS_JSON='{...}' \
  *     node scripts/ci-impact.mjs --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
- * Usage (local):
+ * Usage (local, impact lanes only; files no crate owns count as unowned):
  *   node scripts/ci-impact.mjs --range origin/main..HEAD
  */
 
@@ -42,11 +51,37 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
 import {
+  KNOWN_NON_RUST_TOP_LEVEL,
   buildReverseDependencyGraph,
   buildWorkspaceIndex,
-  classifyChangedFile,
+  mapPathToCrate,
   transitiveDependents,
 } from "./lib/crate-graph.mjs";
+import { PROVIDER_LIVE_SELECTORS } from "./provider-ci-internals.mjs";
+
+/**
+ * The compile-contract lane's owners (`node scripts/compile-contracts.mjs
+ * --list-owners`) and the crate each owner's fixtures compile against. The
+ * runner crate declares these as features with no Cargo edge, so the graph
+ * alone cannot see them; `ci-impact.test.mjs` pins this map to the runner's
+ * own owner list.
+ */
+export const COMPILE_CONTRACT_OWNER_CRATES = Object.freeze({
+  audit: "verter_audit",
+  "compiler-default": "verter_compiler",
+  "css-syntax": "verter_css_syntax",
+  identity: "verter_identity",
+  language: "verter_language",
+  semantic: "verter_semantic",
+  session: "verter_session",
+  "type-runtime": "verter_type_runtime",
+  workspace: "verter_workspace",
+});
+
+/** Every package the serial provider lanes own tests in. */
+export const PROVIDER_PACKAGES = Object.freeze([
+  ...new Set(PROVIDER_LIVE_SELECTORS.map((selector) => selector.package)),
+]);
 
 /**
  * The crates each impact lane is built from. A lane is impacted when a
@@ -62,15 +97,16 @@ export const LANE_ROOTS = Object.freeze({
   lsp: ["verter_lsp", "verter_relay_shim", "verter_mcp", "verter_dx_baseline"],
   // The release LSP binary plus the editor-client shipping plans.
   editors: ["verter_lsp", "verter-editor-client"],
-  // The serial real-provider lanes (tsserver, tsgo).
-  providers: ["verter_lsp", "verter_type_runtime", "verter_tsgo_api"],
-  // Compile-fail contracts, the isolated verter_compiler build, and the
+  // The serial real-provider lane: every package its selectors own.
+  providers: [...PROVIDER_PACKAGES],
+  // Compile-fail contracts: the runner crates plus every owner whose fixtures
+  // the runner compiles, the isolated verter_compiler build, and the
   // generated Svelte artifact check.
   compiler_contracts: [
     "verter_compile_contracts",
     "verter_compile_contracts_bench",
     "verter_compile_contracts_session_variants",
-    "verter_compiler",
+    ...new Set(Object.values(COMPILE_CONTRACT_OWNER_CRATES)),
   ],
   // The feature-gated BF2 inventory is verter_session's lib under a feature.
   bf2: ["verter_session"],
@@ -83,9 +119,10 @@ export const LANE_ROOTS = Object.freeze({
 });
 
 /**
- * The job gates `detect-changes` publishes: each is the OR of the named
- * paths-filter outputs and the named impact lanes. A gate with no `impact`
- * is a pure pass-through of its filter.
+ * The job gates `detect-changes` publishes, in evaluation order. A gate is
+ * the OR of the named paths-filter outputs (`filters`), the named impact
+ * lanes (`impact`) and previously evaluated gates (`gates`). A gate with
+ * only `filters` is a pure pass-through of its filter.
  */
 export const LANE_GATES = Object.freeze({
   rust: { filters: ["rust"] },
@@ -95,19 +132,84 @@ export const LANE_GATES = Object.freeze({
   svelte_oracle: { filters: ["svelte_oracle"] },
   svelte_client_smokes: { filters: ["svelte_client_smokes"] },
   jetbrains: { filters: ["jetbrains"] },
+  // Subsystem gates.
   wasm: { filters: ["wasm"], impact: ["wasm"] },
-  native: { filters: ["js", "playground"], impact: ["native"] },
+  native: { filters: ["js"], impact: ["native"] },
   playground: { filters: ["playground"], impact: ["playground"] },
+  // Transport equivalence compares the two artifacts, so either subsystem
+  // moving demands BOTH artifacts (see the artifact gates below).
+  transport: { filters: ["transport"], impact: ["native", "wasm"] },
+  // Artifact gates: a producer runs whenever any consumer of it runs.
+  native_artifact: { gates: ["native", "playground", "transport"] },
+  wasm_artifact: { gates: ["wasm", "playground", "transport"] },
   vscode: { filters: ["vscode"], impact: ["lsp"] },
   dx: { filters: ["dx"], impact: ["lsp"] },
   editor_lsp: { filters: ["editor_lsp"], impact: ["lsp"] },
   editors: { filters: ["editors"], impact: ["editors"] },
   providers: { filters: ["providers"], impact: ["providers"] },
-  compiler_contracts: { filters: [], impact: ["compiler_contracts"] },
+  compiler_contracts: { filters: ["compiler_contracts"], impact: ["compiler_contracts"] },
   bf2: { filters: ["bf2"], impact: ["bf2"] },
   svelte_conformance: { filters: ["svelte_oracle"], impact: ["svelte_conformance"] },
   svelte_perf: { filters: ["svelte_perf"], impact: ["svelte_perf"] },
 });
+
+/**
+ * This classifier's own escape hatches. Narrower than `affected-tests.mjs`'s:
+ * CI has explicit path owners, so `scripts/`, `packages/`, the JS install
+ * graph and the rest are handled by the lane whose filter names them (an
+ * unowned one still falls back, below). What stays global is what changes
+ * how every crate compiles, what runs, or how this selection is made.
+ */
+export const ESCAPE_HATCHES = Object.freeze([
+  {
+    id: "workspace-manifest",
+    reason: "the workspace manifest or lockfile changes resolution for every crate",
+    test: (p) => p === "Cargo.toml" || p === "Cargo.lock",
+  },
+  {
+    id: "nextest-config",
+    reason: "nextest.toml controls test execution semantics for every nextest lane",
+    test: (p) => p === ".config/nextest.toml",
+  },
+  {
+    id: "toolchain",
+    reason: "the pinned toolchain and cargo configuration change how every crate builds",
+    test: (p) => p === "rust-toolchain.toml" || p === ".cargo" || p.startsWith(".cargo/"),
+  },
+  {
+    id: "ci-workflows",
+    reason: "workflow definitions decide what runs; a selector cannot reason about them",
+    test: (p) => p === ".github/workflows" || p.startsWith(".github/workflows/"),
+  },
+  {
+    id: "ci-actions",
+    reason: "local composite actions are steps of every job that uses them",
+    test: (p) => p === ".github/actions" || p.startsWith(".github/actions/"),
+  },
+  {
+    id: "lane-classifier",
+    reason: "the selection logic itself, or the crate-graph library it is built on, changed",
+    test: (p) => p === "scripts/ci-impact.mjs" || p === "scripts/lib/crate-graph.mjs",
+  },
+  {
+    id: "proc-macro-crate",
+    reason:
+      "a proc-macro crate expands into every consumer at build time, not along a linking edge",
+    test: (p, index) => Boolean(mapPathToCrate(index, p)?.isProcMacro),
+  },
+  {
+    id: "verter-identity",
+    reason: "verter_identity is foundational; identity semantics reach every crate",
+    test: (p) => p === "crates/verter_identity" || p.startsWith("crates/verter_identity/"),
+  },
+]);
+
+function matchHatch(relPath, index) {
+  for (const rule of ESCAPE_HATCHES) {
+    if (rule.test(relPath, index)) return rule;
+  }
+  return null;
+}
 
 /**
  * Pure decision core.
@@ -115,15 +217,13 @@ export const LANE_GATES = Object.freeze({
  * @param {string[]} changedFiles workspace-relative, forward-slash paths
  * @param {object} metadata parsed `cargo metadata --format-version=1`
  * @param {Record<string, string[]>} laneRoots
- * @returns {{
- *   full: boolean,
- *   fullReasons: Array<{file: string, id: string, reason: string}>,
- *   directCrates: string[],
- *   impactedCrates: string[],
- *   lanes: Record<string, boolean>,
- * }}
+ * @param {{ownedFiles?: Set<string> | null}} [options] files some path filter
+ *   matched; a non-crate file outside this set and outside the known
+ *   non-inputs forces the full fallback. `null`/absent means nothing is
+ *   known to be owned.
  */
-export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS) {
+export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS, options = {}) {
+  const ownedFiles = options.ownedFiles ?? new Set();
   const index = buildWorkspaceIndex(metadata);
   for (const [lane, roots] of Object.entries(laneRoots)) {
     for (const root of roots) {
@@ -138,27 +238,27 @@ export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS)
 
   const fullReasons = [];
   const directCrates = new Set();
+  const ownedNonRust = [];
   for (const file of changedFiles) {
-    const classification = classifyChangedFile(index, file);
-    switch (classification.kind) {
-      case "escape-hatch":
-        fullReasons.push({ file, id: classification.id, reason: classification.reason });
-        break;
-      case "crate":
-        directCrates.add(classification.name);
-        break;
-      case "ignored":
-        break;
-      case "unrecognized":
-        fullReasons.push({
-          file,
-          id: "unrecognized-path",
-          reason: "does not map to a workspace crate or a known non-Rust path; over-select",
-        });
-        break;
-      default:
-        throw new Error(`unreachable classification kind: ${classification.kind}`);
+    const hatch = matchHatch(file, index);
+    if (hatch) {
+      fullReasons.push({ file, id: hatch.id, reason: hatch.reason });
+      continue;
     }
+    const crate = mapPathToCrate(index, file);
+    if (crate) {
+      directCrates.add(crate.name);
+      continue;
+    }
+    if (ownedFiles.has(file) || KNOWN_NON_RUST_TOP_LEVEL.has(file.split("/")[0])) {
+      ownedNonRust.push(file);
+      continue;
+    }
+    fullReasons.push({
+      file,
+      id: "unrecognized-path",
+      reason: "no crate owns it and no path filter matched it; over-select rather than guess",
+    });
   }
 
   const full = fullReasons.length > 0;
@@ -172,6 +272,7 @@ export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS)
     fullReasons,
     directCrates: [...directCrates].sort(),
     impactedCrates: [...impacted].sort(),
+    ownedNonRust,
     lanes,
   };
 }
@@ -208,9 +309,33 @@ export function composeLaneGates(filterOutputs, impact, gates = LANE_GATES) {
       }
       if (impact.lanes[lane]) on = true;
     }
+    for (const other of spec.gates ?? []) {
+      if (!(other in result)) {
+        throw new Error(
+          `ci-impact: gate "${gate}" depends on gate "${other}", which is not evaluated before it`,
+        );
+      }
+      if (result[other] === "true") on = true;
+    }
     result[gate] = on ? "true" : "false";
   }
   return result;
+}
+
+/** The files the paths-filter step matched, from its `<filter>_files` outputs. */
+export function ownedFilesFromFilterOutputs(filterOutputs) {
+  const owned = new Set();
+  for (const [key, value] of Object.entries(filterOutputs)) {
+    if (!key.endsWith("_files") || key === "any_files") continue;
+    let files;
+    try {
+      files = JSON.parse(value);
+    } catch {
+      throw new Error(`ci-impact: paths-filter output ${key} is not a JSON file list`);
+    }
+    for (const file of files) owned.add(String(file).replace(/\\/g, "/"));
+  }
+  return owned;
 }
 
 /** `$GITHUB_OUTPUT` lines: one `gate_<name>` per gate, then the fallback flag. */
@@ -285,12 +410,17 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
   }
   changedFiles = changedFiles.map((f) => f.replace(/\\/g, "/"));
 
+  const filterOutputs = env.CI_IMPACT_FILTER_OUTPUTS_JSON
+    ? JSON.parse(env.CI_IMPACT_FILTER_OUTPUTS_JSON)
+    : null;
+  const ownedFiles = filterOutputs ? ownedFilesFromFilterOutputs(filterOutputs) : null;
+
   let impact;
   try {
     const metadata = metadataPath
       ? JSON.parse(readFileSync(resolve(cwd, metadataPath), "utf8"))
       : loadCargoMetadata(cwd);
-    impact = classifyCiImpact(changedFiles, metadata);
+    impact = classifyCiImpact(changedFiles, metadata, LANE_ROOTS, { ownedFiles });
   } catch (error) {
     if (/lane root|LANE_ROOTS/.test(String(error?.message))) {
       // A stale root is a configuration bug: fail the job so it gets fixed.
@@ -309,13 +439,14 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
       fullReasons: [{ file: "(cargo metadata)", id: "graph-unavailable", reason: String(error) }],
       directCrates: [],
       impactedCrates: [],
+      ownedNonRust: [],
       lanes: Object.fromEntries(Object.keys(LANE_ROOTS).map((lane) => [lane, true])),
     };
   }
 
   let gates;
-  if (env.CI_IMPACT_FILTER_OUTPUTS_JSON) {
-    gates = composeLaneGates(JSON.parse(env.CI_IMPACT_FILTER_OUTPUTS_JSON), impact);
+  if (filterOutputs) {
+    gates = composeLaneGates(filterOutputs, impact);
   } else {
     // Local use: report the impact lanes alone.
     gates = Object.fromEntries(
