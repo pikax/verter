@@ -1206,7 +1206,11 @@ impl DocumentRegistry {
 
     /// Handle a document being closed.
     pub fn did_close(&self, uri: &Uri) {
+        // Fence any in-flight publication for this document, then drop the URI's
+        // diagnostics bookkeeping outright — a closed document can have no
+        // legitimate future publication, so retaining its epoch only accumulates.
         self.invalidate_diagnostics(uri.as_str());
+        self.release_diagnostics_state(uri.as_str());
         // Clear the VFS overlay so resolution falls back to snapshot/disk.
         let canonical_id = uri_to_canonical_id(uri);
         // route through `host.notify_close`
@@ -2003,6 +2007,81 @@ mod tests {
 
     /// Close/reopen resets the client's version sequence. Even identical text
     /// at the same version is a distinct open-document lifetime (ABA fence).
+    /// A closed document leaves no diagnostics bookkeeping behind.
+    ///
+    /// The epoch map fences in-flight publications, so it is written on every
+    /// invalidation — including the reserve step of every publication. Nothing
+    /// removed the entry, so a session accumulated one per URI it ever opened.
+    /// Closing is the point at which no further publication can be legitimate, so
+    /// it is the point at which the entry must go.
+    ///
+    /// Discriminating: before the close-time release, the count after 200
+    /// open/close cycles was 200.
+    #[test]
+    fn closing_a_document_releases_its_diagnostics_bookkeeping() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        assert_eq!(registry.tracked_diagnostics_documents(), 0);
+
+        for index in 0..200 {
+            let uri: Uri = format!("file:///home/user/Doc{index}.vue").parse().unwrap();
+            registry.did_open(&TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: "<template><div>x</div></template>".to_string(),
+            });
+            registry.invalidate_diagnostics(uri.as_str());
+            assert_eq!(
+                registry.tracked_diagnostics_documents(),
+                1,
+                "only the one OPEN document is tracked"
+            );
+            registry.did_close(&uri);
+            assert_eq!(
+                registry.tracked_diagnostics_documents(),
+                0,
+                "a closed document must leave no diagnostics entry behind"
+            );
+        }
+    }
+
+    /// A publication that was in flight when its document closed must still be
+    /// rejected. Releasing the epoch entry is a fail-CLOSED removal, not an
+    /// amnesty that lets a stale result publish against a closed document.
+    ///
+    /// Not a discrimination of the epoch fence in isolation — the snapshot-identity
+    /// fence independently rejects a closed document, and no close/reopen sequence
+    /// can make the identity match again. It is the no-regression leg for the
+    /// removal: an ABSENT epoch entry must read as "matches nothing", never as
+    /// "unfenced".
+    #[test]
+    fn a_publication_in_flight_at_close_is_still_rejected() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div>x</div></template>".to_string(),
+        });
+
+        let in_flight = registry
+            .begin_diagnostics_publication(&uri)
+            .expect("a publication may begin for an open document");
+        registry.did_close(&uri);
+
+        assert!(
+            !registry.diagnostic_publication_is_current(&uri, &in_flight),
+            "a publication that was in flight when the document closed must not publish"
+        );
+    }
+
     #[test]
     fn snapshot_identity_rejects_close_reopen_at_same_version() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(

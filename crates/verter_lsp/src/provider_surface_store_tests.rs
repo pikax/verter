@@ -32,6 +32,196 @@ fn record_surface(provider_content: &str, carrier_source: &str) -> RecordSurface
     )
 }
 
+/// A surface for one of MANY documents — the shape a workspace-sized retention
+/// test needs, where every document is a distinct provider path.
+///
+/// The revision is zero-padded to a FIXED width so successive revisions of one
+/// document are byte-for-byte the same SIZE. Otherwise a retention comparison
+/// across revisions would be reading the digit count of an integer.
+fn record_surface_for(index: usize, revision: usize) -> RecordSurface {
+    RecordSurface::carrier_api_legacy(
+        format!("/src/Doc{index}.vue.ts"),
+        format!("/src/Doc{index}.vue"),
+        Arc::from(
+            format!("declare const Doc{index}: {{ rev: {revision:04} }};\n")
+                .repeat(24)
+                .as_str(),
+        ),
+        None,
+        Arc::from(
+            format!("<script setup lang=\"ts\">\nconst rev = {revision:04};\n</script>\n")
+                .repeat(24)
+                .as_str(),
+        ),
+    )
+}
+
+/// A private account, so retention assertions read only THIS test's activity.
+fn private_account() -> Arc<SemanticRetentionAccount> {
+    SemanticRetentionAccount::new(
+        verter_session::semantic_retention_account::RetentionLimits::defaults(),
+    )
+}
+
+/// Open, edit a few times, then close one document — one editing cycle.
+fn open_edit_close_cycle(store: &ProviderSurfaceStore, index: usize) {
+    store.record(record_surface_for(index, 0));
+    for revision in 1..=3 {
+        store.record(record_surface_for(index, revision));
+    }
+    let token = store.forget(&format!("/src/Doc{index}.vue.ts"));
+    assert!(store.finalize_close(token), "the close must finalize");
+}
+
+/// A long editing session must not accumulate retained bytes.
+///
+/// A thousand open/edit/close cycles, each recording four generations of a
+/// distinct document. After each cycle the process is quiescent for that
+/// document, so its bytes must be gone: the occupancy after cycle 1000 must equal
+/// the occupancy after cycle 1, and both must equal the empty baseline. A slope
+/// of zero, measured in bytes, not a claim that the map "looks small".
+///
+/// Discriminating: the insert-only store this replaces retained all 4,000
+/// generations — the assertion fails on the very first cycle boundary.
+#[test]
+fn a_thousand_open_edit_close_cycles_leave_no_retained_byte_slope() {
+    let account = private_account();
+    let store = ProviderSurfaceStore::with_account(Arc::clone(&account));
+    let baseline = account.snapshot().total_bytes();
+    assert_eq!(baseline, 0, "a fresh private account starts empty");
+
+    open_edit_close_cycle(&store, 0);
+    let after_first_cycle = account.snapshot().total_bytes();
+    assert_eq!(
+        after_first_cycle, baseline,
+        "one completed cycle must leave nothing behind"
+    );
+
+    for index in 1..1000 {
+        open_edit_close_cycle(&store, index);
+    }
+
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        after_first_cycle,
+        "1000 cycles must retain exactly what 1 cycle retains — no slope"
+    );
+    assert_eq!(store.retained_surface_count(), 0);
+    assert_eq!(store.retained_surface_bytes(), 0);
+}
+
+/// A cancelled inspection cannot pin the project graph past its own lifetime.
+///
+/// An inspection captures EVERY tracked surface — the whole project graph — then
+/// is cancelled while the workspace keeps being edited. The captured generations
+/// stay charged for as long as the cancelled request holds them, and are released
+/// the instant it drops. What must NOT happen is the store itself holding a
+/// second copy of the graph, in which case dropping the cancelled request frees
+/// nothing at all.
+///
+/// Discriminating: the insert-only store this replaces kept both the captured
+/// generations and the fresh ones, so the post-drop occupancy equalled the
+/// mid-flight occupancy — the assertion that it falls back to one graph fails.
+#[test]
+fn a_cancelled_inspection_cannot_pin_the_project_graph() {
+    const DOCUMENTS: usize = 64;
+
+    let account = private_account();
+    let store = ProviderSurfaceStore::with_account(Arc::clone(&account));
+    for index in 0..DOCUMENTS {
+        store.record(record_surface_for(index, 0));
+    }
+    let one_graph_bytes = account.snapshot().total_bytes();
+    assert!(one_graph_bytes > 0, "the synced graph must be charged");
+
+    // An inspection pins the whole graph, then is CANCELLED: its capture is still
+    // alive (the future has not been dropped yet) while editing continues.
+    let cancelled_capture = store.capture_current_carrier_api_set();
+    assert!(!cancelled_capture.is_empty(), "the capture pins the graph");
+    for index in 0..DOCUMENTS {
+        store.record(record_surface_for(index, 1));
+    }
+
+    assert_eq!(
+        store.retained_surface_count(),
+        DOCUMENTS,
+        "the store owns ONE generation per live path, never the captured one too"
+    );
+    assert!(
+        account.snapshot().total_bytes() > one_graph_bytes,
+        "the cancelled capture is still holding its pinned generations"
+    );
+
+    // The cancelled request is finally dropped.
+    drop(cancelled_capture);
+
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        one_graph_bytes,
+        "dropping the cancelled inspection must release every byte it alone pinned"
+    );
+
+    for index in 0..DOCUMENTS {
+        let token = store.forget(&format!("/src/Doc{index}.vue.ts"));
+        assert!(store.finalize_close(token));
+    }
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// Repeated requests against one document retain ONE version of it, not all of
+/// them.
+///
+/// Each semantic-token / hover / completion round-trip that re-syncs the carrier
+/// records a fresh generation. Two hundred of them must cost what one costs.
+///
+/// Discriminating: the insert-only store this replaces retained all 200 — the
+/// count assertion reads 200 and the byte assertion is 200x over.
+#[test]
+fn repeated_requests_retain_one_document_version_not_every_version() {
+    let account = private_account();
+    let store = ProviderSurfaceStore::with_account(Arc::clone(&account));
+
+    store.record(record_surface_for(0, 0));
+    let one_version_bytes = account.snapshot().total_bytes();
+
+    for revision in 1..200 {
+        store.record(record_surface_for(0, revision));
+    }
+
+    assert_eq!(
+        store.retained_surface_count(),
+        1,
+        "200 re-syncs of one document must retain one generation"
+    );
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        one_version_bytes,
+        "200 re-syncs must cost what one costs"
+    );
+}
+
+/// Every provider-surface store charges the ONE process-local account.
+///
+/// A per-store account would be a private byte quota beside the ratified
+/// aggregate ceiling: N stores would admit against N ceilings, and the process
+/// figure would stop being a bound. `StoreAccount` has no account-less variant,
+/// so the only way to get this wrong is to mint a fresh account per store — which
+/// is exactly what this rejects.
+#[test]
+fn stores_share_the_one_process_local_retention_account() {
+    let first = ProviderSurfaceStore::new();
+    let second = ProviderSurfaceStore::new();
+
+    assert!(
+        Arc::ptr_eq(first.account(), second.account()),
+        "two stores must charge the same account"
+    );
+    assert!(
+        Arc::ptr_eq(first.account(), &SemanticRetentionAccount::process_local()),
+        "the default account must be the process-local one, not a private quota"
+    );
+}
+
 #[test]
 fn unsynced_path_has_no_current_snapshot() {
     // A path that was never recorded resolves to None (fail closed) — so a real
@@ -126,8 +316,8 @@ fn each_record_advances_generation() {
 }
 
 /// DESIGN TEST (a): a generation-A capture still maps through A after generation
-/// B is synced. The historical snapshot for A's exact stamp is preserved and
-/// distinct from B; `snapshot_at(A)` returns A's content, not B's.
+/// B is synced. The capture OWNS the snapshot it pinned, so B cannot reach back
+/// and change what A's offsets resolve against — while the STORE keeps only B.
 #[test]
 fn generation_a_capture_survives_generation_b_sync() {
     let store = ProviderSurfaceStore::new();
@@ -142,18 +332,22 @@ fn generation_a_capture_survives_generation_b_sync() {
     let b = store.record(record_surface("API GEN B\n", "carrier B\n"));
     assert_ne!(b.stamp.generation, gen_a);
 
-    // The pinned request looks up A by its exact stamp → still A's content.
-    let mapped_a = store
-        .snapshot_at(VPATH, gen_a)
-        .expect("generation A must still be retrievable after B");
-    assert_eq!(&*mapped_a.provider_content, "API GEN A\n");
-    assert_eq!(&*mapped_a.carrier_source, "carrier A\n");
-    assert_eq!(mapped_a.stamp, captured_a.stamp);
+    // The pinned request still maps through the exact generation it captured.
+    assert_eq!(&*captured_a.provider_content, "API GEN A\n");
+    assert_eq!(&*captured_a.carrier_source, "carrier A\n");
+    assert_eq!(captured_a.stamp, a.stamp);
 
     // And the current snapshot is now B (not A).
     assert_eq!(
         store.current_snapshot(VPATH).unwrap().stamp.generation,
         b.stamp.generation
+    );
+    // The STORE, meanwhile, kept exactly one generation: superseded A stays alive
+    // only through the capture that pinned it.
+    assert_eq!(
+        store.retained_surface_count(),
+        1,
+        "the store must not keep the superseded generation alive"
     );
 }
 
@@ -279,43 +473,51 @@ fn byte_identical_resync_with_changed_map_identity_is_not_honored() {
     );
 
     // Positive control: an identical-map byte-identical re-sync IS still honored.
+    // `captured_b` is pinned BEFORE the re-sync, exactly as an in-flight request
+    // pins the generation its offsets were produced against.
+    let captured_b = store.current_snapshot(VPATH).expect("B is current");
+    assert_eq!(captured_b.stamp, b.stamp);
     let mut surface_c = record_surface(provider, carrier);
     surface_c.map_hash = [2u8; 16];
     let _c = store.record(surface_c);
-    let captured_b = store
-        .snapshot_at(VPATH, b.stamp.generation)
-        .expect("B retrievable");
     assert!(
         store.captured_snapshot_still_honored(&captured_b),
         "an identical-map byte-identical re-sync must stay honored (no over-drop)"
     );
 }
 
-/// DESIGN TEST (b): a generation-A result with only B available → DROP. If the
-/// pinned request held a stamp whose generation the store does not have, the
-/// lookup returns None. (Here A was never recorded; only B is.)
+/// DESIGN TEST (b): a generation the store can no longer vouch for → DROP.
+///
+/// Releasing the retired generation must not turn into an amnesty: once a path is
+/// `Closing` it has no current generation, so a capture of the retired one is NOT
+/// honored. The capture stays readable — it maps only where its own holder
+/// decided to map it — but the oracle must refuse to call it current.
 #[test]
-fn unknown_generation_resolves_to_none_drop() {
+fn retired_generation_is_no_longer_honored_drop() {
     let store = ProviderSurfaceStore::new();
-    let b = store.record(record_surface("API GEN B\n", "carrier B\n"));
-
-    // A generation that was never recorded for this path → None (fail closed).
-    let missing_generation = b.stamp.generation.wrapping_add(999);
+    let a = store.record(record_surface("API GEN A\n", "carrier A\n"));
     assert!(
-        store.snapshot_at(VPATH, missing_generation).is_none(),
-        "a generation the store never recorded must resolve to None (drop)"
+        store.captured_snapshot_still_honored(&a),
+        "positive control: the live generation IS honored"
     );
+
+    let _token = store.forget(VPATH);
+
+    assert!(
+        !store.captured_snapshot_still_honored(&a),
+        "a retired generation must not be honored (drop)"
+    );
+    assert_eq!(&*a.provider_content, "API GEN A\n");
 }
 
 /// DESIGN TEST (c): a CLOSE after request capture does not break the captured
-/// snapshot. `forget` retires the active generation but preserves history, so a
-/// previously captured stamp still maps.
+/// snapshot. `forget` retires the active generation and releases the STORE's hold
+/// on it; the in-flight capture keeps its own `Arc`, so it still maps.
 #[test]
 fn close_after_capture_preserves_captured_snapshot() {
     let store = ProviderSurfaceStore::new();
     let a = store.record(record_surface("API GEN A\n", "carrier A\n"));
-    let gen_a = a.stamp.generation;
-    let _captured = store.current_snapshot(VPATH).expect("A current");
+    let captured = store.current_snapshot(VPATH).expect("A current");
 
     // Close / drop the surface.
     let _token = store.forget(VPATH);
@@ -327,12 +529,15 @@ fn close_after_capture_preserves_captured_snapshot() {
         store.current_snapshot(VPATH).is_none(),
         "no current snapshot after forget"
     );
+    assert_eq!(
+        store.retained_surface_count(),
+        0,
+        "a closed surface must not stay resident in the store"
+    );
 
-    // The in-flight request's captured generation still resolves.
-    let mapped = store
-        .snapshot_at(VPATH, gen_a)
-        .expect("the captured generation must survive a close");
-    assert_eq!(&*mapped.provider_content, "API GEN A\n");
+    // The in-flight request's captured snapshot is unaffected by the close.
+    assert_eq!(&*captured.provider_content, "API GEN A\n");
+    assert_eq!(captured.stamp, a.stamp);
 }
 
 #[test]
@@ -348,13 +553,12 @@ fn forget_then_record_uses_a_fresh_generation_not_the_retired_one() {
         c.stamp.generation > a.stamp.generation,
         "a record after forget must mint a strictly newer generation"
     );
-    // The retired generation still points at A's content, never C's.
+    // A's snapshot still reads A's content: a later record can never mutate a
+    // snapshot an in-flight request already holds, and the live path reads C.
+    assert_eq!(&*a.provider_content, "api A\n");
     assert_eq!(
-        &*store
-            .snapshot_at(VPATH, a.stamp.generation)
-            .unwrap()
-            .provider_content,
-        "api A\n"
+        &*store.current_snapshot(VPATH).unwrap().provider_content,
+        "api C\n"
     );
 }
 

@@ -109,6 +109,38 @@ impl DocumentRegistry {
         epoch
     }
 
+    /// Drop every trace of a CLOSED document from the diagnostics state.
+    ///
+    /// [`Self::invalidate_diagnostics`] cannot do this: it is also the RESERVE
+    /// step of [`Self::admit_diagnostics_publication`], so the epoch it writes is
+    /// the ownership token the publication about to run will present. Close is the
+    /// one point at which no future publication for this URI can be legitimate, so
+    /// it is the one point at which the entry can go.
+    ///
+    /// Still fail-closed for work already in flight: an outstanding publication
+    /// compares its epoch against the map, and an ABSENT entry matches no epoch at
+    /// all, so it is rejected exactly as a superseding epoch would reject it. A
+    /// reopen starts from the monotonic `next_epoch`, which is never rewound, so a
+    /// stale in-flight epoch can never be resurrected by the removal.
+    ///
+    /// Without this, every URI the session ever opened left a permanent entry
+    /// behind — a slow leak proportional to how long the editor stays open, in a
+    /// map whose live size should track only the OPEN documents.
+    pub(crate) fn release_diagnostics_state(&self, uri: &str) {
+        let mut state = self.diagnostics_state.lock();
+        state.epochs.remove(uri);
+        state.receipts.remove(uri);
+    }
+
+    /// How many documents the diagnostics state is currently tracking. Tests only:
+    /// the live size must track the OPEN documents, never the documents the
+    /// session has ever seen.
+    #[cfg(test)]
+    pub(crate) fn tracked_diagnostics_documents(&self) -> usize {
+        let state = self.diagnostics_state.lock();
+        state.epochs.len().max(state.receipts.len())
+    }
+
     pub(crate) fn begin_diagnostics_publication(&self, uri: &Uri) -> Option<DiagnosticPublication> {
         self.admit_diagnostics_publication(uri, || {
             Some((
@@ -135,7 +167,7 @@ impl DocumentRegistry {
         })
     }
 
-    fn diagnostic_publication_is_current(
+    pub(crate) fn diagnostic_publication_is_current(
         &self,
         uri: &Uri,
         publication: &DiagnosticPublication,

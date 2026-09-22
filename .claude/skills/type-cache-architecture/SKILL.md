@@ -108,7 +108,11 @@ the cache-runtime overhaul and any feature admitting cache entries.
 host-owned semantic store charges. One account per PROCESS (not per
 project): `ProjectTypeStore::retention_account()` hands back
 `SemanticRetentionAccount::process_local()`, so loading N projects does
-not multiply the ratified ceiling by N.
+not multiply the ratified ceiling by N. The module is `pub` because the
+account is process-wide rather than crate-wide: the LSP server's
+`ProviderSurfaceStore` charges the SAME account (see Participants), so
+provider-surface bytes and semantic-cache bytes contend for one ceiling
+instead of each claiming it independently.
 
 **Limits** (`RetentionLimits::defaults()`, the ratified aggregate
 semantic-memory budget): 1 GiB `aggregate_ceiling_bytes`, 512 MiB
@@ -157,10 +161,26 @@ and retries once on refusal, else returns the string un-pooled),
 `RetentionCandidate`), the `SemanticGraphStore` family memo (the charge
 rides `MemoEntry`; `warm_publish_one` refusal returns
 `WarmPublishOutcome::Skipped`, and an SCC batch is charged once as a
-whole so a component can never publish torn), and
-`DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
+whole so a component can never publish torn), `DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
 snapshot, owned by the `ShardEntry` so a second lease on the same
-snapshot never charges twice).
+snapshot never charges twice), and — outside `verter_session` —
+`verter_lsp`'s `ProviderSurfaceStore` (one `Pinned` charge per synced
+provider surface, riding INSIDE the `Arc`-shared
+`ProviderSurfaceSnapshot`, so the bytes are released exactly when the
+last owner drops it: the store's map slot, or an in-flight rename /
+navigation capture that outlived it). Pinned is the right class there for
+the same reason as a parse-snapshot lease — a surface the provider is
+already holding must remain mappable, so refusing to retain it would mean
+silently losing the map a returned offset has to travel back through.
+
+That store's own retention is bounded by REACHABILITY, not history: a
+`record` that supersedes a path's current generation, and a `forget` that
+retires one, each drop the store's reference to the displaced generation,
+so the map holds at most one entry per live path. A capture pins the
+`Arc`, never the map slot, so dropping the slot cannot invalidate an
+in-flight request. Records happen on every provider sync — i.e. every edit
+of every open carrier — so an insert-only map there retained every version
+of every document for the life of the session.
 
 Per-family COUNT caps (`GlobalRetentionBudget`, `FamilyKey::candidate_cap`)
 are unchanged and still hold; this account bounds the byte SUM across

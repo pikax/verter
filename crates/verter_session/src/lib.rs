@@ -384,7 +384,12 @@ pub mod route_analysis_inputs;
 pub mod semantic_capability;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
-pub(crate) mod semantic_retention_account;
+/// The one process-local aggregate retention account. Public because the
+/// account is PROCESS-wide, not crate-wide: every in-process participant that
+/// retains bytes on the user's behalf — the semantic stores here and the LSP
+/// server's provider-surface store — must charge THIS account, or the ratified
+/// ceiling would be enforced once per crate instead of once per process.
+pub mod semantic_retention_account;
 #[cfg(test)]
 mod semantic_retention_account_tests;
 pub(crate) mod session_runtime;
