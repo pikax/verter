@@ -7042,6 +7042,28 @@ fn merge_value_nodes_recursive(
             }
         }
     }
+    // A contributor carrying CALL or CONSTRUCT signatures makes this a
+    // CALLABLE intersection, and callable merging is the signature
+    // kernel's authority — `SignaturesOfType` over an `Intersection`
+    // node routes to `signature_kernel::discovery::intersection_signatures`,
+    // which dedups by signature EQUIVALENCE and composes mixin
+    // constructors. The local surface merge below only concatenates
+    // signature NODES with identity dedup: a weaker duplicate of that
+    // authority, and exactly the "standalone callable merging" §15 of
+    // `docs/arch/signature-kernel.md` retires. Route a callable
+    // intersection to the ordered `Intersection` carrier below instead,
+    // so the kernel answers it and no second producer exists.
+    //
+    // Only the contributors' OWN surfaces are classified — a member
+    // whose VALUE is callable (`{ f: () => void } & { x: 1 }`) does not
+    // make the intersection callable and still merges here.
+    if all_objects
+        && values
+            .iter()
+            .any(|value| value_may_contribute_call_signatures(graph, *value))
+    {
+        all_objects = false;
+    }
     if all_objects {
         let opt_surfaces: Vec<Option<ShallowSurface>> =
             shallow_surfaces.into_iter().map(Some).collect();
@@ -8326,6 +8348,121 @@ mod overload_carrier_exclusion_tests {
             }
             other => panic!("expected the order-preserving intersection carrier, got {other:?}"),
         }
+    }
+
+    /// The same contract for BARE callable objects — the case the alias
+    /// twin above cannot reach, because an `Alias` is not an `Object` and
+    /// so never entered the all-objects surface merge in the first place.
+    ///
+    /// Two arms contribute member `m` as a plain callable `Object` each.
+    /// Merging their SURFACES would concatenate the call-signature nodes
+    /// with identity dedup and publish ONE object carrying both — a second
+    /// producer of callable intersections beside the signature kernel,
+    /// with weaker rules (no signature-equivalence dedup, no mixin
+    /// composition). `docs/arch/signature-kernel.md` §15 retires that
+    /// standalone callable merging: the value must stay an ordered
+    /// `Intersection` carrier so `SignaturesOfType` answers it through
+    /// `signature_kernel::discovery::intersection_signatures`.
+    #[test]
+    fn bare_callable_objects_stay_a_kernel_owned_intersection_carrier() {
+        let graph = SemanticGraphStore::new();
+        let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
+            graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                vec![SurfaceEntry::CallSignature(ret)],
+                None,
+                false,
+            )))
+        };
+        let object_a = callable_object(ret_a);
+        let object_b = callable_object(ret_b);
+        let arm = |value| {
+            Some(ShallowSurface::from_entries(
+                vec![super::ShallowSurfaceEntry::Member(value_member("m", value))],
+                None,
+            ))
+        };
+        let mut evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let merged = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[arm(object_a), arm(object_b)],
+            &mut evidence,
+        )
+        .expect("two live arms merge");
+        let value = merged
+            .members
+            .iter()
+            .find(|m| m.string_name() == Some("m"))
+            .expect("member m survives")
+            .value;
+        match graph.node_data(value).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => {
+                assert_eq!(
+                    arms.as_ref(),
+                    &[object_a, object_b],
+                    "authored contribution order is the overload order"
+                );
+            }
+            Some(SemanticNodeData::Object(view)) => panic!(
+                "the walker merged the callable arms into ONE surface carrying {} call \
+                 signatures — that is the standalone callable merging §15 retires; the \
+                 signature kernel must own it",
+                view.call_signatures.len()
+            ),
+            other => panic!("expected the order-preserving intersection carrier, got {other:?}"),
+        }
+    }
+
+    /// The narrowing must not divert EVERY object intersection: two
+    /// contributors that carry no call or construct signature of their own
+    /// still merge into ONE surface, as `{ a: 1 } & { b: 2 }` always has.
+    /// Only a callable contributor belongs to the signature kernel.
+    #[test]
+    fn non_callable_object_values_still_merge_into_one_surface() {
+        let graph = SemanticGraphStore::new();
+        let keyspace = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        // Two DISTINCT plain surfaces (distinct keyspaces keep them from
+        // interning to one node), neither carrying a signature entry.
+        let value_a = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![],
+            Some(keyspace),
+            false,
+        )));
+        let value_b = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![],
+            None,
+            false,
+        )));
+        assert_ne!(value_a, value_b, "the fixture needs two distinct surfaces");
+        let arm = |value| {
+            Some(ShallowSurface::from_entries(
+                vec![super::ShallowSurfaceEntry::Member(value_member("m", value))],
+                None,
+            ))
+        };
+        let mut evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let merged = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[arm(value_a), arm(value_b)],
+            &mut evidence,
+        )
+        .expect("two live arms merge");
+        let value = merged
+            .members
+            .iter()
+            .find(|m| m.string_name() == Some("m"))
+            .expect("member m survives")
+            .value;
+        assert!(
+            matches!(
+                graph.node_data(value).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "two NON-callable object values still merge into one surface"
+        );
     }
 
     /// Mint one UNRESOLVED reference carrier of `kind` naming `name`. None
