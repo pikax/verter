@@ -353,7 +353,7 @@ impl SemanticGraphStore {
         let staged_entries: Vec<_> = prepared.iter().map(|member| &member.entry).collect();
         let batch_charge = self.reserve_scc_batch(&staged_entries);
         let batch_charge = match batch_charge {
-            Ok(charge) => charge.map(std::sync::Arc::new),
+            Ok(charge) => Some(std::sync::Arc::new(charge)),
             Err(_) => {
                 for member in &prepared {
                     self.abort_staged_flight(&member.flight);
@@ -497,22 +497,20 @@ impl SemanticGraphStore {
 
     /// Reserve ONE aggregate charge covering a whole staged component.
     ///
-    /// `Ok(None)` means the store owns no retention account (a fixture
-    /// store). `Err` means the process declined to retain the component,
-    /// and the caller must refuse the WHOLE batch — a component that
-    /// published only the members that fit would be exactly the torn
-    /// component the root-witness fence forbids.
+    /// `Err` means the process declined to retain the component, and the
+    /// caller must refuse the WHOLE batch — a component that published
+    /// only the members that fit would be exactly the torn component the
+    /// root-witness fence forbids. There is no uncharged arm: every store
+    /// owns an account.
     pub(super) fn reserve_scc_batch(
         &self,
         members: &[&MemoEntry],
     ) -> Result<
-        Option<crate::semantic_retention_account::RetentionCharge>,
+        crate::semantic_retention_account::RetentionCharge,
         crate::semantic_retention_account::RetentionRefusal,
     > {
         use crate::semantic_retention_account::{ChargeClass, RetentionAdmission};
-        let Some(account) = self.retention_account() else {
-            return Ok(None);
-        };
+        let account = self.retention_account();
         // The published root already owns the SCC carrier and self-root
         // allocations. The member batch therefore reserves only each
         // member's distinct allocation; including the first member's
@@ -523,7 +521,7 @@ impl SemanticGraphStore {
             .map(|entry| entry.unique_retained_footprint_bytes())
             .sum();
         match account.reserve(ChargeClass::Retained, bytes) {
-            RetentionAdmission::Admitted(charge) => Ok(Some(charge)),
+            RetentionAdmission::Admitted(charge) => Ok(charge),
             RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),

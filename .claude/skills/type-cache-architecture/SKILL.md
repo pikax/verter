@@ -166,6 +166,28 @@ Per-family COUNT caps (`GlobalRetentionBudget`, `FamilyKey::candidate_cap`)
 are unchanged and still hold; this account bounds the byte SUM across
 them.
 
+**No account-less retaining store.** A store that retains candidates holds
+its account as a `StoreAccount` — a handle with no `None` variant, so
+"retains candidates, charges nothing" is unrepresentable rather than merely
+unused. `StoreAccount::default()` resolves to `process_local()`, NOT to a
+freshly minted private account: a per-store account would be exactly the
+private byte quota beside the aggregate ceiling this contract forbids, and
+would let N stores admit against N ceilings. `SemanticGraphStore` and
+`ComponentMetaResultDb` therefore charge the one account through EVERY
+reachable constructor, including `new()` / `Default`; `reserve_memo_candidate`,
+`reserve_scc_batch` and `ComponentMetaResultDb::insert_owned` have no
+uncharged arm. A test that needs deterministic pressure binds a private
+account explicitly (`with_account`, `with_account_for_test`,
+`ProjectTypeStore::with_retention_account`).
+
+The shared candidate substrate under those stores is closed the same way.
+`BoundedCandidateMap::admit` takes a `RetentionCharge` BY VALUE, not an
+`Option<RetentionCharge>`: a `RetentionCandidate` cannot be constructed
+without a granted reservation, so there is no admission path — production
+or test — that retains a candidate the account never saw. A caller with
+nothing meaningful to reserve mints a zero-byte charge from an account
+rather than skipping one.
+
 **The byte figures are estimates.** `RetainedFootprint` produces an
 accounting estimate; nothing in cache VALIDITY reads it, so an imprecise
 estimate costs hit rate and never correctness. Bytes reached only
