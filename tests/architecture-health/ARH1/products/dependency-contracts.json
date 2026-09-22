@@ -146,8 +146,8 @@
         }
       ],
       "snapshot": {
-        "pubFn": 55,
-        "pubFnTestHooks": 15,
+        "pubFn": 56,
+        "pubFnTestHooks": 16,
         "pubCrateFn": 12,
         "pubType": 9,
         "pubCrateMod": 0,
@@ -601,6 +601,14 @@
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": ["Scheduler::test_clear_analysis", ".test_clear_analysis("]
+          },
+          {
+            "item": "test_reset_wake_posts",
+            "kind": "fn",
+            "to": "test-configuration",
+            "consumersAffected": [],
+            "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification; observes reset()'s teardown-wake post count so a teardown test can release its rendezvous exactly once the wake is posted",
+            "referenceForms": ["Scheduler::test_reset_wake_posts", ".test_reset_wake_posts("]
           }
         ],
         "crossCrateRetainedVerifiedByConsumers": false,

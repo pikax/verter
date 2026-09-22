@@ -69,7 +69,7 @@ use crate::semantic_query::{
     ResolvedCallResult, SemanticNodeId, SignatureCandidateOrigin, SurfaceMember, TupleElement,
     VariancePhase, VariancePolicy,
 };
-use crate::semantic_query_memo::InlineRelationFlight;
+use crate::semantic_query_memo::InlineMemberFlight;
 
 /// Transient per-transaction session token. Content-free; NEVER enters a
 /// published key, a `ReadSetSignature.facts` observation, or any fact
@@ -294,7 +294,7 @@ pub(crate) struct RelationFrameState {
     /// Store-owned family admission claimed for a non-binding inline
     /// relation. It follows the member through SCC deferral and is either
     /// completed by the root's batched publish or explicitly aborted.
-    pub(crate) inline_flight: Option<InlineRelationFlight>,
+    pub(crate) inline_flight: Option<InlineMemberFlight>,
 }
 
 impl RelationFrameState {
@@ -318,7 +318,7 @@ pub(crate) struct FlowReturnFrameState {
     /// evaluation. It follows the member through SCC deferral and is
     /// either completed by the root's batched publish or explicitly
     /// aborted.
-    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     /// Tagged return dependencies discovered by indexed call evaluation
     /// while this flow frame is active.
     pub(crate) holds: Vec<ReturnObligationIdentity>,
@@ -345,7 +345,7 @@ pub(crate) struct FlowReturnFrameState {
 #[derive(Debug, Default)]
 pub(crate) struct ResolveCallFrameState {
     /// Store-owned family admission claimed for a non-root inline call.
-    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
 }
 
 /// The domain payload of one in-flight frame.
@@ -618,7 +618,7 @@ pub(crate) struct RelationPendingState {
     /// The member opened session `Some(..)` (a binding member).
     pub(crate) opened_session: Option<SessionId>,
     /// Store-owned admission for this inline non-binding member.
-    pub(crate) inline_flight: Option<InlineRelationFlight>,
+    pub(crate) inline_flight: Option<InlineMemberFlight>,
 }
 
 /// The decided outcome of a popped flow-return member. Decided at pop:
@@ -680,7 +680,7 @@ pub(crate) struct FlowReturnPendingState {
     /// contained unverified class.
     pub(crate) plan_refusal: Option<flow_obligation_state::FlowPlanRefusal>,
     /// Store-owned admission for this inline member.
-    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     /// The coinductive hold targets the member's evaluation met (in-flight
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle member on its targets' admitted returns.
@@ -806,7 +806,7 @@ pub(crate) struct ResolveCallPendingState {
     /// component root before the return equation runs.
     pub(crate) replay_applicability: bool,
     /// Store-owned admission for this inline member.
-    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     /// The call site's own file roots.
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// `true` when the call-site file is servable and the transitive
@@ -2758,7 +2758,7 @@ impl SessionAdmissionLedger {
 pub(crate) struct CompletedSccMember {
     pub(crate) key: RelateMemoKey,
     pub(crate) payload: RelationPayload,
-    pub(crate) inline_flight: Option<InlineRelationFlight>,
+    pub(crate) inline_flight: Option<InlineMemberFlight>,
 }
 
 /// The relation domain runtime: inference sessions, relation provisional
@@ -2835,7 +2835,7 @@ pub(crate) struct CompletedFlowReturnMember {
     /// publish; a member whose finalization did not complete never enters
     /// this queue at all.
     pub(crate) result: super::flow_solve::CompleteFlowResult,
-    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     /// The member's own file roots (the SCC-union carrier's self-roots
     /// include them even when the ROOT is a relation obligation).
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
@@ -2853,7 +2853,7 @@ pub(crate) struct CompletedResolveCallMember {
     /// The admitted result. A rootless winner cannot be represented here,
     /// so it never reaches the shared cache.
     pub(crate) result: crate::semantic_query::AdmissibleCallResult,
-    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
@@ -3116,7 +3116,7 @@ impl CheckerDispatchTransaction {
         }
     }
 
-    pub(crate) fn note_inline_flight(&mut self, idx: usize, flight: Option<InlineRelationFlight>) {
+    pub(crate) fn note_inline_flight(&mut self, idx: usize, flight: Option<InlineMemberFlight>) {
         if let Some(state) = self
             .reentry_mut()
             .frame_mut_for_update(idx)

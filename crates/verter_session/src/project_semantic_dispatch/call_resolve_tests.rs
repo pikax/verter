@@ -228,7 +228,7 @@ fn abandon_provisional_call_members(dispatch: &ProjectSemanticDispatch<'_>) {
         .drain_scc(0);
     for member in drained {
         if let PendingObligationDomain::ResolveCall(state) = member.domain {
-            dispatch.resolve_call_abort_inline_flight(state.inline_flight.as_ref());
+            dispatch.abort_inline_flight(state.inline_flight.as_ref());
             if let Some(session) = state.staged_session {
                 dispatch.abandon_session(session);
             }
@@ -2348,6 +2348,72 @@ fn explicit_type_args_pair_the_surviving_candidate_with_its_own_raw_form() {
     );
 }
 
+/// Explicit type arguments that EVERY candidate rejects leave a callable
+/// callee callable: `f<number>("x")` on a non-generic `(x: string) => string`
+/// is `NoApplicableOverload` (`tsc --strict` TS2558 "Expected 0 type
+/// arguments"), never `NotCallable` — the callee's call bucket is complete
+/// and non-empty, so the failure is the argument list's, not the callee's.
+/// A construct-only callee invoked as a call is the `NotCallable` control:
+/// its CALL bucket is complete and empty, whatever explicit arguments ride
+/// on the call.
+///
+/// Mutation recipe: classify an all-dropped instantiated set by re-reading
+/// the raw list's SETTLEMENT instead of its requested-bucket emptiness and
+/// the first call answers `NotCallable`.
+#[test]
+fn explicit_type_args_rejected_by_every_candidate_keep_the_callee_callable() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let plain = signature(
+        &dispatch,
+        "plainCallable",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let callee = callable(&dispatch, vec![plain], Vec::new());
+    let mut key = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
+    key.explicit_type_args = Arc::from(vec![number].into_boxed_slice());
+    let step = dispatch.execute_resolve_call(key);
+    assert!(
+        matches!(
+            step,
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
+            )
+        ),
+        "a non-generic callable rejects the explicit type argument but stays callable; got {step:?}"
+    );
+
+    let construct_only = signature(
+        &dispatch,
+        "constructOnly",
+        0,
+        SignatureKind::Construct,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let callee = callable(&dispatch, Vec::new(), vec![construct_only]);
+    let mut key = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
+    key.explicit_type_args = Arc::from(vec![number].into_boxed_slice());
+    let step = dispatch.execute_resolve_call(key);
+    assert!(
+        matches!(
+            step,
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::NotCallable
+            )
+        ),
+        "a construct-only callee has an empty call bucket and is not callable; got {step:?}"
+    );
+}
+
 const DEPENDENT_DEFAULT_CANONICAL: &str = "/ws/call-dependent-default.ts";
 const DEPENDENT_DEFAULT_SOURCE: &str = r#"
 export declare function dependentDefault<T, U = T>(x: U): U;
@@ -3726,6 +3792,109 @@ fn union_undecidable_arm_degrades_the_whole_call() {
     );
 }
 
+/// A call site demands ONLY its own bucket: the settlement of the callee's
+/// OTHER bucket is not its business. `A | B` where both arms are call +
+/// construct hybrids — the call sides share `(x: string)`, the construct
+/// sides share `(x: number)` but one construct return is BODY-DERIVED from
+/// a function the host never indexed, so the common construct signature's
+/// return cannot be read — still answers `u("s")` as `1 | 2`
+/// (`tsc --strict`), because the CALL list settles on its own; the
+/// unsettled CONSTRUCT list degrades only `new u(…)`.
+///
+/// Mutation recipe: acquire both buckets together (either bucket
+/// incomplete ⇒ no candidates) and this call degrades `Undecidable`.
+#[test]
+fn unsettled_construct_bucket_never_degrades_a_call() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let one = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let two = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::Number(2.0),
+    ));
+    let s_lit = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("s".to_owned()),
+    ));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let call_a = signature(
+        &dispatch,
+        "hybridA",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        one,
+    );
+    let construct_a = signature_with_carrier(
+        &dispatch,
+        "hybridACtor",
+        0,
+        SignatureKind::Construct,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+        SignatureReturnCarrier::Function(verter_type_expr::facts::FunctionReturnSource::Flow(
+            occurrence("hybridACtor", 0).function,
+        )),
+    );
+    let call_b = signature(
+        &dispatch,
+        "hybridB",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        two,
+    );
+    let construct_b = signature(
+        &dispatch,
+        "hybridBCtor",
+        0,
+        SignatureKind::Construct,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+    );
+    let arm_a = callable(&dispatch, vec![call_a], vec![construct_a]);
+    let arm_b = callable(&dispatch, vec![call_b], vec![construct_b]);
+    let callee = union_callee(&dispatch, vec![arm_a, arm_b]);
+    let step = dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Call,
+        None,
+        vec![eager(s_lit)],
+    ));
+    let super::call_resolve::ResolveCallStep::Complete(result) = step else {
+        panic!("the call list settles on its own, so the call selects; got {step:?}");
+    };
+    let expected = dispatch.intern_normalized_union_or_intersection(&[one, two], true);
+    assert_eq!(
+        union_signature_return(&result),
+        expected,
+        "tsc --strict: the common call signature returns `1 | 2`"
+    );
+    let construct = dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Construct,
+        None,
+        vec![eager(s_lit)],
+    ));
+    assert!(
+        matches!(
+            construct,
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Undecidable
+            )
+        ),
+        "the construct list is the one that does not settle; got {construct:?}"
+    );
+}
+
 /// An anonymous callee's overload set — and a union mixing an anonymous
 /// arm with an authored one — is admitted on the DEPENDENCY PROOF of its
 /// inputs, not on the candidates' origins. Purely structural inputs (every
@@ -3750,6 +3919,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let env = host.host_view_env_hashes_for(CANONICAL);
     let set_key = SemanticQueryKey::ResolveOverloadSet {
         callee,
+        kind: SignatureKind::Call,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
@@ -3800,6 +3970,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let union = union_callee(&dispatch, vec![authored, callee]);
     let union_key = SemanticQueryKey::ResolveOverloadSet {
         callee: union,
+        kind: SignatureKind::Call,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
@@ -4125,6 +4296,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
     let env = host.host_view_env_hashes_for(CANONICAL);
     let set_key = SemanticQueryKey::ResolveOverloadSet {
         callee,
+        kind: SignatureKind::Call,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
@@ -4236,35 +4408,41 @@ fn call_utility_and_flow_consumers_read_one_signature_list() {
             .unwrap_or_else(|reason| panic!("{name}: the shared list settles, got {reason:?}"));
         assert_eq!(call_list.len(), calls, "{name}: shared call signatures");
 
-        // Call resolution's candidates ARE the shared list.
-        let shared: Vec<SemanticNodeId> = call_list
-            .iter()
-            .chain(construct_list.iter())
-            .copied()
-            .collect();
-        let set = dispatch.execute(SemanticQueryKey::ResolveOverloadSet {
-            callee: subject,
-            type_args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::OverloadSetContext {
-                resolve_env_hash: env.resolve_env_hash,
-                ..Default::default()
-            },
-        });
-        match set {
-            QueryResult::Value(SemanticQueryOutput {
-                value: SemanticQueryValue::OverloadSet(refs),
-                ..
-            }) => assert_eq!(
-                refs.iter()
-                    .map(|candidate| candidate.node)
-                    .collect::<Vec<_>>(),
-                shared,
-                "{name}: the overload set is the shared list, in list order"
-            ),
-            QueryResult::Error(QueryError::Miss) => {
-                assert!(shared.is_empty(), "{name}: only an empty list misses")
+        // Call resolution's candidates ARE the shared list of the demanded
+        // bucket, and nothing from the other bucket.
+        for (bucket, list) in [
+            (SignatureKind::Call, &call_list),
+            (SignatureKind::Construct, &construct_list),
+        ] {
+            let set = dispatch.execute(SemanticQueryKey::ResolveOverloadSet {
+                callee: subject,
+                kind: bucket,
+                type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: crate::semantic_query::OverloadSetContext {
+                    resolve_env_hash: env.resolve_env_hash,
+                    ..Default::default()
+                },
+            });
+            match set {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::OverloadSet(refs),
+                    ..
+                }) => assert_eq!(
+                    &refs
+                        .iter()
+                        .map(|candidate| candidate.node)
+                        .collect::<Vec<_>>(),
+                    list,
+                    "{name}: the {bucket:?} overload set is the shared list, in list order"
+                ),
+                QueryResult::Error(QueryError::Miss) => {
+                    assert!(
+                        list.is_empty(),
+                        "{name}: only an empty {bucket:?} list misses"
+                    )
+                }
+                other => panic!("{name}: unexpected {bucket:?} overload set {other:?}"),
             }
-            other => panic!("{name}: unexpected overload set {other:?}"),
         }
 
         // Utility inference reads the LAST call signature of the same list
