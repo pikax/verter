@@ -248,12 +248,14 @@ export function resolveE2eFixtureSelection(options: {
  * labels reach the whole inventory, like `--fixture=<fixture>@<provider>`.
  */
 export function selectE2eRoutesByLabels(labels: string): E2eRoute[] {
-  const parsed = labels
-    .split(",")
-    .map((label) => label.trim())
-    .filter((label) => label.length > 0);
-  if (parsed.length === 0) {
+  const parsed = labels.split(",").map((label) => label.trim());
+  if (parsed.length === 1 && parsed[0] === "") {
     throw new Error("VS Code E2E route list must name at least one <fixture>@<provider> route");
+  }
+  if (parsed.some((label) => label === "")) {
+    // An empty field is a malformed list (a lost matrix entry, a stray
+    // comma), never something to drop silently.
+    throw new Error(`VS Code E2E route list has an empty field: ${JSON.stringify(labels)}`);
   }
   const seen = new Set<string>();
   for (const label of parsed) {
@@ -280,7 +282,9 @@ export function selectE2eRunRoutes(options: {
   readonly envFixture?: string;
   readonly envTypeProvider?: string;
 }): E2eRoute[] {
-  if (options.envRoutes) {
+  // An explicitly empty list is an error, never the default matrix: a shard
+  // whose matrix entry lost its routes must fail rather than run every route.
+  if (options.envRoutes !== undefined) {
     if (options.fixtureArg || options.envFixture || options.envTypeProvider) {
       throw new Error(
         "E2E_ROUTES cannot be combined with --fixture, E2E_FIXTURE or E2E_TYPE_PROVIDER",

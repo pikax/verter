@@ -9,6 +9,7 @@ import {
   copyLspBinaryToTemp,
   findLspBinary,
   resolveVscodeExecutablePath,
+  VSCODE_ACQUISITION_RETRY,
 } from "../sharedLaunch";
 
 const tmps: string[] = [];
@@ -204,5 +205,21 @@ describe("resolveVscodeExecutablePath", () => {
       }),
     ).rejects.toThrow("download failed #3");
     expect(attempts).toBe(3);
+  });
+
+  it("keeps the retry bounded when the configured attempt count is not finite", async () => {
+    let attempts = 0;
+    await expect(
+      resolveVscodeExecutablePath("stable", {
+        download: async () => {
+          attempts++;
+          throw new Error("never");
+        },
+        platform: "linux",
+        existsSync: () => true,
+        retry: { attempts: Number.POSITIVE_INFINITY, delayMs: 1, sleep: async () => undefined },
+      }),
+    ).rejects.toThrow("never");
+    expect(attempts).toBe(VSCODE_ACQUISITION_RETRY.attempts);
   });
 });

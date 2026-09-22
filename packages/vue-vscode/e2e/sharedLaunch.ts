@@ -236,7 +236,12 @@ export async function resolveVscodeExecutablePath(
     opts.download ??
     (async (v: string) => (await import("@vscode/test-electron")).downloadAndUnzipVSCode(v));
   const retry: VscodeAcquisitionRetry = { ...VSCODE_ACQUISITION_RETRY, ...opts.retry };
-  const attempts = Math.max(1, Math.floor(retry.attempts));
+  // Bounded means finite: a non-finite or non-numeric count falls back to the
+  // default policy rather than retrying forever.
+  const configured = Math.floor(retry.attempts);
+  const attempts = Number.isFinite(configured)
+    ? Math.max(1, configured)
+    : VSCODE_ACQUISITION_RETRY.attempts;
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {

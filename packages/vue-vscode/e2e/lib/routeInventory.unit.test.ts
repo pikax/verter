@@ -131,6 +131,11 @@ describe("VS Code E2E route inventory", () => {
       ).toEqual(["monorepo@tsgo", "no-config@off"]);
     });
 
+    it("treats an explicitly empty E2E_ROUTES as an error, never as the default matrix", () => {
+      // A shard whose matrix entry lost its routes must fail, not run every route.
+      expect(() => selectE2eRunRoutes({ envRoutes: "" })).toThrow(/at least one/);
+    });
+
     it("refuses E2E_ROUTES combined with any other selector, including a labelled --fixture", () => {
       // The labelled `--fixture` used to win silently over E2E_ROUTES.
       for (const conflict of [
@@ -160,7 +165,10 @@ describe("VS Code E2E route inventory", () => {
 
     it("refuses an empty, duplicated, or unknown selection", () => {
       expect(() => selectE2eRoutesByLabels("")).toThrow(/at least one/);
-      expect(() => selectE2eRoutesByLabels(" , ")).toThrow(/at least one/);
+      expect(() => selectE2eRoutesByLabels(" , ")).toThrow(/empty field/);
+      // An empty field is a malformed list, never silently dropped.
+      expect(() => selectE2eRoutesByLabels("monorepo@tsgo,,no-config@off")).toThrow(/empty/);
+      expect(() => selectE2eRoutesByLabels("monorepo@tsgo,")).toThrow(/empty/);
       expect(() => selectE2eRoutesByLabels("monorepo@tsgo,monorepo@tsgo")).toThrow(/twice/);
       expect(() => selectE2eRoutesByLabels("monorepo@nope")).toThrow(/Unsupported/);
       expect(() => selectE2eRoutesByLabels("nope@tsgo")).toThrow(/matched nothing/);
