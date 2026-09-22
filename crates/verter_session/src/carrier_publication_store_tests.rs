@@ -1399,3 +1399,111 @@ fn superseded_generation_retains_stable_unit_for_revisit() {
         "the superseded generation's verified unit must be retained for revisit, not re-parsed"
     );
 }
+
+/// The publish fence binds the ADOPT path too.
+///
+/// `publish_shared` retains a verified parse regardless of currency and
+/// then fences the ENVELOPE on it, so a generation that lost currency
+/// mid-parse is superseded instead of serving a stale snapshot. Adoption
+/// serves an envelope by the same right, so it answers to the same fence:
+/// otherwise the invariant held only on whichever path a lane happened to
+/// take, and one losing generation was `Superseded` when it ran the parse
+/// but `Adopted` when it adopted another lane's retained unit. That made
+/// `concurrent_differing_generations_of_one_content_parse_once` flaky —
+/// it raced for the path, not for the invariant.
+///
+/// Deterministic: the adopter is parked INSIDE its retained read, currency
+/// is stolen while it is parked, and only then is the unit handed back. No
+/// timing surrogate decides the outcome.
+#[test]
+fn a_generation_that_loses_currency_while_adopting_is_superseded() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Parks the adopter inside its `retained` read until the test thread
+    /// has stolen currency, then delegates to a real bounded store.
+    struct GateUnits {
+        inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore,
+        arrive: Barrier,
+        release: Barrier,
+        gated: AtomicBool,
+    }
+
+    impl crate::carrier_publication_store::persistence::CarrierStableUnitStore for GateUnits {
+        fn retained(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
+            if self.gated.swap(false, Ordering::SeqCst) {
+                self.arrive.wait();
+                self.release.wait();
+            }
+            self.inner.retained(id, accepted)
+        }
+
+        fn retain(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+            artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+            cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
+        ) {
+            self.inner.retain(id, accepted, artifact, cohort);
+        }
+
+        fn discard(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        ) {
+            self.inner.discard(id, accepted);
+        }
+    }
+
+    let (source, grammar) = authorities();
+    let units = Arc::new(GateUnits {
+        inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default(),
+        arrive: Barrier::new(2),
+        release: Barrier::new(2),
+        // Off for the first generation's own publish, which must reach the
+        // parser and retain the unit this test later adopts.
+        gated: AtomicBool::new(false),
+    });
+    let store = Arc::new(CarrierPublicationStore::with_dependencies(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        units.clone(),
+        Arc::new(crate::types::MetaProvenance::default()),
+    ));
+    let bytes = "<template><p>adopt me</p></template>";
+    let first = accepted(&source, &grammar, 1, bytes);
+    match store.publish_or_get(&first, request(1, &first)) {
+        PublicationOutcome::Published(_) => {}
+        other => panic!("the first generation must publish and retain, got {other:?}"),
+    }
+
+    // The second generation is CURRENT when it enters, so it passes the
+    // entry check and reaches the adopt read, where it parks.
+    units.gated.store(true, Ordering::SeqCst);
+    let second = accepted(&source, &grammar, 2, bytes);
+    let adopter_store = Arc::clone(&store);
+    let adopter = thread::spawn(move || adopter_store.publish_or_get(&second, request(2, &second)));
+    units.arrive.wait();
+    // Steal currency while it is parked at the adopt read.
+    let _third = accepted(&source, &grammar, 3, "<template><p>other</p></template>");
+    units.release.wait();
+
+    assert!(
+        matches!(
+            adopter.join().expect("adopter worker"),
+            PublicationOutcome::Superseded(_)
+        ),
+        "a generation that lost currency while adopting must be superseded, not serve a \
+         stale snapshot through the adopt path"
+    );
+    assert_eq!(
+        store.audit_snapshot().parser_started,
+        1,
+        "the fence rejects the ENVELOPE, never the retained parse: adoption must not re-parse"
+    );
+}
