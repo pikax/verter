@@ -228,7 +228,7 @@ fn abandon_provisional_call_members(dispatch: &ProjectSemanticDispatch<'_>) {
         .drain_scc(0);
     for member in drained {
         if let PendingObligationDomain::ResolveCall(state) = member.domain {
-            dispatch.resolve_call_abort_inline_flight(state.inline_flight.as_ref());
+            dispatch.abort_inline_flight(state.inline_flight.as_ref());
             if let Some(session) = state.staged_session {
                 dispatch.abandon_session(session);
             }
