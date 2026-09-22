@@ -42,10 +42,11 @@ use std::sync::Arc;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::raise::{
-    node_can_shell_raise, node_contains_semantic_miss_or_unraisable,
-    node_is_expanded_surface_legacy_equivalent, node_raised_shape_facts, node_raised_shape_for_eq,
-    project_node_publication_score_with_dispatch, raised_shape_eq_node_type_expr,
-    raised_shape_eq_nodes, type_expr_publication_score, PublicationScore,
+    node_can_shell_raise_with_dispatch, node_contains_semantic_miss_with_dispatch,
+    node_raised_shape_facts_with_dispatch, node_raised_shape_for_eq_with_dispatch,
+    project_node_publication_score_with_dispatch, raised_shape_eq_node_type_expr_with_dispatch,
+    raised_shape_eq_nodes_with_dispatch, type_expr_publication_score, NodeShapeEq,
+    PublicationScore, RaisedNodeShapeFacts,
 };
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta_query_engine::{
@@ -58,6 +59,61 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryValueTag, SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
+
+// Host-taking shims over the dispatch-taking node-domain decision API.
+//
+// The production API takes the caller's `&ProjectSemanticDispatch` at every
+// member, because every production decision site already holds one. The parity
+// corpus instead holds a `&VerterHost` per fixture, so these suite-local
+// wrappers mint the one dispatch each assertion needs. They are the SUITE's
+// convenience, not a second production signature form.
+
+fn node_can_shell_raise(host: &VerterHost, node: SemanticNodeId) -> bool {
+    node_can_shell_raise_with_dispatch(&ProjectSemanticDispatch::new(host), node)
+}
+
+/// `true` when the whole raise is `None` OR the raised shape carries a semantic
+/// miss anywhere — the None→`true`-collapsing reading the Kind-B sink adapters
+/// apply (an unraisable node is unusable, so it counts as a miss).
+fn node_contains_semantic_miss_or_unraisable(host: &VerterHost, node: SemanticNodeId) -> bool {
+    node_contains_semantic_miss_with_dispatch(&ProjectSemanticDispatch::new(host), node)
+        .unwrap_or(true)
+}
+
+/// Node-domain equivalent of `type_expr_is_expanded_surface(raise(node))`. A
+/// whole-raise `None` is `false` (no surface to be open).
+fn node_is_expanded_surface_legacy_equivalent(host: &VerterHost, node: SemanticNodeId) -> bool {
+    node_raised_shape_facts(host, node)
+        .map(|facts| facts.expanded_surface())
+        .unwrap_or(false)
+}
+
+fn node_raised_shape_facts(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> Option<RaisedNodeShapeFacts> {
+    node_raised_shape_facts_with_dispatch(&ProjectSemanticDispatch::new(host), node)
+}
+
+fn node_raised_shape_for_eq(
+    host: &VerterHost,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<NodeShapeEq> {
+    node_raised_shape_for_eq_with_dispatch(&ProjectSemanticDispatch::new(host), node, expr)
+}
+
+fn raised_shape_eq_node_type_expr(
+    host: &VerterHost,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<bool> {
+    raised_shape_eq_node_type_expr_with_dispatch(&ProjectSemanticDispatch::new(host), node, expr)
+}
+
+fn raised_shape_eq_nodes(host: &VerterHost, a: SemanticNodeId, b: SemanticNodeId) -> Option<bool> {
+    raised_shape_eq_nodes_with_dispatch(&ProjectSemanticDispatch::new(host), a, b)
+}
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {

@@ -261,10 +261,10 @@ pub enum AuditEvent {
     MappedMemberSelectedKeyRepeated,
     /// One call to `prepared_decl_bundle` from
     /// `SessionDispatchHost::scope_payload_for_base`
-    /// (`mod.rs:1661`) — the four `DispatchHost` trait callbacks
-    /// (`resolve_prepared_type_decl`, `root_identity`,
-    /// `resolve_builtin_utility`, `bare_ref_origin`) all route through this
-    /// helper. Dominant warm-read attribution for the K-loop hot path.
+    /// (`mod.rs:4164`) — both adapter lookup methods
+    /// (`resolve_prepared_type_decl`, `resolve_builtin_utility`) route
+    /// through this helper. Dominant warm-read attribution for the K-loop
+    /// hot path.
     PreparedDeclBundleCallsiteScopePayload,
     /// One call to `prepared_decl_bundle` from `build_instantiate`
     /// (`build.rs:495`) — the per-instantiation scope-payload
