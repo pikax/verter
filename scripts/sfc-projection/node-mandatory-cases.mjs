@@ -97,6 +97,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP12-jsx",
     "STP12-suppression",
   ]),
+  STP13: Object.freeze([
+    "STP13-options-this",
+    "STP13-mixins",
+    "STP13-combined",
+    "STP13-shadowed-macro",
+    "STP13-options-instance",
+  ]),
   STP14: Object.freeze([
     "STP14-local-capture",
     "STP14-dependent-default",
@@ -124,5 +131,6 @@ export const STP9_MANDATORY_CASES = NODE_MANDATORY_CASES.STP9;
 export const STP10_MANDATORY_CASES = NODE_MANDATORY_CASES.STP10;
 export const STP11_MANDATORY_CASES = NODE_MANDATORY_CASES.STP11;
 export const STP12_MANDATORY_CASES = NODE_MANDATORY_CASES.STP12;
+export const STP13_MANDATORY_CASES = NODE_MANDATORY_CASES.STP13;
 export const STP14_MANDATORY_CASES = NODE_MANDATORY_CASES.STP14;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

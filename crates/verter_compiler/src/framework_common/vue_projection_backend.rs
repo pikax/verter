@@ -34,6 +34,15 @@ use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
+use crate::ide::vue_projection::options_api::project_options_pair;
+
+/// STP13 named products: the acceptance surface of
+/// [`VueProjectionBackend::options_projection`]. Re-exported here (rather
+/// than through `ide`, which is crate-internal) so qualification harnesses
+/// and the STP58 activation owner name the same types as this backend.
+pub use crate::ide::vue_projection::options_api::{
+    CombinedScriptProjection, OptionsComponentProjection, OptionsTemplateBindingView,
+};
 use crate::ide::vue_projection::script_setup::{
     project_script_pair, ScriptBlockInput, ScriptProjectionFacts, SetupProjectionRefusal,
 };
@@ -148,6 +157,19 @@ impl VueProjectionBackend {
     ) -> Result<ScriptProjectionFacts, SetupProjectionRefusal> {
         let (normal, setup, generic) = self.script_blocks(source, artifact)?;
         project_script_pair(normal, setup, generic)
+    }
+
+    /// Classic Options API plus combined-script facts for the admitted
+    /// parse: Options members, combined module/Options scope, and the
+    /// template binding view inputs. Dormant relative to
+    /// [`Self::project_ide`]; STP58 owns Vue atomic activation.
+    pub fn options_projection(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<CombinedScriptProjection, SetupProjectionRefusal> {
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        project_options_pair(normal, setup, generic)
     }
 
     /// Binder-aware public dependency capture for the admitted parse: the
