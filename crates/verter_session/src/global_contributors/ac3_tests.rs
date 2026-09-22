@@ -29,30 +29,31 @@ fn lookup_path_source_has_no_known_canonicals_scan() {
         .nth(1)
         .and_then(|rest| rest.split("\n    pub(super) fn ").next())
         .expect("resolve_external_module_augmentation body");
-    let nominal = build
-        .split("fn runtime_nominal_call_signatures(")
+    let discovery = include_str!("../project_semantic_dispatch/signature_discovery.rs");
+    let nominal = discovery
+        .split("fn runtime_nominal(")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn first_parameter(").next())
-        .expect("runtime_nominal_call_signatures body");
+        .and_then(|rest| rest.split("\n    fn apparent(").next())
+        .expect("runtime_nominal body");
     assert!(
         !external.contains("known_canonicals()"),
         "resolve_external_module_augmentation must not scan known_canonicals"
     );
     assert!(
         !nominal.contains("known_canonicals()"),
-        "runtime_nominal_call_signatures must not scan known_canonicals"
+        "the lib runtime nominal's contributors must not scan known_canonicals"
     );
     assert!(
         nominal.contains("current_request_canonical"),
-        "runtime_nominal_call_signatures must use the request's compiler options"
+        "the lib runtime nominal must use the request's compiler options"
     );
     assert!(
         !nominal.contains("snapshot_canonicals()"),
-        "runtime_nominal_call_signatures must not pick the first workspace file"
+        "the lib runtime nominal must not pick the first workspace file"
     );
     assert!(
         !nominal.contains("overlay_canonicals()"),
-        "runtime_nominal_call_signatures must not pick the first overlay file"
+        "the lib runtime nominal must not pick the first overlay file"
     );
     let collect = build
         .split("fn collect_augmentation_contributions(")
