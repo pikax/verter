@@ -17,7 +17,7 @@
     "basisDrift": "Squash merging replaces branch commit identities. The source title and date are descriptive context only; the verifiers check current code and structural contracts without Git object or ancestry requirements."
   },
   "structural": [
-    { "path": "crates/verter_scheduler/src/scheduler.rs", "fileLoc": 20941 },
+    { "path": "crates/verter_scheduler/src/scheduler.rs", "fileLoc": 20953 },
     {
       "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
       "fileLoc": 15036
