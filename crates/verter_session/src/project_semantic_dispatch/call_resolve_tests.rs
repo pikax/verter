@@ -3610,6 +3610,63 @@ fn union_non_callable_arm_is_not_callable() {
     );
 }
 
+/// Only a callee that NEVER resolved (`Opaque(Miss)`) is `NotCallable` on
+/// an empty candidate set; every other opaque payload is an incomplete
+/// callee, not a settled type with no signature. A callee whose resolution
+/// was cancelled or tripped a budget carries no evidence about its
+/// signatures, so the call degrades through the shared signature list's
+/// incompleteness (`Budget` / `Undecidable`) — never `NotCallable`.
+/// Mutation recipe: classify every `Opaque(_)` callee as unresolved and the
+/// cancelled callee below answers `NotCallable`.
+#[test]
+fn incomplete_opaque_callee_is_not_classified_not_callable() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let missing = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::Miss,
+    ));
+    assert!(
+        matches!(
+            dispatch.execute_resolve_call(call_key(
+                &dispatch,
+                missing,
+                CallKind::Call,
+                None,
+                Vec::new(),
+            )),
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::NotCallable
+            )
+        ),
+        "a typed miss has no type to enumerate and is not callable"
+    );
+    for incomplete in [
+        crate::semantic_query::QueryError::Cancelled,
+        crate::semantic_query::QueryError::Other(Arc::from("unsettled")),
+    ] {
+        let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
+        let step = dispatch.execute_resolve_call(call_key(
+            &dispatch,
+            callee,
+            CallKind::Call,
+            None,
+            Vec::new(),
+        ));
+        assert!(
+            matches!(
+                step,
+                super::call_resolve::ResolveCallStep::Degraded(
+                    crate::semantic_query::ResolveCallFailure::Budget
+                        | crate::semantic_query::ResolveCallFailure::Undecidable
+                )
+            ),
+            "an incomplete callee ({incomplete:?}) degrades as incomplete, never \
+             `NotCallable`; got {step:?}"
+        );
+    }
+}
+
 /// UNCERTAINTY in any arm degrades the whole call: an arm whose parameter
 /// type is unresolvable cannot be matched against the other arm, so the
 /// shared list does not settle and the call is `Undecidable` — never

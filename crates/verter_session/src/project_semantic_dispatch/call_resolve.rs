@@ -1303,11 +1303,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Whether the callee NEVER resolved: a typed miss has no type to
+    /// enumerate. Every other opaque payload (a cancelled or budget-tripped
+    /// resolution, a recursion carrier, an expandable declaration shell) is
+    /// an incomplete callee, not a settled type without a signature — the
+    /// shared signature list reports its own incompleteness for those.
     fn call_callee_is_unresolved(&self, mut node: SemanticNodeId) -> bool {
         let mut seen = rustc_hash::FxHashSet::default();
         while seen.insert(node) {
             match self.graph().node_data(node).as_deref() {
-                Some(SemanticNodeData::Opaque(_)) => return true,
+                Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss)) => {
+                    return true
+                }
                 Some(SemanticNodeData::Alias(target)) => node = *target,
                 _ => return false,
             }

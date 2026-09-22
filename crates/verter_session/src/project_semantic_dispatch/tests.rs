@@ -12320,6 +12320,155 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     );
 }
 
+/// A union subject distributes through the signature utilities arm by arm:
+/// `ReturnType<T>` and `ThisParameterType<T>` are distributive conditionals
+/// (`ReturnType<typeof a | typeof b>` is `string | number`,
+/// `ThisParameterType<typeof a | typeof b>` is the union of the receivers),
+/// and `OmitThisParameter<T>` follows its lib definition
+/// (`unknown extends ThisParameterType<T> ? T : …`): when every arm carries
+/// a receiver each arm is republished without it; one receiver-less arm
+/// makes the receiver union `unknown` and returns the subject unchanged.
+/// Mutation recipe: hand the undistributed union to the inference read and
+/// `ThisParameterType` answers `unknown` while `OmitThisParameter` returns
+/// the union with its receivers intact.
+#[test]
+fn signature_utilities_distribute_over_union_subjects() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/fns.ts",
+        "export function a(this: { x: number }): string { return \"\" }\n\
+         export function b(this: { y: string }, n: number): number { return n }\n\
+         export function c(): boolean { return true }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let typeof_of = |name: &str| -> SemanticNodeId {
+        match dispatch.execute_type_node(dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId {
+                    canonical_id: Arc::from("/w/fns.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                },
+                name: Arc::from(name),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected typeof {name} to resolve, got {other:?}"),
+        }
+    };
+    let instantiate = |utility: &str, subject: SemanticNodeId| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                utility_identity(&graph, utility),
+                Arc::from(vec![subject].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ),
+        )) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected Value for {utility}<union>, got {other:?}"),
+        }
+    };
+    let union_members = |node: SemanticNodeId, what: &str| -> Vec<SemanticNodeId> {
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            other => panic!("{what} must be a union, got {other:?}"),
+        }
+    };
+    let receiver_key = |member: SemanticNodeId| -> String {
+        match graph.node_data(member).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                let members = surface.positive_members();
+                assert_eq!(members.len(), 1, "each receiver has one member");
+                format!("{:?}", members[0].key)
+            }
+            other => panic!("receiver must be an object, got {other:?}"),
+        }
+    };
+
+    let a = typeof_of("a");
+    let b = typeof_of("b");
+    let c = typeof_of("c");
+    let ab = dispatch.intern_normalized_union_or_intersection(&[a, b], true);
+    assert_eq!(
+        union_members(ab, "typeof a | typeof b").len(),
+        2,
+        "the fixture subject is a two-arm union"
+    );
+
+    // `ReturnType<typeof a | typeof b>` = `string | number`.
+    let returns = union_members(
+        instantiate("ReturnType", ab),
+        "ReturnType<typeof a | typeof b>",
+    );
+    let mut return_kinds: Vec<PrimitiveKind> = returns
+        .iter()
+        .map(|member| match graph.node_data(*member).as_deref() {
+            Some(SemanticNodeData::Primitive(kind)) => *kind,
+            other => panic!("distributed return must be a primitive, got {other:?}"),
+        })
+        .collect();
+    return_kinds.sort_by_key(|kind| format!("{kind:?}"));
+    assert_eq!(
+        return_kinds,
+        vec![PrimitiveKind::Number, PrimitiveKind::String],
+        "ReturnType distributes over the union's arms"
+    );
+
+    // `ThisParameterType<typeof a | typeof b>` = `{ x: number } | { y: string }`.
+    let receivers = union_members(
+        instantiate("ThisParameterType", ab),
+        "ThisParameterType<typeof a | typeof b>",
+    );
+    let mut receiver_keys: Vec<String> = receivers.iter().map(|m| receiver_key(*m)).collect();
+    receiver_keys.sort();
+    assert_eq!(receiver_keys.len(), 2, "one receiver per arm");
+    assert!(
+        receiver_keys[0].contains("\"x\"") && receiver_keys[1].contains("\"y\""),
+        "ThisParameterType distributes to the per-arm receivers, got {receiver_keys:?}"
+    );
+
+    // `OmitThisParameter<typeof a | typeof b>`: every arm has a receiver, so
+    // each arm is republished without it.
+    let omitted = instantiate("OmitThisParameter", ab);
+    assert_ne!(omitted, ab, "a receiver-bearing union is rewritten");
+    let stripped = union_members(omitted, "OmitThisParameter<typeof a | typeof b>");
+    assert_eq!(stripped.len(), 2, "one receiver-free arm per arm");
+    for member in &stripped {
+        match graph.node_data(*member).as_deref() {
+            Some(SemanticNodeData::Signature { params, .. }) => assert!(
+                crate::semantic_query::split_this_receiver(params)
+                    .0
+                    .is_none(),
+                "the republished arm carries no `this` receiver"
+            ),
+            other => panic!("republished arm must be a signature, got {other:?}"),
+        }
+    }
+
+    // `OmitThisParameter<typeof a | typeof c>`: `c` has no receiver, so
+    // `ThisParameterType<typeof a | typeof c>` is `unknown` and the lib
+    // conditional returns the subject unchanged.
+    let ac = dispatch.intern_normalized_union_or_intersection(&[a, c], true);
+    assert_eq!(
+        instantiate("OmitThisParameter", ac),
+        ac,
+        "a receiver-less arm keeps the whole subject unchanged"
+    );
+}
+
 /// `ReturnType<{ a: number }>` (object that is not a call-signature
 /// wrapper) keeps the deferred `Opaque(Miss)` shell + `Instantiate`
 /// edge. The extract helper only matches pure call-signature Objects

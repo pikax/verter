@@ -1293,8 +1293,9 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
         d.utility_inference_signature(overloaded, SignatureKind::Call),
         Some(last)
     );
+    let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
     assert_eq!(
-        d.resolve_signature_utility(SignatureUtility::ReturnType, overloaded),
+        d.resolve_signature_utility(SignatureUtility::ReturnType, overloaded, context),
         Some(string)
     );
     assert_eq!(
@@ -1330,11 +1331,18 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
         );
         assert_eq!(
             d.utility_inference_signature(subject, SignatureKind::Call),
-            None
-        );
-        assert_eq!(
-            d.resolve_signature_utility(SignatureUtility::ReturnType, subject),
-            None
+            None,
+            "neither a union nor a type parameter is an inference source"
         );
     }
+    // The utility itself DISTRIBUTES over the union's arms and re-forms the
+    // per-arm answers (`number | boolean`); a type parameter stays deferred.
+    assert_eq!(
+        d.resolve_signature_utility(SignatureUtility::ReturnType, union, context),
+        Some(d.intern_normalized_union_or_intersection(&[number, boolean], true))
+    );
+    assert_eq!(
+        d.resolve_signature_utility(SignatureUtility::ReturnType, constrained, context),
+        None
+    );
 }

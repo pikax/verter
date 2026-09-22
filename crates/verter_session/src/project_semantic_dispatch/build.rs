@@ -5477,7 +5477,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // ---- Function-signature utilities ----
         // One keyed read over the shared signature list: the subject settles
         // at this demand point (a decl-placeholder / alias-shell / `DeclRef`
-        // carrier argument resolves to its signature-bearing surface), and the
+        // carrier argument resolves to its signature-bearing surface), a union
+        // subject distributes arm by arm under the same context, and the
         // utility infers from it. An unanswerable subject publishes the opaque
         // shell so downstream consumers still see an `Instantiate` edge
         // anchored to the utility identity.
@@ -5487,7 +5488,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             let source_resolved = self.resolve_signature_source_carrier(*subject, context);
             let result = self
-                .resolve_signature_utility(utility, source_resolved)
+                .resolve_signature_utility(utility, source_resolved, context)
                 .unwrap_or_else(|| self.opaque(QueryError::Miss));
             record_utility_edges(result);
             return (QueryResult::Value(result), fence, false);
