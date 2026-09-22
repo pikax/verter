@@ -3733,11 +3733,18 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
             .collect()
     };
 
-    // The re-arm: background receipts, oldest document first.
+    // The re-arm: background receipts, oldest document first by receipt.
+    // Deposited NEWEST first: the coordinator may wake between two deposits and
+    // absorb a partial batch, and it serves whatever it absorbed newest-first.
+    // Deposited oldest first, a partial batch of one is the oldest document,
+    // which then takes a background slot and is no longer pending when the user
+    // turns to it below — the touch has nothing to admit and the wait runs out.
+    // Newest first, every partial batch is a newest-first prefix of the whole,
+    // so the oldest document never enters the window on its own.
     let gate = provider.gate_diagnostics();
     provider.clear_calls();
     let overdue = Instant::now() - Duration::from_secs(60);
-    for (index, (canonical_id, uri)) in docs.iter().enumerate() {
+    for (index, (canonical_id, uri)) in docs.iter().enumerate().rev() {
         handle.signal_diagnostics_only(
             canonical_id.clone(),
             uri.as_str().to_string(),
