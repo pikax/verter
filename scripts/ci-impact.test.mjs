@@ -18,6 +18,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CI_INERT_PATHS,
   COMPILE_CONTRACT_OWNER_CRATES,
   ESCAPE_HATCHES,
   LANE_GATES,
@@ -26,6 +27,7 @@ import {
   classifyCiImpact,
   composeLaneGates,
   formatGithubOutput,
+  isCiInert,
   ownedFilesFromFilterOutputs,
 } from "./ci-impact.mjs";
 import { buildWorkspaceIndex } from "./lib/crate-graph.mjs";
@@ -115,16 +117,21 @@ test("a crate nothing depends on impacts no lane, and a dev-dependency edge coun
   assert.equal(dev.lanes.harness, true);
 });
 
-test("a non-crate file a path filter owns, or a known non-input, impacts nothing", () => {
-  const owned = new Set(["package.json", "scripts/jetbrains-gate.mjs", "pnpm-lock.yaml"]);
+test("a non-crate file a path filter owns, or an explicitly CI-inert one, impacts nothing", () => {
+  const owned = new Set([
+    "package.json",
+    "scripts/jetbrains-gate.mjs",
+    "pnpm-lock.yaml",
+    "packages/vue-vscode/src/extension.ts",
+  ]);
   const result = classifyCiImpact(
     [
       "package.json",
       "scripts/jetbrains-gate.mjs",
       "pnpm-lock.yaml",
-      "docs/guide.md",
       "packages/vue-vscode/src/extension.ts",
-      ".github/README.md",
+      "docs/guide.md",
+      "CHANGELOG.md",
     ],
     metadata,
     ROOTS,
@@ -134,6 +141,46 @@ test("a non-crate file a path filter owns, or a known non-input, impacts nothing
   assert.deepEqual(result.directCrates, []);
   assert.deepEqual(result.lanes, allOff);
   assert.equal(result.ownedNonRust.length, 6);
+});
+
+test("no top-level directory is inert by assumption: an unowned file under one falls back", () => {
+  // Both are read by Rust tests today; the rust filter owns them. Without an
+  // owner they must force the full graph, never be waved through because
+  // their directory looked like a non-input.
+  for (const file of [
+    "schemas/scanners-replacement-v1.schema.json",
+    "test-corpora/style-ir/css-baseline-legacy.json",
+    "extensions/lapce/src/lib.rs",
+    "examples/reference/app.vue",
+    "tools/something.mjs",
+    "mcp/config.json",
+    ".github/README.md",
+  ]) {
+    assert.equal(isCiInert(file), false, file);
+    const result = classifyCiImpact([file], metadata, ROOTS, { ownedFiles: new Set() });
+    assert.equal(result.full, true, file);
+    assert.equal(result.fullReasons[0].id, "unrecognized-path", file);
+  }
+  // The inert list is small and names only files with no CI consumer.
+  assert.ok(CI_INERT_PATHS.length <= 16);
+  for (const entry of CI_INERT_PATHS) {
+    assert.doesNotMatch(
+      entry,
+      /^(schemas|test-corpora|extensions|examples|tools|mcp|packages|crates|scripts)\b/,
+    );
+  }
+});
+
+test("the rust filter owns the directories Rust tests read", () => {
+  const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const start = ci.indexOf("\n            rust:\n");
+  assert.notEqual(start, -1, "ci.yml must declare the rust filter");
+  const rest = ci.slice(start + 1);
+  const next = rest.search(/\n(?: {12}#[^\n]*\n)* {12}[a-z_]+:\n/);
+  const block = next === -1 ? rest : rest.slice(0, next);
+  for (const owned of ["schemas/**", "test-corpora/**"]) {
+    assert.ok(block.includes(`- '${owned}'`), `the rust filter must own ${owned}`);
+  }
 });
 
 test("a non-crate file no path filter owns forces every lane on rather than guessing", () => {

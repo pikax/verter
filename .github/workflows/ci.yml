@@ -67,6 +67,11 @@ jobs:
               - '**'
             rust:
               - 'crates/**'
+              # Read by Rust tests (`verter_source_policy_gate` validates the
+              # schemas; the style-IR corpora are read and `include_str!`-ed), so
+              # this lane owns them; nothing else does.
+              - 'schemas/**'
+              - 'test-corpora/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -2060,8 +2065,10 @@ jobs:
           fi
       # Each editor's section ran even when an earlier editor failed, so one
       # run reports every editor's regression; the job's result is this
-      # verdict. A step skipped because an earlier step of ITS OWN section
-      # failed counts against that section, never against another.
+      # verdict. Every step of every section must have SUCCEEDED: a skipped
+      # step is a failure too (within a section a step only skips behind an
+      # earlier failure of that section), so an accidental `if:` can never
+      # green a section by skipping one of its steps.
       - name: Editor contracts verdict
         if: always()
         env:
@@ -2075,10 +2082,16 @@ jobs:
           failed=0
           while IFS='=' read -r editor outcomes; do
             [ -z "$editor" ] && continue
-            case ",$outcomes," in
-              *,failure,*|*,cancelled,*) echo "::error::$editor contract failed ($outcomes)"; failed=1;;
-              *) echo "$editor: ok ($outcomes)";;
-            esac
+            ok=1
+            for outcome in ${outcomes//,/ }; do
+              [ "$outcome" = success ] || ok=0
+            done
+            if [ "$ok" = 1 ]; then
+              echo "$editor: ok ($outcomes)"
+            else
+              echo "::error::$editor contract did not succeed in every step ($outcomes)"
+              failed=1
+            fi
           done <<< "$OUTCOMES"
           exit "$failed"
   # ---------------------------------------------------------------------------

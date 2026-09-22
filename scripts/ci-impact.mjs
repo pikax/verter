@@ -27,7 +27,9 @@
  *     classifier and the crate-graph library it uses, proc-macro crates and
  *     the foundational identity crate) turn EVERY impact-bearing lane on;
  *   - a changed file that maps to no crate, is owned by no path filter and is
- *     not a known non-input (docs, editor config, ...) does the same;
+ *     not on the small explicit CI-inert list (`CI_INERT_PATHS`) does the same;
+ *     no directory is inert by assumption — `schemas/` and `test-corpora/` hold
+ *     files Rust tests read, so their owner is the rust filter, not silence;
  *   - a lane root that is not a workspace member is a configuration error
  *     and refuses to run rather than yielding an always-false lane;
  *   - if `cargo metadata` itself cannot be read the CLI reports a full
@@ -51,7 +53,6 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
 import {
-  KNOWN_NON_RUST_TOP_LEVEL,
   buildReverseDependencyGraph,
   buildWorkspaceIndex,
   mapPathToCrate,
@@ -204,6 +205,38 @@ export const ESCAPE_HATCHES = Object.freeze([
   },
 ]);
 
+/**
+ * Files that positively have no CI consumer. This is NOT the broad
+ * `KNOWN_NON_RUST_TOP_LEVEL` of `affected-tests.mjs`: that list assumes whole
+ * directories are irrelevant to the Rust build, which is a fine default for a
+ * local inner-loop selector and an under-selection for CI, where
+ * `schemas/**` is validated by a Rust test and `test-corpora/**` is read by
+ * Rust tests and `include_str!`. A file that no crate owns, no path filter
+ * owns and this list does not name falls back to the full graph.
+ */
+export const CI_INERT_PATHS = Object.freeze([
+  "docs/",
+  ".claude/",
+  ".husky/",
+  ".vscode/",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "LICENSE",
+  "readme.md",
+  "README.md",
+  "cliff.toml",
+  "netlify.toml",
+  ".gitignore",
+]);
+
+export function isCiInert(relPath) {
+  return CI_INERT_PATHS.some((entry) =>
+    entry.endsWith("/") ? relPath.startsWith(entry) : relPath === entry,
+  );
+}
+
 function matchHatch(relPath, index) {
   for (const rule of ESCAPE_HATCHES) {
     if (rule.test(relPath, index)) return rule;
@@ -218,9 +251,8 @@ function matchHatch(relPath, index) {
  * @param {object} metadata parsed `cargo metadata --format-version=1`
  * @param {Record<string, string[]>} laneRoots
  * @param {{ownedFiles?: Set<string> | null}} [options] files some path filter
- *   matched; a non-crate file outside this set and outside the known
- *   non-inputs forces the full fallback. `null`/absent means nothing is
- *   known to be owned.
+ *   matched; a non-crate file outside this set and outside `CI_INERT_PATHS`
+ *   forces the full fallback. `null`/absent means nothing is known to be owned.
  */
 export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS, options = {}) {
   const ownedFiles = options.ownedFiles ?? new Set();
@@ -250,7 +282,7 @@ export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS,
       directCrates.add(crate.name);
       continue;
     }
-    if (ownedFiles.has(file) || KNOWN_NON_RUST_TOP_LEVEL.has(file.split("/")[0])) {
+    if (ownedFiles.has(file) || isCiInert(file)) {
       ownedNonRust.push(file);
       continue;
     }
