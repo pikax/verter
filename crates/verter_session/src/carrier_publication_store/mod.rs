@@ -855,16 +855,16 @@ impl CarrierPublicationStore {
         );
 
         let (lane, leader, retired_record) = {
-            let mut lanes = match self.lanes.lock() {
-                Ok(lanes) => lanes,
-                Err(_) => return PublicationOutcome::Closed,
-            };
+            let mut lanes = self
+                .lanes
+                .lock()
+                .expect("publication lane table lock poisoned by a worker panic");
             if let Some(lane) = lanes.get(&artifact_id) {
                 let lane = Arc::clone(lane);
-                let mut state = match lane.state.lock() {
-                    Ok(state) => state,
-                    Err(_) => return PublicationOutcome::Closed,
-                };
+                let mut state = lane
+                    .state
+                    .lock()
+                    .expect("publication lane lock poisoned by a worker panic");
                 let retired =
                     matches!(&*state, LaneState::Terminal(value) if value.artifact_expired());
                 if retired {
@@ -874,9 +874,10 @@ impl CarrierPublicationStore {
                 (lane, retired, retired)
             } else {
                 let lane = Arc::new(PublicationLane::vacant());
-                let Ok(mut state) = lane.state.lock() else {
-                    return PublicationOutcome::Closed;
-                };
+                let mut state = lane
+                    .state
+                    .lock()
+                    .expect("publication lane lock poisoned by a worker panic");
                 *state = LaneState::Producing;
                 drop(state);
                 lanes.insert(artifact_id.clone(), Arc::clone(&lane));
@@ -913,18 +914,18 @@ impl CarrierPublicationStore {
                     PublicationAuditKind::TerminalFailure,
                 );
             }
-            let mut state = match lane.state.lock() {
-                Ok(state) => state,
-                Err(_) => return PublicationOutcome::Closed,
-            };
+            let mut state = lane
+                .state
+                .lock()
+                .expect("publication lane lock poisoned by a worker panic");
             *state = LaneState::Terminal(TerminalOutcome::from_outcome(&outcome));
             lane.wake.notify_all();
             outcome
         } else {
-            let mut state = match lane.state.lock() {
-                Ok(state) => state,
-                Err(_) => return PublicationOutcome::Closed,
-            };
+            let mut state = lane
+                .state
+                .lock()
+                .expect("publication lane lock poisoned by a worker panic");
             if let LaneState::Terminal(outcome) = &*state {
                 if self
                     .grammar_authority
@@ -975,7 +976,7 @@ impl CarrierPublicationStore {
                 let waited = lane.wake.wait_timeout(state, Duration::from_millis(5));
                 state = match waited {
                     Ok((state, _)) => state,
-                    Err(_) => return PublicationOutcome::Closed,
+                    Err(_) => panic!("publication lane lock poisoned by a worker panic"),
                 };
             }
         }
@@ -1112,18 +1113,19 @@ impl CarrierPublicationStore {
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
-        let lane = match self.stable_parses.lock() {
-            Ok(mut inflight) => {
-                if let Some(lane) = inflight.get(key) {
-                    Arc::clone(lane)
-                } else {
-                    let lane = Arc::new(StableParseLane::producing());
-                    inflight.insert(key.clone(), Arc::clone(&lane));
-                    drop(inflight);
-                    return self.lead_stable_parse(&lane, key, accepted, request, artifact_id);
-                }
+        let lane = {
+            let mut inflight = self
+                .stable_parses
+                .lock()
+                .expect("stable-parse table lock poisoned by a worker panic");
+            if let Some(lane) = inflight.get(key) {
+                Arc::clone(lane)
+            } else {
+                let lane = Arc::new(StableParseLane::producing());
+                inflight.insert(key.clone(), Arc::clone(&lane));
+                drop(inflight);
+                return self.lead_stable_parse(&lane, key, accepted, request, artifact_id);
             }
-            Err(_) => return StableShared::Done(PublicationOutcome::Closed),
         };
         self.await_stable_parse(&lane, request, artifact_id)
     }
@@ -1136,13 +1138,27 @@ impl CarrierPublicationStore {
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
-        // No second retained read here: `produce` already missed, and a
-        // blocking store must observe exactly one read per lane leader.
-        // The race this could theoretically lose (a unit retained between
-        // that miss and the insert above) is closed the other way: the
-        // entry stays listed until this leader retains below, so a
-        // newcomer either joins this lane or arrives after the retain and
-        // adopts — it never starts a second parse of the same unit.
+        // Double-checked retained read: `produce` missed before the insert
+        // above, but a previous leader may have retained and unlisted
+        // between that miss and this leader's insert. Adopt the retained
+        // unit instead of parsing it a second time.
+        if let Some(candidate) = self.units.retained(artifact_id, accepted) {
+            match self.adopt_retained(candidate, accepted, request, artifact_id) {
+                StableAdoption::Adopted(outcome) => {
+                    if let PublicationOutcome::Adopted(envelope) = &outcome {
+                        self.finish_stable_parse(
+                            lane,
+                            key,
+                            StableParseOutcome::Parsed(Arc::clone(envelope.artifact())),
+                        );
+                    } else {
+                        self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
+                    }
+                    return StableShared::Done(outcome);
+                }
+                StableAdoption::Discarded => {}
+            }
+        }
         let shared = match catch_unwind(AssertUnwindSafe(|| {
             self.parse_stable_unit(accepted, request, artifact_id)
         })) {
@@ -1156,15 +1172,28 @@ impl CarrierPublicationStore {
                 // a newcomer in between either joins this lane or lands on
                 // the double-checked retained read — never on a second
                 // parse of the same unit.
-                if let Ok(mut state) = lane.state.lock() {
-                    *state =
-                        StableParseState::Ready(StableParseOutcome::Parsed(Arc::clone(&artifact)));
-                }
+                *lane
+                    .state
+                    .lock()
+                    .expect("stable-parse lane lock poisoned by a worker panic") =
+                    StableParseState::Ready(StableParseOutcome::Parsed(Arc::clone(&artifact)));
                 lane.wake.notify_all();
-                let outcome = self.publish_shared(&artifact, accepted, request, artifact_id);
-                if let Ok(mut inflight) = self.stable_parses.lock() {
-                    inflight.remove(key);
-                }
+                let outcome = match catch_unwind(AssertUnwindSafe(|| {
+                    self.publish_shared(&artifact, accepted, request, artifact_id)
+                })) {
+                    Ok(outcome) => outcome,
+                    Err(payload) => {
+                        // Never leak the in-flight key when publication
+                        // panics: the outer `publish_or_get` converts the
+                        // resumed unwind into `WinnerPanicked`.
+                        self.finish_stable_parse(lane, key, StableParseOutcome::Parsed(artifact));
+                        std::panic::resume_unwind(payload);
+                    }
+                };
+                self.stable_parses
+                    .lock()
+                    .expect("stable-parse table lock poisoned by a worker panic")
+                    .remove(key);
                 StableShared::Done(outcome)
             }
             StableParseOutcome::Rejected(reject) => {
@@ -1187,10 +1216,10 @@ impl CarrierPublicationStore {
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
-        let mut state = match lane.state.lock() {
-            Ok(state) => state,
-            Err(_) => return StableShared::Done(PublicationOutcome::Closed),
-        };
+        let mut state = lane
+            .state
+            .lock()
+            .expect("stable-parse lane lock poisoned by a worker panic");
         loop {
             if request.cancellation.is_cancelled() {
                 self.audit.push(
@@ -1217,7 +1246,7 @@ impl CarrierPublicationStore {
             let waited = lane.wake.wait_timeout(state, Duration::from_millis(5));
             state = match waited {
                 Ok((state, _)) => state,
-                Err(_) => return StableShared::Done(PublicationOutcome::Closed),
+                Err(_) => panic!("stable-parse lane lock poisoned by a worker panic"),
             };
         }
     }
@@ -1231,13 +1260,16 @@ impl CarrierPublicationStore {
         // Publish before unlisting: a newcomer that misses the entry must
         // land on the double-checked retained read (or a fresh in-flight
         // lane), never on a removed-but-unpublished parse.
-        if let Ok(mut state) = lane.state.lock() {
-            *state = StableParseState::Ready(outcome);
-        }
+        *lane
+            .state
+            .lock()
+            .expect("stable-parse lane lock poisoned by a worker panic") =
+            StableParseState::Ready(outcome);
         lane.wake.notify_all();
-        if let Ok(mut inflight) = self.stable_parses.lock() {
-            inflight.remove(key);
-        }
+        self.stable_parses
+            .lock()
+            .expect("stable-parse table lock poisoned by a worker panic")
+            .remove(key);
     }
 
     /// The one parser run for this stable unit: provenance counters and the
@@ -1307,6 +1339,17 @@ impl CarrierPublicationStore {
         {
             return PublicationOutcome::RegistryMismatch(RegistryMismatch::ProducerVersionMismatch);
         }
+        // The stable unit's identity is byte- and grammar-bound, independent
+        // of snapshot currency: retain the verified parse product even when
+        // this lane's own generation lost currency mid-parse, so a revisit
+        // of these bytes adopts instead of re-parsing. Only the envelope
+        // below stays fenced on currency.
+        self.units.retain(
+            artifact_id,
+            accepted,
+            artifact,
+            current_persisted_carrier_artifact_cohort(),
+        );
         if self
             .grammar_authority
             .validate_accepted_current(&self.source_authority, accepted)
@@ -1331,12 +1374,6 @@ impl CarrierPublicationStore {
             source: accepted.source().clone(),
             artifact: Arc::clone(artifact),
         });
-        self.units.retain(
-            artifact_id,
-            accepted,
-            envelope.artifact(),
-            current_persisted_carrier_artifact_cohort(),
-        );
         self.audit
             .push(request, artifact_id, PublicationAuditKind::Published);
         PublicationOutcome::Published(envelope)

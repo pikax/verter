@@ -956,6 +956,7 @@ mod tests {
         };
         let overload_set = SemanticQueryKey::ResolveOverloadSet {
             callee: dummy_node,
+            kind: crate::semantic_query::SignatureKind::Call,
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::OverloadSetContext {
                 resolve_env_hash: Default::default(),

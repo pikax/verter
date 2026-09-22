@@ -430,13 +430,15 @@ pub(super) enum FamilyKey {
         resolve_env_hash: crate::semantic_query::HashValue,
     },
     /// Mode-erased `ResolveOverloadSet` identity. Carries the context's
-    /// extra env dim (`resolve_env_hash` = `R`). LIVE producer
-    /// (`build_resolve_overload_set` — the ordered visible signature
-    /// group, admitted `Singleflight`); the key carries no projection
+    /// extra env dim (`resolve_env_hash` = `R`) and the requested
+    /// signature bucket (`kind`). LIVE producer
+    /// (`build_resolve_overload_set` — the ordered visible signatures of
+    /// one bucket, admitted `Singleflight`); the key carries no projection
     /// context, so the whole family is mode-erased and lives in the
     /// `Single` slot.
     ResolveOverloadSet {
         callee: SemanticNodeId,
+        kind: crate::semantic_query::SignatureKind,
         type_args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
@@ -1984,11 +1986,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // `Single` slot (the WHY is mode-erasure, not non-production).
         SemanticQueryKey::ResolveOverloadSet {
             callee,
+            kind,
             type_args,
             context,
         } => (
             FamilyKey::ResolveOverloadSet {
                 callee: *callee,
+                kind: *kind,
                 type_args: Arc::clone(type_args),
                 resolve_env_hash: context.resolve_env_hash,
             },

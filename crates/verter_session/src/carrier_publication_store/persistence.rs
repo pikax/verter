@@ -267,7 +267,10 @@ impl CarrierStableUnitStore for InMemoryStableUnitStore {
         accepted: &AcceptedRegisteredCarrierSource,
     ) -> Option<RetainedStableUnit> {
         let key = StableUnitKey::new(id, accepted);
-        let mut units = self.units.lock().ok()?;
+        let mut units = self
+            .units
+            .lock()
+            .expect("stable-unit store lock poisoned by a worker panic");
         let unit = units.units.get(&key).cloned()?;
         units.touch(&key);
         Some(unit)
@@ -289,15 +292,17 @@ impl CarrierStableUnitStore for InMemoryStableUnitStore {
             artifact: Arc::clone(artifact),
             checksum: unit_checksum(artifact, cohort),
         };
-        if let Ok(mut units) = self.units.lock() {
-            units.insert(StableUnitKey::new(id, accepted), unit);
-        }
+        self.units
+            .lock()
+            .expect("stable-unit store lock poisoned by a worker panic")
+            .insert(StableUnitKey::new(id, accepted), unit);
     }
 
     fn discard(&self, id: &FrameworkArtifactId, accepted: &AcceptedRegisteredCarrierSource) {
-        if let Ok(mut units) = self.units.lock() {
-            units.remove(&StableUnitKey::new(id, accepted));
-        }
+        self.units
+            .lock()
+            .expect("stable-unit store lock poisoned by a worker panic")
+            .remove(&StableUnitKey::new(id, accepted));
     }
 }
 
