@@ -682,7 +682,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Each `(node, context)` pair reduces at most once per call to
     /// [`Self::raise_and_reduce_with_context`] — the visited set
     /// deduplicates entry.
-    #[allow(dead_code)] // wired by reduce_graph_node_iterative + dispatch_operator_with_recurse.
     fn reduce_subtree(
         &self,
         root: SemanticNodeId,
@@ -788,7 +787,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   `Infer`, `TemplateLiteral`, `DeclRef`)
     ///   have no semantic operand children for the iterative reducer
     ///   to pre-resolve.
-    #[allow(dead_code)] // wired by reduce_subtree above.
     fn push_demand_children(
         &self,
         data: &SemanticNodeData,
@@ -1034,7 +1032,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   payload carries the hard-stop message).
     /// - Terminals (`Primitive` / `Literal` / `TypeParam` / `Opaque(…)`)
     ///   return `node` as-is.
-    #[allow(dead_code)] // wired by reduce_graph_node_iterative above.
     fn reduce_one(
         &self,
         node: SemanticNodeId,
@@ -1640,7 +1637,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   contain further operator nodes), then return that.
     ///
     /// On `Recursive(id)` or `Error(_)`: return `node` (deferred form).
-    #[allow(dead_code)] // wired by reduce_one above.
     fn dispatch_operator_with_recurse(
         &self,
         node: SemanticNodeId,
@@ -1716,7 +1712,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Helper: convert a reducer-driven hard-stop into an
     /// `Opaque(QueryError::Other(reason))` interned at the origin node's
     /// scope so subsequent raises render the documented sentinel.
-    #[allow(dead_code)] // wired by reduce_one above.
     fn opaque_unknown_with(&self, origin: SemanticNodeId, reason: &str) -> SemanticNodeId {
         self.graph().intern_preserving_scope(
             origin,
@@ -1735,7 +1730,6 @@ type MappingMap =
 
 /// Top-down demand reducer work-stack frame.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // wired by reduce_subtree.
 enum ReduceFrameKind {
     /// Mark `(node, context)` visited, push the matching `Reduce`
     /// frame, then push the demand-selected children.
@@ -1746,14 +1740,12 @@ enum ReduceFrameKind {
     Reduce,
 }
 
-#[allow(dead_code)] // wired by reduce_subtree.
 struct ReduceFrame {
     node: SemanticNodeId,
     context: ProjectionReductionContext,
     kind: ReduceFrameKind,
 }
 
-#[allow(dead_code)] // wired by reduce_subtree.
 impl ReduceFrame {
     #[inline]
     fn descend(node: SemanticNodeId, context: ProjectionReductionContext) -> Self {
@@ -1770,7 +1762,6 @@ impl ReduceFrame {
 /// descend frames ONLY in this case; per-prop `Published(Navigate)` /
 /// `Published(Shallow)` and any `StructuralTransit` walk treat the
 /// composite parent as the demand terminal.
-#[allow(dead_code)] // wired by push_demand_children + child-context helpers.
 #[inline]
 fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
     matches!(ctx.demand, ReductionDemand::Published) && matches!(ctx.mode, ProjectionMode::Expanded)
@@ -1807,7 +1798,6 @@ fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
 /// operand demotion preserves the orthogonal Vue heritage policy so a runtime
 /// declaration carrier still filters producer-addressed heritage before it
 /// resolves.
-#[allow(dead_code)] // wired by push_demand_children + reduce_one IndexedAccess.
 #[inline]
 fn indexed_access_object_context(
     parent_context: ProjectionReductionContext,
@@ -1836,7 +1826,6 @@ fn structural_operand_context(
 /// substitutes them per-key internally under a structural-transit
 /// evaluation (see [`crate::project_semantic_dispatch::evaluate`]'s
 /// context-explicit variant).
-#[allow(dead_code)] // wired by reduce_one above.
 fn remap_mapper(
     mapper: &MapperKey,
     mapping: &MappingMap,
@@ -1850,7 +1839,6 @@ fn remap_mapper(
     new_mapper
 }
 
-#[allow(dead_code)] // wired by reduce_one above.
 fn rebuild_object(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -1939,7 +1927,6 @@ fn rebuild_object(
     )
 }
 
-#[allow(dead_code)] // wired by reduce_one above.
 fn rebuild_union_or_intersection(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -1980,7 +1967,6 @@ fn rebuild_union_or_intersection(
     Some(dispatch.graph().intern_preserving_scope(node, data))
 }
 
-#[allow(dead_code)] // wired by reduce_one above.
 fn rebuild_tuple(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -2018,7 +2004,6 @@ fn rebuild_tuple(
     ))
 }
 
-#[allow(dead_code)] // wired by reduce_one above.
 #[allow(clippy::too_many_arguments)]
 fn rebuild_function(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -2195,7 +2180,6 @@ impl ReduceState {
 /// resolution miss), the function returns `false` — the reducer
 /// proceeds with the `Instantiate` dispatch as the safe default
 /// (matches the earlier behaviour).
-#[allow(dead_code)] // wired by InstantiationRef Navigate-terminal gate.
 pub(super) fn userland_instantiation_body_is_closed_object(
     ctx: &dyn crate::resolver_core::ResolverContext,
     base: &crate::semantic_query::DeclIdentity,
@@ -4537,14 +4521,12 @@ pub(crate) fn type_expr_publication_score(expr: &TypeExpr) -> PublicationScore {
     shape_engine::type_expr_publication_score(expr)
 }
 
-// The node-domain decision API is exposed in two signature forms:
-//
-// - DISPATCH-taking (`*_with_dispatch`) — the PRIMARY form. A caller that
-//   already holds a `&ProjectSemanticDispatch` (the sink adapters, the dispatch
-//   internals) passes it so NO redundant `ProjectSemanticDispatch::new` runs.
-// - CTX-taking — a thin convenience that builds ONE dispatch and delegates to
-//   the primary. Used at true boundaries (a caller holding only a
-//   `&dyn ResolverContext`) and by the parity suite.
+// The node-domain decision API has ONE signature form: every member takes the
+// caller's `&ProjectSemanticDispatch`. A caller already holds one at every
+// production decision site, so no member re-runs `ProjectSemanticDispatch::new`
+// behind the caller's back — the redundant dispatch construction a ctx-taking
+// convenience form performs is what made a per-element equality probe pay one
+// dispatch per element.
 
 /// `true` when `node` can be shell-raised to a `TypeExpr` at all
 /// (`raise(node).is_some()`). DISPATCH-taking primary.
@@ -4554,85 +4536,6 @@ pub(crate) fn node_can_shell_raise_with_dispatch(
     node: SemanticNodeId,
 ) -> bool {
     shape_engine::project_node_facts(dispatch, node).is_some_and(|facts| facts.can_shell_raise())
-}
-
-/// `true` when `node` can be shell-raised to a `TypeExpr` at all
-/// (`raise(node).is_some()`), capturing the `?`-propagation `None` positions.
-//
-// CTX-taking convenience over `node_can_shell_raise_with_dispatch`. Production
-// callers already hold a dispatch and use the `_with_dispatch` primary, so this
-// boundary form is exercised by the parity suite; it stays defined in both
-// builds as the named ctx-taking member of the decision API.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "ctx-taking boundary convenience; production callers use the _with_dispatch \
-                  primary; exercised by the parity suite"
-    )
-)]
-#[must_use]
-pub(crate) fn node_can_shell_raise(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: SemanticNodeId,
-) -> bool {
-    node_can_shell_raise_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
-}
-
-/// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`. A
-/// whole-raise `None` counts as a miss (`true`) — matching how the consuming
-/// Kind-B sites treat a `None` raise (unusable / fall back).
-//
-// Named single-fact member of the node-domain decision API. The Kind-B sink
-// adapters read both facts together through `node_raised_shape_facts_with_dispatch`
-// (one projection), so this single-fact accessor has no production caller; the
-// parity suite exercises it as the equivalence proof.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "single-fact member of the node-domain decision API; the sink adapters read \
-                  both facts via node_raised_shape_facts_with_dispatch; exercised by the parity suite"
-    )
-)]
-#[must_use]
-pub(crate) fn node_contains_semantic_miss_or_unraisable(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: SemanticNodeId,
-) -> bool {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    match shape_engine::project_node_facts(&dispatch, node) {
-        Some(facts) => !facts.materialized(),
-        None => true,
-    }
-}
-
-/// Node-domain equivalent of `type_expr_is_expanded_surface(raise(node))`. A
-/// whole-raise `None` is `false` (no surface to be open).
-//
-// Named single-fact member of the node-domain decision API (see
-// `node_contains_semantic_miss_or_unraisable`): the sink adapters read both
-// facts via `node_raised_shape_facts_with_dispatch`, so this single-fact
-// accessor has no production caller; the parity suite exercises it as the
-// equivalence proof.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "single-fact member of the node-domain decision API; the sink adapters read \
-                  both facts via node_raised_shape_facts_with_dispatch; exercised by the parity suite"
-    )
-)]
-#[must_use]
-pub(crate) fn node_is_expanded_surface_legacy_equivalent(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: SemanticNodeId,
-) -> bool {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    match shape_engine::project_node_facts(&dispatch, node) {
-        Some(facts) => facts.expanded_surface(),
-        None => false,
-    }
 }
 
 /// The node-bound [`RaisedNodeShapeFacts`] witness of `node` (its facts — the
@@ -4709,8 +4612,9 @@ pub(crate) fn node_root_is_published_operator_with_dispatch(
 /// (`!RaisedShapeFacts.materialized`). `None` when the whole raise is `None`,
 /// letting the caller distinguish "no miss" (`Some(false)`) from "unraisable"
 /// (`None`) — DISTINCT from the root-only
-/// [`node_root_is_unmaterialized_sentinel_with_dispatch`] and from the
-/// None→`true`-collapsing [`node_contains_semantic_miss_or_unraisable`].
+/// [`node_root_is_unmaterialized_sentinel_with_dispatch`]. A consumer that
+/// treats an unraisable node as a miss collapses the `None` itself
+/// (`.unwrap_or(true)`); that reading is not a separate member here.
 /// DISPATCH-taking primary — a publication carrier path reads this off the
 /// reduced-output carrier node instead of materialising it to a `TypeExpr` and
 /// running a raised-string walk.
@@ -4746,26 +4650,6 @@ pub(crate) fn node_declaration_facts_with_dispatch(
     shape_engine::project_node_declaration_facts(dispatch, node)
 }
 
-/// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.
-/// Production gates hold a dispatch and use the `_with_dispatch` primary; this
-/// boundary form is exercised by the parity suite as the FACTS-ONLY-algebra
-/// projection in the facts-only-vs-full-fold equivalence proof.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "ctx-taking boundary convenience over the facts-only projection; production \
-                  gates use the _with_dispatch primary; exercised by the parity suite"
-    )
-)]
-#[must_use]
-pub(crate) fn node_raised_shape_facts(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: SemanticNodeId,
-) -> Option<RaisedNodeShapeFacts> {
-    node_raised_shape_facts_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
-}
-
 /// Combined `RaisedShapeFacts` + node-vs-`TypeExpr` equality of `node` in ONE
 /// fold: the route-gate facts AND the no-op/changed decision (`eq_to_expr`) from
 /// a single key-bearing fold (the input `expr` is interned into the SAME
@@ -4780,29 +4664,6 @@ pub(crate) fn node_raised_shape_for_eq_with_dispatch(
     shape_engine::project_node_shape_for_eq(dispatch, node, expr)
 }
 
-/// CTX-taking convenience over `node_raised_shape_for_eq_with_dispatch`.
-/// Production no-op/changed gates already hold a dispatch and use the
-/// `_with_dispatch` primary; this boundary form is exercised by the parity suite
-/// (the facts-only-vs-full-fold equivalence proof: the `facts` it returns —
-/// computed by the KEY-bearing algebra — must equal `node_raised_shape_facts`,
-/// computed by the FACTS-ONLY algebra).
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "ctx-taking boundary convenience; production gates use the _with_dispatch \
-                  primary; exercised by the parity suite"
-    )
-)]
-#[must_use]
-pub(crate) fn node_raised_shape_for_eq(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: SemanticNodeId,
-    expr: &TypeExpr,
-) -> Option<NodeShapeEq> {
-    node_raised_shape_for_eq_with_dispatch(&ProjectSemanticDispatch::new(ctx), node, expr)
-}
-
 /// Raised-shape equality between two nodes: `Some(true)`/`Some(false)` when
 /// BOTH nodes raise to `Some`, `None` when EITHER raise is `None`.
 ///
@@ -4812,17 +4673,17 @@ pub(crate) fn node_raised_shape_for_eq(
 /// the comparison subject.
 //
 // Node-vs-node member of the node-domain decision API: the query-engine
-// admitted-node compare (`route_projection_nodes_eq`) reads successive
-// admitted route nodes through this form. The parity suite exercises it as the
-// equivalence proof against `raise(a) == raise(b)`.
+// admitted-node compare (`route_projection_nodes_eq`) and the Vue authored-
+// locator coverage proof read successive nodes through this form. Both probe
+// element-wise inside a loop, so taking the caller's dispatch keeps the whole
+// probe on one dispatch instead of minting one per element.
 #[must_use]
-pub(crate) fn raised_shape_eq_nodes(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn raised_shape_eq_nodes_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
     a: SemanticNodeId,
     b: SemanticNodeId,
 ) -> Option<bool> {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    shape_engine::raised_shape_eq_nodes(&dispatch, a, b)
+    shape_engine::raised_shape_eq_nodes(dispatch, a, b)
 }
 
 /// Raised-shape equality between a node and a `TypeExpr`: `Some(bool)` when the
@@ -4837,18 +4698,18 @@ pub(crate) fn raised_shape_eq_nodes(
     not(test),
     allow(
         dead_code,
-        reason = "production gates use node_raised_shape_for_eq_with_dispatch (facts + equality \
-                  in one fold); the standalone equality form is exercised by the parity suite"
+        reason = "production gates read facts + equality from one fold via \
+                  node_raised_shape_for_eq_with_dispatch; the standalone equality form \
+                  is exercised by the parity suite"
     )
 )]
 #[must_use]
-pub(crate) fn raised_shape_eq_node_type_expr(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn raised_shape_eq_node_type_expr_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     expr: &TypeExpr,
 ) -> Option<bool> {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    shape_engine::raised_shape_eq_node_type_expr(&dispatch, node, expr)
+    shape_engine::raised_shape_eq_node_type_expr(dispatch, node, expr)
 }
 
 #[cfg(test)]

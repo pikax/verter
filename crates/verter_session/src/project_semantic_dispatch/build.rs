@@ -15,8 +15,8 @@ use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use super::walk::PathWalker;
 use super::{
-    empty_signature, utility_param_names, ConditionalBranchSelection, DispatchHost,
-    ProjectSemanticDispatch, SessionDispatchHost,
+    empty_signature, utility_param_names, ConditionalBranchSelection, ProjectSemanticDispatch,
+    SessionDispatchHost,
 };
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
@@ -2830,7 +2830,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `ensure_indexed_ready_serve(base.defining_canonical)`'s serve
     /// carrier `indexed.whole_hash`, never
     /// from the key. Fetches the [`PreparedTypeDecl`] via
-    /// [`DispatchHost`] and produces **one shell level** of the
+    /// [`SessionDispatchHost`] and produces **one shell level** of the
     /// declaration's structural shape with `args` bound to the decl's
     /// type parameters.
     ///
@@ -2948,8 +2948,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None => crate::semantic_query::HashValue::default(),
         };
 
-        // Intern a scope-carrying placeholder so DispatchHost methods
-        // (resolve_builtin_utility, resolve_prepared_type_decl, etc.) can look
+        // Intern a scope-carrying placeholder so the adapter lookups
+        // (resolve_builtin_utility, resolve_prepared_type_decl) can look
         // up the declaration scope via node_scope(base).
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(decl_canonical),
@@ -3126,7 +3126,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return output.with_observed_self_roots(observed_self_roots);
         }
 
-        // 3. Resolve prepared type decl via `DispatchHost` — the adapter
+        // 3. Resolve prepared type decl via `SessionDispatchHost` — the adapter
         // routes through the sidecar-recorded scope for `base`.
         //
         // The prepared decl is recovered from the declaration artifact
