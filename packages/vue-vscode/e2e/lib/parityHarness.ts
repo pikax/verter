@@ -17,10 +17,12 @@ import {
   ensureTypeProviderSynced,
   invalidateTypeProviderSyncCache,
   logMark,
+  readTestLog,
   sleep,
   waitForDiagnostics,
   waitForDiagnosticsSettled,
 } from "../helpers";
+import { didOpenHandlersInFlight } from "./serverLog";
 import { VIRTUAL_CARRIER_PATTERN } from "./virtualCarrier";
 
 export type ParityFramework = "vue" | "svelte";
@@ -82,16 +84,49 @@ export async function ensureParityReady(entry: string): Promise<vscode.TextDocum
   return openRelative(entry);
 }
 
+/**
+ * Close every editor, reverting unsaved edits first so nothing prompts.
+ *
+ * A language-server restart replays a `did_open` for every document the
+ * client still holds, all at once, to a server that is also rescanning the
+ * workspace. Each open then waits behind the others, and a case that opens its
+ * own file into that queue spends its whole diagnostics budget waiting for a
+ * turn (2026-09-22: 62 replayed opens, five to seven seconds each, and
+ * `vue.matrix.slots.clean` timed out 200ms short of its first sync). Earlier
+ * suites' editors are theirs, not the next epoch's: the new server starts
+ * with nothing to replay.
+ */
+async function closeAllEditors(): Promise<void> {
+  for (const document of vscode.workspace.textDocuments) {
+    if (!document.isDirty || document.isUntitled) continue;
+    await vscode.window.showTextDocument(document, { preview: false });
+    await vscode.commands.executeCommand("workbench.action.files.revert");
+  }
+  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+}
+
 /** Start a clean provider epoch for a state-sensitive parity suite. */
 export async function restartParityReady(entry: string): Promise<vscode.TextDocument> {
+  await closeAllEditors();
   // Marked BEFORE the restart: init generations restart at 1, so the previous
   // server's readiness lines would otherwise vouch for the one still booting.
   const logFloor = logMark();
-  await vscode.commands.executeCommand("verter.restartLanguageServer");
-  invalidateTypeProviderSyncCache(logFloor);
+  const started = Date.now();
   // A restart repeats the root provider handshake, so it takes that budget
   // explicitly rather than the ordinary per-wait default.
-  await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+  const budgetMs = pollBudget("restartTypeProviderSync");
+  await vscode.commands.executeCommand("verter.restartLanguageServer");
+  invalidateTypeProviderSyncCache(logFloor);
+  await ensureTypeProviderSynced({ syncBudgetMs: budgetMs });
+  // A document held without an editor is still replayed. The epoch is usable
+  // once the server has answered every open it was handed, under what is left
+  // of the same handshake budget; a document opened below starts a fair clock.
+  await pollUntilWithin(
+    "restarted server still answering replayed opens",
+    async () => didOpenHandlersInFlight(readTestLog(), logFloor),
+    (inFlight) => inFlight === 0,
+    Math.max(budgetMs - (Date.now() - started), 1_000),
+  );
   return openRelative(entry);
 }
 
@@ -356,7 +391,10 @@ export async function assertReferenceCountAtLeast(
 
 export async function settledDiagnostics(relative: string): Promise<vscode.Diagnostic[]> {
   const doc = await openRelative(relative);
-  return waitForDiagnosticsSettled(doc.uri, { timeoutMs: 12_000, stableMs: 600 });
+  return waitForDiagnosticsSettled(doc.uri, {
+    timeoutMs: pollBudget("parityDiagnosticsSettle"),
+    stableMs: 600,
+  });
 }
 
 export async function errorDiagnostics(relative: string): Promise<vscode.Diagnostic[]> {
@@ -391,7 +429,7 @@ export async function assertHasErrorMatching(
     return matcher.test(hay);
   };
   const diagnostics = await waitForDiagnostics(doc.uri, {
-    timeoutMs: 12_000,
+    timeoutMs: pollBudget("parityDiagnosticsSettle"),
     predicate: matches,
   });
   const errors = diagnostics.filter(
