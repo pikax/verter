@@ -5249,7 +5249,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// DispatchHost adapter routing ( + C1)
+// SessionDispatchHost adapter routing
 // ──────────────────────────────────────────────────────────────────
 
 /// The session-owned [`SessionDispatchHost`] adapter consults the
@@ -5301,7 +5301,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
     assert_eq!(adapter.base_scope(anchor_a), scope_a);
     assert_eq!(adapter.base_scope(anchor_a), scope_a);
 
-    // Trait methods route through `solver_host_for_base`. Without
+    // The adapter lookups route through `scope_payload_for_base`. Without
     // prepared decls set up, `resolve_prepared_type_decl` returns
     // `Missing` but the call succeeds for all scopes (no panic, no
     // stale state between calls).
@@ -5316,10 +5316,14 @@ fn dispatch_host_adapter_routes_per_base_scope() {
         .resolve_prepared_type_decl(global_anchor, &ri)
         .is_missing());
 
-    // `resolve_builtin_utility` and `bare_ref_origin` behave per-scope; without
-    // user shadowings these return `Builtin` / `Unknown` respectively.
-    let _ = adapter.resolve_builtin_utility(anchor_a, "Partial");
-    let _ = adapter.bare_ref_origin(anchor_a, "Foo");
+    // `resolve_builtin_utility` decides per-scope; without a user shadowing
+    // in `scope_a` the compiler-provided utility wins.
+    assert_eq!(
+        adapter.resolve_builtin_utility(anchor_a, "Partial"),
+        BuiltinUtilityResolution::Builtin(Some(
+            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::Partial
+        )),
+    );
 }
 
 #[test]
@@ -5501,7 +5505,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
 // The tests below exercise the shallow + lazy + mode-free
 // `build_instantiate` behaviour. They depend on:
 //  - `build_resolve_decl` producing `Opaque(Miss)` placeholders.
-//  - `build_instantiate` resolving the base via `DispatchHost` and
+//  - `build_instantiate` resolving the base via `SessionDispatchHost` and
 //    interning the shell-level object with member refs.
 //  - `Instantiate` + `SubstituteTypeParam` origin edges.
 //  - the content-free `ResolvedDeclSlotIdentity` slot on `Instantiate.base`.
