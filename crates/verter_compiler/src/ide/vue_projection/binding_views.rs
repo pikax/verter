@@ -255,27 +255,20 @@ fn template_mentions(template: &str) -> FxHashSet<String> {
         names: FxHashSet::default(),
     };
     // Interpolation expressions with brace-depth matching so object
-    // literals (`{{ { a: 1 }.a }}`) do not truncate the snippet.
+    // literals (`{{ { a: 1 }.a }}`) do not truncate the snippet. The
+    // boundary scan tracks JavaScript lexical state, so a `}` inside a
+    // string, template literal, regular expression or comment
+    // (`{{ ok ? '}' : count }}`) never closes the interpolation early.
     let bytes = visible.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'{' && bytes.get(i + 1) == Some(&b'{') {
-            let mut depth = 2usize;
-            let mut j = i + 2;
-            while j < bytes.len() && depth > 0 {
-                if bytes[j] == b'{' {
-                    depth += 1;
-                } else if bytes[j] == b'}' {
-                    depth -= 1;
-                }
-                j += 1;
-            }
-            if depth == 0 {
-                collect_snippet_references(&allocator, &visible[i + 2..j - 2], &mut scan);
-                i = j;
-                continue;
-            }
-            break;
+            let Some(j) = interpolation_end(bytes, i + 2) else {
+                break;
+            };
+            collect_snippet_references(&allocator, &visible[i + 2..j - 2], &mut scan);
+            i = j;
+            continue;
         }
         i += 1;
     }
@@ -290,6 +283,190 @@ fn template_mentions(template: &str) -> FxHashSet<String> {
         tag = start + close;
     }
     scan.names
+}
+
+/// End of an interpolation opened at `bytes[start - 2..start] == "{{"`:
+/// the byte offset past the matching closing `}}`, or `None` when the
+/// template ends first. Nested `{`/`}` pairs balance; bytes inside
+/// single- or double-quoted strings, template literals (including nested
+/// `${ ... }` expressions), line/block comments and regular expression
+/// literals never open, close or balance anything.
+fn interpolation_end(bytes: &[u8], start: usize) -> Option<usize> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Normal,
+        Single,
+        Double,
+        Template,
+        LineComment,
+        BlockComment,
+        Regex,
+        RegexClass,
+    }
+    let mut mode = Mode::Normal;
+    // Suspended modes to resume when a string, template literal,
+    // comment or regex literal closes.
+    let mut suspended: Vec<Mode> = Vec::new();
+    // One entry per `{` consumed in expression position: `true` when the
+    // brace opened a template-literal `${ ... }` (whose `}` resumes
+    // template text), `false` for a plain object/block brace.
+    let mut braces: Vec<bool> = Vec::new();
+    let resume = |mode: &mut Mode, suspended: &mut Vec<Mode>, fallback: Mode| {
+        *mode = suspended.pop().unwrap_or(fallback);
+    };
+    let mut j = start;
+    // Byte before `index`, skipping ASCII whitespace, if any.
+    let prev_significant = |index: usize| -> Option<u8> {
+        let mut k = index;
+        while k > 0 {
+            k -= 1;
+            if !bytes[k].is_ascii_whitespace() {
+                return Some(bytes[k]);
+            }
+        }
+        None
+    };
+    while j < bytes.len() {
+        let byte = bytes[j];
+        let next = bytes.get(j + 1).copied();
+        match mode {
+            Mode::Single | Mode::Double => {
+                let quote = if mode == Mode::Single { b'\'' } else { b'"' };
+                if byte == b'\\' {
+                    j += 1;
+                } else if byte == quote {
+                    resume(&mut mode, &mut suspended, Mode::Normal);
+                }
+            }
+            Mode::Template => {
+                if byte == b'\\' {
+                    j += 1;
+                } else if byte == b'`' {
+                    resume(&mut mode, &mut suspended, Mode::Normal);
+                } else if byte == b'$' && next == Some(b'{') {
+                    // A nested `${ ... }` parses as expression text; its
+                    // closing brace resumes this template literal.
+                    suspended.push(mode);
+                    mode = Mode::Normal;
+                    braces.push(true);
+                    j += 1;
+                }
+                // Every other byte (including bare `{` and `}`) is literal
+                // template text and never balances the interpolation.
+            }
+            Mode::LineComment => {
+                if byte == b'\n' {
+                    resume(&mut mode, &mut suspended, Mode::Normal);
+                }
+            }
+            Mode::BlockComment => {
+                if byte == b'*' && next == Some(b'/') {
+                    resume(&mut mode, &mut suspended, Mode::Normal);
+                    j += 1;
+                }
+            }
+            Mode::Regex => {
+                if byte == b'\\' {
+                    j += 1;
+                } else if byte == b'[' {
+                    suspended.push(mode);
+                    mode = Mode::RegexClass;
+                } else if byte == b'/' || byte == b'\n' {
+                    resume(&mut mode, &mut suspended, Mode::Normal);
+                }
+            }
+            Mode::RegexClass => {
+                if byte == b'\\' {
+                    j += 1;
+                } else if byte == b']' {
+                    resume(&mut mode, &mut suspended, Mode::Regex);
+                }
+            }
+            Mode::Normal => {
+                if byte == b'\'' || byte == b'"' || byte == b'`' {
+                    suspended.push(mode);
+                    mode = if byte == b'\'' {
+                        Mode::Single
+                    } else if byte == b'"' {
+                        Mode::Double
+                    } else {
+                        Mode::Template
+                    };
+                } else if byte == b'/' && next == Some(b'/') {
+                    suspended.push(mode);
+                    mode = Mode::LineComment;
+                    j += 1;
+                } else if byte == b'/' && next == Some(b'*') {
+                    suspended.push(mode);
+                    mode = Mode::BlockComment;
+                    j += 1;
+                } else if byte == b'/' && next != Some(b'/') && next != Some(b'*') {
+                    // A `/` opens a regex literal only in operand position:
+                    // at the expression start or after an operator or opener.
+                    // `//`, `/*` and `/=` (division-assign) never do.
+                    let regex_open = next != Some(b'=')
+                        && !next.is_some_and(|b| b.is_ascii_whitespace())
+                        && match prev_significant(j) {
+                            None => true,
+                            Some(prev) => matches!(
+                                prev,
+                                b'(' | b','
+                                    | b':'
+                                    | b'='
+                                    | b'!'
+                                    | b'?'
+                                    | b'&'
+                                    | b'|'
+                                    | b';'
+                                    | b'{'
+                                    | b'}'
+                                    | b'['
+                                    | b'+'
+                                    | b'-'
+                                    | b'*'
+                                    | b'%'
+                                    | b'<'
+                                    | b'>'
+                                    | b'^'
+                                    | b'~'
+                            ),
+                        };
+                    if regex_open {
+                        suspended.push(mode);
+                        mode = Mode::Regex;
+                    }
+                } else if byte == b'{' {
+                    braces.push(false);
+                } else if byte == b'}' {
+                    if next == Some(b'}') && braces.is_empty() {
+                        return Some(j + 2);
+                    }
+                    if let Some(was_template) = braces.pop() {
+                        if was_template {
+                            mode = suspended.pop().unwrap_or(Mode::Normal);
+                        }
+                    }
+                    // The second half of a `}}` pair balances one more level
+                    // too, or closes the interpolation when nothing is open.
+                    // Only while still in expression position: a `}` that
+                    // resumed template text leaves its neighbour alone.
+                    if next == Some(b'}') && mode == Mode::Normal {
+                        if braces.is_empty() {
+                            return Some(j + 2);
+                        }
+                        if let Some(was_template) = braces.pop() {
+                            if was_template {
+                                mode = suspended.pop().unwrap_or(Mode::Normal);
+                            }
+                        }
+                        j += 1;
+                    }
+                }
+            }
+        }
+        j += 1;
+    }
+    None
 }
 
 /// End of the tag starting at `text[0] == '<'`: the first `>` outside a
@@ -311,10 +488,14 @@ fn find_tag_end(text: &str) -> Option<usize> {
     None
 }
 
-/// Identifier references inside bound attribute values (`:prop="..."`,
-/// `@event="..."`, `#slot="..."`, `v-...="..."`); static attributes
-/// contribute nothing. Values parse as freestanding programs so statement
-/// handlers (`bump(); count++`) and expressions both contribute.
+/// Identifier references inside bound attribute positions
+/// (`:prop="..."`, `@event="..."`, `#slot="..."`, `v-...="..."`); static
+/// attributes contribute nothing. Values parse as freestanding programs so
+/// statement handlers (`bump(); count++`) and expressions both contribute.
+/// Vue directive syntax is honoured, not just `name="value"` pairs:
+/// same-name shorthand (`:count`), dynamic arguments (`:[key]="value"`),
+/// `v-for` aliases (locally bound, never root uses) and `v-slot` bindings
+/// (slot-prop declarations, never root uses).
 fn collect_bound_attribute_references(
     allocator: &Allocator,
     tag: &str,
@@ -338,33 +519,323 @@ fn collect_bound_attribute_references(
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
-        if i < bytes.len() && bytes[i] == b'=' {
+        if i >= bytes.len() || bytes[i] != b'=' {
+            // Valueless attribute: only bound same-name shorthand
+            // (`<div :count>`, `<div v-bind:count>`) names a binding. The
+            // name scan above also absorbs the tag-closing `>` (and `/`),
+            // so strip those before classifying the shorthand.
+            collect_shorthand_reference(name.trim_end_matches(['>', '/']), scan);
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        }
+        let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let value_start = i;
+            while i < bytes.len() && bytes[i] != quote {
                 i += 1;
             }
-            let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
-                let quote = bytes[i];
+            let value = &tag[value_start..i];
+            i += 1;
+            value
+        } else {
+            let value_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
                 i += 1;
-                let value_start = i;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += 1;
-                }
-                let value = &tag[value_start..i];
-                i += 1;
-                value
-            } else {
-                let value_start = i;
-                while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
-                    i += 1;
-                }
-                &tag[value_start..i]
-            };
-            if !value.is_empty() && (name.starts_with([':', '@', '#']) || name.starts_with("v-")) {
-                collect_snippet_references(allocator, value, scan);
+            }
+            &tag[value_start..i]
+        };
+        if value.is_empty() {
+            continue;
+        }
+        collect_directive_references(allocator, name, value, scan);
+    }
+}
+
+/// Vue directive class of one attribute name: which positions name root
+/// bindings and which declare template-local aliases.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectiveKind {
+    /// `:arg`, `v-bind:arg`: the value is a root expression.
+    Bind,
+    /// `@arg`, `v-on:arg`: the value is a root handler expression.
+    On,
+    /// `v-for`: the value is `alias in source`; only the source names
+    /// root bindings.
+    For,
+    /// `v-slot...`, `#...`: the value declares slot-prop aliases; only a
+    /// dynamic argument in the name (`#[name]`) names a root binding.
+    Slot,
+    /// Any other `v-...` directive (`v-model`, `v-if`, `v-show`, ...):
+    /// the value is a root expression.
+    Other,
+    /// A static attribute: contributes nothing.
+    Static,
+}
+
+/// Classify one attribute name into its Vue directive class.
+fn directive_kind(name: &str) -> DirectiveKind {
+    if name.starts_with(':') {
+        DirectiveKind::Bind
+    } else if let Some(rest) = name.strip_prefix("v-bind") {
+        if rest.is_empty() || rest.starts_with([':', '.', '[']) {
+            DirectiveKind::Bind
+        } else {
+            DirectiveKind::Static
+        }
+    } else if name.starts_with('@')
+        || name
+            .strip_prefix("v-on")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '.', '@', '[']))
+    {
+        DirectiveKind::On
+    } else if name == "v-for" {
+        DirectiveKind::For
+    } else if name.starts_with('#')
+        || name == "v-slot"
+        || name.starts_with("v-slot:")
+        || name.starts_with("v-slot[")
+        || name.starts_with("v-slot.")
+    {
+        DirectiveKind::Slot
+    } else if name.starts_with("v-") {
+        DirectiveKind::Other
+    } else {
+        DirectiveKind::Static
+    }
+}
+
+/// Collect references for one bound `name="value"` attribute: the dynamic
+/// argument in the name (if any) plus the value positions that name root
+/// bindings for the directive class.
+fn collect_directive_references(
+    allocator: &Allocator,
+    name: &str,
+    value: &str,
+    scan: &mut ScriptReferenceScan,
+) {
+    let kind = directive_kind(name);
+    if kind == DirectiveKind::Static {
+        return;
+    }
+    // A dynamic argument (`:[key]`, `@[event]`, `#[name]`, `v-slot:[name]`)
+    // is itself a root expression, whatever the directive class.
+    if let Some(argument) = dynamic_argument(name) {
+        collect_snippet_references(allocator, argument, scan);
+    }
+    match kind {
+        DirectiveKind::Bind | DirectiveKind::On | DirectiveKind::Other => {
+            collect_snippet_references(allocator, value, scan);
+        }
+        DirectiveKind::For => collect_v_for_source(allocator, value, scan),
+        // A slot value (`v-slot="props"`, `#default="{ item }"`) declares
+        // template-local aliases, never root uses.
+        DirectiveKind::Slot | DirectiveKind::Static => {}
+    }
+}
+
+/// A valueless bound same-name shorthand (`:count`, `v-bind:count`)
+/// references the named binding directly; a dynamic-argument shorthand
+/// (`:[key]`) collects the argument expression. Anything else (static
+/// attributes, valueless `@`/`#`/`v-` names) contributes nothing.
+fn collect_shorthand_reference(name: &str, scan: &mut ScriptReferenceScan) {
+    let argument = if let Some(arg) = name.strip_prefix(':') {
+        arg
+    } else if let Some(rest) = name.strip_prefix("v-bind") {
+        rest.strip_prefix(':').unwrap_or(rest)
+    } else {
+        return;
+    };
+    if argument.is_empty() {
+        return;
+    }
+    if argument.starts_with('[') {
+        if let Some(inner) = dynamic_argument(name) {
+            let allocator = Allocator::default();
+            collect_snippet_references(&allocator, inner, scan);
+        }
+        return;
+    }
+    let plain = argument.split(['.', '[']).next().unwrap_or("");
+    if is_plain_identifier(plain) {
+        scan.names.insert(plain.to_string());
+    }
+}
+
+/// The `[expression]` dynamic argument inside a directive name, if any.
+fn dynamic_argument(name: &str) -> Option<&str> {
+    let open = name.find('[')?;
+    let mut depth = 0usize;
+    for (offset, byte) in name.as_bytes()[open..].iter().enumerate() {
+        if *byte == b'[' {
+            depth += 1;
+        } else if *byte == b']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&name[open + 1..open + offset]);
             }
         }
     }
+    None
+}
+
+/// True for a bare identifier reference (`count`, `$props`); dotted,
+/// called or empty spellings are never shorthand references.
+fn is_plain_identifier(candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' || first == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Root references of a `v-for="alias in source"` value: the source side
+/// parses as an expression while the alias side only declares
+/// template-local names (including destructuring and index aliases),
+/// which are subtracted so a shadowing alias never marks a top-level
+/// binding as used. A value without a top-level `in`/`of` separator is
+/// malformed; it contributes nothing rather than a false alias use.
+fn collect_v_for_source(allocator: &Allocator, value: &str, scan: &mut ScriptReferenceScan) {
+    let Some((aliases, source)) = split_v_for(value) else {
+        return;
+    };
+    let mut source_scan = ScriptReferenceScan {
+        names: FxHashSet::default(),
+    };
+    collect_snippet_references(allocator, source, &mut source_scan);
+    let alias_names = v_for_alias_names(allocator, aliases);
+    for name in source_scan.names {
+        if !alias_names.contains(name.as_str()) {
+            scan.names.insert(name);
+        }
+    }
+}
+
+/// Split a `v-for` value into its alias side and its source side at a
+/// top-level `in`/`of` separator (outside any nesting, string or template
+/// literal). Returns `None` when there is no such separator.
+fn split_v_for(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.as_bytes();
+    let mut depth = 0usize;
+    let mut quote = None::<u8>;
+    let mut template = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if template {
+            if byte == b'\\' {
+                i += 2;
+                continue;
+            }
+            if byte == b'`' {
+                template = false;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if byte == b'\\' {
+                i += 2;
+                continue;
+            }
+            if byte == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => {
+                quote = Some(byte);
+                i += 1;
+            }
+            b'`' => {
+                template = true;
+                i += 1;
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ => {
+                if depth == 0 {
+                    for separator in [" in ", " of "] {
+                        if value[i..].starts_with(separator) {
+                            // `for...in`/`for...of` keywords only separate at
+                            // an identifier boundary on the left.
+                            let left_ok = i > 0
+                                && (bytes[i - 1].is_ascii_alphanumeric()
+                                    || bytes[i - 1] == b'_'
+                                    || bytes[i - 1] == b'$'
+                                    || bytes[i - 1] == b')'
+                                    || bytes[i - 1] == b']'
+                                    || bytes[i - 1] == b'}');
+                            if left_ok {
+                                return Some((
+                                    value[..i].trim(),
+                                    value[i + separator.len()..].trim(),
+                                ));
+                            }
+                        }
+                    }
+                    // Fall back to tab/newline separators (`item\tin\tlist`).
+                    for keyword in ["in", "of"] {
+                        if value[i..].starts_with(keyword) {
+                            let before = i.checked_sub(1).map(|k| bytes[k]);
+                            let after = bytes.get(i + keyword.len()).copied();
+                            let boundary =
+                                |b: Option<u8>| b.is_none_or(|c| c.is_ascii_whitespace());
+                            if boundary(before) && after.is_some_and(|c| c.is_ascii_whitespace()) {
+                                return Some((
+                                    value[..i].trim(),
+                                    value[i + keyword.len()..].trim(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Names declared by a `v-for` alias side (`item`, `(item, index)`,
+/// `{ id, label }`): parsed as an array-destructuring probe so nested
+/// patterns resolve through the real grammar instead of word-splitting.
+/// Falls back to no aliases (collect the source whole) when the probe
+/// does not parse.
+fn v_for_alias_names(allocator: &Allocator, aliases: &str) -> FxHashSet<String> {
+    let trimmed = aliases.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(trimmed);
+    let probe = format!("let [{inner}] = [];");
+    let Some(program) = parse_reference_snippet(allocator, &probe) else {
+        return FxHashSet::default();
+    };
+    let mut names = FxHashSet::default();
+    for statement in &program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        for declarator in &declaration.declarations {
+            for (name, _) in pattern_names(&declarator.id, 0) {
+                names.insert(name);
+            }
+        }
+    }
+    names
 }
 
 /// Identifier references (never declarations) in one script or template

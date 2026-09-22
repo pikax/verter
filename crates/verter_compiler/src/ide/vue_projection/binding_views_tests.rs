@@ -759,6 +759,80 @@ fn stp15_usage_ignores_shadowed_script_identifiers() {
 }
 
 #[test]
+fn stp15_usage_keeps_braces_inside_strings_and_comments() {
+    let declared = ["ok".to_string(), "count".to_string()];
+    // A `}` inside a string literal must not close the interpolation early:
+    // the full expression still names both bindings.
+    let template = r#"{{ ok ? '}' : count }}"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("ok"), "the condition binding stays used");
+    assert!(
+        usage.is_used("count"),
+        "a binding after a `}}` string literal stays used"
+    );
+    // Same for template literals, regex literals and comments.
+    let template =
+        r#"{{ label + `}` + suffix }} {{ text.replace(/}/g, cleaned) }} {{ /* } */ trailing }}"#;
+    let declared = [
+        "label".to_string(),
+        "suffix".to_string(),
+        "text".to_string(),
+        "cleaned".to_string(),
+        "trailing".to_string(),
+    ];
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    for name in ["label", "suffix", "text", "cleaned", "trailing"] {
+        assert!(
+            usage.is_used(name),
+            "{name} survives a lexical `}}` that is not a delimiter"
+        );
+    }
+}
+
+#[test]
+fn stp15_usage_supports_vue_directive_forms() {
+    // Same-name shorthand names the binding with no `=`.
+    let declared = ["count".to_string(), "other".to_string()];
+    let usage = BindingUsageSet::from_region_text(&declared, r#"<div :count></div>"#, "", "");
+    assert!(usage.is_used("count"), "`:count` shorthand counts as a use");
+    assert!(!usage.is_used("other"));
+    // A dynamic argument is itself a root expression.
+    let declared = ["key".to_string(), "value".to_string()];
+    let usage =
+        BindingUsageSet::from_region_text(&declared, r#"<div :[key]="value"></div>"#, "", "");
+    assert!(usage.is_used("key"), "the dynamic argument names a use");
+    assert!(usage.is_used("value"), "the bound value names a use");
+    // A `v-for` alias is template-local: only the source counts.
+    let declared = ["items".to_string(), "todo".to_string()];
+    let template = r#"<li v-for="todo in items">{{ items.length }}</li>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("items"), "the `v-for` source counts as a use");
+    assert!(
+        !usage.is_used("todo"),
+        "the `v-for` alias never marks a top-level binding as used"
+    );
+    // Destructured and indexed aliases stay local too.
+    let declared = ["rows".to_string(), "row".to_string(), "index".to_string()];
+    let template = r#"<tr v-for="(row, index) in rows">{{ rows.length }}</tr>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("rows"));
+    assert!(!usage.is_used("row") && !usage.is_used("index"));
+    // A `v-slot` value declares slot-prop aliases, never root uses; a
+    // dynamic slot name still counts.
+    let declared = ["props".to_string(), "name".to_string()];
+    let template = r#"<template #[name]="props"><span>static</span></template>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(
+        usage.is_used("name"),
+        "the dynamic slot name counts as a use"
+    );
+    assert!(
+        !usage.is_used("props"),
+        "the slot-prop alias never marks a top-level binding as used"
+    );
+}
+
+#[test]
 fn stp15_usage_parses_tsx_script_blocks() {
     let declared = ["count".to_string()];
     let script = "import { ref } from 'vue';\nconst count = ref(0);\nconst node = <div />;\nfunction bump() { count.value++; }\n";
