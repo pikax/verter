@@ -188,6 +188,14 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
         if sync_outcome_dequeues(outcome) || documents.host.get_source(&canonical_id).is_none() {
             pending_snapshot_provider_sync.remove(&canonical_id);
         }
+        // The pass above advanced this carrier's diagnostics generation before
+        // re-syncing it. An open document whose last publication that outdated
+        // — a complete receipt, or an owed one that landed incomplete because
+        // this very commit had not happened yet — is re-armed here, since no
+        // publication is in flight to notice and no editor signal follows.
+        if matches!(outcome, SyncOutcome::FullyReconciled) {
+            documents.refresh_owed_diagnostics(&canonical_id);
+        }
     }
 }
 
