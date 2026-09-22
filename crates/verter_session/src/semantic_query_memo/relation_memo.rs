@@ -141,8 +141,18 @@ impl SemanticGraphStore {
             key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
         // A relation entry always materialises the modeless identity
-        // point, so it takes no §3.4 point gate — only carrier validation.
-        let hit = self.modeless_family_warm_hit(ctx, &family, None)?;
+        // point, so the §3.4 gate is the modeless identity point every
+        // entry records — only carrier validation can block.
+        let requested = MaterializedPoint::new(family::point_for_slot(
+            ModeSlot::Single,
+            &ProjectionPath::empty(),
+        ));
+        // Miss-neutral probe: a miss falls through to the owning
+        // cooperative dispatch, which records the single miss (see
+        // `get_validated_value_impl`'s `record_miss` contract).
+        let hit = self
+            .get_validated_value_impl(&family, ModeSlot::Single, &requested, ctx, None, false)?
+            .value;
         match hit {
             QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(payload),
             // Structural invariant: the relation authority only ever

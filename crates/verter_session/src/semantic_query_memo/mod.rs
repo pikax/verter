@@ -1945,7 +1945,7 @@ impl SemanticGraphStore {
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        self.get_validated_value_impl(&family, slot, &requested, ctx, None)
+        self.get_validated_value_impl(&family, slot, &requested, ctx, None, true)
             .map(narrow_cache_read)
     }
 
@@ -1968,9 +1968,22 @@ impl SemanticGraphStore {
             prepared.requested_point(),
             ctx,
             operand_evidence,
+            true,
         )
     }
 
+    /// Shared snapshot → two-gate validate → bubble → LRU-promote warm
+    /// read. `record_miss` selects who owns the per-request miss count:
+    /// pass `true` when this probe is the owning read for the logical
+    /// query (the [`Self::get_validated`] / cooperative rails). The
+    /// modeless payload accessors (`get_relation_payload`,
+    /// `get_flow_return_result`, `get_resolve_call_result`) pass `false`:
+    /// a modeless miss never short-circuits — every production caller
+    /// falls through to the owning cooperative path, which records the
+    /// single miss — while a modeless hit short-circuits the dispatch,
+    /// so the probe owns the hit count. Counting the probe miss too
+    /// would record two misses per logical cold query, breaking the
+    /// one-miss contract.
     fn get_validated_value_impl(
         &self,
         family: &FamilyKey,
@@ -1980,6 +1993,7 @@ impl SemanticGraphStore {
         operand_evidence: Option<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
+        record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
@@ -2037,7 +2051,7 @@ impl SemanticGraphStore {
                     .semantic_graph
                     .hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            } else {
+            } else if record_miss {
                 rctx.cache_counters
                     .semantic_graph
                     .misses
