@@ -761,8 +761,15 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         // The store view is NOT the version check for THIS node: an intrinsic
         // surface carries an empty validated-fact signature, so every candidate
         // validates vacuously. The generation carried on the value is the
-        // check, and a mismatch RETIRES the entry — otherwise the superseded
-        // candidate stays warm under the stable key and shadows the fresh one.
+        // check, and a STRICTLY OLDER candidate RETIRES the entry — otherwise
+        // the superseded candidate stays warm under the stable key and shadows
+        // the fresh one.
+        //
+        // Retirement is generation-ORDERED, never unconditional: this reader's
+        // `cache_generation` sample can already be stale by the time it decides,
+        // so it may only retire what it can PROVE it outranks. A candidate at or
+        // beyond the sampled generation is a concurrent writer's newer
+        // completion and survives.
         if let Some(node) = self
             .host
             .resolver_runtime()
@@ -773,13 +780,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                 Some((members, node_generation)) if node_generation == cache_generation => {
                     return members;
                 }
-                Some(_) => {
+                Some((_, node_generation)) if node_generation < cache_generation => {
                     self.host
                         .resolver_runtime()
                         .fallthrough
-                        .retire_node(&cache_key);
+                        .retire_superseded_intrinsic_surface(&cache_key, cache_generation);
                 }
-                None => {}
+                Some(_) | None => {}
             }
         }
 
@@ -799,6 +806,16 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                     .host
                     .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
                     .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
+                // Re-sample the live generation AFTER the compute. The node is
+                // stamped with the PRE-compute sample, so a surface built
+                // across a content-generation advance would be admitted under
+                // an already-superseded stamp and could publish over a newer
+                // completion. That result is still SERVED to this caller
+                // verbatim; only the shared-cache admission is refused.
+                let (_, generation_after) = self.host.project_intrinsic_cache_anchor(canonical_id);
+                if generation_after != cache_generation {
+                    return (members, None);
+                }
                 let node = self
                     .host
                     .build_runtime_intrinsic_surface_node(&members, cache_generation);

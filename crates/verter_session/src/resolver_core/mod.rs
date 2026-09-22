@@ -719,9 +719,10 @@ pub struct ResolutionNodeKey {
 /// Typed fallthrough-node cache key. Each variant is one node kind, so the
 /// kind-discriminating fields are not field-overloaded: the override-bearing
 /// variants carry a typed [`FallthroughOverrideIdentity`] (not a lossy `u64`),
-/// and the intrinsic-surface variant carries its own
-/// `(project_anchor, cache_generation, tag)` axes instead of overloading the
-/// override field to also smuggle the intrinsic cache generation.
+/// and the intrinsic-surface variant carries its own content-free
+/// `(project_anchor, tag)` axes instead of overloading the override field to
+/// also smuggle the intrinsic cache generation. That generation rides on the
+/// VALUE, never in this key (R6).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FallthroughNodeKey {
     ComponentRootFollow {
@@ -1863,12 +1864,51 @@ where
         }
     }
 
+    /// The freshest warm candidate under `key`, bypassing view validation.
+    ///
+    /// Test-only: a value-versioned entry (the intrinsic surface) carries an
+    /// empty fact signature, so `get_if_valid` cannot distinguish "gone" from
+    /// "still warm but superseded". Retirement tests need the raw slot.
+    #[cfg(test)]
+    pub(crate) fn peek_any_candidate(&self, key: &K) -> Option<Arc<V>> {
+        let entry = self.entries.get(key)?;
+        let candidates = entry.candidates.load();
+        candidates.last().map(|candidate| candidate.value.clone())
+    }
+
     pub fn clear(&self) {
         self.entries.clear();
     }
 
     pub fn remove(&self, key: &K) {
         self.entries.remove(key);
+    }
+
+    /// Remove `key` only while EVERY warm candidate still satisfies
+    /// `superseded`, evaluated under the slot's own shard lock.
+    ///
+    /// The unconditional [`Self::remove`] is unsafe for a value-versioned
+    /// entry whose reader decides staleness outside the map: a reader that
+    /// observes a stale candidate, is descheduled, and resumes after a
+    /// concurrent writer admitted a NEWER value would erase that newer
+    /// value. Deciding supersession inside the removal closure makes the
+    /// retirement ordered — a slot repopulated with a value the predicate
+    /// does not call superseded survives.
+    ///
+    /// Returns `true` when the entry was removed.
+    pub fn remove_if_all_candidates<F>(&self, key: &K, superseded: F) -> bool
+    where
+        F: Fn(&V) -> bool,
+    {
+        self.entries
+            .remove_if(key, |_key, entry| {
+                entry
+                    .candidates
+                    .load()
+                    .iter()
+                    .all(|candidate| superseded(&candidate.value))
+            })
+            .is_some()
     }
 
     /// Hard-remove: same as `remove` under the post-archive cache
