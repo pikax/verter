@@ -52,7 +52,6 @@
 //! non-binary relation outcome has no value-domain form — the batch
 //! refuses WHOLE rather than admitting a torn component.
 
-use super::inflight::InflightState;
 use super::relation_memo::relation_satisfied_projection;
 use super::resolve_call_memo::resolve_call_satisfied_projection;
 use super::*;
@@ -111,7 +110,7 @@ pub(crate) struct PendingRelationMember {
     /// The decided binary payload its inline compute produced.
     pub(crate) payload: crate::semantic_query::RelationPayload,
     /// The ordinary family flight the member claimed.
-    pub(crate) flight: InlineRelationFlight,
+    pub(crate) flight: InlineMemberFlight,
 }
 
 /// One flow-return member queued for the batched publish.
@@ -127,7 +126,7 @@ pub(crate) struct PendingFlowReturnMember {
     /// recorded by the compute, never re-derived from the nominal key.
     pub(crate) materialized: MaterializedSet,
     /// The ordinary family flight the member claimed.
-    pub(crate) flight: InlineFlowReturnFlight,
+    pub(crate) flight: InlineMemberFlight,
 }
 
 /// One call-resolution member queued for the batched publish.
@@ -139,7 +138,7 @@ pub(crate) struct PendingResolveCallMember {
     /// batch needs no further result-kind gate for this domain.
     pub(crate) result: crate::semantic_query::AdmissibleCallResult,
     /// The ordinary family flight the member claimed.
-    pub(crate) flight: InlineResolveCallFlight,
+    pub(crate) flight: InlineMemberFlight,
 }
 
 /// Whether a member's `entries` write made its family NEWLY resident,
@@ -154,19 +153,12 @@ pub(crate) struct PendingResolveCallMember {
 #[must_use]
 struct NewlyKeyedFamily(bool);
 
-/// A member's claimed flight, in whichever domain it belongs to.
-enum StagedFlight {
-    Relation(InlineRelationFlight),
-    Flow(InlineFlowReturnFlight),
-    ResolveCall(InlineResolveCallFlight),
-}
-
 /// One member prepared outside the entries lock. Its candidate has no
 /// retention charge until the whole component has been admitted.
 struct PreparedMember {
     family: FamilyKey,
     entry: MemoEntry,
-    flight: StagedFlight,
+    flight: InlineMemberFlight,
 }
 
 /// One member prepared for publication: everything computed OUTSIDE the
@@ -178,12 +170,12 @@ struct StagedMember {
     /// The value a waiting joiner receives when the flight completes.
     completed: QueryResult<SemanticQueryValue>,
     admission_seq: u64,
-    flight: StagedFlight,
+    flight: InlineMemberFlight,
 }
 
 impl SemanticGraphStore {
     /// Publish a component's deferred members onto the root's published
-    /// carrier — the SOLE member-admission entry for both domains.
+    /// carrier — the SOLE member-admission entry for every deferred domain.
     ///
     /// Returns whether the batch published. `false` means NOTHING was
     /// written and every flight was released: the root witness no longer
@@ -262,13 +254,13 @@ impl SemanticGraphStore {
             });
         if inadmissible {
             for member in relation_members {
-                self.abort_inline_relation_flight(&member.flight);
+                self.abort_inline_member_flight(&member.flight);
             }
             for member in flow_members {
-                self.abort_inline_flow_return_flight(&member.flight);
+                self.abort_inline_member_flight(&member.flight);
             }
             for member in call_members {
-                self.abort_inline_resolve_call_flight(&member.flight);
+                self.abort_inline_member_flight(&member.flight);
             }
             return false;
         }
@@ -298,7 +290,7 @@ impl SemanticGraphStore {
             prepared.push(PreparedMember {
                 family,
                 entry,
-                flight: StagedFlight::Relation(member.flight),
+                flight: member.flight,
             });
         }
         for member in flow_members {
@@ -323,7 +315,7 @@ impl SemanticGraphStore {
             prepared.push(PreparedMember {
                 family,
                 entry,
-                flight: StagedFlight::Flow(member.flight),
+                flight: member.flight,
             });
         }
         for member in call_members {
@@ -346,7 +338,7 @@ impl SemanticGraphStore {
             prepared.push(PreparedMember {
                 family,
                 entry,
-                flight: StagedFlight::ResolveCall(member.flight),
+                flight: member.flight,
             });
         }
 
@@ -356,7 +348,7 @@ impl SemanticGraphStore {
             Ok(charge) => Some(std::sync::Arc::new(charge)),
             Err(_) => {
                 for member in &prepared {
-                    self.abort_staged_flight(&member.flight);
+                    self.abort_inline_member_flight(&member.flight);
                 }
                 return false;
             }
@@ -399,12 +391,12 @@ impl SemanticGraphStore {
             drop(entries);
             record_cold_abort_swept(&self.stats);
             for member in staged {
-                self.abort_staged_flight(&member.flight);
+                self.abort_inline_member_flight(&member.flight);
             }
             return false;
         }
 
-        let mut to_complete: Vec<(StagedFlight, QueryResult<SemanticQueryValue>)> =
+        let mut to_complete: Vec<(InlineMemberFlight, QueryResult<SemanticQueryValue>)> =
             Vec::with_capacity(staged.len());
         // Every member family the batch touches, whether or not its write
         // newly keyed it — an ALREADY-resident member family still carries
@@ -454,7 +446,7 @@ impl SemanticGraphStore {
                 let mut state = state_lock.lock();
                 if state.aborted {
                     drop(state);
-                    self.abort_staged_flight(&flight);
+                    self.abort_inline_member_flight(&flight);
                     continue;
                 }
                 state.completed = Some(completed);
@@ -539,7 +531,7 @@ impl SemanticGraphStore {
         &self,
         family: FamilyKey,
         mut entry: MemoEntry,
-        flight: StagedFlight,
+        flight: InlineMemberFlight,
         ctx: Option<&dyn crate::resolver_core::ResolverContext>,
     ) -> StagedMember {
         let admission_seq = self.alloc_candidate_admission_seq();
@@ -618,14 +610,6 @@ impl SemanticGraphStore {
         NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
     }
 
-    fn abort_staged_flight(&self, flight: &StagedFlight) {
-        match flight {
-            StagedFlight::Relation(flight) => self.abort_inline_relation_flight(flight),
-            StagedFlight::Flow(flight) => self.abort_inline_flow_return_flight(flight),
-            StagedFlight::ResolveCall(flight) => self.abort_inline_resolve_call_flight(flight),
-        }
-    }
-
     /// Test-support seed seam: publish ONE decided candidate directly,
     /// with no flight and no root fence. Backs the relation fixture
     /// seams, which seed a ROOT rather than drain a member.
@@ -679,43 +663,6 @@ impl SemanticGraphStore {
         // ordinary unexempted admission, exactly like `warm_publish_one`.
         if is_new {
             self.record_family_admission_locked(&mut entries, &family);
-        }
-    }
-}
-
-impl StagedFlight {
-    fn state(&self) -> &parking_lot::Mutex<InflightState> {
-        match self {
-            StagedFlight::Relation(flight) => &flight.inflight.state,
-            StagedFlight::Flow(flight) => &flight.inflight.state,
-            StagedFlight::ResolveCall(flight) => &flight.inflight.state,
-        }
-    }
-
-    fn mark_aborted(&self) {
-        self.state().lock().aborted = true;
-    }
-
-    fn is_aborted(&self) -> bool {
-        self.state().lock().aborted
-    }
-
-    /// Wake every joiner and retire the flight from the ORDINARY table —
-    /// the table `begin_inline_*_flight` claimed in.
-    fn notify_and_retire(self, store: &SemanticGraphStore) {
-        match self {
-            StagedFlight::Relation(flight) => {
-                flight.inflight.ready.notify_all();
-                store.retire_inflight(&flight.prepared, &flight.inflight, false);
-            }
-            StagedFlight::Flow(flight) => {
-                flight.inflight.ready.notify_all();
-                store.retire_inflight(&flight.prepared, &flight.inflight, false);
-            }
-            StagedFlight::ResolveCall(flight) => {
-                flight.inflight.ready.notify_all();
-                store.retire_inflight(&flight.prepared, &flight.inflight, false);
-            }
         }
     }
 }
