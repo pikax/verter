@@ -288,6 +288,28 @@ Binding implementation spec: `.claude/skills/type-cache-architecture/SKILL.md`
 (Blocks 6 and 7). When in doubt, the plan wins; this skill derives from
 the plan body.
 
+## Driver park and teardown
+
+The native driver loop (`driver_loop_native`) parks between wakes on three
+things at once, reported as `DriverPark`: its own private teardown channel
+(`Scheduler::driver_teardown`), the shared submission inbox, and an idle
+re-pump deadline. The idle deadline is a missed-wake backstop for stranded
+ready work, not priority aging.
+
+**The teardown signal never travels through the inbox.** The submission inbox
+is a MULTI-consumer channel — every cooperative pump drains it
+(`drain_inbox_for_pump`), the driver's own dispatch loop included — so a
+teardown posted there can be consumed before the driver reaches its park. The
+driver would then sleep out the whole idle interval while the thread joining
+it (`reset()` / `Drop`, i.e. every host `close()`) waits with it. The
+`driver_teardown` channel has exactly one consumer, the parked driver, so the
+signal cannot be swallowed. It has capacity one (a second signal carries no
+extra meaning) and `restart_driver` drains it before spawning the next
+driver, so a signal the outgoing driver never consumed cannot stop the
+incoming one on arrival.
+
+Guard: `teardown_stops_the_driver_when_its_wake_was_consumed_before_the_park`.
+
 ## Crate dependency invariant
 
 `verter_scheduler` MUST NOT depend on any higher-level crate. Dependency
