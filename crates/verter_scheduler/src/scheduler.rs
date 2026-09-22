@@ -396,6 +396,26 @@ fn should_join_driver_thread(
     handle_thread_id != current_thread_id
 }
 
+/// What ended the native driver's park.
+///
+/// The park watches three things at once, so the outcome is named rather
+/// than inferred from a channel error: a teardown signal delivered on the
+/// driver's own private channel, a submission from the shared inbox, a
+/// closed inbox, or the idle re-pump deadline.
+#[cfg(not(target_arch = "wasm32"))]
+enum DriverPark {
+    /// A teardown was requested. Re-enters the outer loop, which observes
+    /// the shutdown flag and exits.
+    Teardown,
+    /// A submission arrived and must be processed into the DAG.
+    Submission(Submission),
+    /// The inbox is closed: no further submission can arrive.
+    Disconnected,
+    /// The idle re-pump deadline expired. Backstops a dropped wake for
+    /// stranded ready work; not priority aging.
+    IdleTick,
+}
+
 /// Test-only dispatch instrumentation that lets a test deterministically
 /// observe SCHEDULER-PRIORITY-QUEUE dwell.
 ///
@@ -1158,6 +1178,22 @@ pub struct Scheduler {
     /// Driver thread handle (native only).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) driver_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Out-of-band teardown signal for the parked driver (native only).
+    ///
+    /// The submission inbox is a MULTI-consumer channel: every
+    /// cooperative pump drains it, the driver's own dispatch loop
+    /// included. A teardown request posted there can therefore be
+    /// consumed before the driver reaches its park, after which the
+    /// driver sleeps out its whole idle re-pump interval and whichever
+    /// thread is joining it waits that long too. This channel has
+    /// exactly ONE consumer — the parked driver — so a teardown signal
+    /// can never be swallowed by a pump. Capacity one: a second signal
+    /// while one is already queued carries no extra meaning.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) driver_teardown: (
+        crossbeam_channel::Sender<()>,
+        crossbeam_channel::Receiver<()>,
+    ),
     /// Contention instrumentation counters surfaced through
     /// [`Self::counters`].
     pub(crate) counters: SchedulerCounters,
@@ -1383,6 +1419,7 @@ impl Scheduler {
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
+            driver_teardown: crossbeam_channel::bounded(1),
             counters: SchedulerCounters::default(),
             #[cfg(any(test, feature = "test-support"))]
             dispatch_pause: DispatchPauseHook::default(),
@@ -1404,10 +1441,11 @@ impl Scheduler {
         // Also clones the receiver so it can block on it without upgrading.
         let weak = Arc::downgrade(&scheduler);
         let receiver = scheduler.inbox.receiver.clone();
+        let teardown = scheduler.driver_teardown.1.clone();
         let handle = std::thread::Builder::new()
             .name("verter-scheduler".to_string())
             .spawn(move || {
-                Self::driver_loop_native(weak, receiver);
+                Self::driver_loop_native(weak, receiver, teardown);
             })
             .expect("failed to spawn scheduler driver");
 
@@ -1477,6 +1515,8 @@ impl Scheduler {
             shutdown: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             driver_handle: Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            driver_teardown: crossbeam_channel::bounded(1),
             counters: SchedulerCounters::default(),
             #[cfg(any(test, feature = "test-support"))]
             dispatch_pause: DispatchPauseHook::default(),
@@ -2156,8 +2196,11 @@ impl Scheduler {
     /// the clear phase because the driver thread is joined first.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reset(&self) {
-        // 1. Stop the driver thread.
+        // 1. Stop the driver thread. The dedicated teardown signal — not
+        //    the inbox wake, which any cooperative pump may consume first —
+        //    is what guarantees a parked driver observes this.
         self.shutdown.store(true, Ordering::Release);
+        let _ = self.driver_teardown.0.try_send(());
         let _ = self.inbox.sender.send(Submission::Wake);
         if let Some(handle) = self.driver_handle.lock().take() {
             if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
@@ -2235,12 +2278,17 @@ impl Scheduler {
     /// `Arc<Self>` because the driver needs a `Weak` reference.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn restart_driver(self: &Arc<Self>) {
+        // The outgoing driver may have exited on the shutdown flag without
+        // consuming its teardown signal; a leftover signal would stop the
+        // incoming driver on its first park.
+        while self.driver_teardown.1.try_recv().is_ok() {}
         let weak = Arc::downgrade(self);
         let receiver = self.inbox.receiver.clone();
+        let teardown = self.driver_teardown.1.clone();
         let handle = std::thread::Builder::new()
             .name("verter-scheduler".to_string())
             .spawn(move || {
-                Self::driver_loop_native(weak, receiver);
+                Self::driver_loop_native(weak, receiver, teardown);
             })
             .expect("failed to restart scheduler driver");
         *self.driver_handle.lock() = Some(handle);
@@ -3152,6 +3200,7 @@ impl Scheduler {
     pub fn driver_loop_native(
         weak: std::sync::Weak<Scheduler>,
         receiver: crossbeam_channel::Receiver<Submission>,
+        teardown: crossbeam_channel::Receiver<()>,
     ) {
         // Mark the driver thread so cooperative-pump callers can
         // distinguish driver-led pumps from worker-led pumps. The
@@ -3203,9 +3252,21 @@ impl Scheduler {
             // Drop the strong ref before blocking so the caller's Drop can run.
             drop(scheduler);
 
-            // Wait for the next submission or the idle re-pump tick.
-            match receiver.recv_timeout(idle_repump_interval) {
-                Ok(submission) => {
+            // Wait for a teardown signal, the next submission, or the
+            // idle re-pump tick. The teardown arm is what makes this park
+            // exitable without an inbox message: the pump above drains the
+            // very inbox every other pumper drains, so a teardown wake
+            // posted there may already be gone by the time we get here.
+            let park = crossbeam_channel::select! {
+                recv(teardown) -> _ => DriverPark::Teardown,
+                recv(receiver) -> submission => match submission {
+                    Ok(submission) => DriverPark::Submission(submission),
+                    Err(crossbeam_channel::RecvError) => DriverPark::Disconnected,
+                },
+                default(idle_repump_interval) => DriverPark::IdleTick,
+            };
+            match park {
+                DriverPark::Submission(submission) => {
                     if let Some(scheduler) = weak.upgrade() {
                         // Process the wake submission directly so
                         // the DAG sees it before the next pump
@@ -3219,12 +3280,10 @@ impl Scheduler {
                     }
                     // Else: scheduler dropped during recv — loop will exit on next upgrade
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    continue;
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    break;
-                }
+                // Both re-enter the outer loop, which observes the
+                // shutdown flag (teardown) or re-pumps (idle tick).
+                DriverPark::Teardown | DriverPark::IdleTick => continue,
+                DriverPark::Disconnected => break,
             }
         }
     }
@@ -7254,6 +7313,10 @@ impl Drop for Scheduler {
     fn drop(&mut self) {
         // Set shutdown flag
         self.shutdown.store(true, Ordering::Release);
+        // Dedicated teardown signal: the inbox wake below can be consumed
+        // by a cooperative pump before the driver parks on it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = self.driver_teardown.0.try_send(());
         let _ = self.inbox.sender.send(Submission::Wake);
         self.shutdown_all_scoped_cache_flights();
 
@@ -9510,6 +9573,95 @@ mod tests {
         assert!(
             h.try_get().is_some(),
             "should complete after dep is analyzed"
+        );
+    }
+
+    /// Teardown must stop the driver even when the submission inbox does
+    /// not deliver the request. The inbox is drained by every cooperative
+    /// pump — the driver's own dispatch loop included — so a teardown wake
+    /// posted there can be consumed before the driver reaches its park. A
+    /// driver reachable only through the inbox then sleeps out its whole
+    /// idle re-pump interval, and the thread joining it (every host
+    /// teardown) waits that long with it.
+    ///
+    /// The window is entered by pausing the driver on the LAST dispatch of
+    /// a backlog: the pause sits inside the pre-park pump loop, the
+    /// teardown request lands and is swallowed by the paused driver's own
+    /// re-drain, and on release there is no work left to keep the driver
+    /// awake, so it parks — with the teardown already pending.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn teardown_stops_the_driver_when_its_wake_was_consumed_before_the_park() {
+        /// Big enough that the backlog outlives the driver's first wake
+        /// pump, so the final dispatch happens in the pre-park pump loop.
+        const FILES: usize = 60;
+        /// Source + Analysis.
+        const DISPATCHES_PER_FILE: usize = 2;
+
+        // The window is entered on a race between the backlog draining and
+        // the teardown landing, so a single attempt can miss it; each
+        // attempt is a few hundred milliseconds and the worst one rules.
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..6 {
+            let loader = Arc::new(MemorySourceLoader::new());
+            for i in 0..FILES {
+                loader.insert(format!("/f{i}.vue"), Arc::from("x"));
+            }
+            let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
+
+            // Park the driver on the backlog's final dispatch.
+            sched.test_arm_dispatch_pause(FILES * DISPATCHES_PER_FILE);
+            let pending: Vec<_> = (0..FILES)
+                .map(|i| {
+                    sched.submit_request(Request {
+                        file_id: format!("/f{i}.vue"),
+                        target: TargetStage::Analysis,
+                        priority: Priority::Interactive,
+                        source: Some(Arc::from("x")),
+                        file_language: None,
+                        request_context: None,
+                    })
+                })
+                .collect();
+            sched.test_wait_until_dispatch_paused();
+
+            // Tear down while the driver sits in that re-draining park, so
+            // the inbox wake is gone before the driver parks on it.
+            let resetter = {
+                let sched = Arc::clone(&sched);
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    sched.reset();
+                    started.elapsed()
+                })
+            };
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            sched.test_release_dispatch_pause();
+
+            worst = worst.max(resetter.join().expect("teardown must not panic"));
+
+            // The teardown signal must not outlive the driver it stopped:
+            // a leftover signal would stop the next driver on arrival.
+            sched.restart_driver();
+            let handle = sched.submit_request(Request {
+                file_id: "/f0.vue".to_string(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("x v2")),
+                file_language: None,
+                request_context: None,
+            });
+            assert!(
+                handle.wait().is_ready(),
+                "the restarted driver must still process requests"
+            );
+            drop(pending);
+        }
+
+        assert!(
+            worst < std::time::Duration::from_secs(2),
+            "teardown must reach the parked driver directly instead of \
+             waiting out its idle re-pump interval; worst reset() took {worst:?}"
         );
     }
 
