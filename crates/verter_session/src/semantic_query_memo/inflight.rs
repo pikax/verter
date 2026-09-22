@@ -283,3 +283,116 @@ impl<'a> Drop for InflightPanicGuard<'a> {
 /// typical because the next call either hits a freshly-warm slot or
 /// claims the fresh in-flight as winner.
 pub(super) const MAX_INFLIGHT_RETRIES: usize = 3;
+
+/// Store-owned admission token for an SCC member computed inline on
+/// another obligation's transaction.
+///
+/// ONE type across every deferred domain (relation, flow-return,
+/// call-resolution): a member's claim/abort/completion coordination is
+/// the SAME work in all three, and a per-domain copy of it could drift
+/// on exactly the properties [`super::scc_publish`] fences whole-batch.
+/// The member's typed family identity is NOT erased — it stays in
+/// `prepared`, the full [`crate::semantic_query::SemanticQueryKey`] the
+/// flight claimed, which the batch asserts against the member's own key
+/// before staging its candidate.
+///
+/// Registering the token in the ORDINARY family flight table lets a
+/// concurrent top-level request join the inline compute instead of
+/// starting duplicate cold work.
+#[derive(Clone)]
+pub(crate) struct InlineMemberFlight {
+    pub(super) prepared: PreparedKeyHandle,
+    pub(super) inflight: Arc<FlightCell>,
+    /// Present only when an inline flight starts outside an existing
+    /// semantic execution stack. Production nested members reuse the
+    /// active owner; direct callers hold this detached RAII lease.
+    _owner_registration: Option<super::wait_cycle::ExecutionOwnerRegistration>,
+}
+
+impl std::fmt::Debug for InlineMemberFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InlineMemberFlight")
+            .field("key", self.prepared.key())
+            .finish_non_exhaustive()
+    }
+}
+
+impl InlineMemberFlight {
+    pub(super) fn state(&self) -> &Mutex<InflightState> {
+        &self.inflight.state
+    }
+
+    pub(super) fn mark_aborted(&self) {
+        self.state().lock().aborted = true;
+    }
+
+    pub(super) fn is_aborted(&self) -> bool {
+        self.state().lock().aborted
+    }
+
+    /// Wake every joiner and retire the flight from the ORDINARY table —
+    /// the table [`super::SemanticGraphStore::begin_inline_member_flight`]
+    /// claimed in.
+    pub(super) fn notify_and_retire(self, store: &super::SemanticGraphStore) {
+        self.inflight.ready.notify_all();
+        store.retire_inflight(&self.prepared, &self.inflight, false);
+    }
+}
+
+impl super::SemanticGraphStore {
+    /// Claim the ordinary family flight for a member that will be
+    /// computed inline on the current transaction. `None` means another
+    /// cold owner already owns this exact full key.
+    pub(super) fn begin_inline_member_flight(
+        &self,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> Option<InlineMemberFlight> {
+        let prepared = PreparedKeyHandle::prepare(key);
+        let inflight = Arc::new(FlightCell::new());
+        let (owner, owner_registration) = if let Some(owner) =
+            super::wait_cycle::ExecutionOwnerScope::current(&self.wait_for_graph)
+        {
+            (owner, None)
+        } else {
+            let registration = self.wait_for_graph.register_owner();
+            (registration.owner(), Some(registration))
+        };
+        {
+            let mut state = inflight.state.lock();
+            state.claimed = true;
+            state.owner = Some(owner);
+        }
+        let mut table = self.inflight.lock();
+        if table.contains_key(&prepared) {
+            return None;
+        }
+        table.insert(prepared.clone(), Arc::clone(&inflight));
+        Some(InlineMemberFlight {
+            prepared,
+            inflight,
+            _owner_registration: owner_registration,
+        })
+    }
+
+    /// Release an inline flight that cannot publish a decided member.
+    /// Waiting top-level callers wake on the abort sentinel and retry
+    /// admission.
+    pub(crate) fn abort_inline_member_flight(&self, flight: &InlineMemberFlight) {
+        {
+            let mut state = flight.inflight.state.lock();
+            state.aborted = true;
+            if state.completed.is_none() {
+                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                    "inline member flight abandoned",
+                ))));
+                state.dep_signature = Some(empty_signature());
+            }
+            state.graph_carrier = None;
+            state.walker_diagnostics = None;
+            state.cache_suppress = true;
+            state.result_is_partial = true;
+        }
+        flight.inflight.ready.notify_all();
+        self.retire_inflight(&flight.prepared, &flight.inflight, false);
+    }
+}

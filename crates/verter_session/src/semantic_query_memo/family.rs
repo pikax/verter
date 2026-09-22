@@ -2315,3 +2315,50 @@ pub(super) const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::MacroSurfaceShallow,
     ModeSlot::VueRuntimeSurfaceShallow,
 ];
+
+impl super::SemanticGraphStore {
+    /// The strict warm-hit read of a `ModeSlot::Single` family — the ONE
+    /// read-side coordination the modeless payload families share.
+    ///
+    /// Three steps, in this order and for the reasons
+    /// [`FamilySlots::snapshot_slot`] documents: snapshot the slot's
+    /// candidate list under the `entries` lock, run the per-candidate
+    /// gates OUTSIDE it (validation re-enters the memo through the
+    /// resolver view), then briefly re-acquire to promote the hit in the
+    /// slot's LRU order. The hit's carrier is bubbled into the caller's
+    /// active tracer before the payload is handed back, so an enclosing
+    /// cold build inherits the entry's dependencies.
+    ///
+    /// `requested` is the §3.4 materialised-point gate: `Some(point)`
+    /// demands that the candidate's RECORDED `satisfied_projection`
+    /// covers the caller's OWN demand point, never the family's nominal
+    /// slot. `None` is for a family whose every entry materialises the
+    /// same modeless identity point, where the gate can never block a
+    /// hit. Carrier validation is unconditional in both cases — it is
+    /// the sole validity oracle.
+    pub(super) fn modeless_family_warm_hit(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        family: &FamilyKey,
+        requested: Option<&MaterializedPoint>,
+    ) -> Option<QueryResult<SemanticQueryValue>> {
+        let snapshot: super::CandidateList = {
+            let entries = self.entries_lock_diagnosed();
+            entries
+                .get(family)
+                .map(|slots| slots.snapshot_slot(ModeSlot::Single))?
+        };
+        let hit = snapshot.into_iter().find(|entry| {
+            requested.is_none_or(|point| cached_satisfies(&entry.satisfied_projection, point))
+                && entry.validate(ctx)
+        })?;
+        {
+            let mut entries = self.entries_lock_diagnosed();
+            if let Some(slots) = entries.get_mut(family) {
+                slots.mark_validated_freshest(ModeSlot::Single, &hit);
+            }
+        }
+        hit.read_set_signature.bubble(ctx);
+        Some(hit.result)
+    }
+}

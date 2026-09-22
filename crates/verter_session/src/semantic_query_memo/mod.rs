@@ -64,9 +64,7 @@ mod scc_publish;
 mod scc_publish_tests;
 mod unresolved_reach;
 
-pub(crate) use flow_return_memo::InlineFlowReturnFlight;
-pub(crate) use relation_memo::InlineRelationFlight;
-pub(crate) use resolve_call_memo::InlineResolveCallFlight;
+pub(crate) use inflight::InlineMemberFlight;
 pub(crate) use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };

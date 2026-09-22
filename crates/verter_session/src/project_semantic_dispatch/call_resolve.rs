@@ -430,7 +430,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 CandidateVerdict::Degraded(failure) => {
                     drop(txn);
-                    self.resolve_call_abort_inline_flight(inline_flight.as_ref());
+                    self.abort_inline_flight(inline_flight.as_ref());
                     ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure))
                 }
                 CandidateVerdict::Mismatch => {
@@ -783,7 +783,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(session) = root.staged_session {
                     self.abandon_session(session);
                 }
-                self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                self.abort_inline_flight(root.inline_flight.as_ref());
                 return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
                     if cap.is_some() {
                         ResolveCallFailure::Budget
@@ -811,7 +811,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     root_result,
                 ));
             }
-            self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+            self.abort_inline_flight(root.inline_flight.as_ref());
             return ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result));
         }
 
@@ -836,7 +836,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // build/request must take the same non-admission rails
                     // a machinery-root `cache_suppress` would set.
                     self.fold_into_top_build_local_taint(false, true);
-                    self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                    self.abort_inline_flight(root.inline_flight.as_ref());
                 }
             }
         }
@@ -884,29 +884,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         true
     }
 
-    pub(super) fn resolve_call_abort_inline_flight(
-        &self,
-        flight: Option<&crate::semantic_query_memo::InlineResolveCallFlight>,
-    ) {
-        if let Some(flight) = flight {
-            self.graph().abort_inline_resolve_call_flight(flight);
-        }
-    }
-
     fn abort_mixed_call_component(
         &self,
-        root_flight: Option<&crate::semantic_query_memo::InlineResolveCallFlight>,
+        root_flight: Option<&crate::semantic_query_memo::InlineMemberFlight>,
         relation_members: &[super::relation::DrainedRelationMember],
         flow_members: &[super::relation::DrainedFlowReturnMember],
         call_members: &[(ResolveCallKey, ResolveCallPendingState)],
     ) {
-        self.resolve_call_abort_inline_flight(root_flight);
+        self.abort_inline_flight(root_flight);
         for member in relation_members {
-            self.relation_abort_inline_flight(member.inline_flight.as_ref());
+            self.abort_inline_flight(member.inline_flight.as_ref());
         }
         self.flow_return_abort_drained_flights(flow_members);
         for (_, member) in call_members {
-            self.resolve_call_abort_inline_flight(member.inline_flight.as_ref());
+            self.abort_inline_flight(member.inline_flight.as_ref());
             if let Some(session) = member.staged_session {
                 self.abandon_session(session);
             }
@@ -968,7 +959,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let ObligationFrameDomain::ResolveCall(frame) = popped.domain else {
             unreachable!("call replay pops its call frame")
         };
-        self.resolve_call_abort_inline_flight(frame.inline_flight.as_ref());
+        self.abort_inline_flight(frame.inline_flight.as_ref());
         if popped.min_open_target.is_some() {
             if let CandidateVerdict::Selected(state) = &replay {
                 if let Some(session) = state.staged_session {
@@ -1018,14 +1009,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for member in pending {
             match member.domain {
                 PendingObligationDomain::Relate(state) => {
-                    self.relation_abort_inline_flight(state.inline_flight.as_ref());
+                    self.abort_inline_flight(state.inline_flight.as_ref());
                 }
                 PendingObligationDomain::FlowReturn(state) => {
-                    self.flow_return_abort_inline_flight(state.inline_flight.as_ref());
+                    self.abort_inline_flight(state.inline_flight.as_ref());
                 }
                 PendingObligationDomain::ResolveCall(state) => {
                     let state = *state;
-                    self.resolve_call_abort_inline_flight(state.inline_flight.as_ref());
+                    self.abort_inline_flight(state.inline_flight.as_ref());
                     if let Some(session) = state.staged_session {
                         self.abandon_session(session);
                     }

@@ -42,8 +42,9 @@ use rustc_hash::FxHashSet;
 use crate::cursor::ScriptLanguage;
 use crate::utils::oxc::vue::parse_generic;
 
-/// Vue macros recognised at setup scope.
-pub(super) const MACRO_NAMES: [&str; 7] = [
+/// Vue macros recognised at setup scope. Shared with the Options/combined
+/// projection for shadow reporting; macro resolution itself stays here.
+pub(crate) const MACRO_NAMES: [&str; 7] = [
     "defineProps",
     "defineEmits",
     "defineExpose",
@@ -125,7 +126,10 @@ pub struct SetupMacroCall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupStatementKind {
     /// `import ...`; hoists to module scope.
-    Import,
+    Import {
+        /// Imported local names.
+        names: Vec<String>,
+    },
     /// Type-only declaration (`type`, `interface`); hoists to module scope.
     TypeDeclaration {
         /// Declared type name.
@@ -263,8 +267,9 @@ const PURE_TYPE_SPACE: SymbolFlags = SymbolFlags::Interface
 
 /// Root-scope names bound to a runtime value, for macro-shadow checks. A
 /// type-only declaration (`interface`, `type`, `import type`) of the same
-/// name as a macro must not suppress the macro.
-pub(super) fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
+/// name as a macro must not suppress the macro. Shared with the
+/// Options/combined projection; the rule itself stays here.
+pub(crate) fn value_bindings(scoping: &Scoping) -> FxHashSet<String> {
     scoping
         .get_bindings(scoping.root_scope_id())
         .iter()
@@ -507,7 +512,29 @@ fn project_setup(
 
 fn classify(statement: &Statement<'_>) -> SetupStatementKind {
     match statement {
-        Statement::ImportDeclaration(_) => SetupStatementKind::Import,
+        Statement::ImportDeclaration(import) => SetupStatementKind::Import {
+            names: if import.import_kind.is_type() {
+                Vec::new()
+            } else {
+                import
+                    .specifiers
+                    .as_ref()
+                    .map(|specifiers| {
+                        specifiers
+                            .iter()
+                            .filter_map(|specifier| match specifier {
+                                ImportDeclarationSpecifier::ImportSpecifier(spec)
+                                    if spec.import_kind.is_type() =>
+                                {
+                                    None
+                                }
+                                _ => Some(specifier.local().name.to_string()),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
+        },
         Statement::TSTypeAliasDeclaration(decl) => SetupStatementKind::TypeDeclaration {
             name: decl.id.name.to_string(),
         },
