@@ -1958,6 +1958,49 @@ fn optional_member_read_return_is_the_stripped_member_or_undefined() {
         ]),
     );
 }
+
+/// A member read through a SYNTHESIZED optional member folds the absent-key
+/// `undefined` exactly like the authored one.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): with
+/// `type Authored = { a?: 1 }` and `type Synthetic = Partial<{ a: 1 }>`,
+/// `v.a` is `1 | undefined` for BOTH.
+///
+/// Before, the synthesized read published `1`: the optionality proof that
+/// gates the fold recognised only an `Object` surface, and `Partial<…>`
+/// reaches the read as a deferred mapped shell whose optional member is
+/// visible only once it is reduced. One shape then answered differently by
+/// origin — the section 5.9 determinism row DET-07 found it.
+#[test]
+fn synthesized_optional_member_read_folds_undefined_like_the_authored_one() {
+    const PATH: &str = "/ws/cov/synthetic_optional.ts";
+    const SRC: &str = "type Authored = { a?: 1 };\n\
+                       type Synthetic = Partial<{ a: 1 }>;\n\
+                       export function authored(v: Authored) { return v.a; }\n\
+                       export function synthetic(v: Synthetic) { return v.a; }\n";
+    let host = host_with(&[(PATH, SRC)]);
+    let authored = eval(&host, PATH, "authored");
+    match &authored {
+        Outcome::Value {
+            ty: TypeExpr::Union(arms),
+            degradation: None,
+            candidates: 1,
+        } => {
+            let one = TypeExpr::Literal(LiteralValue::Number(1.0));
+            let undefined = TypeExpr::Primitive(PrimitiveName::Undefined);
+            assert!(
+                arms.len() == 2 && arms.contains(&one) && arms.contains(&undefined),
+                "the authored read must be `1 | undefined`: {authored:?}"
+            );
+        }
+        other => panic!("the authored read must be a clean `1 | undefined` union: {other:?}"),
+    }
+    assert_eq!(
+        eval(&host, PATH, "synthetic"),
+        authored,
+        "a SYNTHESIZED optional member must read exactly like the authored one"
+    );
+}
 /// CANARY (landed) — a `super.m()` call in a derived class method
 /// resolves to the base member's declared return.
 ///

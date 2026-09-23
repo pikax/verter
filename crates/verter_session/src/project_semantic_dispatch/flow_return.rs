@@ -10605,9 +10605,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         crate::semantic_query::SurfaceKeyProjection::AbsentProven => {}
                     }
                 }
-                _ => {
-                    any_unknown = true;
-                }
+                // Anything else may still DENOTE a surface it has not been
+                // reduced to: a deferred mapped shell, a utility or alias
+                // application, a declaration reference. `Partial<{ a: 1 }>`
+                // declares `a` optional, but only in the mapped surface it
+                // evaluates to. Reduce it through the ONE structural-fact
+                // demand — bounded, cycle detected, fail-closed — and
+                // examine what it denotes. Without this a synthesized
+                // optional member is unproven, the read never gains its
+                // absent-key `undefined`, and one shape answers differently
+                // by origin: an authored `{ a?: 1 }` reads `1 | undefined`
+                // and `Partial<{ a: 1 }>` read `1`. A node the demand cannot
+                // reduce comes back as itself, and a `Partial` demand
+                // answers nothing, so both stay unknown and the fold stays
+                // proof-gated.
+                _ => match self
+                    .dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        concrete,
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    )
+                    .into_complete_node()
+                {
+                    Some(resolved) if resolved != concrete && !seen.contains(&resolved) => {
+                        pending.push(resolved);
+                    }
+                    _ => any_unknown = true,
+                },
             }
         }
         if any_required {
