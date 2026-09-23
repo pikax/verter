@@ -547,8 +547,8 @@ fn workload_json(workload: &Workload) -> serde_json::Value {
 /// The stack the measured work runs on. Deep descriptor-instantiation chains
 /// recurse through the implementation, and a process main thread's stack is
 /// platform-sized (1 MiB on Windows, 8 MiB on macOS and Linux): the
-/// pre-kernel baseline overflows a 1 MiB stack on the depth-12 chain while
-/// the candidate completes it. Both arms run on one explicit, generous stack
+/// pre-kernel baseline overflows a 1 MiB stack on a depth-12 chain where
+/// the candidate reaches its typed depth refusal. Both arms run on one explicit, generous stack
 /// so the timing compares the same completed workload on every platform;
 /// the depth each arm tolerates on a default stack is a separate finding,
 /// not something to let a platform default decide inside a timing run.
@@ -567,9 +567,14 @@ fn main() {
 
 fn run() {
     let args: Vec<String> = std::env::args().collect();
+    // Depth 8: both arms COMPLETE the chain, so its timing compares the
+    // same answered work. Past eleven levels the connected-query depth
+    // guard refuses it in both arms (two nested queries per level), and
+    // the baseline's chain work doubles per level, so a deeper default
+    // times refusals or spends the session on one witness.
     let corpus = Corpus {
         modules: arg(&args, "--modules", 24),
-        depth: arg(&args, "--depth", 12).max(1),
+        depth: arg(&args, "--depth", 8).max(1),
     };
     let samples = arg(&args, "--samples", 30);
     let cold_samples = arg(&args, "--cold-samples", 10);
