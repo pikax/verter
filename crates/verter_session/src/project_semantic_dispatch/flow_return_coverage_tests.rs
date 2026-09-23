@@ -5779,6 +5779,7 @@ export function plainLit() { const x: InstanceType<ReturnType<typeof plainClass>
 export function plainMethod() { const x: InstanceType<ReturnType<typeof plainClass>>['m'] = null as any; return x; }
 export function plainGetter() { const x: InstanceType<ReturnType<typeof plainClass>>['g'] = null as any; return x; }
 export function plainStatic() { const x: ReturnType<typeof plainClass>['st'] = null as any; return x; }
+export function protoRead() { const C = class { extra = 1; }; return C.prototype; }
 export function plainCtorParams() { const x: ConstructorParameters<ReturnType<typeof plainClass>> = null as any; return x; }
 export function ctorParams() { const x: ConstructorParameters<ReturnType<typeof ctorClass>> = null as any; return x; }
 export function ctorProperty() { const x: InstanceType<ReturnType<typeof ctorClass>>['a'] = null as any; return x; }
@@ -5905,7 +5906,9 @@ fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
 /// the instance prints `(Anonymous class)` (no type-parameter clause
 /// encloses it); `extra` is `number`, `lit` is `1`, `m` is `() => number`,
 /// `g` is `boolean`; the static `st` is `string`; `ConstructorParameters`
-/// is `[]`.
+/// is `[]`. `protoRead`'s `C.prototype` over `const C = class { extra = 1;
+/// }` is `C`: the constructor's `prototype` is the instance, and a class
+/// expression that initializes a variable is named after it.
 #[test]
 fn class_expression_value_is_its_constructor_over_its_own_members() {
     assert_class_probe(
@@ -5922,6 +5925,7 @@ fn class_expression_value_is_its_constructor_over_its_own_members() {
     );
     assert_class_probe("plainGetter", ClassProbeAdmission::ReturnOnly, "boolean");
     assert_class_probe("plainStatic", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("protoRead", ClassProbeAdmission::ReturnOnly, "C");
     assert_eq!(class_probe_tuple("plainCtorParams"), Vec::new());
 }
 
