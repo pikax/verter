@@ -611,10 +611,11 @@ const MATRIX: &[MatrixRow] = &[
         id: "DET-05",
         perturbation: "Cold, warm, partial persisted cache, edit/revert, cancelled/retried work, epoch rebuild",
         driver: Driver::Ignored {
-            reason: "the partial-persisted-cache axis has no public drivable surface: nothing \
-                     persists a semantic cache across a process; the cold, warm, \
-                     edit-revert, cancelled/retried and epoch-rebuild axes are asserted in \
-                     the ignored body and by the drivable subset",
+            reason: "the cross-process persisted-cache axis has no public drivable surface: \
+                     nothing persists a semantic cache across a process; a partial resident \
+                     cache is driven by family eviction, and the cold, warm, edit-revert, \
+                     cancelled/retried and epoch-rebuild axes are asserted in the ignored \
+                     body and by the drivable subset",
         },
     },
     MatrixRow {
@@ -932,18 +933,87 @@ fn det_04_worker_counts_1_2_4_8() {
 /// observation; a caller-cancelled request answers complete-and-cold-equal
 /// or `Cancelled`, and its retry equals a cold host; the public
 /// `clear_compile_cache` advances the store-view epoch and the same logical
-/// snapshot then gives the same observation and bytes). One axis has no
-/// drivable surface: partial PERSISTED cache — the product persists no
-/// semantic cache across a process at all. The row stays ignored naming it;
-/// the driven axes stay asserted so the un-ignoring change inherits a real
-/// body, not a stub.
+/// snapshot then gives the same observation and bytes). A PARTIAL resident
+/// cache is driven by `det_05_partial_resident_cache_after_family_eviction`.
+/// One axis has no drivable surface: a cache PERSISTED across processes —
+/// the product persists no semantic cache at all. The row stays ignored
+/// naming it; the driven axes stay asserted so the un-ignoring change
+/// inherits a real body, not a stub.
 #[test]
-#[ignore = "the partial-persisted-cache axis has no public drivable surface: nothing persists a \
-            semantic cache across a process; the cold, warm, edit-revert, \
-            cancelled/retried and epoch-rebuild axes are the drivable subset"]
+#[ignore = "the cross-process persisted-cache axis has no public drivable surface: nothing \
+            persists a semantic cache across a process; the cold, warm, edit-revert, \
+            cancelled/retried, epoch-rebuild and partial resident-cache axes are driven"]
 fn det_05_cold_warm_edit_revert() {
     assert_registered_ignored("DET-05");
     drive_det_05_subset();
+}
+
+/// More distinct answered questions than the family memo retains: the
+/// memo's retention bound is 4096 families, admitted in order and evicted
+/// oldest first.
+const FAMILY_EVICTION_FLOOD: usize = 4200;
+
+/// DET-05's partial-cache axis in the product's own terms. The family memo
+/// is bounded, so a host that has answered more distinct questions than the
+/// bound holds a PARTIAL cache: its oldest answers evicted, the rest
+/// resident. The witness answered first is evicted by the flood — re-asked,
+/// its record is cold while a question answered last is still served warm —
+/// and its answer equals a cold host's on both bases. Run by default; the
+/// PERSISTED form of the axis (a cache carried across processes) has no
+/// product surface and stays with the ignored row.
+#[test]
+fn det_05_partial_resident_cache_after_family_eviction() {
+    assert_registered_ignored("DET-05");
+    let canonical = "/det/edit.ts";
+    let cold_host = build_host(&[(canonical, EDIT_ORIGINAL_TS)]);
+    let cold = observe(&cold_host, canonical, "witness");
+    let ask = |host: &VerterHost, canonical: &str, symbol: &str| {
+        host.get_flow_return_type_with_audit(
+            &identity(canonical, symbol),
+            ReturnProjectionDemand::whole_return(),
+        )
+        .audit()
+        .from_cache
+    };
+
+    let host = build_host(&[(canonical, EDIT_ORIGINAL_TS)]);
+    assert_eq!(observe(&host, canonical, "witness"), cold);
+    assert!(
+        ask(&host, canonical, "witness"),
+        "DET-05: precondition — the witness is served warm before the flood"
+    );
+    let mut last = String::new();
+    // bounded-loop: FAMILY_EVICTION_FLOOD distinct questions.
+    for i in 0..FAMILY_EVICTION_FLOOD {
+        last = format!("/det/flood{i}.ts");
+        upsert(
+            &host,
+            &last,
+            &format!("export function flood() {{ return {{ k: {i} }}; }}\n"),
+        );
+        ask(&host, &last, "flood");
+    }
+    assert!(
+        ask(&host, &last, "flood"),
+        "DET-05: precondition — the last question answered is still resident, so the \
+         cache is partial rather than empty"
+    );
+    assert!(
+        !ask(&host, canonical, "witness"),
+        "DET-05: precondition — the flood evicted the witness answered first"
+    );
+    assert_eq!(
+        observe(&host, canonical, "witness"),
+        cold,
+        "DET-05: the witness re-answered beside a partial cache disagrees with a cold host"
+    );
+    let witness_row = |host: &VerterHost| generated_byte_rows(host).remove(canonical);
+    assert!(witness_row(&cold_host).is_some());
+    assert_eq!(
+        witness_row(&host),
+        witness_row(&cold_host),
+        "DET-05: the witness's generated bytes changed under a partial cache"
+    );
 }
 
 /// DET-05's drivable subset, run by default: an ignored test runs in no CI
