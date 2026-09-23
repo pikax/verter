@@ -12127,4 +12127,13 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
         !store.node_is_live(a_union),
         "the closed document's union is released"
     );
+
+    // A late reader of the released union id gets the placeholder's view but
+    // does not re-admit it: nothing would ever release that residue.
+    let _ = semantic_union_members(&store, a_union, &ctx);
+    assert_eq!(
+        store.union_view_count(),
+        1,
+        "a view of a released union is served, never kept"
+    );
 }

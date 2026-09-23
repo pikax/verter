@@ -699,15 +699,6 @@ impl NodeArena {
                             embeds_dead = true;
                         }
                     });
-                    // A class expression's instance embeds its surface node
-                    // outside the child walk (the walk serves the semantic
-                    // definition of structure; the surface is the instance's
-                    // own evaluation product), so the cascade reaches it here.
-                    if let SemanticNodeData::ClassExpressionInstance { surface, .. } =
-                        payload.as_ref()
-                    {
-                        embeds_dead |= dead.contains(&surface.0);
-                    }
                     if embeds_dead {
                         dead.insert(id);
                         changed = true;
