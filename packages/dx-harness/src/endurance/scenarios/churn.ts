@@ -326,10 +326,6 @@ export interface RetentionReading {
   readonly releaseWaitMaxMicros: number;
   /** The slowest single close-time release, in microseconds. */
   readonly releaseElapsedMaxMicros: number;
-  /** Times the gate paused admission to drain readers for a starving release. */
-  readonly releaseDrains: number;
-  /** The longest an arriving computation waited for such a drain, in microseconds. */
-  readonly releaseDrainWaitMaxMicros: number;
   /** The last close-time release applied, or null before the first. */
   readonly lastRelease: LastReleaseReading | null;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
@@ -426,8 +422,6 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "releasesApplied",
   "releaseWaitMaxMicros",
   "releaseElapsedMaxMicros",
-  "releaseDrains",
-  "releaseDrainWaitMaxMicros",
 ];
 
 /**
@@ -1273,7 +1267,6 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `registeredSources=${reading.registeredSources} signatureRecords=${reading.signatureRecords} ` +
     `deferred=${reading.deferredReleases} releases=${reading.releasesApplied} ` +
     `releaseWaitMax=${formatMicros(reading.releaseWaitMaxMicros)} releaseMax=${formatMicros(reading.releaseElapsedMaxMicros)} ` +
-    `drains=${reading.releaseDrains}/${formatMicros(reading.releaseDrainWaitMaxMicros)} ` +
     (reading.lastRelease
       ? `lastRelease={wait=${formatMicros(reading.lastRelease.waitMicros)} took=${formatMicros(reading.lastRelease.elapsedMicros)} ` +
         `scanned=${reading.lastRelease.nodesScanned} released=${reading.lastRelease.nodesReleased} ` +

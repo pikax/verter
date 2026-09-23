@@ -424,11 +424,6 @@ pub struct RetentionStatistics {
     pub release_wait_max_micros: u64,
     pub release_elapsed_max_micros: u64,
     pub release_elapsed_total_micros: u64,
-    /// Times the gate drained readers for a starving release, and the
-    /// longest an arriving computation waited for one (see
-    /// `verter_session::project_type_store::semantic_activity`).
-    pub release_drains: u64,
-    pub release_drain_wait_max_micros: u64,
     /// The last close-time release applied, or `None` before the first.
     pub last_release: Option<LastReleaseStatistics>,
     pub shape_cache_entries: usize,
@@ -479,8 +474,6 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             release_wait_max_micros: snapshot.reclaim.wait_max_micros,
             release_elapsed_max_micros: snapshot.reclaim.elapsed_max_micros,
             release_elapsed_total_micros: snapshot.reclaim.elapsed_total_micros,
-            release_drains: snapshot.reclaim.drains,
-            release_drain_wait_max_micros: snapshot.reclaim.drain_wait_max_micros,
             last_release: snapshot.reclaim.last.map(LastReleaseStatistics::from),
             shape_cache_entries: snapshot.shape_cache_entries,
             flow_graphs: snapshot.flow_graphs,

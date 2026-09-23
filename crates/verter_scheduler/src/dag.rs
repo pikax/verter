@@ -522,6 +522,7 @@ impl ReadyJob {
     /// share is the last one and the permit returns HERE, outside any pump:
     /// without a wake, the ready work it admits would wait for the driver's
     /// idle re-pump.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub(crate) fn started(
         mut self,

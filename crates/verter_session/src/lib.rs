@@ -291,9 +291,9 @@ mod semantic_graph_self_root_tests;
 /// Selective component-meta surface API types and BFS bridge support
 /// (Tier 1B / D102 / D125).
 pub mod component_meta_payload;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod guarded_host;
 pub use guarded_host::{GuardedHost, HostRef};
+#[cfg(not(target_arch = "wasm32"))]
 pub mod host_analyze_audit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_audit_bridge;

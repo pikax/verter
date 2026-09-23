@@ -959,6 +959,7 @@ fn a_job_dropped_after_a_reset_does_not_release_against_the_new_ledger() {
 /// driver's idle re-pump (5 s). In the WSP6 churn lane (a document closed and
 /// reopened in a loop) that put a 5 s stall under roughly one request in
 /// five.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
     let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
@@ -988,6 +989,7 @@ fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
 /// A live job's node keeps its share until `complete`, so starting the
 /// closure neither returns the permit nor posts a wake: the completion path
 /// returns it and pumps, exactly as before the share existed.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_started_live_job_leaves_the_permit_with_its_node() {
     let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
