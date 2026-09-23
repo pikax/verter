@@ -622,23 +622,20 @@ fn handler_key(event: &str, modifiers: &[String]) -> String {
             key = "onMouseup".to_string();
         }
     }
-    for option in ["passive", "once", "capture"] {
-        if modifiers.iter().any(|m| m == option) {
-            key.push_str(&capitalize(option));
+    for modifier in modifiers {
+        if matches!(modifier.as_str(), "passive" | "once" | "capture") {
+            key.push_str(&capitalize(modifier));
         }
     }
     key
 }
 
-/// Runtime `getModifierPropName`.
+/// Runtime modifiers key: `${arg}Modifiers` for a static `v-model:arg`
+/// (`modelModifiers` only when there is no arg). Matches
+/// `transformModel` in `@vue/compiler-core`, which uses the raw static
+/// arg spelling verbatim (`model-value` keeps its hyphen).
 fn modifier_prop_name(model: &str) -> String {
-    let base = if model == "modelValue" || model == "model-value" {
-        "model"
-    } else {
-        model
-    };
-    let suffix = if model == "model" { "$" } else { "" };
-    format!("{base}Modifiers{suffix}")
+    format!("{model}Modifiers")
 }
 
 fn capitalize(input: &str) -> String {

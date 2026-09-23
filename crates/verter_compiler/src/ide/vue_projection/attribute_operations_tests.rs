@@ -1,6 +1,6 @@
 use super::attribute_operations::{
     project_attribute_operations, AttributeOperationsProjection, AttributeSyntax, Certainty,
-    ConsumerChannel, MergeRule, RuntimeKey, SpreadKind, WriteValue,
+    ConsumerChannel, MergeRule, RuntimeKey, RuntimePropertyKeyPlan, SpreadKind, WriteValue,
 };
 use crate::framework_common::projection_plan::{build_projection_plan, PlanInput};
 
@@ -338,6 +338,62 @@ fn attribute_ops_dynamic_component_is_selects_instead_of_writing() {
     assert_eq!(plan.no_property, vec![0]);
     assert!(plan.effective("is").is_none());
     assert!(plan.effective("title").is_some());
+}
+
+/// `v-model:model` and `v-model:model-value` use the raw arg spelling
+/// plus `Modifiers` (`modelModifiers`, `model-valueModifiers`), matching
+/// `transformModel` in `@vue/compiler-core`: no `$` suffix, and
+/// `model-value` keeps its hyphen instead of colliding with the
+/// default-model key.
+#[test]
+fn attribute_ops_model_modifier_key_uses_raw_arg_spelling() {
+    let projection =
+        project("  <Foo v-model:model.trim=\"a\" />\n  <Foo v-model:model-value.trim=\"b\" />");
+    assert!(projection.complete);
+    let keys = |plan: &RuntimePropertyKeyPlan| {
+        plan.writes
+            .iter()
+            .map(|w| w.key.clone())
+            .collect::<Vec<_>>()
+    };
+    let key = |k: &str| RuntimeKey::Static(k.to_string());
+    assert_eq!(
+        keys(&projection.key_plans[0]),
+        vec![key("model"), key("onUpdate:model"), key("modelModifiers"),]
+    );
+    assert_eq!(
+        keys(&projection.key_plans[1]),
+        vec![
+            key("model-value"),
+            key("onUpdate:modelValue"),
+            key("model-valueModifiers"),
+        ]
+    );
+}
+
+/// `v-on` option modifiers append their postfix in authored order
+/// (`@save.capture.once` is `onSaveCaptureOnce`), matching
+/// `transformOn` in `@vue/compiler-dom`.
+#[test]
+fn attribute_ops_option_modifiers_keep_authored_order() {
+    let projection =
+        project("  <Foo @save.capture.once=\"h\" />\n  <Foo @save.once.capture=\"h\" />");
+    assert!(projection.complete);
+    let keys = |plan: &RuntimePropertyKeyPlan| {
+        plan.writes
+            .iter()
+            .map(|w| w.key.clone())
+            .collect::<Vec<_>>()
+    };
+    let key = |k: &str| RuntimeKey::Static(k.to_string());
+    assert_eq!(
+        keys(&projection.key_plans[0]),
+        vec![key("onSaveCaptureOnce")]
+    );
+    assert_eq!(
+        keys(&projection.key_plans[1]),
+        vec![key("onSaveOnceCapture")]
+    );
 }
 
 /// Products are a pure function of the admitted plan: an unchanged
