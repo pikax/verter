@@ -185,6 +185,7 @@ fn pattern_declares_infer(
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 children.extend(params.iter().map(|parameter| parameter.ty));
@@ -193,6 +194,7 @@ fn pattern_declares_infer(
                     children.extend(parameter.constraint);
                     children.extend(parameter.default);
                 }
+                children.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::Mapped { source, mapper } => {
                 children.extend([*source, mapper.key_space]);
@@ -801,6 +803,7 @@ fn display_resolved_type_node(
             params,
             return_type,
             type_parameters,
+            predicate,
             ..
         } => {
             let new_prefix = match kind {
@@ -809,7 +812,15 @@ fn display_resolved_type_node(
             };
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
             let rendered_params = render_params(store, params, needs, child_depth, visited);
-            let ret = display_type_node(store, *return_type, needs, child_depth, visited).0;
+            let ret = render_return(
+                store,
+                *return_type,
+                *predicate,
+                params,
+                needs,
+                child_depth,
+                visited,
+            );
             format!("{new_prefix}{tps}({rendered_params}) => {ret}")
         }
         // Lazy named references: render the NAME (§14.3 — a lazy ref carries no
@@ -1275,6 +1286,41 @@ fn render_params(
     rendered.join(", ")
 }
 
+/// Render a signature's return position the way TypeScript prints it: its
+/// type predicate when it carries one (`x is T`, `asserts x`,
+/// `asserts this is T`), never the `boolean` / `void` return that
+/// predicate denotes; otherwise the return type.
+fn render_return(
+    store: &SemanticGraphStore,
+    return_type: SemanticNodeId,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
+    params: &[FunctionParam],
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut DisplayContext,
+) -> String {
+    let Some(predicate) = predicate else {
+        return display_type_node(store, return_type, needs, depth, visited).0;
+    };
+    let subject = match predicate.subject {
+        crate::semantic_query::PredicateSubject::This => "this",
+        crate::semantic_query::PredicateSubject::Parameter(_) => predicate
+            .subject_parameter(params)
+            .and_then(|param| param.name.as_deref())
+            .unwrap_or("arg"),
+    };
+    let mut rendered = String::new();
+    if predicate.asserts {
+        rendered.push_str("asserts ");
+    }
+    rendered.push_str(subject);
+    if let Some(target) = predicate.ty {
+        rendered.push_str(" is ");
+        rendered.push_str(&display_type_node(store, target, needs, depth, visited).0);
+    }
+    rendered
+}
+
 /// Render a [`SemanticNodeData::Signature`] signature node in object / type-
 /// literal position, where the return type is introduced by a COLON
 /// (`(params): ret`) — distinct from the standalone arrow form. `prefix` is
@@ -1300,11 +1346,20 @@ fn render_signature_colon(
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             }) => {
                 let tps = render_type_parameters(store, type_parameters, needs, depth, visited);
                 let rendered_params = render_params(store, params, needs, depth, visited);
-                let ret = display_type_node(store, *return_type, needs, depth, visited).0;
+                let ret = render_return(
+                    store,
+                    *return_type,
+                    *predicate,
+                    params,
+                    needs,
+                    depth,
+                    visited,
+                );
                 format!("{prefix}{tps}({rendered_params}): {ret}")
             }
             // Defensive: a genuinely non-function signature node renders through its

@@ -1354,13 +1354,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 13,
+        "pubFn": 15,
         "pubFnTestHooks": 0,
         "pubCrateFn": 11,
-        "pubType": 31,
+        "pubType": 32,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
-        "pubStructField": 44
+        "pubStructField": 45
       },
       "authority": [
         {

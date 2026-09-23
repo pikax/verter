@@ -43,6 +43,7 @@ pub(crate) enum InferSyntaxPathStep {
     FunctionTypeParameterDefault(u32),
     FunctionParameter(u32),
     FunctionReturn,
+    FunctionPredicate,
     ObjectProperty(u32),
     ObjectSpread(u32),
     ObjectIndexKey(u32),
@@ -51,14 +52,17 @@ pub(crate) enum InferSyntaxPathStep {
     ObjectMethodTypeParameterDefault { member: u32, parameter: u32 },
     ObjectMethodParameter { member: u32, parameter: u32 },
     ObjectMethodReturn(u32),
+    ObjectMethodPredicate(u32),
     ObjectCallTypeParameterConstraint { member: u32, parameter: u32 },
     ObjectCallTypeParameterDefault { member: u32, parameter: u32 },
     ObjectCallParameter { member: u32, parameter: u32 },
     ObjectCallReturn(u32),
+    ObjectCallPredicate(u32),
     ObjectConstructTypeParameterConstraint { member: u32, parameter: u32 },
     ObjectConstructTypeParameterDefault { member: u32, parameter: u32 },
     ObjectConstructParameter { member: u32, parameter: u32 },
     ObjectConstructReturn(u32),
+    ObjectConstructPredicate(u32),
 }
 
 /// Exact typed child path from one lowering root to a syntax node.
@@ -395,6 +399,18 @@ fn visit_function_children<'a>(
     if let Some(return_type) = &function.return_type {
         visit(InferSyntaxPathStep::FunctionReturn, return_type);
     }
+    if let Some(target) = predicate_target(function) {
+        visit(InferSyntaxPathStep::FunctionPredicate, target);
+    }
+}
+
+/// The target of a signature's type predicate (`x is infer U` declares
+/// `U` there).
+fn predicate_target(function: &FunctionExpr) -> Option<&TypeExpr> {
+    function
+        .predicate
+        .as_deref()
+        .and_then(|predicate| predicate.ty.as_deref())
 }
 
 #[derive(Clone, Copy)]
@@ -466,6 +482,14 @@ fn visit_object_function_children<'a>(
             ObjectFunctionKind::Construct => InferSyntaxPathStep::ObjectConstructReturn(member),
         };
         visit(step, return_type);
+    }
+    if let Some(target) = predicate_target(function) {
+        let step = match kind {
+            ObjectFunctionKind::Method => InferSyntaxPathStep::ObjectMethodPredicate(member),
+            ObjectFunctionKind::Call => InferSyntaxPathStep::ObjectCallPredicate(member),
+            ObjectFunctionKind::Construct => InferSyntaxPathStep::ObjectConstructPredicate(member),
+        };
+        visit(step, target);
     }
 }
 

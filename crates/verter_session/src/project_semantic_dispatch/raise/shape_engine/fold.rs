@@ -37,6 +37,16 @@ pub(super) struct FoldedFunction<O> {
     pub(super) type_parameters: Vec<FoldedTypeParam<O>>,
     pub(super) signature_span: Option<Span>,
     pub(super) return_type_span: Option<Span>,
+    /// The signature's type predicate, its subject spelled the way the
+    /// raised function prints it (the named parameter, or `this`).
+    pub(super) predicate: Option<FoldedPredicate<O>>,
+}
+
+/// A folded type predicate awaiting algebra construction.
+pub(super) struct FoldedPredicate<O> {
+    pub(super) subject: verter_type_expr::TypePredicateSubject,
+    pub(super) asserts: bool,
+    pub(super) ty: Option<O>,
 }
 
 pub(super) struct FoldedFunctionParam<O> {
@@ -307,6 +317,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             type_parameters,
             signature_span,
             return_type_span,
+            predicate,
             ..
         } => {
             let folded = fold_function(
@@ -317,6 +328,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
                 type_parameters,
                 *signature_span,
                 *return_type_span,
+                *predicate,
                 active,
             )?;
             let function = alg.build_function(folded);
@@ -428,6 +440,7 @@ fn fold_function<A: RaisedShapeAlgebra>(
     type_parameters: &[crate::semantic_query::TypeParamDecl],
     signature_span: Option<Span>,
     return_type_span: Option<Span>,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<FoldedFunction<A::Out>> {
     // Presence-aware: an unraisable parameter, the REQUIRED return, or a
@@ -454,12 +467,37 @@ fn fold_function<A: RaisedShapeAlgebra>(
             is_const: tp.is_const,
         });
     }
+    // A predicate whose parameter carries no name has no printable subject;
+    // the `boolean` / `void` return still stands on its own.
+    let predicate = match predicate {
+        Some(predicate) => {
+            let subject = match predicate.subject {
+                crate::semantic_query::PredicateSubject::This => {
+                    Some(verter_type_expr::TypePredicateSubject::This)
+                }
+                crate::semantic_query::PredicateSubject::Parameter(_) => predicate
+                    .subject_parameter(params)
+                    .and_then(|param| param.name.clone())
+                    .map(verter_type_expr::TypePredicateSubject::Parameter),
+            };
+            match subject {
+                Some(subject) => Some(FoldedPredicate {
+                    subject,
+                    asserts: predicate.asserts,
+                    ty: fold_optional_slot(alg, dispatch, predicate.ty, active)?,
+                }),
+                None => None,
+            }
+        }
+        None => None,
+    };
     Some(FoldedFunction {
         parameters,
         return_type: Some(return_out),
         type_parameters: type_params,
         signature_span,
         return_type_span,
+        predicate,
     })
 }
 

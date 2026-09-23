@@ -99,6 +99,7 @@ fn signature_with_carrier(
         return_carrier,
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     })
 }
 
@@ -1099,6 +1100,7 @@ fn anonymous_signature(
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     })
 }
 
@@ -2617,6 +2619,7 @@ fn prototype_call_rebase_onto_a_rootless_callable_keeps_its_return() {
         return_carrier: SignatureReturnCarrier::Declared(rootless_return),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let key = prototype_call_key(&dispatch, call_member, extracted, vec![undefined, string]);
     let result = match dispatch.execute_resolve_call(key) {

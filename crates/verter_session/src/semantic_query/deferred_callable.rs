@@ -152,6 +152,8 @@ impl DeferredCallable {
             return_carrier: self.return_carrier,
             signature_span: None,
             return_type_span: None,
+            // A body-derived return carries no authored predicate.
+            predicate: None,
         }
     }
 }

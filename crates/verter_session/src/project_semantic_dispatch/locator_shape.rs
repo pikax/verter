@@ -138,6 +138,18 @@ fn register_locator_function_children_alias(
     ) {
         infer_binders.register_equivalent_subtree(alias, original);
     }
+    if let (Some(alias), Some(original)) = (
+        alias_function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+        original
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
 }
 
 fn register_locator_object_member_alias(
@@ -1344,6 +1356,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
             },
         };
+        // The predicate target is a fixed authored shape under the
+        // signature's own binders, exactly like the return.
+        let predicate = func.predicate.as_deref().and_then(|predicate| {
+            let target = predicate
+                .ty
+                .as_deref()
+                .map(|target| self.lower_locator_shape_node(target, &inner_ctx));
+            crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+        });
         graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
@@ -1357,6 +1378,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span: func.spans.signature,
                 return_type_span: func.spans.return_type,
+                predicate,
             },
             scope.clone(),
         )

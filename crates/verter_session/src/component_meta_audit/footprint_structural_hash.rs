@@ -582,6 +582,7 @@ impl StructuralEncoder<'_> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => {
                 self.buf.push(SemanticNodeTag::Signature.stable_id());
                 self.buf.push(match kind {
@@ -617,6 +618,13 @@ impl StructuralEncoder<'_> {
                 self.push_str(&format!("{return_carrier:?}"));
                 self.push_str(&format!("{signature_span:?}"));
                 self.push_str(&format!("{return_type_span:?}"));
+                // Trailing, present only on a predicate signature, so every
+                // predicate-less signature keeps its hash.
+                if let Some(predicate) = predicate {
+                    self.push_str(&format!("{:?}", predicate.subject));
+                    self.buf.push(u8::from(predicate.asserts));
+                    self.encode_child_opt(predicate.ty, depth);
+                }
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 self.buf.push(SemanticNodeTag::InstantiationRef.stable_id());

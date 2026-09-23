@@ -1686,9 +1686,15 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             signature_span: _,
             return_type_span: _,
             return_type: _,
+            predicate,
         } => {
             kind.hash(hasher);
             occurrence.hash(hasher);
+            // The predicate target is a pushed child; its subject and
+            // assertion flag are the shallow identity.
+            predicate
+                .map(|predicate| (predicate.subject, predicate.asserts, predicate.ty.is_some()))
+                .hash(hasher);
             params.len().hash(hasher);
             for param in params.iter() {
                 param.name.hash(hasher);
@@ -2302,6 +2308,7 @@ fn compare_shallow(
                 // constituent identity (they stay interning identity).
                 signature_span: _,
                 return_type_span: _,
+                predicate: da,
             },
             D::Signature {
                 kind: kb,
@@ -2312,6 +2319,7 @@ fn compare_shallow(
                 return_carrier: cb,
                 signature_span: _,
                 return_type_span: _,
+                predicate: db,
             },
         ) => {
             // Occurrence and the return-carrier discriminant participate in
@@ -2349,6 +2357,15 @@ fn compare_shallow(
                 }
             }
             work.push((*ra, *rb));
+            match (da, db) {
+                (None, None) => {}
+                (Some(da), Some(db)) if da.subject == db.subject && da.asserts == db.asserts => {
+                    if !push_opt(work, da.ty, db.ty) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
             true
         }
         // Opaque callable-composition payload: conservative Distinct (the

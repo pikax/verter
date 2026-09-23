@@ -226,6 +226,14 @@ fn reverse_readonly(observed: bool, modifier: ReadonlyMod) -> Option<bool> {
     }
 }
 
+/// One side of a signature relation's result: the return, and the type
+/// predicate that replaces it when the target narrows.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FunctionResult {
+    pub(super) return_type: SemanticNodeId,
+    pub(super) predicate: Option<crate::semantic_query::SignaturePredicate>,
+}
+
 /// One inferable parameter discovered in a pattern.
 #[derive(Debug, Clone)]
 pub(super) struct InferParamSite {
@@ -2984,6 +2992,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
             }) => {
                 let mut sites = Vec::new();
@@ -3040,6 +3049,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name: Arc::clone(name),
                         priority: InferenceCandidatePriority::ReturnType,
                     });
+                }
+                // `x is infer U`: the predicate target is inferred from the
+                // source predicate where the return would be.
+                if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
+                    if let Some(SemanticNodeData::Infer { name, .. }) =
+                        graph.node_data(target).as_deref()
+                    {
+                        sites.push(InferParamSite {
+                            node: target,
+                            name: Arc::clone(name),
+                            priority: InferenceCandidatePriority::ReturnType,
+                        });
+                    }
                 }
                 (!sites.is_empty())
                     .then(|| InferPatternInfo::new(InferPatternShape::Function, sites, None))
@@ -3368,6 +3390,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     stack.extend(params.iter().map(|parameter| parameter.ty));
@@ -3376,6 +3399,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.extend(parameter.constraint);
                         stack.extend(parameter.default);
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {
                     stack.extend(expressions.iter().copied());
@@ -4066,6 +4090,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     if shadowed
@@ -4079,6 +4104,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.push((parameter.ty, false));
                     }
                     stack.push((*return_type, false));
+                    if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
+                        stack.push((target, false));
+                    }
                     for parameter in type_parameters.iter() {
                         if let Some(constraint) = parameter.constraint {
                             stack.push((constraint, false));
@@ -6717,12 +6745,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 kind: s_kind,
                 params: s_params,
                 return_type: s_ret,
+                predicate: s_predicate,
                 ..
             },
             SemanticNodeData::Signature {
                 kind: t_kind,
                 params: t_params,
                 return_type: t_ret,
+                predicate: t_predicate,
                 ..
             },
         ) = (&*source_data, &*target_data)
@@ -6735,11 +6765,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             let s_params = Arc::clone(s_params);
             let t_params = Arc::clone(t_params);
-            let s_ret = *s_ret;
-            let t_ret = *t_ret;
+            let source_result = FunctionResult {
+                return_type: *s_ret,
+                predicate: *s_predicate,
+            };
+            let target_result = FunctionResult {
+                return_type: *t_ret,
+                predicate: *t_predicate,
+            };
             drop(source_data);
             drop(target_data);
-            results.push(self.relate_function(&s_params, s_ret, &t_params, t_ret, bindings));
+            results.push(self.relate_function(
+                &s_params,
+                source_result,
+                &t_params,
+                target_result,
+                bindings,
+            ));
             return;
         }
 
@@ -7572,12 +7614,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// strictly contravariant under `strictFunctionTypes`, bivariant
     /// otherwise (either direction suffices per parameter pair); the
     /// return is covariant. Subtype never uses the bivariant shortcut.
+    ///
+    /// A target carrying a TYPE predicate (`x is T` / `this is T`) relates
+    /// predicates instead of returns, as TypeScript's
+    /// `compareSignaturesRelated` does: a source without a predicate never
+    /// satisfies it (a `boolean`-returning function is not a type guard),
+    /// and a source predicate must be of the same kind about the same
+    /// parameter with a related target type. Measured on 7.0.2:
+    /// `((x: unknown) => boolean) extends ((x: unknown) => x is string)`
+    /// is false, `((x: unknown) => x is string) extends ((x: unknown) =>
+    /// x is string | number)` is true, a predicate about another
+    /// parameter or an assertion source is false.
     pub(super) fn relate_function(
         &self,
         source_params: &[crate::semantic_query::FunctionParam],
-        source_return: SemanticNodeId,
+        source_result: FunctionResult,
         target_params: &[crate::semantic_query::FunctionParam],
-        target_return: SemanticNodeId,
+        target_result: FunctionResult,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         let (source_this, source_pos) = crate::semantic_query::split_this_receiver(source_params);
@@ -7643,10 +7696,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::NotAssignable;
             }
         }
+        if let Some(target_predicate) = target_result
+            .predicate
+            .filter(|predicate| !predicate.asserts)
+        {
+            let related = match source_result.predicate {
+                Some(source_predicate)
+                    if !source_predicate.asserts
+                        && source_predicate.subject == target_predicate.subject =>
+                {
+                    match (source_predicate.ty, target_predicate.ty) {
+                        (Some(source_ty), Some(target_ty)) => self.relate_member(
+                            source_ty,
+                            target_ty,
+                            bindings,
+                            InferPosition::Return,
+                        ),
+                        _ => RelationResult::NotAssignable,
+                    }
+                }
+                _ => RelationResult::NotAssignable,
+            };
+            return result_and(acc, related);
+        }
         // Covariant return.
         let r = self.relate_member(
-            source_return,
-            target_return,
+            source_result.return_type,
+            target_result.return_type,
             bindings,
             InferPosition::Return,
         );

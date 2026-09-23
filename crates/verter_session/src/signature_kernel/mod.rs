@@ -42,12 +42,13 @@ pub use read_view::{BorrowedSet, ReadError, SemanticReadView};
 pub use records::{
     AppliedResult, AppliedResultId, BinderDeclaration, BinderSpace, BinderSpaceId, BodyLocatorId,
     CallSubstitutionId, DeclarationInstantiationId, GraphEpoch, ParameterLayout, ParameterLayoutId,
-    ParameterOptionality, ParameterSlot, ParameterSlotId, RestKind, RestSlot, ReturnObligationKey,
-    SignatureCandidate, SignatureDescriptor, SignatureDescriptorId, SignatureInputShape,
-    SignatureInputShapeId, SignatureKind, SignatureProvenanceId, SignatureResultRecipe,
-    SignatureResultRecipeId, SignatureSemanticFlags, SignatureSetId, SignatureSetRef,
-    SignatureTemplate, SignatureTemplateId, SpellingId, TypeToken, LAYOUT_QUERY_OUTCOME_SET,
-    LAYOUT_READY_SET, LAYOUT_SIGNATURE_CANDIDATE, LAYOUT_SIGNATURE_SET_REF,
+    ParameterOptionality, ParameterSlot, ParameterSlotId, PredicateEffect, RestKind, RestSlot,
+    ReturnObligationKey, SignatureCandidate, SignatureDescriptor, SignatureDescriptorId,
+    SignatureInputShape, SignatureInputShapeId, SignatureKind, SignatureProvenanceId,
+    SignatureResultRecipe, SignatureResultRecipeId, SignatureSemanticFlags, SignatureSetId,
+    SignatureSetRef, SignatureTemplate, SignatureTemplateId, SpellingId, TypeToken,
+    LAYOUT_QUERY_OUTCOME_SET, LAYOUT_READY_SET, LAYOUT_SIGNATURE_CANDIDATE,
+    LAYOUT_SIGNATURE_SET_REF,
 };
 #[allow(unused_imports)]
 pub use result::{

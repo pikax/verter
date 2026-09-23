@@ -1721,12 +1721,19 @@ fn collect_registry_refs_node_inner(
         SemanticNodeData::Signature {
             params,
             return_type,
+            predicate,
             ..
         } => {
-            for param in params.iter() {
+            // A predicate target prints in the return position.
+            for position in params
+                .iter()
+                .map(|param| param.ty)
+                .chain(std::iter::once(*return_type))
+                .chain(predicate.and_then(|predicate| predicate.ty))
+            {
                 collect_registry_member_surface_refs_node(
                     ctx,
-                    param.ty,
+                    position,
                     published_names,
                     queued_names,
                     output,
@@ -1735,16 +1742,6 @@ fn collect_registry_refs_node_inner(
                     visited,
                 );
             }
-            collect_registry_member_surface_refs_node(
-                ctx,
-                *return_type,
-                published_names,
-                queued_names,
-                output,
-                producer_scope,
-                RegistryMemberRefPolicy::PublicationBoundary,
-                visited,
-            );
         }
         SemanticNodeData::IndexedAccess { object, index } => {
             collect_registry_refs_node_inner(
@@ -1998,26 +1995,25 @@ fn collect_registry_member_surface_refs_node(
         SemanticNodeData::Signature {
             params,
             return_type,
+            predicate,
             ..
         } => {
-            for param in params.iter() {
+            // A predicate target prints in the return position.
+            for position in params
+                .iter()
+                .map(|param| param.ty)
+                .chain(std::iter::once(*return_type))
+                .chain(predicate.and_then(|predicate| predicate.ty))
+            {
                 recurse(
                     ctx,
-                    param.ty,
+                    position,
                     queued_names,
                     output,
                     RegistryMemberRefPolicy::PublicationBoundary,
                     visited,
                 );
             }
-            recurse(
-                ctx,
-                *return_type,
-                queued_names,
-                output,
-                RegistryMemberRefPolicy::PublicationBoundary,
-                visited,
-            );
         }
         SemanticNodeData::Object(surface) => {
             for member in surface.positive_members().iter() {
@@ -2182,10 +2178,12 @@ fn walk_reference_carriers(
             SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
             } => {
                 worklist.extend(params.iter().map(|param| param.ty));
                 worklist.push(*return_type);
+                worklist.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 worklist.push(*object);

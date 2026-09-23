@@ -952,6 +952,7 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let object = |members: Vec<SurfaceMember>,
@@ -2008,6 +2009,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let contravariant = reverse_test_conditional(
@@ -2100,6 +2102,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     assert_eq!(
@@ -3172,6 +3175,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
             signature_span: Some(verter_span::Span::new(span_start, span_start + 20)),
             return_type_span: Some(verter_span::Span::new(span_start + 15, span_start + 20)),
+            predicate: None,
         })
     };
     let sig_a = signature_node(30);
@@ -11574,6 +11578,7 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     let result = instantiate_utility(&dispatch, &graph, "Parameters", &[function]);
@@ -13531,6 +13536,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     // check = `(x: string) => any` — concrete Function.
     let check = graph.intern_node(SemanticNodeData::Signature {
@@ -13550,6 +13556,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     // true_branch = bare `P` reference (re-uses the same Infer node).
     let true_branch = infer_p;
@@ -13610,6 +13617,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
 
@@ -13836,6 +13844,7 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", signature, false, false)]);
@@ -13942,6 +13951,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", signature, false, false)]);
@@ -14185,6 +14195,7 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let source = graph.intern_node(SemanticNodeData::Object(
         crate::semantic_query::surface_view! {
@@ -14590,6 +14601,7 @@ fn relate_function_rest_never_exempts_uncallable_source_arity() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     // `(a: string, b: number, ...rest: any[])` — last required position 2.
@@ -14827,6 +14839,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
 
@@ -15908,6 +15921,7 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let overloaded = graph.intern_node(SemanticNodeData::Object(
@@ -16111,6 +16125,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
 
@@ -16334,6 +16349,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let shadow_source_value = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
@@ -16352,6 +16368,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let shadow_source = intern_object_with_members(
         &graph,
@@ -16472,6 +16489,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     // Substitute T → string. Expect `(x: string) => string`.
@@ -17124,6 +17142,7 @@ fn unary_function(
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     })
 }
 
@@ -19680,6 +19699,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let node_fn_open = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![fn_open]),
@@ -19705,6 +19725,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let node_fn_closed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: inst("Wrap2", vec![fn_closed]),
@@ -20605,6 +20626,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -20632,6 +20654,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -26596,6 +26619,7 @@ fn resolve_overload_set_occurrence_less_candidate_is_rootless_not_a_node_keyed_o
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let first = anonymous();
@@ -26954,6 +26978,7 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     (func, t_param)
 }
@@ -30428,6 +30453,7 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let members = intern_file_scoped_object(
         &graph,
@@ -31862,6 +31888,7 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
         return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let intersection_node = graph.intern_node_with_scope(
         SemanticNodeData::Intersection(
@@ -32067,6 +32094,7 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
         return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let with_callable = [callable, number_node];
 

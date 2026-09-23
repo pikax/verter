@@ -311,7 +311,11 @@ impl SignatureStore {
             result.recipe.index(),
             &inner.recipes,
         )?;
-        for token in result.return_type.into_iter().chain(result.effects) {
+        for token in result
+            .return_type
+            .into_iter()
+            .chain(result.effects.and_then(|effect| effect.ty))
+        {
             let raw = token.as_u64();
             Self::require_id(
                 inner,

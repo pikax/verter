@@ -4773,6 +4773,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let check = function(string_node, number_node);
@@ -4913,6 +4914,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
@@ -5547,6 +5549,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5618,6 +5621,7 @@ fn constructor_type_relates_and_binds_infer_return() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         });
         graph.intern_construct_twin_for_tests(signature)
     };
@@ -5703,6 +5707,7 @@ fn mapped_constructor_value_substitutes_per_key() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5797,6 +5802,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let ctor_pattern = graph.intern_construct_twin_for_tests(signature);
     // Inner: `(new (x: number) => any) extends new (x: infer P) => any ? P : never`.
@@ -5817,6 +5823,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let inner_check = graph.intern_construct_twin_for_tests(inner_check_sig);
     let inner = graph.intern_node(SemanticNodeData::Conditional {
@@ -5894,6 +5901,7 @@ fn signature_fixture_nodes(
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let construct = graph.intern_construct_twin_for_tests(call);
     (call, construct)
@@ -6109,6 +6117,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let construct_obj = graph.intern_node(SemanticNodeData::Object(

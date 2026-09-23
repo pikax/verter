@@ -14,9 +14,9 @@ use rustc_hash::FxHashMap;
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
-    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
-    QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceEntry, SurfaceMember,
+    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, OptionalityMod, PredicateSubject,
+    PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
+    SignatureKind, SurfaceEntry, SurfaceMember,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::CompilerIntrinsicTypeOp;
@@ -629,6 +629,7 @@ fn encode_data(
             return_carrier: _,
             signature_span: _,
             return_type_span: _,
+            predicate,
         } => {
             enc.header(category::AUTHORED, subtag::SIGNATURE);
             enc.u8(match kind {
@@ -659,6 +660,27 @@ fn encode_data(
                 Some(occ) => {
                     enc.u8(1);
                     enc.bytes(&format!("{occ:?}").into_bytes());
+                }
+            }
+            // The predicate is a trailing section, present only on a
+            // predicate signature: every predicate-less signature keeps its
+            // key bytes, and a predicate key extends that prefix, so the two
+            // never collide.
+            if let Some(predicate) = predicate {
+                match predicate.subject {
+                    PredicateSubject::This => enc.u8(1),
+                    PredicateSubject::Parameter(index) => {
+                        enc.u8(2);
+                        enc.u32(index);
+                    }
+                }
+                enc.bool(predicate.asserts);
+                match predicate.ty {
+                    None => enc.u8(0),
+                    Some(ty) => {
+                        enc.u8(1);
+                        encode_child(graph, ty, seen, &mut enc, depth);
+                    }
                 }
             }
         }

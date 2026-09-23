@@ -107,6 +107,8 @@ pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
+#[cfg(test)]
+mod signature_predicate_tests;
 pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime

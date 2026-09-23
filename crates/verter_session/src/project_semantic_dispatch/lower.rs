@@ -76,6 +76,18 @@ fn register_eager_function_alias(
     ) {
         infer_binders.register_equivalent_subtree(alias, original);
     }
+    if let (Some(alias), Some(original)) = (
+        alias_function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+        original
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
 }
 
 /// The scalar → projected-`TypeExpr` mapping for a stored enum member fact —
@@ -2661,6 +2673,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         is_const: tp.is_const,
                     })
                     .collect();
+                // The predicate target lowers under the signature's own
+                // binders, exactly like the return it rides beside.
+                let predicate = func.predicate.as_deref().and_then(|predicate| {
+                    let target = predicate.ty.as_deref().map(|target| {
+                        self.lower_type_expr_with_infer_factory(
+                            infer_binders,
+                            target,
+                            env,
+                            scope,
+                            name_resolution,
+                            scope_payload,
+                            shadowing,
+                            substitutions,
+                            reduction_context,
+                        )
+                    });
+                    crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+                });
                 let kind = match expr {
                     TypeExpr::ConstructorType(_) => crate::semantic_query::SignatureKind::Construct,
                     _ => crate::semantic_query::SignatureKind::Call,
@@ -2681,6 +2711,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // FunctionExpr (NOT recovered from child node ids).
                         signature_span: func.spans.signature,
                         return_type_span: func.spans.return_type,
+                        predicate,
                     },
                     scope.clone(),
                 )

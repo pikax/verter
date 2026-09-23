@@ -500,6 +500,7 @@ impl ProjectSemanticDispatch<'_> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     stack.extend(params.iter().map(|p| p.ty));
@@ -508,6 +509,7 @@ impl ProjectSemanticDispatch<'_> {
                         stack.extend(tp.constraint);
                         stack.extend(tp.default);
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());

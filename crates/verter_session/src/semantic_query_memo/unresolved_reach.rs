@@ -208,6 +208,7 @@ impl SemanticGraphStore {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 children.extend(params.iter().map(|param| param.ty));
@@ -216,6 +217,7 @@ impl SemanticGraphStore {
                     children.extend(parameter.constraint);
                     children.extend(parameter.default);
                 }
+                children.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::InstantiationRef { args, .. } => children.extend_from_slice(args),
             // A deferred intrinsic application is a KNOWN value whose operands
