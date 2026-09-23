@@ -690,11 +690,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// A type entering a flow evaluation under `nullability`. Declared
     /// unions lower as authored shells, never through the canonical
-    /// algebra, so a `string | null` annotation still names `null`; with
-    /// `strictNullChecks` off the checker built that type as `string`, and
-    /// the value the evaluation reads is the erased union. A union with no
-    /// nullable member, any non-union node, and every node under the strict
-    /// algebra pass through unchanged.
+    /// algebra, so a `string | null` annotation still names `null` — at
+    /// the top level or nested in an inline object, array or tuple type
+    /// (`{ a: string | null }`, `(string | null)[]`). With
+    /// `strictNullChecks` off the checker built every one of those unions
+    /// without the nullable member, so the value the evaluation reads is
+    /// the erased structure: `{ a: string }`, `string[]`. Every node under
+    /// the strict algebra, and every structure with no nullable union
+    /// member, passes through unchanged. A named carrier (a declaration or
+    /// instantiation reference) is not unfolded here: its members erase
+    /// where a read projects them into the flow.
     pub(super) fn erase_nullable_members(
         &self,
         node: SemanticNodeId,
@@ -703,18 +708,168 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if nullability.is_strict() {
             return node;
         }
+        let mut erased = rustc_hash::FxHashMap::default();
+        self.erase_nullable_members_within(node, nullability, &mut erased)
+    }
+
+    /// The structural walk behind [`Self::erase_nullable_members`]:
+    /// unions, arrays, tuples, object member values and function types,
+    /// memoized per walk — every node is rebuilt at most once, and a node
+    /// revisited while in flight answers itself. The walk never unfolds a
+    /// named carrier, so it only descends the inline structure the node
+    /// was interned with.
+    fn erase_nullable_members_within(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+        erased: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> SemanticNodeId {
+        if let Some(done) = erased.get(&node) {
+            return *done;
+        }
+        erased.insert(node, node);
         let graph = self.graph();
-        let members: Vec<SemanticNodeId> = match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Union(members))
-                if members
+        let result = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                let rebuilt: Vec<SemanticNodeId> = members
                     .iter()
-                    .any(|member| is_nullable_node(graph, *member)) =>
-            {
-                members.to_vec()
+                    .map(|member| self.erase_nullable_members_within(*member, nullability, erased))
+                    .collect();
+                if rebuilt.as_slice() == members.as_ref()
+                    && !members
+                        .iter()
+                        .any(|member| is_nullable_node(graph, *member))
+                {
+                    node
+                } else {
+                    self.intern_normalized_union(&rebuilt, nullability)
+                }
             }
-            _ => return node,
+            Some(SemanticNodeData::Array { element, readonly }) => {
+                let rebuilt = self.erase_nullable_members_within(*element, nullability, erased);
+                if rebuilt == *element {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Array {
+                            element: rebuilt,
+                            readonly: *readonly,
+                        },
+                    )
+                }
+            }
+            Some(SemanticNodeData::Tuple { elements, readonly }) => {
+                let mut rebuilt = elements.to_vec();
+                let mut changed = false;
+                for element in &mut rebuilt {
+                    let value =
+                        self.erase_nullable_members_within(element.value, nullability, erased);
+                    changed |= value != element.value;
+                    element.value = value;
+                }
+                if changed {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Tuple {
+                            elements: Arc::from(rebuilt.into_boxed_slice()),
+                            readonly: *readonly,
+                        },
+                    )
+                } else {
+                    node
+                }
+            }
+            Some(SemanticNodeData::Object(surface)) => {
+                let mut members = surface.positive_members().to_vec();
+                let mut changed = false;
+                for member in &mut members {
+                    let value =
+                        self.erase_nullable_members_within(member.value, nullability, erased);
+                    changed |= value != member.value;
+                    member.value = value;
+                }
+                if changed {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Object(
+                            surface
+                                .clone()
+                                .with_positive_members(Arc::from(members.into_boxed_slice())),
+                        ),
+                    )
+                } else {
+                    node
+                }
+            }
+            // A function type's parameter and return positions are unions
+            // the checker built too (`(x: string | null) => void` is
+            // `(x: string) => void`). The rebuilt signature keeps its
+            // occurrence, clause and spans — the same callable, as an
+            // instantiation keeps them.
+            Some(SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier,
+                signature_span,
+                return_type_span,
+                predicate,
+            }) => {
+                let mut rebuilt_params = params.to_vec();
+                let mut changed = false;
+                for param in &mut rebuilt_params {
+                    let ty = self.erase_nullable_members_within(param.ty, nullability, erased);
+                    changed |= ty != param.ty;
+                    param.ty = ty;
+                }
+                let rebuilt_return =
+                    self.erase_nullable_members_within(*return_type, nullability, erased);
+                changed |= rebuilt_return != *return_type;
+                // A type predicate's target is a type the checker built under
+                // the same policy (`x is string | null` guards `string`).
+                let rebuilt_predicate = predicate.map(|mut predicate| {
+                    if let Some(target) = predicate.ty {
+                        let erased_target =
+                            self.erase_nullable_members_within(target, nullability, erased);
+                        changed |= erased_target != target;
+                        predicate.ty = Some(erased_target);
+                    }
+                    predicate
+                });
+                if changed {
+                    let return_carrier = match return_carrier {
+                        crate::semantic_query::SignatureReturnCarrier::Declared(declared)
+                            if declared == return_type =>
+                        {
+                            crate::semantic_query::SignatureReturnCarrier::Declared(rebuilt_return)
+                        }
+                        other => other.clone(),
+                    };
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Signature {
+                            kind: *kind,
+                            params: Arc::from(rebuilt_params.into_boxed_slice()),
+                            return_type: rebuilt_return,
+                            type_parameters: Arc::clone(type_parameters),
+                            occurrence: occurrence.clone(),
+                            return_carrier,
+                            signature_span: *signature_span,
+                            return_type_span: *return_type_span,
+                            predicate: rebuilt_predicate,
+                        },
+                    )
+                } else {
+                    node
+                }
+            }
+            _ => node,
         };
-        self.intern_normalized_union(&members, nullability)
+        erased.insert(node, result);
+        result
     }
 
     /// The env-bearing function slot identity for one served function
@@ -1992,7 +2147,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         result: FlowReturnResult,
         kind: verter_semantic::analysis::flow::FunctionBodyKind,
-        yield_contributions: &[(SemanticNodeId, bool)],
+        yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: crate::semantic_query::NullabilityPolicy,
     ) -> FlowReturnResult {
@@ -2025,26 +2180,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// lone FRESH literal: `yield 1` widens to `number`, `yield 1; yield
     /// 2` keeps `1 | 2`). An empty contribution set is `None`: the wrap
     /// publishes the empty union (`never`).
+    ///
+    /// Under `strictNullChecks` off the yield type is widened exactly as
+    /// the return type is: a nullable contribution beside any other
+    /// vanishes before the lone-fresh-literal rule reads the aggregate
+    /// (`yield null; yield "s"` is `string`), and a yield type made only
+    /// of widening `null` / `undefined` values is `any` (TypeScript
+    /// 7.0.2: `function* g() { yield null; }` is `Generator<any, void,
+    /// unknown>`).
     fn join_yield_contributions(
         &self,
-        contributions: &[(SemanticNodeId, bool)],
+        contributions: &[YieldContribution],
         nullability: crate::semantic_query::NullabilityPolicy,
     ) -> Option<SemanticNodeId> {
         if contributions.is_empty() {
             return None;
         }
+        let graph = self.graph();
+        let mut contributions: Vec<&YieldContribution> = contributions.iter().collect();
+        let mut widening_nullish_only = false;
+        if !nullability.is_strict() {
+            if contributions
+                .iter()
+                .any(|contribution| !is_nullable_node(graph, contribution.node))
+            {
+                contributions.retain(|contribution| !is_nullable_node(graph, contribution.node));
+            } else {
+                widening_nullish_only = contributions
+                    .iter()
+                    .all(|contribution| contribution.widening_nullish);
+            }
+        }
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributions.len());
         let mut all_fresh = true;
-        for &(node, fresh) in contributions {
-            all_fresh &= fresh;
-            if !arms.contains(&node) {
-                arms.push(node);
+        for contribution in contributions {
+            all_fresh &= contribution.fresh;
+            if !arms.contains(&contribution.node) {
+                arms.push(contribution.node);
             }
         }
         if arms.len() == 1 && all_fresh {
             arms[0] = widen_literal_node(self, arms[0]);
         }
-        Some(self.intern_normalized_union(&arms, nullability))
+        let joined = self.intern_normalized_union(&arms, nullability);
+        if widening_nullish_only && is_nullable_node(graph, joined) {
+            return Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)));
+        }
+        Some(joined)
     }
 
     /// Resolve a wrap's lib generic head (`Generator` /
@@ -4653,6 +4835,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .then_some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition)
                 }),
             pending_statement_gap: None,
+            auto_typed_locals: rustc_hash::FxHashMap::default(),
             conditional_arm_nesting: 0,
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
@@ -6316,7 +6499,7 @@ struct FlowEvaluator<'d, 'b> {
     /// yield join widens a lone fresh literal exactly as the return join
     /// does). Read by the function-kind wrap at the join; a generator
     /// without yields joins the empty union (`never`).
-    yield_contributions: Vec<(SemanticNodeId, bool)>,
+    yield_contributions: Vec<YieldContribution>,
     /// The member-projection demand filter, when this evaluation serves
     /// a single-named-member `ReturnProjectionDemand` (`ReturnType<typeof
     /// f>['b']`). Return sites evaluate ONLY the demanded member of a
@@ -6332,6 +6515,13 @@ struct FlowEvaluator<'d, 'b> {
     /// modeled-`any` substitution for a value it could not model). Rides
     /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
     degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    /// Under `strictNullChecks` off: the checker's auto-typed locals —
+    /// unannotated `let` / `var` declared with no initializer or with a
+    /// bare `null` / `undefined` / `void` one — each mapped to whether
+    /// its value is currently that widening nullable type (the
+    /// initializer's or the latest write's;
+    /// [`Self::reads_widening_nullish_local`]).
+    auto_typed_locals: rustc_hash::FxHashMap<FlowProductSubject, bool>,
     /// The first statement-level gap observed in source order. A statement
     /// gap is a fallback diagnosis; a concrete degradation found during the
     /// evaluation takes precedence. Expression gaps remain immediate because
@@ -6593,6 +6783,18 @@ struct FlowContribution {
     /// the checker's widening nullable type, which the join widens to
     /// `any` when the function's `strictNullChecks` is off and nothing
     /// else contributes.
+    widening_nullish: bool,
+}
+
+/// One evaluated `yield` of a generator body, for the yield join.
+struct YieldContribution {
+    /// The yielded value.
+    node: SemanticNodeId,
+    /// The value is a fresh (widening) literal source.
+    fresh: bool,
+    /// The value is a bare `null` / `undefined` / `void` (or a read of
+    /// an auto-typed local holding one): the checker's widening nullable
+    /// type.
     widening_nullish: bool,
 }
 
@@ -7511,6 +7713,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         freshness: &crate::flow_slice_content::SliceFreshness,
     ) -> Positional<SemanticNodeId> {
         let declared = self.target_declared_node(target);
+        // An auto-typed local is retyped by every write: a bare `null` /
+        // `undefined` / `void` (or a read of another auto-typed local
+        // holding one) leaves it the widening nullable value, anything else
+        // ends it.
+        if let crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } = &target.root {
+            let subject = self.canonical_runtime_subject(binding);
+            if self.auto_typed_locals.contains_key(&subject) {
+                let widening = self.widening_nullish_value(value, freshness);
+                self.auto_typed_locals.insert(subject, widening);
+            }
+        }
         match declared {
             Some(node) if self.dispatch.union_arms_of(node).is_some() => {
                 self.eval_assignment_expr(value)
@@ -11519,6 +11732,66 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Whether `expr` reads an auto-typed local whose value is the
+    /// widening nullable type of its bare `null` / `undefined` / `void`
+    /// initializer or latest write — which a return, a yield or a value
+    /// position widens to `any` under `strictNullChecks` off. Always false
+    /// under the strict algebra.
+    ///
+    /// The tracking is by source order, not by path: a write retypes the
+    /// binding for every later read. Where a widening path and a path
+    /// holding a DECLARED nullable meet, the checker keeps the declared
+    /// (non-widening) type; this reads whichever write came last.
+    fn reads_widening_nullish_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
+        if self.nullability.is_strict() {
+            return false;
+        }
+        let crate::flow_slice_content::SliceExpr::Local {
+            binding,
+            captured: false,
+            ..
+        } = expr
+        else {
+            return false;
+        };
+        self.auto_typed_locals
+            .get(&self.canonical_runtime_subject(binding))
+            .is_some_and(|widening| *widening)
+    }
+
+    /// Whether the value `expr` evaluates to is the widening nullable
+    /// type under `strictNullChecks` off: a bare `null` / `undefined` /
+    /// `void` (the lowering's freshness mirror says so), a read of an
+    /// auto-typed local still holding one, or a conditional whose every
+    /// arm is one of those. Always false under the strict algebra.
+    fn widening_nullish_value(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> bool {
+        use crate::flow_slice_content::{SliceExpr, SliceFreshness};
+        if self.nullability.is_strict() {
+            return false;
+        }
+        match (expr, freshness) {
+            (_, SliceFreshness::WideningNullish) => true,
+            (SliceExpr::Union { arms, .. }, SliceFreshness::PerArm(facts))
+                if arms.len() == facts.len() =>
+            {
+                arms.iter()
+                    .zip(facts.iter())
+                    .all(|(arm, fact)| self.widening_nullish_value(arm, fact))
+            }
+            (SliceExpr::Union { arms, .. }, SliceFreshness::Pinned) => {
+                !arms.is_empty()
+                    && arms
+                        .iter()
+                        .all(|arm| self.widening_nullish_value(arm, &SliceFreshness::Pinned))
+            }
+            _ => self.reads_widening_nullish_local(expr),
+        }
+    }
+
     /// Whether `expr` is a read of a WIDENING-literal local (`const b =
     /// 1` — unannotated, no const assertion). `as const` / annotated
     /// literals, parameters, and non-local reads are never widening.
@@ -11566,6 +11839,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
+        // `strictNullChecks` off: a read of an auto-typed local still
+        // holding its widening nullable value widens to `any` at a value
+        // position, exactly as the bare `null` / `undefined` it came from.
+        if self.reads_widening_nullish_local(expr) && is_nullable_node(self.dispatch.graph(), node)
+        {
+            return self
+                .dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        }
         if let Some(call) = self.fresh_call_return_for(expr, node) {
             if call.values.contains(&node) {
                 return widen_fresh_read_node(self.dispatch, node, self.nullability);
@@ -11741,7 +12024,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             || self
                                                 .fresh_call_return_for(expr, node)
                                                 .is_some_and(|call| call.values.contains(&node));
-                                        self.yield_contributions.push((node, fresh));
+                                        self.yield_contributions.push(YieldContribution {
+                                            node,
+                                            fresh,
+                                            widening_nullish: self
+                                                .widening_nullish_value(expr, freshness),
+                                        });
                                     }
                                     None => {
                                         self.record_degradation(
@@ -11751,14 +12039,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 }
                             }
                             None => {
-                                // A bare `yield;` yields `undefined`.
+                                // A bare `yield;` yields the widening
+                                // `undefined` a bare `undefined` would.
                                 let graph = self.dispatch.graph();
-                                self.yield_contributions.push((
-                                    graph.intern_node(SemanticNodeData::Primitive(
+                                self.yield_contributions.push(YieldContribution {
+                                    node: graph.intern_node(SemanticNodeData::Primitive(
                                         PrimitiveKind::Undefined,
                                     )),
-                                    false,
-                                ));
+                                    fresh: false,
+                                    widening_nullish: true,
+                                });
                             }
                         }
                     }
@@ -11889,7 +12179,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     node,
                                     fresh_literal,
                                     fresh_values,
-                                    widening_nullish: freshness.all_widening_nullish(),
+                                    widening_nullish: self.widening_nullish_value(expr, freshness),
                                 });
                             }
                         }
@@ -12879,6 +13169,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                     self.set_declared_local(&FlowProductSubject::Local(*binding), *kind, None);
+                    // `strictNullChecks` off: a `const` initialised to a bare
+                    // `null` / `undefined` / `void` value (or to a read of an
+                    // auto-typed local holding one) is DECLARED as that
+                    // value's widened type, `any` (TypeScript 7.0.2: `const y
+                    // = null; return y` is `any`). An unannotated `let` /
+                    // `var` with no initializer or such an initializer is the
+                    // checker's auto-typed variable: it reads the widening
+                    // nullable value until a later write retypes it.
+                    let subject = FlowProductSubject::Local(*binding);
+                    let widening_nullish_init = init
+                        .as_ref()
+                        .is_some_and(|init| self.widening_nullish_value(init, freshness));
+                    if !self.nullability.is_strict() {
+                        let canonical_subject = self.canonical_runtime_subject(&subject);
+                        if *kind == crate::flow_slice_content::SliceBindingKind::Const {
+                            if widening_nullish_init {
+                                let any = self
+                                    .dispatch
+                                    .graph()
+                                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                                self.bind_local(&subject, *kind, any, None, false);
+                                continue;
+                            }
+                        } else if init.is_none() || widening_nullish_init {
+                            self.auto_typed_locals
+                                .insert(canonical_subject, widening_nullish_init);
+                        } else {
+                            self.auto_typed_locals.remove(&canonical_subject);
+                        }
+                    }
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
                     // the whole declaration, so nothing here can observe
@@ -12900,6 +13220,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         {
                             let mut parts: Vec<EvolvingPart> = Vec::new();
                             self.collect_evolving_parts(init, freshness, &mut parts);
+                            // Under `strictNullChecks` off a nullable arm
+                            // beside another arm is erased from the
+                            // initializer's union, so it neither pins nor
+                            // blocks the surviving arms' freshness
+                            // (`const y = c ? null : 1` is the fresh `1`).
+                            if !self.nullability.is_strict() {
+                                let graph = self.dispatch.graph();
+                                if parts.iter().any(|part| !is_nullable_node(graph, part.node)) {
+                                    parts.retain(|part| !is_nullable_node(graph, part.node));
+                                }
+                            }
                             let pinned = self.pinned_literal_blockers(&parts);
                             let mut merged: Vec<EvolvingPart> = Vec::new();
                             for part in parts {
@@ -13791,6 +14122,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 yield_contributions: Vec::new(),
                 degradation: None,
                 pending_statement_gap: None,
+                auto_typed_locals: rustc_hash::FxHashMap::default(),
                 conditional_arm_nesting: 0,
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),

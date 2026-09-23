@@ -1062,7 +1062,17 @@ fn drive_det_05_cancel_and_retry() {
 }
 
 fn drive_det_05_subset() {
-    drive_det_05_cancel_and_retry();
+    // The cancel witness's eight-level generic chain runs on the stack the
+    // product gives query work (the language server's serve thread and the
+    // host CPU pool are 8 MiB). An unoptimised build's frames exceed the
+    // test harness's 2 MiB default at that depth.
+    std::thread::Builder::new()
+        .name("det-05-cancel".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(drive_det_05_cancel_and_retry)
+        .expect("spawn the DET-05 cancellation driver")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let host = build_host(&[("/det/edit.ts", EDIT_ORIGINAL_TS)]);
     let canonical = "/det/edit.ts";
     let cold = observe(&host, canonical, "witness");

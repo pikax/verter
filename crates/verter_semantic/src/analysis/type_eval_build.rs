@@ -4124,6 +4124,10 @@ type InferenceResult<T> = Result<T, InferenceUnavailableReason>;
 struct InferenceBudget {
     remaining_work: usize,
     used_unmodeled_fallback: bool,
+    /// How a bare nullish value nested in an object- or array-literal
+    /// position is typed for this whole inference (see
+    /// [`NestedNullishLiterals`]).
+    nested_nullish: NestedNullishLiterals,
 }
 
 impl Default for InferenceBudget {
@@ -4131,7 +4135,54 @@ impl Default for InferenceBudget {
         Self {
             remaining_work: MAX_SEMANTIC_INFERENCE_WORK,
             used_unmodeled_fallback: false,
+            nested_nullish: NestedNullishLiterals::Keep,
         }
+    }
+}
+
+/// How a bare `null` / `undefined` / `void` value NESTED in an object
+/// member or an array element is typed — the program's `strictNullChecks`.
+///
+/// With `strictNullChecks` off such a value has the checker's WIDENING
+/// nullable type, and widening the enclosing literal's type (every
+/// position a flow evaluation publishes: a return, a yield, a variable's
+/// declared type, an inference candidate) turns it into `any`: `{ a: null
+/// }` is `{ a: any }`, `[null]` is `any[]`. An array's element union never
+/// keeps a nullable element beside another element (`[null, 1]` is
+/// `number[]`). A standalone top-level value is not a nested position and
+/// is never affected: its widening depends on the enclosing join, which
+/// only the consumer knows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NestedNullishLiterals {
+    /// `strictNullChecks` on: the value is `null` / `undefined`.
+    Keep,
+    /// `strictNullChecks` off: the value widens to `any`, and an element
+    /// union drops it beside any other element.
+    WidenToAny,
+}
+
+/// Whether a value expression is a bare `null` / `undefined` / `void`
+/// value, seen through parentheses and `satisfies` — the checker's
+/// WIDENING nullable type. A conditional is one when both arms are. A type
+/// assertion (`null as null`) and a read of a declared `null` binding are
+/// not: their nullable type is the regular one.
+#[must_use]
+pub fn expr_is_widening_nullish(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expr_is_widening_nullish(&parenthesized.expression)
+        }
+        Expression::TSSatisfiesExpression(satisfies) => {
+            expr_is_widening_nullish(&satisfies.expression)
+        }
+        Expression::ConditionalExpression(conditional) => {
+            expr_is_widening_nullish(&conditional.consequent)
+                && expr_is_widening_nullish(&conditional.alternate)
+        }
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name.as_str() == "undefined",
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
+        _ => false,
     }
 }
 
@@ -4261,7 +4312,27 @@ pub fn infer_declaration_expression_type_with_completeness(
     source: &str,
     policy: TopLevelLiteralPolicy,
 ) -> Result<DeclarationExpressionInference, InferenceUnavailableReason> {
-    let mut budget = InferenceBudget::default();
+    infer_declaration_expression_type_with_nested_nullish(
+        expr,
+        source,
+        policy,
+        NestedNullishLiterals::Keep,
+    )
+}
+
+/// [`infer_declaration_expression_type_with_completeness`] with the
+/// program's typing of nested bare nullish values
+/// ([`NestedNullishLiterals`]).
+pub fn infer_declaration_expression_type_with_nested_nullish(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: TopLevelLiteralPolicy,
+    nested_nullish: NestedNullishLiterals,
+) -> Result<DeclarationExpressionInference, InferenceUnavailableReason> {
+    let mut budget = InferenceBudget {
+        nested_nullish,
+        ..InferenceBudget::default()
+    };
     let ty = infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)?;
     Ok(DeclarationExpressionInference {
         ty,
@@ -4331,6 +4402,16 @@ fn infer_declaration_expression_type_with_budget(
         Expression::ArrayExpression(array) => {
             let mut element_types = Vec::new();
             for element in &array.elements {
+                // `strictNullChecks` off: a bare nullish element is dropped
+                // beside another element; an array of nothing else widens
+                // its element to `any` (see [`NestedNullishLiterals`]).
+                if budget.nested_nullish == NestedNullishLiterals::WidenToAny
+                    && element
+                        .as_expression()
+                        .is_some_and(expr_is_widening_nullish)
+                {
+                    continue;
+                }
                 match element {
                     oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                         let spread_type = infer_declaration_expression_type_with_budget(
@@ -4452,6 +4533,15 @@ fn object_member_value(
     // VALUE to a literal but does NOT add the `readonly` modifier — TS leaves
     // `tag` mutable; only `{ … } as const` makes the properties `readonly`.
     let readonly = policy == MemberLiteralPolicy::ConstAssert;
+    // A bare nullish member value under `strictNullChecks` off widens to
+    // `any` whatever the member policy — an `as const` object keeps it
+    // `readonly` but not `null` (TypeScript 7.0.2: `{ a: null } as const`
+    // is `{ readonly a: any }`).
+    if budget.nested_nullish == NestedNullishLiterals::WidenToAny && expr_is_widening_nullish(value)
+    {
+        budget.visit(depth)?;
+        return Ok((TypeExpr::Primitive(PrimitiveName::Any), readonly));
+    }
     // The value (and its NESTED members) is inferred under a const context when
     // the whole object is `as const` OR this property carries its own `as const`,
     // so a nested object under a per-property `as const`
@@ -4575,6 +4665,10 @@ fn infer_expression_type_ctx_with_read_root(
         Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
         Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
         Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
+        // `void x` evaluates its operand and produces `undefined`.
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
+            Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
+        }
         Expression::ConditionalExpression(cond) => Ok(TypeExpr::union(vec![
             // Both arms contribute to this composite; neither is its whole
             // identifier origin.
@@ -4593,15 +4687,21 @@ fn infer_expression_type_ctx_with_read_root(
                         | oxc_ast::ast::ArrayExpressionElement::Elision(_)
                 )
             });
+            let widen_nullish = budget.nested_nullish == NestedNullishLiterals::WidenToAny;
             if let (Some(readonly), true) = (policy.array_literal_is_tuple(), positional) {
                 let mut elements = Vec::with_capacity(arr.elements.len());
                 for element in &arr.elements {
                     let Some(expr) = element.as_expression() else {
                         continue;
                     };
+                    let ty = if widen_nullish && expr_is_widening_nullish(expr) {
+                        TypeExpr::Primitive(PrimitiveName::Any)
+                    } else {
+                        infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?
+                    };
                     elements.push(TupleElement {
                         label: None,
-                        ty: infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?,
+                        ty,
                         optional: false,
                         rest: false,
                     });
@@ -4612,7 +4712,17 @@ fn infer_expression_type_ctx_with_read_root(
                 });
             }
             let mut element_types = Vec::new();
+            // `strictNullChecks` off: a bare nullish element adds nothing to
+            // the element union beside another element, and an array of
+            // nothing else widens to `any[]` exactly as an empty one does.
             for element in &arr.elements {
+                if widen_nullish
+                    && element
+                        .as_expression()
+                        .is_some_and(expr_is_widening_nullish)
+                {
+                    continue;
+                }
                 match element {
                     oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                         // A spread element contributes its source's element

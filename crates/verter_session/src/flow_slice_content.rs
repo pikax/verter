@@ -83,9 +83,9 @@ use verter_semantic::analysis::function_program::{
     FunctionNode, FunctionProgramEntry, ResolvedFunctionNode,
 };
 use verter_semantic::analysis::type_eval_build::{
-    embeds_call_return_carrier, infer_declaration_expression_type,
-    infer_declaration_expression_type_with_completeness, ExpressionInferenceCompleteness,
-    TopLevelLiteralPolicy,
+    embeds_call_return_carrier, expr_is_widening_nullish, infer_declaration_expression_type,
+    infer_declaration_expression_type_with_nested_nullish, ExpressionInferenceCompleteness,
+    NestedNullishLiterals, TopLevelLiteralPolicy,
 };
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
@@ -505,7 +505,9 @@ pub enum SliceStatement {
         /// the fresh arms and keeps authored pins (`1 as const`, a call,
         /// a reference). Annotated declarators and `let` / `var` (whose
         /// bare literal initializers already widened at lowering) stay
-        /// `Pinned`.
+        /// `Pinned` — except a `let` / `var` initialised to a bare
+        /// `null` / `undefined` / `void` value, which carries its
+        /// [`SliceFreshness::WideningNullish`] shape.
         freshness: SliceFreshness,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
@@ -2081,6 +2083,7 @@ pub(crate) fn build_flow_slice_content(
         loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
+        nullability,
     };
     if selection.is_some() {
         lowerer.unsafe_invoked_closure_effects =
@@ -2732,20 +2735,6 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
     }
 }
 
-/// Whether a value expression is a bare `null` / `undefined` / `void`
-/// value — the checker's WIDENING nullable type, seen through the
-/// freshness-transparent wrappers. A type assertion (`null as null`) or a
-/// read of a declared `null` / `undefined` binding is not: its nullable
-/// type is the regular one.
-fn expr_is_widening_nullish(expression: &Expression<'_>) -> bool {
-    match unwrap_freshness_transparent(expression) {
-        Expression::NullLiteral(_) => true,
-        Expression::Identifier(identifier) => identifier.name.as_str() == "undefined",
-        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
-        _ => false,
-    }
-}
-
 /// The top-level FRESHNESS shape of one applied write's right-hand side —
 /// the lowering-time input to the evaluator's evolving-target widening
 /// rule (an assignment into a binding with NO declared authority widens
@@ -2797,17 +2786,6 @@ impl SliceFreshness {
             Self::Fresh => true,
             Self::Pinned | Self::WideningNullish => false,
             Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
-        }
-    }
-
-    /// Whether EVERY leaf of the tree is a widening `null` / `undefined`
-    /// value (and the tree is non-empty).
-    #[must_use]
-    pub fn all_widening_nullish(&self) -> bool {
-        match self {
-            Self::WideningNullish => true,
-            Self::Fresh | Self::Pinned => false,
-            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_widening_nullish),
         }
     }
 
@@ -4210,6 +4188,11 @@ pub(crate) fn build_flow_capture_authority(
 /// planned edge and a lowered read can never disagree about which slot a
 /// name denotes.
 struct Lowerer<'a> {
+    /// The function's own project's `strictNullChecks` algebra. With it
+    /// off a bare `null` / `undefined` / `void` value nested in an object
+    /// member or an array element is the checker's widening nullable type,
+    /// which the enclosing literal's widening turns into `any`.
+    nullability: crate::semantic_query::NullabilityPolicy,
     frame_gate: Arc<DefiningFrameGate>,
     bindings: &'a verter_semantic::analysis::flow::FlowBindingMap,
     index: &'a verter_semantic::analysis::function_program::FunctionProgramIndex,
@@ -5305,13 +5288,19 @@ impl Lowerer<'_> {
                         // initializers already widened at `BindingInit`
                         // lowering, and an annotated `const` takes its
                         // declared type — both stay `Pinned` here.
-                        let freshness = if kind == SliceBindingKind::Const && declared.is_none() {
-                            declarator
-                                .init
-                                .as_ref()
-                                .map_or(SliceFreshness::Pinned, expression_freshness)
-                        } else {
-                            SliceFreshness::Pinned
+                        // An unannotated `let` / `var` whose initializer is
+                        // a bare `null` / `undefined` / `void` value carries
+                        // that shape too: it is the checker's auto-typed
+                        // variable, reading the widening nullable type
+                        // until a later write retypes it.
+                        let freshness = match (declared.as_ref(), declarator.init.as_ref()) {
+                            (None, Some(init)) if kind == SliceBindingKind::Const => {
+                                expression_freshness(init)
+                            }
+                            (None, Some(init)) if expr_is_widening_nullish(init) => {
+                                expression_freshness(init)
+                            }
+                            _ => SliceFreshness::Pinned,
                         };
                         out.push(SliceStatement::Binding {
                             binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
@@ -7784,6 +7773,13 @@ impl Lowerer<'_> {
                 captured: true,
             },
             NameBinding::NestedFunction | NameBinding::Unmodeled => SliceExpr::UnmodeledBinding,
+            // A free `undefined` is not a declaration the owner scope can
+            // answer: its value IS the `undefined` type (the shared shallow
+            // pass reads it the same way).
+            NameBinding::Free if name == "undefined" => SliceExpr::Type(GatedLeaf(
+                TypeExpr::Primitive(PrimitiveName::Undefined),
+                None,
+            )),
             NameBinding::Free => SliceExpr::Type(GatedLeaf(
                 TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: vec![name.to_owned()],
@@ -8033,6 +8029,24 @@ impl Lowerer<'_> {
                     // under `as const` or otherwise: the modifier applies
                     // to data properties.
                     readonly: false,
+                    spans,
+                })));
+                continue;
+            }
+            // `strictNullChecks` off: a bare `null` / `undefined` /
+            // `void` member is the widening nullable type, which the
+            // literal's widening turns into `any` under every member
+            // policy (`{ a: null } as const` is `{ readonly a: any }`).
+            // The value still RUNS, so a call inside `void f()` takes
+            // the same scan an elided position does.
+            if !self.nullability.is_strict() && expr_is_widening_nullish(value_expression) {
+                self.scan_unmodeled_position_effects(value_expression);
+                entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
+                    key,
+                    value: SliceExpr::SemanticAny,
+                    assignment_value: None,
+                    method_kind,
+                    readonly: policy.readonly(),
                     spans,
                 })));
                 continue;
@@ -9085,8 +9099,17 @@ impl Lowerer<'_> {
                 preserve_literal: false,
             } => TopLevelLiteralPolicy::Widen,
         };
-        let inference =
-            infer_declaration_expression_type_with_completeness(expr, self.source, policy);
+        let nested_nullish = if self.nullability.is_strict() {
+            NestedNullishLiterals::Keep
+        } else {
+            NestedNullishLiterals::WidenToAny
+        };
+        let inference = infer_declaration_expression_type_with_nested_nullish(
+            expr,
+            self.source,
+            policy,
+            nested_nullish,
+        );
         let (ty, completeness) = inference
             .map(|inference| (inference.ty, inference.completeness))
             .unwrap_or_else(|reason| {
