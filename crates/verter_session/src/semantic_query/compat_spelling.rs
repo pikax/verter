@@ -68,6 +68,10 @@ pub(crate) const MATERIALIZE_PREFIX: &str = "materialize:";
 /// `QueryError::IncompleteSemanticOperand` —
 /// `semanticIncompleteOperand(<reason>|<reason>)`.
 pub(crate) const SEMANTIC_INCOMPLETE_OPERAND_PREFIX: &str = "semanticIncompleteOperand(";
+/// `QueryError::CheckerRecovery` — `checkerRecovery(TS<code>)`. The carrier
+/// raises as its recovery type, so this spelling appears only where a
+/// caller asks for the terminal projection of the error itself.
+pub(crate) const CHECKER_RECOVERY_PREFIX: &str = "checkerRecovery(";
 
 /// The recorded partial reasons as stable `|`-joined names in bit order,
 /// or `none` for an empty set.

@@ -10678,40 +10678,151 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Re-enter [`SemanticQueryKey::AwaitedNormalize`] on a composite arm.
-    /// Going back through the query — rather than recursing privately — is
-    /// what puts nested unwraps under the family memo, the singleflight, the
-    /// same-path cycle guard and the connected-work budget.
-    fn awaited_normalize_read(
+    /// The checker's error type after `diagnostic`, as the typed recovery
+    /// carrier.
+    fn checker_recovery(
+        &self,
+        diagnostic: crate::semantic_query::CheckerDiagnostic,
+    ) -> SemanticNodeId {
+        self.graph()
+            .intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery(
+                diagnostic,
+            )))
+    }
+
+    /// Whether `reduced` is `relation`'s TS1062 failure for `operand` — the
+    /// relation's own recovery carrier, reached from an operand that was not
+    /// already an error type (an error-type operand is its own answer, so it
+    /// passes through as a value).
+    fn awaited_relation_failed_on(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        reduced: SemanticNodeId,
+    ) -> bool {
+        use crate::project_semantic_dispatch::absorb::SpecialKind;
+        matches!(
+            self.graph().node_data(reduced).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic)))
+                if *diagnostic == relation.recursion_diagnostic()
+        ) && !matches!(self.peek_special(operand), Some((SpecialKind::Error, _)))
+    }
+
+    /// Whether the runtime awaited relation FAILED on `operand` with TS1062,
+    /// given the node `awaited_normalize_for_flow` answered for it.
+    pub(super) fn awaited_normalize_failed_on(
         &self,
         operand: SemanticNodeId,
+        reduced: SemanticNodeId,
+    ) -> bool {
+        self.awaited_relation_failed_on(AwaitedRelation::Normalize, operand, reduced)
+    }
+
+    /// Re-enter `relation`'s own family on `operand`. Going back through the
+    /// query — rather than recursing privately — is what puts nested unwraps
+    /// under the family memo, the singleflight and the connected-work
+    /// budget; each relation re-enters ONLY itself, so an async return
+    /// payload never comes back as `Awaited<T>` for a nested naked `T`.
+    ///
+    /// The re-entry first applies the checker's own recursion rule
+    /// (`getAwaitedTypeNoAlias` and its `awaitedTypeStack`): when `operand`
+    /// is a type this relation is ALREADY unwrapping on the current path, the
+    /// thenable that promised it references itself, directly or indirectly,
+    /// in its fulfillment callback. The checker reports TS1062 there and
+    /// fails the step ([`AwaitedStep::Failed`]). Which operands are in flight
+    /// is a fact about this path, not about `operand`, so every answer built
+    /// over such a failure stays out of the warm memo.
+    fn awaited_relation_step(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AwaitedNormalize { operand, context })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
+    ) -> AwaitedStep {
+        let key = relation.key(operand, context);
+        if self.graph().is_same_path_inflight_on_current_thread(&key) {
+            self.fold_into_top_build_local_taint(false, true);
+            return AwaitedStep::Failed;
+        }
+        match self.execute_read(key).value {
+            QueryResult::Value(node)
+                if self.awaited_relation_failed_on(relation, operand, node) =>
+            {
+                AwaitedStep::Failed
+            }
+            QueryResult::Value(node) => AwaitedStep::Value(node),
+            _ => AwaitedStep::Refused,
         }
     }
 
-    /// Re-enter [`SemanticQueryKey::AsyncReturnPayload`] on a composite arm.
-    /// Deliberately its OWN relation: an async return payload never
-    /// re-enters `AwaitedNormalize`, or a nested naked type parameter would
-    /// come back as `Awaited<T>` instead of `T`.
-    fn async_return_payload_read(
+    /// Distribute `relation` over union arms the way the checker maps
+    /// `getAwaitedTypeNoAlias` over a union: an arm that FAILS (TS1062) is
+    /// dropped, and the union fails only when every arm does. An arm that
+    /// refuses defers the whole reduction — a partial distribution would
+    /// silently drop information.
+    fn awaited_union_step(
         &self,
-        operand: SemanticNodeId,
+        relation: AwaitedRelation,
+        arms: &[SemanticNodeId],
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AsyncReturnPayload { operand, context })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
+    ) -> AwaitedStep {
+        let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match self.awaited_relation_step(relation, *arm, context) {
+                AwaitedStep::Value(node) => reduced.push(node),
+                AwaitedStep::Failed => {}
+                AwaitedStep::Refused => return AwaitedStep::Refused,
+            }
         }
+        match reduced.as_slice() {
+            [] => AwaitedStep::Failed,
+            [single] => AwaitedStep::Value(*single),
+            _ => AwaitedStep::Value(self.intern_normalized_union_or_intersection(&reduced, true)),
+        }
+    }
+
+    /// The declaration a lowering-time self-reference sentinel names.
+    ///
+    /// A declaration's body lowers a reference to the declaration itself as
+    /// `RecursiveRef { name }` (`interface Rec { then(f: (v: Rec) => void):
+    /// void }` — the `Rec` in the callback), scoped to the declaring file.
+    /// For a declaration with no type parameters that sentinel denotes
+    /// exactly the declaration, so it answers as its `DeclRef` carrier.
+    /// A generic declaration's sentinel does not record which instantiation
+    /// it stands for, and a function-local declaration is not addressable by
+    /// its file slot, so both stay the sentinel.
+    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let name = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name })) => Arc::clone(name),
+            _ => return None,
+        };
+        let scope = self.graph().node_scope(node)?;
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            whole_hash,
+            local_scope: None,
+        } = &scope
+        else {
+            return None;
+        };
+        let prepared = self.ctx.prepared_type_decl_return_only(
+            canonical_id.as_ref(),
+            *owner,
+            name.as_ref(),
+        )?;
+        if !prepared.type_parameters.is_empty() {
+            return None;
+        }
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(canonical_id),
+            owner: *owner,
+            whole_hash: *whole_hash,
+            decl_name: name,
+        };
+        Some(
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope.clone()),
+        )
     }
 
     /// Settle the operand once, through the shared deferred evaluator, and
@@ -10729,6 +10840,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
             .into_active_query_build_node(self);
+        // A declaration's lowering-time reference to itself is the
+        // declaration it names.
+        let resolved = self
+            .self_reference_declaration(resolved)
+            .unwrap_or(resolved);
         // `any` / `never` / `unknown` and the dominating error carrier all
         // answer with the resolved operand verbatim.
         if let Some((kind, special)) = self.peek_special(resolved) {
@@ -10748,21 +10864,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (resolved, None)
     }
 
-    /// Re-enter the family `relation` names — each relation's composite arms
-    /// go back through its OWN query so nested unwraps share its memo, cycle
-    /// guard and budget.
-    fn awaited_relation_read(
-        &self,
-        relation: AwaitedRelation,
-        operand: SemanticNodeId,
-        context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        match relation {
-            AwaitedRelation::Normalize => self.awaited_normalize_read(operand, context),
-            AwaitedRelation::Payload => self.async_return_payload_read(operand, context),
-        }
-    }
-
     /// The structural arms BOTH compiler awaited relations share, reached
     /// after each family's own arms declined. They follow the checker's
     /// runtime awaited-type protocol (`getAwaitedType` /
@@ -10774,7 +10875,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   ([`Self::surface_thenability`]): not thenable ⇒ itself; a valid
     ///   thenable ⇒ the relation over the promised value; a callable `then`
     ///   with no callable `onfulfilled` ⇒ `any` (the checker reports the
-    ///   operand and types it `any`);
+    ///   operand and types it `any`); the promised values are one union to
+    ///   the checker, so a value the relation FAILS on is dropped, and the
+    ///   step fails only when every value does;
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands ONE
     ///   level through the shared `Instantiate` family and re-enters the
     ///   relation on its body. When the body comes back unchanged the
@@ -10787,44 +10890,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         relation: AwaitedRelation,
         resolved: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        let data = self.graph().node_data(resolved)?;
+    ) -> AwaitedStep {
+        let Some(data) = self.graph().node_data(resolved) else {
+            return AwaitedStep::Refused;
+        };
         match data.as_ref() {
             SemanticNodeData::Object(surface) => {
                 self.note_awaited_evidence(surface.positive_members().iter().map(|m| m.value));
                 let thenability = self.surface_thenability(resolved, surface);
                 drop(data);
                 match thenability {
-                    Thenability::NotThenable => Some(resolved),
+                    Thenability::NotThenable => AwaitedStep::Value(resolved),
                     Thenability::Promised(values) => {
-                        let mut reduced = Vec::with_capacity(values.len());
-                        for value in values {
-                            reduced.push(self.awaited_relation_read(relation, value, context)?);
-                        }
-                        Some(if reduced.len() == 1 {
-                            reduced[0]
-                        } else {
-                            self.intern_normalized_union_or_intersection(&reduced, true)
-                        })
+                        self.awaited_union_step(relation, &values, context)
                     }
-                    Thenability::Malformed => Some(
+                    Thenability::Malformed => AwaitedStep::Value(
                         self.graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
                     ),
-                    Thenability::Undecided => None,
+                    Thenability::Undecided => AwaitedStep::Refused,
                 }
             }
             SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
                 drop(data);
-                let body = self.declaration_carrier_body(resolved)?;
+                let Some(body) = self.declaration_carrier_body(resolved) else {
+                    return AwaitedStep::Refused;
+                };
                 self.note_awaited_evidence([body]);
                 if self.same_node_payload(body, resolved) {
-                    return None;
+                    return AwaitedStep::Refused;
                 }
-                let reduced = self.awaited_relation_read(relation, body, context)?;
-                Some(if reduced == body { resolved } else { reduced })
+                match self.awaited_relation_step(relation, body, context) {
+                    AwaitedStep::Value(reduced) if reduced == body => AwaitedStep::Value(resolved),
+                    step => step,
+                }
             }
-            _ => None,
+            _ => AwaitedStep::Refused,
         }
     }
 
@@ -10847,6 +10948,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         carrier: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
+        match self
+            .execute_read(self.declaration_carrier_key(carrier)?)
+            .value
+        {
+            QueryResult::Value(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// The `Instantiate` key [`Self::declaration_carrier_body`] reads for a
+    /// declaration carrier, or `None` for any other node.
+    fn declaration_carrier_key(&self, carrier: SemanticNodeId) -> Option<SemanticQueryKey> {
         let (identity, args) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => (
                 identity.clone(),
@@ -10868,15 +10981,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
         );
-        match self
-            .execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(slot, args, context),
-            ))
-            .value
-        {
-            QueryResult::Value(body) => Some(body),
-            _ => None,
-        }
+        Some(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(slot, args, context),
+        ))
     }
 
     /// Bind the lexical demand scope to `node`'s declaring file for one
@@ -11096,8 +11203,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// family (its memo, singleflight and cycle guard), classified:
     /// `Some(None)` when the application stays deferred, `Some(Some(node))`
     /// when it reduced, `None` on refusal.
+    ///
+    /// When `Awaited<argument>` is an application whose evaluation is
+    /// ALREADY in progress on this path, the conditional has recursed back
+    /// into itself with the same argument: `Awaited<V>` for a `then` whose
+    /// fulfillment value leads back to the operand. The checker's
+    /// instantiation never terminates there; it stops at its depth limit,
+    /// reports TS2589 and continues with its error type. That recovery is
+    /// the answer, and it holds whatever else is in flight — every
+    /// application on the path leads back to this one, and the error type
+    /// dominates each union and branch the conditional builds on the way.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
-        let body = self.declaration_carrier_body(self.lib_awaited_carrier(argument))?;
+        let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
+        if self
+            .graph()
+            .is_same_path_inflight_on_current_thread(&application)
+        {
+            return Some(Some(self.checker_recovery(
+                crate::semantic_query::CheckerDiagnostic {
+                    code:
+                        crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                    operation: crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+                },
+            )));
+        }
+        let body = match self.execute_read(application).value {
+            QueryResult::Value(body) => body,
+            _ => return None,
+        };
         if self.lib_awaited_carrier_argument(body) == Some(argument) {
             return Some(None);
         }
@@ -11138,6 +11271,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
             .into_active_query_build_node(self);
+        let resolved = self
+            .self_reference_declaration(resolved)
+            .unwrap_or(resolved);
         if let Some((kind, special)) = self.peek_special(resolved) {
             return match kind {
                 SpecialKind::Any
@@ -11446,8 +11582,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             _ => vec![bound],
         };
-        arms.into_iter()
-            .any(|arm| self.awaited_normalize_read(arm, context) != Some(arm))
+        arms.into_iter().any(|arm| {
+            !matches!(
+                self.awaited_relation_step(AwaitedRelation::Normalize, arm, context),
+                AwaitedStep::Value(node) if node == arm
+            )
+        })
     }
 
     /// The awaited-type normalization — the LIVE producer for
@@ -11465,19 +11605,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_awaited_normalize();
         let reduced = self.awaited_normalize_node(operand, context);
-        self.awaited_relation_output(operand, reduced)
+        self.awaited_relation_output(AwaitedRelation::Normalize, operand, reduced)
     }
 
     fn awaited_normalize_node(
         &self,
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> AwaitedStep {
         let (resolved, decided) = self.awaited_operand_prelude(operand);
         if let Some(node) = decided {
-            return Some(node);
+            return AwaitedStep::Value(node);
         }
-        let data = self.graph().node_data(resolved)?;
+        let Some(data) = self.graph().node_data(resolved) else {
+            return AwaitedStep::Refused;
+        };
         match data.as_ref() {
             // `Promise<V>` — recognised by RESOLVED declaration identity
             // through the registry, never by spelling — unwraps its payload
@@ -11487,20 +11629,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let payload = args[0];
                 drop(data);
-                self.awaited_normalize_read(payload, context)
+                self.awaited_relation_step(AwaitedRelation::Normalize, payload, context)
             }
             // Union distribution: every arm re-enters the family and the
-            // results renormalise canonically. An arm that refuses defers the
-            // WHOLE reduction — a partial distribution would silently drop
-            // information.
+            // results renormalise canonically.
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
                 drop(data);
-                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    reduced.push(self.awaited_normalize_read(*member, context)?);
-                }
-                Some(self.intern_normalized_union_or_intersection(&reduced, true))
+                self.awaited_union_step(AwaitedRelation::Normalize, &members, context)
             }
             // A type parameter whose constraint is provably its own awaited
             // type is its own awaited type; every other open parameter is the
@@ -11510,9 +11646,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let constraint = *constraint;
                 drop(data);
                 if self.awaited_type_parameter_needs_deferral(constraint, context) {
-                    Some(self.deferred_awaited(resolved))
+                    AwaitedStep::Value(self.deferred_awaited(resolved))
                 } else {
-                    Some(resolved)
+                    AwaitedStep::Value(resolved)
                 }
             }
             // The awaited operation is idempotent: awaiting a deferred
@@ -11520,7 +11656,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IntrinsicApplication {
                 op: crate::semantic_query::CompilerIntrinsicTypeOp::Awaited,
                 ..
-            } => Some(resolved),
+            } => AwaitedStep::Value(resolved),
             // An authored lib `Awaited<X>` (by declaration identity): the lib
             // conditional decides it first; a deferred application is
             // already an awaited type (the checker's
@@ -11532,9 +11668,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .lib_awaited_carrier_argument(resolved)
                     .expect("guarded by the arm");
                 drop(data);
-                match self.lib_awaited_read(argument)? {
-                    None => Some(resolved),
-                    Some(reduced) => self.awaited_normalize_read(reduced, context),
+                match self.lib_awaited_read(argument) {
+                    None => AwaitedStep::Refused,
+                    Some(None) => AwaitedStep::Value(resolved),
+                    Some(Some(reduced)) => {
+                        self.awaited_relation_step(AwaitedRelation::Normalize, reduced, context)
+                    }
                 }
             }
             // Object surfaces and declaration carriers follow the shared
@@ -11562,25 +11701,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_async_return_payload();
         let reduced = self.async_return_payload_node(operand, context);
-        self.awaited_relation_output(operand, reduced)
+        self.awaited_relation_output(AwaitedRelation::Payload, operand, reduced)
     }
 
     fn async_return_payload_node(
         &self,
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> AwaitedStep {
         let (resolved, decided) = self.awaited_operand_prelude(operand);
         if let Some(node) = decided {
-            return Some(node);
+            return AwaitedStep::Value(node);
         }
-        let data = self.graph().node_data(resolved)?;
+        let Some(data) = self.graph().node_data(resolved) else {
+            return AwaitedStep::Refused;
+        };
         match data.as_ref() {
             // THE DISCRIMINATOR. A naked type parameter is its own payload
             // REGARDLESS of constraint — no constraint test here, deliberately.
             SemanticNodeData::TypeParam { .. } => {
                 drop(data);
-                Some(resolved)
+                AwaitedStep::Value(resolved)
             }
             // An awaited operand contributes NOTHING to the published
             // payload: measured on tsc 7.0.2, `async f<T>(v: T) { return await
@@ -11601,7 +11742,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let inner = args[0];
                 drop(data);
-                self.async_return_payload_read(inner, context)
+                self.awaited_relation_step(AwaitedRelation::Payload, inner, context)
             }
             // An authored lib `Awaited<X>` at the TOP of the payload arrives as
             // the syntax-preserving `__builtin__` carrier, recognised by
@@ -11620,9 +11761,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .lib_awaited_carrier_argument(resolved)
                     .expect("guarded by the arm");
                 drop(data);
-                match self.lib_awaited_read(argument)? {
-                    None => self.async_return_payload_read(argument, context),
-                    Some(reduced) => self.async_return_payload_read(reduced, context),
+                match self.lib_awaited_read(argument) {
+                    None => AwaitedStep::Refused,
+                    Some(None) => {
+                        self.awaited_relation_step(AwaitedRelation::Payload, argument, context)
+                    }
+                    Some(Some(reduced)) => {
+                        self.awaited_relation_step(AwaitedRelation::Payload, reduced, context)
+                    }
                 }
             }
             SemanticNodeData::InstantiationRef { base, args }
@@ -11630,16 +11776,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let payload = args[0];
                 drop(data);
-                self.async_return_payload_read(payload, context)
+                self.awaited_relation_step(AwaitedRelation::Payload, payload, context)
             }
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
                 drop(data);
-                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    reduced.push(self.async_return_payload_read(*member, context)?);
-                }
-                Some(self.intern_normalized_union_or_intersection(&reduced, true))
+                self.awaited_union_step(AwaitedRelation::Payload, &members, context)
             }
             _ => {
                 drop(data);
@@ -11649,16 +11791,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Shared output shape for both relations: the reduced node rooted on the
-    /// operand's file-derived version, or a non-admitting honest refusal.
+    /// operand's file-derived version; for a TS1062 failure, the checker's
+    /// error type the operation continues with, carrying that diagnostic;
+    /// otherwise a non-admitting honest refusal.
     fn awaited_relation_output(
         &self,
+        relation: AwaitedRelation,
         operand: SemanticNodeId,
-        reduced: Option<SemanticNodeId>,
+        reduced: AwaitedStep,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let observed_self_roots = self.observed_self_roots_from_nodes([operand]);
         let result = match reduced {
-            Some(node) => QueryResult::Value(node),
-            None => QueryResult::Error(QueryError::Miss),
+            AwaitedStep::Value(node) => QueryResult::Value(node),
+            AwaitedStep::Failed => {
+                QueryResult::Value(self.checker_recovery(relation.recursion_diagnostic()))
+            }
+            AwaitedStep::Refused => QueryResult::Error(QueryError::Miss),
         };
         let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
@@ -12643,6 +12791,48 @@ enum AwaitedRelation {
     Normalize,
     /// [`SemanticQueryKey::AsyncReturnPayload`].
     Payload,
+}
+
+impl AwaitedRelation {
+    /// This relation's family key over `operand`.
+    fn key(
+        self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> SemanticQueryKey {
+        match self {
+            Self::Normalize => SemanticQueryKey::AwaitedNormalize { operand, context },
+            Self::Payload => SemanticQueryKey::AsyncReturnPayload { operand, context },
+        }
+    }
+
+    /// The diagnostic this relation raises on a thenable whose promised
+    /// value it is already unwrapping: TS1062, from the operation the
+    /// relation serves.
+    fn recursion_diagnostic(self) -> crate::semantic_query::CheckerDiagnostic {
+        use crate::semantic_query::CheckerDiagnosticOperation;
+        crate::semantic_query::CheckerDiagnostic {
+            code: crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+            operation: match self {
+                Self::Normalize => CheckerDiagnosticOperation::AwaitOperand,
+                Self::Payload => CheckerDiagnosticOperation::AsyncReturnPayload,
+            },
+        }
+    }
+}
+
+/// One step of an awaited relation.
+#[derive(Debug, Clone, Copy)]
+enum AwaitedStep {
+    /// The relation reduced the operand to this node.
+    Value(SemanticNodeId),
+    /// The relation reached a thenable whose promised value it is already
+    /// unwrapping, and the checker reports TS1062. Its `getAwaitedType`
+    /// answers `undefined` here: a union drops the arm, anything else fails
+    /// whole, and the operation continues with its error type.
+    Failed,
+    /// The protocol cannot decide the operand.
+    Refused,
 }
 
 /// The lib `Awaited<T>` conditional's outcome over one operand.
