@@ -180,7 +180,7 @@ function summarize(samples: readonly CloseCostSample[]): string {
       s.before?.heapInUseBytes != null && s.after?.heapInUseBytes != null
         ? `heap ${mib(s.before.heapInUseBytes)}→${mib(s.after.heapInUseBytes)}MiB`
         : "heap n/a";
-    const rss = `rss ${mib(s.rssBefore.totalRssBytes)}→${mib(s.rssAfter.totalRssBytes)}MiB`;
+    const rss = `rss ${mib(s.rssBefore.totalBytes ?? 0)}→${mib(s.rssAfter.totalBytes ?? 0)}MiB`;
     const release = s.release
       ? `release took ${ms(s.release.elapsedMicros)}ms (wait ${ms(s.release.waitMicros)}ms) scanned ${s.release.nodesScanned} ` +
         `released ${s.release.nodesReleased} slots ${s.release.storageSlotsBefore}→${s.release.storageSlotsAfter} memo -${s.release.memoEntriesEvicted}`
