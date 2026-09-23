@@ -2274,7 +2274,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// there is no second classifier here to drift from it.
     ///
     /// `None` is the family's honest refusal; the caller publishes the typed
-    /// gap rather than a fabricated answer.
+    /// gap rather than a fabricated answer. A recursive thenable is not a
+    /// refusal: the family answers the checker's TS1062 recovery, the error
+    /// type an `await` continues with.
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         match self
             .execute_read(SemanticQueryKey::AwaitedNormalize {
@@ -2396,12 +2398,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `AsyncGenerator<Awaited<p>, Awaited<q>, unknown>`). A
                 // SYNC generator awaits neither — it publishes what the
                 // body yielded and returned verbatim.
+                // A join the relation FAILS on (TS1062) has no defined
+                // recovery here: tsc 7.0.2 publishes `never` for one such
+                // yield and crashes on two, so it stays the typed gap.
                 let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
                     match (
                         self.awaited_normalize_for_flow(yield_join),
                         self.awaited_normalize_for_flow(body),
                     ) {
-                        (Some(yielded), Some(returned)) => (yielded, returned),
+                        (Some(yielded), Some(returned))
+                            if !self.awaited_normalize_failed_on(yield_join, yielded)
+                                && !self.awaited_normalize_failed_on(body, returned) =>
+                        {
+                            (yielded, returned)
+                        }
                         _ => return self.materialize_wrap_typed_gap(result),
                     }
                 } else {

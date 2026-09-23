@@ -1851,7 +1851,8 @@ pub(super) fn project_root_summary(
             summary::opaque_sentinel(&QueryError::UnrepresentableSurface),
         ),
         SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { .. } => {
+            // A checker recovery raises as its recovery primitive.
+            QueryError::RecursiveRef { .. } | QueryError::CheckerRecovery(_) => {
                 RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
             }
             _ => RootOnlySummary::from_summary(summary::opaque_sentinel(err)),
@@ -1861,10 +1862,11 @@ pub(super) fn project_root_summary(
 
 /// `true` when `node` is an interned resolver-control FAILURE carrier — a
 /// [`SemanticNodeData::Opaque`] whose shell materialization renders
-/// `Unknown { raw }` (`Miss`, `BudgetExceeded`, `Other(..)`, …). The two
+/// `Unknown { raw }` (`Miss`, `BudgetExceeded`, `Other(..)`, …). The
 /// legitimately-publishable opaque carriers are NOT failures and stay
-/// `false`: `RecursiveRef` raises to `TypeExpr::RecursiveRef` and
-/// `DeclPlaceholder` raises to the named `Ref` shell — mirroring the
+/// `false`: `RecursiveRef` raises to `TypeExpr::RecursiveRef`,
+/// `DeclPlaceholder` raises to the named `Ref` shell and `CheckerRecovery`
+/// raises to its recovery type — mirroring the
 /// `fold_node` `Opaque` conduit and the root-summary `Opaque` arm above,
 /// held in agreement by proximity. Raise boundaries use this to FAIL
 /// CLOSED: a projection that "succeeds" onto such a node is a projection
