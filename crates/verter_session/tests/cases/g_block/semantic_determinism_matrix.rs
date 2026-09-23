@@ -507,8 +507,8 @@ fn live_semantic_node_data_variants() -> Vec<String> {
 /// Stable-key registration: the table enumerates EVERY
 /// `SemanticNodeData` category — exactly the live declaration's variant
 /// set, no more, no less — with a non-empty domain and inputs for each,
-/// and every not-yet-encoded row naming the successor block that owns
-/// its `VerterStableV1` encoding.
+/// and every residual row naming the APPROXIMATION the current
+/// `VerterStableV1` encoder consumes in place of a declared identity input.
 #[test]
 fn stable_key_table_enumerates_every_semantic_node_data_category() {
     let live = live_semantic_node_data_variants();
