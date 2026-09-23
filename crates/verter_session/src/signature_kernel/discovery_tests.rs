@@ -367,3 +367,87 @@ fn intersection_keeps_signatures_that_differ_only_in_their_result() {
         "signatures identical including their result collapse onto the first"
     );
 }
+
+/// A union whose arms each carry several signatures, none of them common to
+/// every arm, has no signatures: the restricted synthesis runs only when at
+/// most one arm is overloaded, so no product of overload choices is ever
+/// opened. Measured on 7.0.2: calling `{ (x: number): 1; (x: string): 2 } |
+/// { (x: boolean): 3; (x: symbol): 4 }` is TS2349 ("none of those
+/// signatures are compatible with each other"), while `{ (x: number): 1;
+/// (x: string): 2 } | { (x: number | string): 3 }` — one overloaded arm — is
+/// callable.
+#[test]
+fn a_union_of_overloaded_arms_without_a_common_signature_synthesizes_nothing() {
+    let store = SignatureStore::new();
+    let types = DelayedTypes {
+        store: &store,
+        unsettled: RefCell::new(BTreeSet::new()),
+    };
+    let (number, string, boolean, symbol, number_or_string) = (100, 101, 102, 103, 104);
+    let overloaded_arms = vec![
+        vec![sig(&store, 1, number, 201), sig(&store, 2, string, 202)],
+        vec![sig(&store, 3, boolean, 203), sig(&store, 4, symbol, 204)],
+    ];
+    assert_eq!(
+        union_signatures(&store, &types, &overloaded_arms).unwrap(),
+        Vec::new(),
+        "two overloaded arms with no common signature synthesize nothing"
+    );
+
+    // Control: with ONE overloaded arm the restricted synthesis does run.
+    let one_overloaded_arm = vec![
+        vec![sig(&store, 5, number, 201), sig(&store, 6, string, 202)],
+        vec![sig(&store, 7, number_or_string, 203)],
+    ];
+    assert!(
+        !union_signatures(&store, &types, &one_overloaded_arm)
+            .unwrap()
+            .is_empty(),
+        "a single overloaded arm reaches the restricted synthesis"
+    );
+}
+
+/// The restricted union synthesis folds the arms one at a time, but no
+/// prefix of the fold copies provenance: every synthesized candidate interns
+/// ONE constituent sequence and ONE provenance, however many arms it spans.
+/// With K arms folded, the sequences and provenances interned equal the
+/// candidates synthesized — the same for three arms as for six — never a
+/// count that grows with K.
+#[test]
+fn union_synthesis_interns_one_provenance_per_candidate_whatever_the_arm_count() {
+    let interned = |store: &SignatureStore, arms: usize| {
+        let types = DelayedTypes {
+            store,
+            unsettled: RefCell::new(BTreeSet::new()),
+        };
+        // One overloaded arm; every other arm has one signature matching
+        // neither overload, so phase 1 finds nothing and the synthesis runs.
+        let mut lists = vec![vec![sig(store, 1, 100, 200), sig(store, 2, 101, 201)]];
+        for arm in 0..arms as u64 {
+            lists.push(vec![sig(store, 10 + arm, 110 + arm, 210 + arm)]);
+        }
+        let before = store.pin();
+        let (sequences, provenances) = (
+            before.sequences.record_count(),
+            before.provenances.record_count(),
+        );
+        drop(before);
+        let synthesized = union_signatures(store, &types, &lists).unwrap();
+        let after = store.pin();
+        (
+            synthesized.len(),
+            after.sequences.record_count() - sequences,
+            after.provenances.record_count() - provenances,
+        )
+    };
+    for arms in [3, 6] {
+        let store = SignatureStore::new();
+        let (candidates, sequences, provenances) = interned(&store, arms);
+        assert_eq!(candidates, 2, "{arms} arms: one candidate per overload");
+        assert_eq!(
+            (sequences, provenances),
+            (candidates, candidates),
+            "{arms} arms: one sequence and one provenance per synthesized candidate"
+        );
+    }
+}
