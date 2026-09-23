@@ -7,8 +7,8 @@ use crate::semantic_query::{IncompleteReason, SemanticNodeId};
 
 use super::discovery::{
     intersection_signatures, publish_signature, signatures_identical, union_signatures,
-    BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput, ResultInput,
-    SignatureInput,
+    BinderInput, DiscoveryError, DiscoveryTypes, ForcedResult, MatchOptions, ParamInput,
+    ResultInput, SignatureInput,
 };
 use super::lifetime::SignatureStore;
 use super::positional::SlotTypeFacts;
@@ -69,7 +69,7 @@ impl DiscoveryTypes for DelayedTypes<'_> {
     fn is_any(&self, _: TypeToken) -> bool {
         false
     }
-    fn forced_return(&self, _: &SignatureCandidate) -> Result<TypeToken, IncompleteReason> {
+    fn forced_result(&self, _: &SignatureCandidate) -> Result<ForcedResult, IncompleteReason> {
         Err(IncompleteReason::UnresolvedObligation)
     }
 }
@@ -314,12 +314,18 @@ impl DiscoveryTypes for DeclaredReturns<'_> {
     fn is_any(&self, _: TypeToken) -> bool {
         false
     }
-    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason> {
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<ForcedResult, IncompleteReason> {
         self.returns
             .borrow()
             .iter()
             .find(|(known, _)| known == candidate)
-            .map(|(_, token)| *token)
+            .map(|(_, token)| ForcedResult {
+                return_type: *token,
+                effects: None,
+            })
             .ok_or(IncompleteReason::UnresolvedObligation)
     }
 }

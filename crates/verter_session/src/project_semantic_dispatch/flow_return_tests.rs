@@ -11062,7 +11062,7 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
     // than an inequality: an inequality with slack cannot see the memo
     // disappear.
     assert_eq!(
-        cold_reads, 15,
+        cold_reads, 13,
         "the cold relation budget of this three-arm join moved; a reunion that re-asks a \
          decided arm pair spends more"
     );

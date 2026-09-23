@@ -2042,10 +2042,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return result;
         }
         let substituted = self.substitute_canonical(result.return_type(), substitution);
-        if substituted == result.return_type() {
+        // An inferred predicate's target is in the same binder space as
+        // the return it stands beside.
+        let predicate = result.inferred_predicate().map(|predicate| {
+            predicate.map_type(|target| self.substitute_canonical(target, substitution))
+        });
+        let result = if substituted == result.return_type() {
+            result
+        } else {
+            result.with_return_type(self.graph().as_ref(), substituted)
+        };
+        match predicate {
+            Some(predicate) => result.with_inferred_predicate(predicate),
+            None => result,
+        }
+    }
+
+    /// Attach the type predicate a frame's single return established
+    /// ([`FlowEvaluator::infer_return_predicate`]) to the frame's joined
+    /// result — only when the whole return is exactly `boolean` and the
+    /// body's end point is unreachable. The checker infers a predicate
+    /// only for a `boolean` function with no implicit return: an implicit
+    /// return makes the function `boolean | undefined`, and with
+    /// `strictNullChecks` off, where that join erases to `boolean`, the
+    /// checker still refuses to infer one.
+    fn attach_inferred_predicate(
+        &self,
+        result: FlowReturnResult,
+        predicate: Option<crate::semantic_query::SignaturePredicate>,
+    ) -> FlowReturnResult {
+        let Some(predicate) = predicate else {
+            return result;
+        };
+        let returns_boolean = matches!(
+            self.graph().node_data(result.return_type()).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+        );
+        if !returns_boolean
+            || result
+                .can_fall_through
+                .reaches_end(CompletionDischarge::PublishedResult)
+        {
             return result;
         }
-        result.with_return_type(self.graph().as_ref(), substituted)
+        result.with_inferred_predicate(predicate)
     }
 
     /// The final IDEMPOTENT pre-seal closure of a flow result: one
@@ -3987,6 +4027,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 {
                     next = next.with_function_wrap(wrap);
                 }
+                // So is a predicate inferred from the entry's own single
+                // return.
+                if let Some(predicate) = current[i]
+                    .as_ref()
+                    .and_then(FlowReturnResult::inferred_predicate)
+                {
+                    next = next.with_inferred_predicate(predicate);
+                }
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
                     progressed = true;
@@ -4848,6 +4896,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
             heritage_self_roots: Vec::new(),
+            inferred_predicate: None,
         };
         let holds;
         let yield_contributions;
@@ -4859,10 +4908,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let frame_product_evidence;
         let frame_bindings;
         let frame_products;
+        let inferred_predicate;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
+            inferred_predicate = evaluator.inferred_predicate;
             holds = std::mem::take(&mut evaluator.holds);
             yield_contributions = std::mem::take(&mut evaluator.yield_contributions);
             observations = evaluator.observations;
@@ -5062,6 +5113,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // whole return), so the wrap attaches only on the
                 // whole-return point.
                 let (result, fresh_seed) = joined;
+                let result = self.attach_inferred_predicate(result, inferred_predicate);
                 let result = if whole_return_point {
                     self.attach_function_kind_wrap(
                         result,
@@ -6203,6 +6255,18 @@ enum ArmGuardClass {
     Unclassified,
 }
 
+/// A top arm's (`unknown` / `any`) reading on one `typeof` edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopTypeofEdge {
+    /// The arm stays whole on the edge.
+    Kept,
+    /// The checker substitutes this implied type for the arm.
+    Implied(SemanticNodeId),
+    /// The checker's reading is not modeled: the arm stays possible and
+    /// the narrow degrades.
+    Unmodeled,
+}
+
 /// One union arm's key-presence verdict for a `"key" in subject` test.
 /// The `in` guard needs one more state than [`ArmGuardClass`] because an
 /// OPTIONAL member is its own proof shape: the arm provably stays on
@@ -6619,6 +6683,10 @@ struct FlowEvaluator<'d, 'b> {
     /// root and instead marks the whole walk undecided, so the narrow it
     /// feeds degrades and never reaches the warm slot unrooted.
     heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The type predicate the function's single return establishes, read
+    /// at that return ([`Self::infer_return_predicate`]). The frame's
+    /// result carries it only when the whole return joins to `boolean`.
+    inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -9954,6 +10022,98 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Read the type predicate the function's single return establishes
+    /// ([`crate::flow_slice_content::ReturnPredicateTest`]) once the
+    /// returned expression evaluated to `returned`: the checker's
+    /// `getTypePredicateFromBody`. Only a `boolean` return infers one. For
+    /// each candidate parameter in order, the parameter's type on the
+    /// test's TRUE edge must differ from its declared type, and the test's
+    /// FALSE edge must narrow that true-edge type to `never` — `x is T`
+    /// means `x` is NOT `T` whenever the call returns `false`. The first
+    /// parameter that passes names the predicate. Both edges start from
+    /// the state the return is reached in, so a narrow the body already
+    /// established before the return counts. An unexpressible test over a
+    /// `boolean` return degrades: the checker may infer a predicate this
+    /// substrate cannot compute.
+    fn infer_return_predicate(
+        &mut self,
+        test: &crate::flow_slice_content::ReturnPredicateTest,
+        returned: SemanticNodeId,
+    ) {
+        use crate::flow_slice_content::{ReturnPredicateTest, SliceNarrowRoot, SliceNarrowSubject};
+        let is_primitive = |dispatch: &ProjectSemanticDispatch<'_>, node, kind| {
+            dispatch.graph().node_data(node).as_deref() == Some(&SemanticNodeData::Primitive(kind))
+        };
+        if !is_primitive(self.dispatch, returned, PrimitiveKind::Boolean) {
+            return;
+        }
+        let (guard, parameters) = match test {
+            ReturnPredicateTest::Unexpressible => {
+                self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return;
+            }
+            ReturnPredicateTest::Guard { guard, parameters } => (guard, parameters),
+        };
+        for &ordinal in parameters.iter() {
+            let Some(declared) = self.params.get(ordinal as usize).copied() else {
+                continue;
+            };
+            // Refining a `boolean` parameter to `true` / `false` is not a
+            // predicate the checker infers.
+            if is_primitive(self.dispatch, declared, PrimitiveKind::Boolean) {
+                continue;
+            }
+            let Some(binding) = self
+                .param_names
+                .get(ordinal as usize)
+                .and_then(|param| param.binding)
+            else {
+                continue;
+            };
+            let subject = SliceNarrowSubject {
+                root: SliceNarrowRoot::Param { ordinal, binding },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            let mark = self.narrowing_snapshot();
+            self.apply_guard_scoped(guard, true);
+            let true_edge = self.subject_current_node(&subject);
+            self.restore_narrowings(mark);
+            let Some(true_edge) = true_edge else {
+                continue;
+            };
+            // The checker compares TYPE identity: a union narrowed back to
+            // every one of its arms is the declared union itself, in
+            // whatever order the narrow rebuilt it.
+            if true_edge == declared || self.same_union_arms(true_edge, declared) {
+                continue;
+            }
+            let mark = self.narrowing_snapshot();
+            self.push_narrowing(&subject, true_edge);
+            self.apply_guard_scoped(guard, false);
+            let false_edge = self.subject_current_node(&subject);
+            self.restore_narrowings(mark);
+            if false_edge
+                .is_some_and(|node| is_primitive(self.dispatch, node, PrimitiveKind::Never))
+            {
+                self.inferred_predicate = Some(crate::semantic_query::SignaturePredicate {
+                    subject: crate::semantic_query::PredicateSubject::Parameter(ordinal),
+                    asserts: false,
+                    ty: Some(true_edge),
+                });
+                return;
+            }
+        }
+    }
+
+    /// Whether two nodes enumerate the same set of union arms.
+    fn same_union_arms(&mut self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
+        let left = self.enumerated_union_arms_or_self(left);
+        let right = self.enumerated_union_arms_or_self(right);
+        left.len() == right.len() && left.iter().all(|arm| right.contains(arm))
+    }
+
     /// Filter `subject`'s arms by a per-arm predicate, joining the
     /// survivors back into the narrow's node. An empty survivor set is a
     /// positive PROOF that every arm is off the tested edge, distinct
@@ -10044,6 +10204,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 continue;
             }
+            if let Some(top) = self.top_arm_typeof_edge(*arm, kind, negated) {
+                match top {
+                    TopTypeofEdge::Kept => out.push(*arm),
+                    TopTypeofEdge::Implied(node) => {
+                        out.push(node);
+                        changed = true;
+                    }
+                    TopTypeofEdge::Unmodeled => {
+                        out.push(*arm);
+                        unclassified = true;
+                    }
+                }
+                continue;
+            }
             match self.arm_typeof_class(*arm, kind) {
                 ArmGuardClass::Match => {
                     if negated {
@@ -10104,14 +10278,100 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         )
     }
 
+    /// The `typeof` edge of a TOP arm (`unknown` / `any`), which no
+    /// runtime kind classifies: `None` for every other arm.
+    ///
+    /// The checker's `narrowTypeByTypeName` SUBSTITUTES the kind's implied
+    /// type on the positive edge, because that type is a subtype of the
+    /// top arm: `unknown` and `any` read `string` inside `typeof x ===
+    /// "string"`, `unknown` reads `object | null` under `"object"` and the
+    /// global `Function` under `"function"`, while `any` stays `any` under
+    /// those two. The negated edge keeps `any` and keeps `unknown` too,
+    /// except under `"undefined"` / `"object"` with `strictNullChecks`
+    /// on, where the checker splits `unknown` into `{} | null |
+    /// undefined` and removes the tested kind (`{} | null`, `{} |
+    /// undefined`).
+    fn top_arm_typeof_edge(
+        &mut self,
+        arm: SemanticNodeId,
+        kind: crate::flow_slice_content::SliceTypeofKind,
+        negated: bool,
+    ) -> Option<TopTypeofEdge> {
+        use crate::flow_slice_content::SliceTypeofKind;
+        let is_any = match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => true,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => false,
+            _ => return None,
+        };
+        let primitive = |this: &Self, kind| {
+            this.dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(kind))
+        };
+        if negated {
+            let removed = match kind {
+                SliceTypeofKind::Undefined => PrimitiveKind::Undefined,
+                SliceTypeofKind::Object => PrimitiveKind::Null,
+                _ => return Some(TopTypeofEdge::Kept),
+            };
+            if is_any || !self.nullability.is_strict() {
+                return Some(TopTypeofEdge::Kept);
+            }
+            let kept = match removed {
+                PrimitiveKind::Undefined => PrimitiveKind::Null,
+                _ => PrimitiveKind::Undefined,
+            };
+            let members = [
+                self.dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view())),
+                primitive(self, kept),
+            ];
+            return Some(TopTypeofEdge::Implied(self.union(&members)));
+        }
+        Some(match kind {
+            SliceTypeofKind::String => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::String))
+            }
+            SliceTypeofKind::Number => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Number))
+            }
+            SliceTypeofKind::BigInt => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::BigInt))
+            }
+            SliceTypeofKind::Boolean => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Boolean))
+            }
+            SliceTypeofKind::Symbol => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Symbol))
+            }
+            SliceTypeofKind::Undefined => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Undefined))
+            }
+            SliceTypeofKind::Object | SliceTypeofKind::Function if is_any => TopTypeofEdge::Kept,
+            SliceTypeofKind::Object => {
+                let members = [
+                    primitive(self, PrimitiveKind::Object),
+                    primitive(self, PrimitiveKind::Null),
+                ];
+                TopTypeofEdge::Implied(self.union(&members))
+            }
+            SliceTypeofKind::Function => match self.lower_global_function_surface() {
+                Some(function) => TopTypeofEdge::Implied(function),
+                None => TopTypeofEdge::Unmodeled,
+            },
+        })
+    }
+
     /// One union arm's verdict against the runtime type a `typeof`
     /// comparison names. A primitive is its own kind (`null` is the
     /// operator's `"object"` quirk); a literal its primitive's; objects,
     /// arrays, tuples and spread programs are `"object"`, signatures
     /// `"function"`; `never` is uninhabited, off both edges. Anything
-    /// the graph cannot place under exactly one runtime kind — `any`,
-    /// `unknown`, a memberless `{}` surface (primitives inhabit it), an
-    /// unresolved carrier — is `Unclassified`: `NoMatch` means PROVED
+    /// the graph cannot place under exactly one runtime kind — a memberless
+    /// `{}` surface (primitives inhabit it), an unresolved carrier — is
+    /// `Unclassified` (a top arm, `any` / `unknown`, is read by
+    /// [`Self::top_arm_typeof_edge`] before this classification): `NoMatch` means PROVED
     /// non-inhabitance of the tested edge, never "unrecognized". The one
     /// dual-kind value domain — the non-primitive `object`, which also
     /// inhabits `"function"` — is intercepted by [`Self::narrow_typeof`]
@@ -10371,9 +10631,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
                 }
                 ArmFilter::Narrowed(node) => {
+                    let node = self.refine_arms_by_literal(node, literal, negated);
                     return GuardNarrowing::Narrowed(subject.clone(), node);
                 }
                 ArmFilter::Unchanged => {}
+            }
+            if let Some(current) = self.subject_current_node(subject) {
+                let refined = self.refine_arms_by_literal(current, literal, negated);
+                if refined != current {
+                    return GuardNarrowing::Narrowed(subject.clone(), refined);
+                }
             }
             if !negated {
                 // No arm was filtered. The literal can still be a STRICT
@@ -10454,7 +10721,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // identically in every arm, is never discriminated — the
                 // checker keeps its declared type — so no fact lands.
                 ArmFilter::NoSurvivor => {
-                    if projected.len() > 1 && projected.windows(2).any(|pair| pair[0] != pair[1]) {
+                    let discriminated = (projected.len() > 1
+                        && projected.windows(2).any(|pair| pair[0] != pair[1]))
+                        || self.declared_parent_discriminates(&parent_subject, &last);
+                    if discriminated {
                         GuardNarrowing::Narrowed(parent_subject, self.never_node())
                     } else {
                         GuardNarrowing::Unchanged
@@ -10464,6 +10734,103 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ArmFilter::Unchanged => GuardNarrowing::Unchanged,
             }
         }
+    }
+
+    /// The surviving arms of an equality narrow against a literal, with
+    /// the checker's `replacePrimitivesWithLiterals` applied: on the
+    /// positive edge a `string` / `number` / `bigint` / `boolean` arm the
+    /// literal inhabits IS the literal (`x: string | number` reads `1`
+    /// inside `x === 1`, `x: boolean | string` reads `true` inside `x ===
+    /// true`); on the negated edge a `boolean` arm — `true | false` —
+    /// loses the compared literal (`x !== true` reads `false`). Every
+    /// other arm stays as it is.
+    fn refine_arms_by_literal(
+        &mut self,
+        node: SemanticNodeId,
+        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        negated: bool,
+    ) -> SemanticNodeId {
+        use crate::flow_slice_content::SliceGuardLiteral;
+        let base = match literal {
+            SliceGuardLiteral::String(_) => PrimitiveKind::String,
+            SliceGuardLiteral::Number(_) => PrimitiveKind::Number,
+            SliceGuardLiteral::Boolean(_) => PrimitiveKind::Boolean,
+            SliceGuardLiteral::Null | SliceGuardLiteral::Undefined => return node,
+        };
+        let replacement = match (literal, negated) {
+            (_, false) => guard_literal_type_expr(literal),
+            (SliceGuardLiteral::Boolean(value), true) => {
+                Some(verter_type_expr::TypeExpr::boolean_literal(!*value))
+            }
+            (_, true) => None,
+        };
+        let Some(replacement) = replacement else {
+            return node;
+        };
+        let arms = self.enumerated_union_arms_or_self(node);
+        // A template-literal arm is a pattern of strings the string
+        // literal inhabits, replaced exactly like `string`.
+        let is_base = |this: &Self, arm: SemanticNodeId| match this
+            .dispatch
+            .graph()
+            .node_data(arm)
+            .as_deref()
+        {
+            Some(SemanticNodeData::Primitive(kind)) => *kind == base,
+            Some(SemanticNodeData::TemplateLiteral { .. }) => {
+                !negated && base == PrimitiveKind::String
+            }
+            _ => false,
+        };
+        if !arms.iter().any(|arm| is_base(self, *arm)) {
+            return node;
+        }
+        let replacement = self.lower_body_type(&replacement);
+        let refined: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|arm| {
+                if is_base(self, *arm) {
+                    replacement
+                } else {
+                    *arm
+                }
+            })
+            .collect();
+        self.union(&refined)
+    }
+
+    /// Whether a PARAMETER's declared type is a union whose arms project
+    /// `member` to different types — the checker's discriminant-property
+    /// precondition, which it reads off the reference's DECLARED type. It
+    /// still holds once an earlier narrow left a single arm: a parameter
+    /// `x: Foo | Bar` already narrowed to `Foo` reads `never` under
+    /// `x.kind !== "foo"`.
+    fn declared_parent_discriminates(
+        &mut self,
+        parent: &crate::flow_slice_content::SliceNarrowSubject,
+        member: &[Arc<str>],
+    ) -> bool {
+        let crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } = &parent.root else {
+            return false;
+        };
+        if !parent.path.is_empty() {
+            return false;
+        }
+        let Some(declared) = self.params.get(*ordinal as usize).copied() else {
+            return false;
+        };
+        let arms = self.enumerated_union_arms_or_self(declared);
+        if arms.len() < 2 {
+            return false;
+        }
+        let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match self.project_segments_navigate(arm, member) {
+                Some(node) => projected.push(node),
+                None => return false,
+            }
+        }
+        projected.windows(2).any(|pair| pair[0] != pair[1])
     }
 
     /// Bake a narrow verdict into a state SNAPSHOT's reaching-definition
@@ -12056,6 +12423,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::flow_slice_content::SliceStatement::Return {
                     argument,
                     freshness,
+                    predicate_test,
                 } => {
                     path_alive = false;
                     self.prescan_statement_value_writes(argument.as_ref());
@@ -12175,6 +12543,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 fresh_literal |= self
                                     .fresh_call_return_for(expr, node)
                                     .is_some_and(|call| call.values.contains(&node));
+                                if let Some(test) = predicate_test {
+                                    self.infer_return_predicate(test, node);
+                                }
                                 contributors.push(FlowContribution {
                                     node,
                                     fresh_literal,
@@ -14094,6 +14465,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let nested_degradation;
         let nested_observations;
         let nested_yield_contributions;
+        let nested_inferred_predicate;
         let (contributors, nested_body_falls_through) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
@@ -14135,11 +14507,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
                 heritage_self_roots: Vec::new(),
+                inferred_predicate: None,
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
             nested_evaluator.promote_pending_statement_gap();
             nested_yield_contributions = std::mem::take(&mut nested_evaluator.yield_contributions);
+            nested_inferred_predicate = nested_evaluator.inferred_predicate;
             #[cfg(test)]
             if self
                 .dispatch
@@ -14253,6 +14627,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A nested function value's body is its own join; its holds ride
         // the OUTER frame's component, so no fixed point closes here and
         // the freshness bit has no later consumer.
+        let mut predicate = None;
         let return_type = match contributors.and_then(|contributors| {
             self.dispatch.join_flow_return_contributors(
                 contributors,
@@ -14272,8 +14647,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // body join (an async arrow's type is `() => Promise<T>`), so
             // the wrap attaches and MATERIALIZES here — the nested body has
             // no equation fixed point of its own ("no fixed point closes
-            // here"), and the signature consumes the node directly.
+            // here"), and the signature consumes the node directly. A
+            // predicate inferred from the body rides beside that return.
             Ok((result, _fresh_seed)) => {
+                let result = self
+                    .dispatch
+                    .attach_inferred_predicate(result, nested_inferred_predicate);
+                predicate = result.inferred_predicate();
                 let wrapped = self.dispatch.materialize_flow_return_wrap(
                     self.dispatch.attach_function_kind_wrap(
                         result,
@@ -14299,7 +14679,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // return carrier is the interned node itself.
             occurrence: None,
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
-            predicate: None,
+            predicate,
         })
     }
 

@@ -24,7 +24,7 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 
 | Module | Owns |
 |---|---|
-| `records.rs` | The record vocabulary and its handles: `SignatureDescriptor`, `SignatureCandidate`, `SignatureTemplate`, `SignatureInputShape`, `ParameterLayout`/`ParameterSlot`/`RestSlot`, `BinderSpace`/`BinderDeclaration`, `SignatureResultRecipe`, `PredicateEffect` (a declared result's type predicate / assertion — the effect half of a result read), `AppliedResult`, `TypeToken`, `GraphEpoch`. Every id is epoch-qualified. |
+| `records.rs` | The record vocabulary and its handles: `SignatureDescriptor`, `SignatureCandidate`, `SignatureTemplate`, `SignatureInputShape`, `ParameterLayout`/`ParameterSlot`/`RestSlot`, `BinderSpace`/`BinderDeclaration`, `SignatureResultRecipe`, `PredicateEffect` (the effect half of a result read: a declared result's type predicate / assertion, the predicate the checker infers from a body, or a union signature's composite predicate), `AppliedResult`, `TypeToken`, `GraphEpoch`. Every id is epoch-qualified. |
 | `storage.rs` | `AppendInterner<T>` — the private append-only interner over `boxcar::Vec` with `DEDUP_SHARDS` (16) hash shards. Hash is computed outside the shard lock; equality decides collisions. A record is fully initialised before its handle is published, so `boxcar`'s `count()` is never a published-handle range. |
 | `lifetime.rs` | `SignatureStore`: interning entry points, `replace_epoch()`, `retain_result`/`drain_retained`/`retained_len`, `live_reader_count()`, `StoreError`. |
 | `read_view.rs` | `SemanticReadView::pin(&SignatureStore)` — the request-pinned borrowed read. `BorrowedSet::{Empty, One, Many}`, `ReadError`, plus the `descriptor_chain_walks` / `shard_lock_acquires` probes the performance gates assert on. |

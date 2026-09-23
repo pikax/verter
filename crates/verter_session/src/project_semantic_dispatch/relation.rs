@@ -3641,11 +3641,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target_signature: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let alternatives: Vec<_> = source_signatures
+        let mut alternatives: Vec<_> = source_signatures
             .iter()
             .map(|source| (*source, target_signature))
             .collect();
+        if self.infers_from_last_source_signature(target_signature) {
+            alternatives.reverse();
+        }
         self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
+    }
+
+    /// Whether relating an overloaded source to `target` infers the
+    /// target's `infer` sites: the checker's `inferFromSignatures` reads
+    /// the source's LAST signature, so `(() => A) & (() => B)` against
+    /// `() => infer R` infers `B` and `((x: unknown) => x is A) & ((x:
+    /// unknown) => x is B)` against `(x: any) => x is infer U` infers `B`.
+    /// The overloads are then tried last first.
+    fn infers_from_last_source_signature(&self, target: SemanticNodeId) -> bool {
+        self.relation_session_active()
+            && self
+                .relation_pattern_info(target)
+                .is_some_and(|pattern| pattern.shape == InferPatternShape::Function)
     }
 
     /// Recover the input of an exact homomorphic mapped target. The only
@@ -6481,7 +6497,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
-            let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
+            let mut alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
+            if self.infers_from_last_source_signature(target) {
+                alternatives.reverse();
+            }
             results.push(self.relate_pair_alternatives(
                 &alternatives,
                 bindings,

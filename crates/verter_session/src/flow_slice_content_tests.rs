@@ -22,10 +22,10 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
-    FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry,
-    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
-    SliceUnsupported,
+    FlowSliceSelection, ReturnPredicateTest, SliceBindingKind, SliceCall, SliceCallSite,
+    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot,
+    SliceNarrowSubject, SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement,
+    SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -619,6 +619,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
                 freshness: SliceFreshness::Fresh,
+                predicate_test: None,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(_)))
         ),
         "a return argument PRESERVES its fresh literal and flags it: tsc \
@@ -637,6 +638,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
                 freshness: SliceFreshness::Fresh,
+                predicate_test: None,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::String(_)))
         ),
         "the else arm likewise preserves its fresh literal"
@@ -689,6 +691,7 @@ fn bare_return_carries_no_argument() {
         &[SliceStatement::Return {
             argument: None,
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
     );
 }
@@ -3704,6 +3707,22 @@ fn return_of_parameter_is_param_carrier() {
                 binding: node.params[0].binding.expect("parameter binding")
             }),
             freshness: SliceFreshness::Pinned,
+            // The single return of an unannotated function is also read as
+            // a test over its parameters: a returned parameter is its own
+            // truthiness test.
+            predicate_test: Some(ReturnPredicateTest::Guard {
+                guard: Box::new(SliceGuard::Truthy {
+                    subject: SliceNarrowSubject {
+                        root: SliceNarrowRoot::Param {
+                            ordinal: 0,
+                            binding: node.params[0].binding.expect("parameter binding"),
+                        },
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    negated: false,
+                }),
+                parameters: Arc::from(vec![0].into_boxed_slice()),
+            }),
         }],
     );
 }
@@ -3786,6 +3805,7 @@ fn local_reaching_definition_is_binding_and_local() {
                 captured: false,
             }),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         },
     );
 }
@@ -3802,6 +3822,7 @@ fn direct_self_call_is_recursion_hold() {
                 SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
             )),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
     );
 }
@@ -3853,6 +3874,7 @@ fn symbolic_and_unrepresentable_calls() {
         &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
         "a `this` receiver is not modeled, so the call has no structural \
          arm and fails closed rather than fabricating `any`"
@@ -3904,6 +3926,7 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
         &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
         "an unrepresentable callee fails closed through the sequence too"
     );
@@ -4103,6 +4126,12 @@ fn arrow_expression_body_is_single_return() {
                 crate::semantic_query::FlowGap::UnmodeledExpression
             )),
             freshness: SliceFreshness::Pinned,
+            // Arithmetic narrows nothing, so no parameter can be a
+            // predicate subject.
+            predicate_test: Some(ReturnPredicateTest::Guard {
+                guard: Box::new(SliceGuard::None),
+                parameters: Arc::from(vec![0].into_boxed_slice()),
+            }),
         }],
         "a binary expression is an unmodelled leaf, not semantic any"
     );

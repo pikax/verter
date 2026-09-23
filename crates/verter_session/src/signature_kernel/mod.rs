@@ -22,7 +22,7 @@ mod substitution;
 pub use discovery::{
     append_signatures, intersection_signatures, publish_signature, set_from_candidates,
     signatures_identical, union_signatures, BinderInput, DiscoveryError, DiscoveryTypes,
-    MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
+    ForcedResult, MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
 pub use lifetime::{SignatureStore, StoreError};

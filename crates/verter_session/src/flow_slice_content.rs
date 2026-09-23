@@ -320,6 +320,11 @@ pub enum SliceStatement {
         /// per-arm tree additionally tells the evaluator WHICH kept
         /// constituents stay fresh on the sealed return.
         freshness: SliceFreshness,
+        /// What the returned expression establishes over the function's
+        /// parameters, carried only on the single return of a function
+        /// the checker may infer a type predicate for
+        /// ([`ReturnPredicateTest`]).
+        predicate_test: Option<ReturnPredicateTest>,
     },
     /// A statement-position `yield x` in a generator body. The yielded
     /// expression lowers like a return argument (a call rides the call
@@ -813,6 +818,36 @@ pub enum SliceGuard {
     /// A disjunction: the positive reading unions each disjunct's
     /// positive narrow; the negated reading applies every negation.
     Or(Arc<[SliceGuard]>),
+}
+
+/// The single returned expression of a function the checker may infer a
+/// type predicate for, read as a test over the function's parameters.
+///
+/// The checker's rule (`getTypePredicateFromBody`): a plain (not `async`,
+/// not generator) function with NO return annotation and exactly one
+/// `return` statement — or an expression body — whose returned expression
+/// is `boolean` infers `p is T` for the FIRST parameter `p` the expression
+/// narrows to `T` on its true edge while its false edge narrows `T` itself
+/// to `never`. A parameter takes part only when it is a plain identifier,
+/// not a rest parameter, never assigned anywhere in the function (a nested
+/// closure's write included), and not itself `boolean`; the evaluator
+/// decides the last clause and the narrowing, the lowering the rest. An
+/// accessor never infers one: a getter has no parameter and a setter
+/// cannot return a value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReturnPredicateTest {
+    /// The narrowing facts the returned expression establishes
+    /// ([`SliceGuard::None`] when it establishes none), and the ordinals
+    /// of the parameters a predicate may name, in source order.
+    Guard {
+        guard: Box<SliceGuard>,
+        parameters: Arc<[u32]>,
+    },
+    /// The returned expression narrows a parameter in a form the guard
+    /// vocabulary cannot express, so the predicate the checker may infer
+    /// is unknown: a `boolean` return degrades rather than publishing a
+    /// predicate-less signature.
+    Unexpressible,
 }
 
 fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNarrowSubject)) {
@@ -2073,6 +2108,13 @@ pub(crate) fn build_flow_slice_content(
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
         predicate_guard_call_spans: FxHashSet::default(),
+        predicate_parameters: predicate_parameters(
+            declared_return.is_some(),
+            skeleton,
+            &bindings,
+            entry,
+            &params,
+        ),
         control_test_gap: false,
         narrowing_alias_locals: FxHashSet::default(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
@@ -2118,11 +2160,15 @@ pub(crate) fn build_flow_slice_content(
             }
         } else {
             let freshness = expression_freshness(&expression.expression);
-            let argument = if lowerer.value_span_selected(expression.expression.span()) {
-                lowerer.lower_expr(&expression.expression, ExprMode::Return)
-            } else {
-                SliceExpr::Elided
-            };
+            let (argument, predicate_test) =
+                if lowerer.value_span_selected(expression.expression.span()) {
+                    (
+                        lowerer.lower_expr(&expression.expression, ExprMode::Return),
+                        lowerer.return_predicate_test(&expression.expression),
+                    )
+                } else {
+                    (SliceExpr::Elided, None)
+                };
             // An expression body has no statement loop to drain the
             // ternary-test gap into: it lands ahead of the synthesized
             // `return` here.
@@ -2135,6 +2181,7 @@ pub(crate) fn build_flow_slice_content(
             statements.push(SliceStatement::Return {
                 argument: Some(argument),
                 freshness,
+                predicate_test,
             });
             SliceRegion {
                 statements: Arc::from(statements.into_boxed_slice()),
@@ -2169,6 +2216,52 @@ pub(crate) fn build_flow_slice_content(
         inert_write_spans,
         decided_above_call_spans,
     })
+}
+
+/// The parameters a type predicate inferred from the function's body may
+/// name, in source order ([`ReturnPredicateTest`]): every plain identifier
+/// parameter that is not a rest parameter and that nothing in the function
+/// ever assigns — a nested closure's write included. `None` when the
+/// function cannot infer one at all: it has a return annotation, it is
+/// `async` or a generator, or its body does not hold exactly one `return`
+/// (reachable or not), carrying a value.
+fn predicate_parameters(
+    declared_return: bool,
+    skeleton: &FunctionBodySkeleton,
+    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    entry: &FunctionProgramEntry,
+    params: &[SliceParam],
+) -> Option<Arc<[u32]>> {
+    if declared_return || skeleton.kind != verter_semantic::analysis::flow::FunctionBodyKind::Plain
+    {
+        return None;
+    }
+    let [site] = skeleton.return_sites.as_ref() else {
+        return None;
+    };
+    site.argument?;
+    let assigned = |binding: SkeletonBindingId| {
+        let runtime = bindings.canonical_local(binding);
+        skeleton.writes.iter().any(|write| {
+            write.path.is_empty()
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if bindings.canonical_local(local) == runtime)
+        }) || entry
+            .descendant_writes
+            .iter()
+            .filter_map(|identity| bindings.local(identity))
+            .any(|local| bindings.canonical_local(local) == runtime)
+    };
+    let parameters: Vec<u32> = params
+        .iter()
+        .enumerate()
+        .filter(|(_, param)| !param.rest && param.name.is_some() && param.destructured.is_empty())
+        .filter_map(|(ordinal, param)| {
+            let binding = param.binding?;
+            (!assigned(binding)).then(|| u32::try_from(ordinal).ok())?
+        })
+        .collect();
+    (!parameters.is_empty()).then(|| Arc::from(parameters.into_boxed_slice()))
 }
 
 /// Whether the retained program carries top-level MODULE syntax: an
@@ -4287,6 +4380,11 @@ struct Lowerer<'a> {
     /// control-position recorder neither certifies them decided-above nor
     /// gaps them.
     predicate_guard_call_spans: FxHashSet<verter_span::Span>,
+    /// The parameters a type predicate inferred from the body may name —
+    /// `Some` only for a function the checker may infer one for (see
+    /// [`ReturnPredicateTest`]). Its single return reads its argument as a
+    /// test over them.
+    predicate_parameters: Option<Arc<[u32]>>,
     /// A narrowing position lowered inside the CURRENT statement — a
     /// control-position test, an assertion statement, a sequence's
     /// discarded operand — carried a fact this half can neither certify
@@ -5062,9 +5160,12 @@ impl Lowerer<'_> {
                         .argument
                         .as_ref()
                         .map_or(SliceFreshness::Pinned, expression_freshness);
+                    let mut predicate_test = None;
                     let argument = ret.argument.as_ref().map(|arg| {
                         if self.value_span_selected(arg.span()) {
-                            self.lower_expr(arg, ExprMode::Return)
+                            let lowered = self.lower_expr(arg, ExprMode::Return);
+                            predicate_test = self.return_predicate_test(arg);
+                            lowered
                         } else {
                             // An unselected return argument still RUNS:
                             // scan its effects like every elided position.
@@ -5075,6 +5176,7 @@ impl Lowerer<'_> {
                     out.push(SliceStatement::Return {
                         argument,
                         freshness,
+                        predicate_test,
                     });
                     can_fall_through = false;
                 }
@@ -5944,6 +6046,67 @@ impl Lowerer<'_> {
                 SliceGuard::None
             }
         }
+    }
+
+    /// The single returned expression of a function that may infer a type
+    /// predicate, read as a test through the ONE guard authority
+    /// ([`ReturnPredicateTest`]); `None` for every other function. An
+    /// unexpressible test raises no gap here: only a `boolean` return
+    /// makes the unknown predicate matter, and only the evaluator sees
+    /// the returned type.
+    fn return_predicate_test(&mut self, argument: &Expression<'_>) -> Option<ReturnPredicateTest> {
+        let parameters = self.predicate_parameters.clone()?;
+        let guard = match self.classify_guard(argument) {
+            GuardDisposition::Modeled(guard) => *guard,
+            GuardDisposition::NoNarrowing => SliceGuard::None,
+            GuardDisposition::Unexpressible => return Some(ReturnPredicateTest::Unexpressible),
+        };
+        if self.holds_unprovable_narrowing_call(argument) {
+            return Some(ReturnPredicateTest::Unexpressible);
+        }
+        Some(ReturnPredicateTest::Guard {
+            guard: Box::new(guard),
+            parameters,
+        })
+    }
+
+    /// Whether a returned expression holds a call whose result could
+    /// narrow a parameter beyond what the guard lowering minted. A call
+    /// narrows only a reference it is handed — an argument or the
+    /// receiver — so only a call reaching a parameter that way counts. The
+    /// guard vocabulary reads a call as a fact only for a provably closed
+    /// same-file predicate callee, so every other such call
+    /// (`Array.isArray(x)`, an imported guard) is proved inert only when
+    /// its callee is a closed same-file declaration with a non-predicate
+    /// return annotation — the control-test rule, read here without
+    /// recording anything.
+    fn holds_unprovable_narrowing_call(&self, argument: &Expression<'_>) -> bool {
+        let mut scanner = LeafCallScanner {
+            control_nesting: 1,
+            ..LeafCallScanner::default()
+        };
+        scanner.visit_expression(argument);
+        scanner.control.iter().any(|call| match call {
+            ControlCall::Construct(_) => false,
+            ControlCall::Call {
+                span,
+                callee,
+                assertion_subject_roots,
+            } => {
+                assertion_subject_roots.iter().any(|(_, root)| {
+                    matches!(self.classify_occurrence(*root), NameBinding::Param(_))
+                }) && !self.predicate_guard_call_spans.contains(span)
+                    && !callee.as_ref().is_some_and(|(name, callee_span)| {
+                        matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
+                            && self
+                                .closed_callee_declaration(name)
+                                .is_some_and(|function| {
+                                    ResultIndependentPosition::ControlTest
+                                        .certifies_closed_return(function.return_type.as_deref())
+                                })
+                    })
+            }
+        })
     }
 
     /// The tri-state classification behind [`Self::lower_guard`] — the
