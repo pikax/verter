@@ -24,7 +24,7 @@
 //! Workloads, each a distribution:
 //!
 //! * `cold_load`         — fresh host, upsert the corpus, first query of every witness.
-//! * `warm_query`        — one query on a warm host (per-query samples).
+//! * `warm_query`        — warm-host queries, timed in batches of full sweeps, per query.
 //! * `local_edit`        — edit one module's body, re-query that module.
 //! * `declaration_edit`  — edit the shared declarations every module imports, re-query all.
 //! * `augmentation_edit` — edit a `declare global` augmentation, re-query its readers.
@@ -386,16 +386,24 @@ fn cold_load(corpus: &Corpus, samples: usize) -> Workload {
     }
 }
 
-fn warm_query(host: &VerterHost, corpus: &Corpus, rounds: usize) -> Workload {
+/// Full sweeps over every witness in ONE warm-query sample. A single warm
+/// query is a memo hit of tens of nanoseconds — below what a timer resolves
+/// reliably, and its distribution is the mix of witness kinds rather than a
+/// latency — so each sample times a fixed batch and is normalized per query.
+const WARM_SWEEPS_PER_SAMPLE: usize = 10;
+
+fn warm_query(host: &VerterHost, corpus: &Corpus, samples: usize) -> Workload {
     let witnesses = corpus.all_witnesses();
     query_all(host, &witnesses);
-    let mut samples_ns = Vec::with_capacity(rounds * witnesses.len());
-    for _ in 0..rounds {
-        for (canonical, symbol) in &witnesses {
-            samples_ns.push(nanos(|| {
-                query(host, canonical, symbol);
-            }));
-        }
+    let queries_per_sample = (WARM_SWEEPS_PER_SAMPLE * witnesses.len()).max(1) as u64;
+    let mut samples_ns = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let batch = nanos(|| {
+            for _ in 0..WARM_SWEEPS_PER_SAMPLE {
+                query_all(host, &witnesses);
+            }
+        });
+        samples_ns.push(batch / queries_per_sample);
     }
     let (alloc_count, alloc_bytes) = account(|| {
         query_all(host, &witnesses);
@@ -655,11 +663,7 @@ fn run() {
     let mut workloads = vec![cold_load(&corpus, cold_samples)];
     let host = host_with_workers(None);
     load(&host, &corpus);
-    workloads.push(warm_query(
-        &host,
-        &corpus,
-        samples.div_ceil(corpus.modules.max(1)).max(3),
-    ));
+    workloads.push(warm_query(&host, &corpus, samples));
     let module0 = [corpus.module(0, false), corpus.module(0, true)];
     workloads.push(edit_workload(
         "local_edit",
@@ -730,6 +734,7 @@ fn run() {
         "workloads": by_name,
         "throughput_qps": throughput_qps,
         "soak_live_bytes": live,
+        "warm_query_sweeps_per_sample": WARM_SWEEPS_PER_SAMPLE,
     });
     println!("{document}");
 }

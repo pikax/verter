@@ -267,16 +267,47 @@ function mulberry32(seed) {
 
 /** Bootstrap CI of median(candidate) / median(baseline). */
 function bootstrapRatio(baseline, candidate, resamples, confidence, seed) {
+  // HIERARCHICAL: `baseline` and `candidate` are arrays of invocations, each an
+  // array of samples. Samples inside one invocation share its process, heap and
+  // thermal state, so they are not independent draws: resampling them pooled makes
+  // the interval far more confident than an ABBA session supports. Each resample
+  // draws the invocations with replacement (the outer level), then each drawn
+  // invocation's own samples with replacement (the inner level).
   const rand = mulberry32(seed);
-  const draw = (xs) => {
-    const out = new Array(xs.length);
-    for (let i = 0; i < xs.length; i++) out[i] = xs[Math.floor(rand() * xs.length)];
-    return out;
+  const pick = (xs) => xs[Math.floor(rand() * xs.length)];
+  const draw = (invocations) => {
+    const pooled = [];
+    for (let i = 0; i < invocations.length; i++) {
+      const samples = pick(invocations);
+      for (let j = 0; j < samples.length; j++) pooled.push(pick(samples));
+    }
+    return pooled;
   };
   const ratios = new Array(resamples);
   for (let r = 0; r < resamples; r++) ratios[r] = median(draw(candidate)) / median(draw(baseline));
   const tail = (1 - confidence) / 2;
   return { lower: quantile(ratios, tail), upper: quantile(ratios, 1 - tail) };
+}
+
+/**
+ * The verdict for a time ratio (candidate / baseline; below 1 is faster) with its
+ * interval, against a gate of ±`gate` percent. "within noise" is reserved for an
+ * interval that includes parity; an interval that excludes it is a MEASURED
+ * difference, placed against the gate.
+ */
+function verdictFor(ci, gate) {
+  const band = gate / 100;
+  const g = `±${gate.toFixed(1)}%`;
+  if (ci.lower <= 1 && ci.upper >= 1) return "within noise";
+  if (ci.lower > 1) {
+    if (ci.lower > 1 + band) return `REGRESSION beyond the ${g} gate — investigate`;
+    if (ci.upper > 1 + band)
+      return `measured regression, possibly beyond the ${g} gate — investigate`;
+    return `measured regression within the ${g} gate`;
+  }
+  if (ci.upper < 1 - band) return `improvement beyond the ${g} gate`;
+  if (ci.lower < 1 - band) return `measured improvement, possibly beyond the ${g} gate`;
+  return `measured improvement within the ${g} gate`;
 }
 
 // ── git / build ──────────────────────────────────────────────────────────
@@ -557,6 +588,7 @@ function summarize({
   const first = runs.baseline[0].document;
   const workloadNames = Object.keys(first.workloads);
   const pooled = (arm, name) => runs[arm].flatMap((r) => r.document.workloads[name].samples_ns);
+  const clustered = (arm, name) => runs[arm].map((r) => r.document.workloads[name].samples_ns);
   const perInvocationMedians = (arm, name) =>
     runs[arm].map((r) => median(r.document.workloads[name].samples_ns));
 
@@ -586,15 +618,13 @@ function summarize({
     );
     const ratio = median(cand) / median(base);
     const ci = bootstrapRatio(
-      base,
-      cand,
+      clustered("baseline", name),
+      clustered("candidate", name),
       POLICY.bootstrapResamples,
       POLICY.confidence,
       0x5eed + index,
     );
-    let verdict = "within noise";
-    if (ci.lower > 1 + threshold / 100) verdict = "REGRESSION — investigate";
-    else if (ci.upper < 1 - threshold / 100) verdict = "improvement";
+    const verdict = verdictFor(ci, threshold);
     const stats = (xs) => ({
       p50: quantile(xs, 0.5),
       p95: quantile(xs, 0.95),
@@ -688,7 +718,8 @@ function summarize({
 }
 
 function renderMarkdown(s) {
-  const ms = (ns) => (ns / 1e6).toFixed(3);
+  // Four significant figures: a per-query warm read is hundredths of a millisecond.
+  const ms = (ns) => String(Number((ns / 1e6).toPrecision(4)));
   const pct = (x) => `${x >= 0 ? "+" : ""}${x.toFixed(1)}%`;
   const lines = [];
   lines.push("# Signature-kernel performance run", "");
@@ -769,6 +800,15 @@ function renderMarkdown(s) {
       `| ${name} | ${ms(w.baseline_ns.p50)} / ${ms(w.baseline_ns.p95)} / ${ms(w.baseline_ns.p99)} | ${ms(w.candidate_ns.p50)} / ${ms(w.candidate_ns.p95)} / ${ms(w.candidate_ns.p99)} | ${w.median_ratio.toFixed(3)} (${w.ratio_ci.lower.toFixed(3)}–${w.ratio_ci.upper.toFixed(3)}) | ±${w.gate_threshold_percent.toFixed(1)}% | ${w.verdict} |`,
     );
   }
+  lines.push(
+    "",
+    "Ratio is candidate / baseline time (below 1 is faster). The 95% interval is a",
+    "hierarchical bootstrap: invocations are resampled first, then each drawn",
+    "invocation's own samples. The gate is max(5%, 2 × the baseline's between-invocation",
+    "noise). **within noise** — the interval includes parity; **measured",
+    "regression / improvement** — the interval excludes parity, placed within or beyond",
+    "the gate; an interval that crosses the gate is flagged for investigation.",
+  );
   lines.push("", "## Allocation (per workload pass, median across invocations)", "");
   lines.push(
     "| Workload | baseline bytes | candidate bytes | baseline allocs | candidate allocs |",
@@ -785,9 +825,20 @@ function renderMarkdown(s) {
     "## Throughput (queries/s, one warm host, N threads over N scheduler workers)",
     "",
   );
-  lines.push("| Workers | baseline | candidate |", "|---|---|---|");
-  for (const [key, t] of Object.entries(s.throughput))
-    lines.push(`| ${key.replace("throughput_w", "")} | ${t.baseline_qps} | ${t.candidate_qps} |`);
+  lines.push(
+    "| Workers | baseline | candidate | time ratio (95% CI) | verdict |",
+    "|---|---|---|---|---|",
+  );
+  for (const [key, t] of Object.entries(s.throughput)) {
+    // The throughput workload's own time samples carry the interval and verdict.
+    const w = s.workloads[key];
+    const timed = w
+      ? `${w.median_ratio.toFixed(3)} (${w.ratio_ci.lower.toFixed(3)}–${w.ratio_ci.upper.toFixed(3)}) | ${w.verdict}`
+      : "n/a | n/a";
+    lines.push(
+      `| ${key.replace("throughput_w", "")} | ${t.baseline_qps} | ${t.candidate_qps} | ${timed} |`,
+    );
+  }
   lines.push("", "## Edit/revert soak (live heap)", "");
   lines.push(
     "| Arm | second-quarter median | last-quarter median | growth | verdict |",
