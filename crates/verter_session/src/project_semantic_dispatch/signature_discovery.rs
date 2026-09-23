@@ -804,6 +804,8 @@ impl ProjectSemanticDispatch<'_> {
         };
         let _ = walk.context_id;
         let found = walk.discover(subject);
+        #[cfg(test)]
+        signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Discovered);
         let published = found.and_then(|list| {
             let view = SemanticReadView::pin(store);
             let mut nodes_of: Vec<crate::signature_kernel::SignatureCandidateNodes> =
@@ -1207,7 +1209,83 @@ pub(super) enum SharedSignatureNodes {
     Incomplete(IncompleteReason),
 }
 
+/// Why one read over a dispatched `SignaturesOfType` value did not answer.
+#[derive(Debug, Clone, Copy)]
+enum SignatureSetReadFailure {
+    /// The value's handles belong to a retired kernel epoch: a replacement
+    /// landed between the memo read and the pin, or while the read held
+    /// them. That is a miss, never an incomplete answer.
+    Retired,
+    Incomplete(IncompleteReason),
+}
+
+/// Whether `error` is a kernel handle a replacement retired.
+fn is_retired_handle(error: &DiscoveryError) -> bool {
+    matches!(
+        error,
+        DiscoveryError::Read(crate::signature_kernel::ReadError::StaleHandle)
+            | DiscoveryError::Store(crate::signature_kernel::StoreError::StaleHandle)
+    )
+}
+
 impl ProjectSemanticDispatch<'_> {
+    /// Dispatch the subject's shared `SignaturesOfType` read. Anything but a
+    /// signature set is the reason the subject did not settle.
+    fn signature_set_value(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> Result<crate::signature_kernel::SignatureSetValue, IncompleteReason> {
+        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
+        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind,
+            context: SemanticContextId::production(),
+        });
+        match read.value {
+            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => Ok(value),
+            _ => Err(if self.connected_demand_tripped() {
+                IncompleteReason::Budget
+            } else {
+                IncompleteReason::UnsettledInput
+            }),
+        }
+    }
+
+    /// Run `read` over the value `first` dispatched, and over one fresh
+    /// dispatch when `read` finds the value's kernel epoch retired.
+    ///
+    /// The memo read and the pin are two steps, so a kernel-epoch
+    /// replacement can land between them, and a joined build can finish in
+    /// an epoch the replacement retired. The re-dispatch cannot see that
+    /// value again: the memo's warm gate and its joiner fork both refuse a
+    /// retired-epoch value, so it recomputes in the current epoch. The retry
+    /// is bounded at one; only a second replacement inside it leaves the
+    /// read unsettled.
+    fn read_signature_set<T>(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+        read: impl Fn(&crate::signature_kernel::SignatureSetValue) -> Result<T, SignatureSetReadFailure>,
+    ) -> Result<T, IncompleteReason> {
+        let attempt = |dispatched: Result<_, IncompleteReason>| {
+            dispatched
+                .map_err(SignatureSetReadFailure::Incomplete)
+                .and_then(|value| read(&value))
+        };
+        let outcome = match attempt(first) {
+            Err(SignatureSetReadFailure::Retired) => {
+                attempt(self.signature_set_value(subject, kind))
+            }
+            outcome => outcome,
+        };
+        outcome.map_err(|failure| match failure {
+            SignatureSetReadFailure::Retired => IncompleteReason::UnsettledInput,
+            SignatureSetReadFailure::Incomplete(reason) => reason,
+        })
+    }
+
     /// The subject's candidates of `kind`, read from `SignaturesOfType`, each
     /// as the graph signature node a node-based consumer reads: the authored
     /// node for a leaf, and for a composite the node form of its descriptor
@@ -1219,41 +1297,56 @@ impl ProjectSemanticDispatch<'_> {
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
     ) -> SharedSignatureNodes {
-        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
-        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
-            subject,
-            kind,
-            context: SemanticContextId::production(),
-        });
-        let value = match read.value {
-            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value,
-            _ => {
-                return SharedSignatureNodes::Incomplete(if self.connected_demand_tripped() {
-                    IncompleteReason::Budget
-                } else {
-                    IncompleteReason::UnsettledInput
-                })
-            }
-        };
+        let first = self.signature_set_value(subject, kind);
+        self.shared_signature_nodes_from(subject, kind, first)
+    }
+
+    /// [`Self::shared_signature_nodes`] over an already-dispatched first
+    /// read.
+    fn shared_signature_nodes_from(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+    ) -> SharedSignatureNodes {
+        match self.read_signature_set(subject, kind, first, |value| {
+            self.signature_nodes_of(kind, value)
+        }) {
+            Ok(nodes) => SharedSignatureNodes::Nodes(nodes),
+            Err(reason) => SharedSignatureNodes::Incomplete(reason),
+        }
+    }
+
+    /// The node form of every candidate of one dispatched set, in candidate
+    /// order.
+    fn signature_nodes_of(
+        &self,
+        kind: GraphSignatureKind,
+        value: &crate::signature_kernel::SignatureSetValue,
+    ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
+        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().signature_store();
         let candidates: Vec<SignatureCandidate> = {
             let view = SemanticReadView::pin(store);
+            if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                return Err(SignatureSetReadFailure::Retired);
+            }
             match view.read_set(value.set) {
                 Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
                 Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
                 Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
-                Err(_) => {
-                    return SharedSignatureNodes::Incomplete(IncompleteReason::UnsettledInput)
-                }
+                Err(_) => return Err(unsettled),
             }
         };
         if candidates.len() != value.nodes.len() {
-            return SharedSignatureNodes::Incomplete(IncompleteReason::UnsettledInput);
+            return Err(unsettled);
         }
         let mut nodes = Vec::with_capacity(candidates.len());
         for (index, candidate) in candidates.iter().enumerate() {
             let node = match value.nodes[index].authored {
                 Some(node) => node,
+                // The composite's node form is built after the view above is
+                // released, so a replacement can still retire the candidate.
                 None => match self.composite_signature_node(
                     store,
                     kind,
@@ -1261,14 +1354,19 @@ impl ProjectSemanticDispatch<'_> {
                     &value.nodes[index].constituents,
                 ) {
                     Ok(node) => node,
+                    Err(error) if is_retired_handle(&error) => {
+                        return Err(SignatureSetReadFailure::Retired)
+                    }
                     Err(error) => {
-                        return SharedSignatureNodes::Incomplete(error.incomplete_reason())
+                        return Err(SignatureSetReadFailure::Incomplete(
+                            error.incomplete_reason(),
+                        ))
                     }
                 },
             };
             nodes.push(node);
         }
-        SharedSignatureNodes::Nodes(nodes)
+        Ok(nodes)
     }
 
     /// The type at positional argument `position` of every shared candidate
@@ -1295,34 +1393,47 @@ impl ProjectSemanticDispatch<'_> {
         kind: GraphSignatureKind,
         position: usize,
     ) -> SharedPositionalReads {
-        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
+        let first = self.signature_set_value(subject, kind);
+        let raw = self.read_signature_set(subject, kind, first, |value| {
+            self.raw_positional_reads(value, position)
+        })?;
+        Ok(raw
+            .into_iter()
+            .map(|raw| PositionalRead {
+                receiver: raw.receiver,
+                argument: match raw.argument {
+                    None => PositionalArgument::Absent,
+                    Some(ty) => PositionalArgument::Type {
+                        ty,
+                        non_nullish_arms: self.non_nullish_arms(ty),
+                    },
+                },
+            })
+            .collect())
+    }
+
+    /// Every candidate's positional slots at `position`, read under ONE
+    /// pinned view of the set's own epoch; no semantics is dispatched while
+    /// it is held.
+    fn raw_positional_reads(
+        &self,
+        value: &crate::signature_kernel::SignatureSetValue,
+        position: usize,
+    ) -> Result<Vec<RawPositional>, SignatureSetReadFailure> {
         use crate::signature_kernel::{PositionalShape, TypeAt};
 
-        let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
-            subject,
-            kind,
-            context: SemanticContextId::production(),
-        });
-        let value = match read.value {
-            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value,
-            _ => {
-                return Err(if self.connected_demand_tripped() {
-                    IncompleteReason::Budget
-                } else {
-                    IncompleteReason::UnsettledInput
-                })
-            }
-        };
+        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().signature_store();
-        // Everything the positional model needs is read under ONE pinned
-        // view; no semantics is dispatched while it is held.
         let raw: Result<Vec<RawPositional>, ()> = {
             let view = SemanticReadView::pin(store);
+            if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                return Err(SignatureSetReadFailure::Retired);
+            }
             let candidates: Vec<SignatureCandidate> = match view.read_set(value.set) {
                 Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
                 Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
                 Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
-                Err(_) => return Err(IncompleteReason::UnsettledInput),
+                Err(_) => return Err(unsettled),
             };
             let mut out = Vec::with_capacity(candidates.len());
             let mut failed = false;
@@ -1393,22 +1504,7 @@ impl ProjectSemanticDispatch<'_> {
                 Ok(out)
             }
         };
-        let Ok(raw) = raw else {
-            return Err(IncompleteReason::UnsettledInput);
-        };
-        Ok(raw
-            .into_iter()
-            .map(|raw| PositionalRead {
-                receiver: raw.receiver,
-                argument: match raw.argument {
-                    None => PositionalArgument::Absent,
-                    Some(ty) => PositionalArgument::Type {
-                        ty,
-                        non_nullish_arms: self.non_nullish_arms(ty),
-                    },
-                },
-            })
-            .collect())
+        raw.map_err(|()| unsettled)
     }
 
     /// `node`'s union arms without `null` / `undefined` (the checker's
@@ -1638,12 +1734,18 @@ impl ProjectSemanticDispatch<'_> {
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
         let fence = self.project_generation_signature();
-        match self.signatures_of_type_with_authored(
-            self.graph().signature_store(),
-            subject,
-            kind,
-            context,
-        ) {
+        let store = self.graph().signature_store();
+        let began = store.epoch();
+        let mut outcome = self.signatures_of_type_with_authored(store, subject, kind, context);
+        // A kernel-epoch replacement landing mid-walk retires what the walk
+        // interned (it fails, or answers in the retired epoch): that walk is
+        // a miss, run once more in the current epoch.
+        if store.epoch() != began {
+            outcome = self.signatures_of_type_with_authored(store, subject, kind, context);
+        }
+        #[cfg(test)]
+        signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Settled);
+        match outcome {
             QueryOutcome::Ready(Ready { value, .. }) => {
                 let (roots, complete) =
                     match self.transitive_self_roots_from_nodes(std::iter::once(subject)) {
@@ -1698,6 +1800,39 @@ impl ProjectSemanticDispatch<'_> {
     }
 }
 
+/// The two windows of a `SignaturesOfType` build a kernel-epoch replacement
+/// can land in.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignaturesOfTypeBuildPoint {
+    /// The walk has discovered its candidates and not yet published the
+    /// set: a replacement here retires what the walk interned.
+    Discovered,
+    /// The build has settled its value and not yet handed it to the memo: a
+    /// replacement here makes the build publish a retired-epoch value.
+    Settled,
+}
+
+#[cfg(test)]
+type SignaturesOfTypeBuildHook = Box<dyn Fn(SignaturesOfTypeBuildPoint)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs on the building thread at each
+    /// [`SignaturesOfTypeBuildPoint`].
+    static SIGNATURES_OF_TYPE_BUILD_HOOK: std::cell::RefCell<Option<SignaturesOfTypeBuildHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn signatures_of_type_build_point(point: SignaturesOfTypeBuildPoint) {
+    SIGNATURES_OF_TYPE_BUILD_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(point);
+        }
+    });
+}
+
 fn incomplete_output(
     fence: crate::semantic_query::DepSignature,
     reason: IncompleteReason,
@@ -1714,3 +1849,7 @@ fn incomplete_output(
     );
     output
 }
+
+#[cfg(test)]
+#[path = "signature_epoch_tests.rs"]
+mod signature_epoch_tests;

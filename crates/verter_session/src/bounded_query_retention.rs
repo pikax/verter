@@ -285,10 +285,11 @@ where
     /// race. A caller that only holds a shared read guard MUST use
     /// `forget_seq` with the removed entry's own admission seq instead.
     ///
-    /// The single in-tree caller is the `SemanticGraphStore` family
-    /// memo's per-canonical drain, which runs inside the `entries`
-    /// `Mutex` hold — the exact lock domain `record_family_admission_locked`
-    /// records under and `invalidate_all` clears under. Identity-scoped
+    /// The in-tree callers are the `SemanticGraphStore` family memo's
+    /// per-canonical drain and its retired-kernel-epoch sweep, both of
+    /// which run inside the `entries` `Mutex` hold — the exact lock domain
+    /// `record_family_admission_locked` records under and `invalidate_all`
+    /// clears under. Identity-scoped
     /// caches (`BoundedCandidateMap`, the
     /// `component_meta_caches` DBs) use `forget_seq` and never call this.
     pub fn forget_key_under_exclusive_lock(&self, key: &K) {

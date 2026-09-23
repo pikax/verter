@@ -25,7 +25,7 @@ pub use discovery::{
     MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
-pub use lifetime::{SignatureStore, StoreError};
+pub use lifetime::{SignatureStore, StoreError, EPOCH_RECORD_CAP};
 #[allow(unused_imports)]
 pub use positional::{
     MinArityFlags, PositionalMode, PositionalShape, ProjectedElement, ProjectedKind,

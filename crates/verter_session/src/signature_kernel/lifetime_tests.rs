@@ -582,3 +582,42 @@ fn pinned_view_reads_substitution_after_epoch_replacement() {
         .unwrap();
     assert_eq!(applied, SubstTerm::Binder(SemanticNodeId(1)));
 }
+
+#[test]
+fn racing_over_cap_triggers_retire_one_epoch_and_keep_pinned_readers() {
+    use std::sync::Arc;
+    let store = Arc::new(SignatureStore::new());
+    let set = intern_one_call(&store);
+    let held = store.interned_len();
+    assert!(held > 0);
+    let before = store.epoch();
+    let pinned = SemanticReadView::pin(&store);
+    let replaced: Vec<Option<super::records::GraphEpoch>> = std::thread::scope(|scope| {
+        let racers: Vec<_> = (0..8)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                scope.spawn(move || store.replace_epoch_if_over(held - 1))
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .collect()
+    });
+    assert_eq!(
+        replaced.iter().flatten().count(),
+        1,
+        "one trigger replaces; the others find the new epoch under the cap"
+    );
+    assert_eq!(store.epoch().as_u32(), before.as_u32() + 1);
+    assert_eq!(store.interned_len(), 0);
+    assert!(
+        pinned.read_set(set).is_ok(),
+        "a pinned reader keeps its epoch"
+    );
+    assert_eq!(
+        store.replace_epoch_if_over(0),
+        None,
+        "an empty epoch is at the cap"
+    );
+}
