@@ -70,6 +70,12 @@ pub enum FlowReturnError {
         /// Number of retry attempts made before giving up.
         attempts: u8,
     },
+    /// The caller cancelled the request before it produced a complete
+    /// answer. Whatever incomplete state the evaluation reached — a budget
+    /// trip at the next cancellation check, or a nested read that stopped
+    /// and degraded the value — is the CANCELLATION, never a statement about
+    /// the program, and nothing it computed was admitted.
+    Cancelled,
 }
 
 impl VerterHost {
@@ -98,6 +104,32 @@ impl VerterHost {
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         demand: ReturnProjectionDemand,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
+        self.flow_return_with_audit(function, demand, None)
+    }
+
+    /// [`Self::get_flow_return_type_with_audit`] under the CALLER's
+    /// cancellation: cancelling any clone of `cancellation` — before the
+    /// request starts or while it runs — cancels it. A request that had not
+    /// finished answers [`FlowReturnError::Cancelled`]; one that completed
+    /// before the cancellation landed keeps its answer. A retry under a
+    /// fresh token recomputes from whatever the cancelled attempt left,
+    /// which is never a partial answer.
+    #[must_use]
+    pub fn get_flow_return_type_with_audit_cancellable(
+        &self,
+        function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        demand: ReturnProjectionDemand,
+        cancellation: verter_scheduler::cancellation::CancellationToken,
+    ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
+        self.flow_return_with_audit(function, demand, Some(cancellation))
+    }
+
+    fn flow_return_with_audit(
+        &self,
+        function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        demand: ReturnProjectionDemand,
+        cancellation: Option<verter_scheduler::cancellation::CancellationToken>,
+    ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();
         let function_symbol: &str = function.anchor.symbol.as_ref();
 
@@ -117,14 +149,26 @@ impl VerterHost {
             request_id,
             footprint_capture,
         );
-        let ctx = RequestContext::with_kind_and_timing(
-            request_id,
-            Arc::<str>::from(canonical_id),
-            RequestKind::FlowReturnInference,
-            footprint_capture,
-            timing_capture,
-            footprint_scope.accumulator(),
-        );
+        let caller_cancellable = cancellation.is_some();
+        let ctx = match cancellation {
+            None => RequestContext::with_kind_and_timing(
+                request_id,
+                Arc::<str>::from(canonical_id),
+                RequestKind::FlowReturnInference,
+                footprint_capture,
+                timing_capture,
+                footprint_scope.accumulator(),
+            ),
+            Some(cancellation) => RequestContext::with_kind_timing_and_cancellation(
+                request_id,
+                Arc::<str>::from(canonical_id),
+                RequestKind::FlowReturnInference,
+                footprint_capture,
+                timing_capture,
+                footprint_scope.accumulator(),
+                cancellation,
+            ),
+        };
 
         // BEFORE installing the TLS guard: construct the registration.
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
@@ -176,6 +220,11 @@ impl VerterHost {
                         }
                         AuditRequestRegistration::Noop => {
                             let _noop_guard = verter_audit::install_noop_observer();
+                            // The dispatch reads cancellation from the
+                            // installed request context, so a caller's
+                            // token needs it installed even with no audit.
+                            let _ctx_guard = caller_cancellable
+                                .then(|| RequestContextGuard::install(Arc::clone(&ctx)));
                             let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                             run(&dispatch)
                         }
@@ -185,6 +234,20 @@ impl VerterHost {
                     attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
                 }),
             };
+        // A cancelled request's incomplete answer IS the cancellation: the
+        // evaluation stops at its next check with a budget trip, or a nested
+        // read stops and degrades the value it feeds. Neither says anything
+        // about the program. A complete answer finished before the
+        // cancellation landed and stands.
+        let outcome = match outcome {
+            Ok(result) if ctx.is_cancelled() && result.degradation().is_some() => {
+                Err(FlowReturnError::Cancelled)
+            }
+            Err(FlowReturnError::Failure(_)) if ctx.is_cancelled() => {
+                Err(FlowReturnError::Cancelled)
+            }
+            other => other,
+        };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
         // Filtered kinds: return the cheap default-filled record. The
@@ -295,6 +358,9 @@ fn observed_partiality(
         }
         Err(FlowReturnError::UnstableState { .. }) => {
             Some(FlowPartialityTag::NoValue(FlowFailureTag::UnstableState))
+        }
+        Err(FlowReturnError::Cancelled) => {
+            Some(FlowPartialityTag::NoValue(FlowFailureTag::Cancelled))
         }
     }
 }

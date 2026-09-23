@@ -31,7 +31,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{ReturnProjectionDemand, SemanticNodeData};
+use verter_session::semantic_query::{FlowReturnResult, ReturnProjectionDemand, SemanticNodeData};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -176,6 +176,11 @@ fn observe_demand(
         .as_result()
         .ok()
         .unwrap_or_else(|| panic!("observe `{canonical}` / `{symbol}` did not complete"));
+    render_result(host, result)
+}
+
+/// One flow-return result as the stable observation text of [`observe`].
+fn render_result(host: &VerterHost, result: &FlowReturnResult) -> String {
     let graph = host.project_type_store().semantic_graph();
     let mut text = String::new();
     match result.degradation() {
@@ -604,11 +609,10 @@ const MATRIX: &[MatrixRow] = &[
         id: "DET-05",
         perturbation: "Cold, warm, partial persisted cache, edit/revert, cancelled/retried work, epoch rebuild",
         driver: Driver::Ignored {
-            reason: "the cancelled/retried-work and partial-persisted-cache axes have no \
-                     public drivable surface: the audited flow-return entry installs its own \
-                     request context, so a caller cannot cancel it, and nothing persists a \
-                     semantic cache across a process; the cold/warm/edit-revert and \
-                     epoch-rebuild subset is asserted in the ignored body",
+            reason: "the partial-persisted-cache axis has no public drivable surface: nothing \
+                     persists a semantic cache across a process; the cold, warm, \
+                     edit-revert, cancelled/retried and epoch-rebuild axes are asserted in \
+                     the ignored body and by the drivable subset",
         },
     },
     MatrixRow {
@@ -920,23 +924,21 @@ fn det_04_worker_counts_1_2_4_8() {
     }
 }
 
-/// DET-05 (ignored) — the cold / warm / edit-revert / EPOCH-REBUILD axes
-/// ARE driven below (cold equals warm on both bases; an authored edit
-/// changes both; the revert restores the original observation; the public
+/// DET-05 (ignored) — the cold / warm / edit-revert / CANCELLED-RETRIED /
+/// EPOCH-REBUILD axes ARE driven below (cold equals warm on both bases; an
+/// authored edit changes both; the revert restores the original
+/// observation; a caller-cancelled request answers complete-and-cold-equal
+/// or `Cancelled`, and its retry equals a cold host; the public
 /// `clear_compile_cache` advances the store-view epoch and the same logical
-/// snapshot then gives the same observation and bytes). Two axes have no
-/// drivable surface. Cancelled/retried work: the audited flow-return entry
-/// mints and installs its OWN request context, so a caller cannot cancel
-/// the request it drives. Partial PERSISTED cache: the product persists no
-/// semantic cache across a process at all — backend/process identity and
-/// restart admission belong to the kernel-expansion cache-identity block.
-/// The row stays ignored naming both; the driven axes stay asserted so the
-/// un-ignoring change inherits a real body, not a stub.
+/// snapshot then gives the same observation and bytes). One axis has no
+/// drivable surface: partial PERSISTED cache — the product persists no
+/// semantic cache across a process at all. The row stays ignored naming it;
+/// the driven axes stay asserted so the un-ignoring change inherits a real
+/// body, not a stub.
 #[test]
-#[ignore = "the cancelled/retried-work and partial-persisted-cache axes have no public \
-            drivable surface: the audited flow-return entry installs its own request \
-            context, and nothing persists a semantic cache across a process; the cold, \
-            warm, edit-revert and epoch-rebuild axes are the drivable subset"]
+#[ignore = "the partial-persisted-cache axis has no public drivable surface: nothing persists a \
+            semantic cache across a process; the cold, warm, edit-revert, \
+            cancelled/retried and epoch-rebuild axes are the drivable subset"]
 fn det_05_cold_warm_edit_revert() {
     assert_registered_ignored("DET-05");
     drive_det_05_subset();
@@ -959,7 +961,106 @@ fn assert_registered_ignored(id: &str) {
     }
 }
 
+/// A witness with enough connected work that a concurrent cancellation can
+/// land while it evaluates: a generic call chain and a union return.
+const CANCEL_TS: &str = r#"
+function c0<T>(x: T) { return { v: x, tag: "c" as const }; }
+function c1<T>(x: T) { return c0(x); }
+function c2<T>(x: T) { return c1(x); }
+function c3<T>(x: T) { return c2(x); }
+function c4<T>(x: T) { return c3(x); }
+function c5<T>(x: T) { return c4(x); }
+function c6<T>(x: T) { return c5(x); }
+function c7<T>(x: T) { return c6(x); }
+export function witness(v: number | string, flag: boolean) {
+    if (flag) return c7(v);
+    return [v] as const;
+}
+"#;
+
+/// DET-05's cancelled/retried axis. The caller's token cancels the audited
+/// request. Cancelled before it starts, the request answers the typed
+/// `Cancelled` error and publishes nothing. A concurrent cancellation, at
+/// whatever instant it lands, leaves the attempt either complete and equal
+/// to a cold host's answer or `Cancelled` — never a degraded value that
+/// would blame the program for the caller's cancellation. The retry under a
+/// fresh token answers exactly what a cold host answers, on both bases: a
+/// cancelled attempt never leaves a partial answer behind.
+fn drive_det_05_cancel_and_retry() {
+    use verter_scheduler::cancellation::CancellationToken;
+    use verter_session::host_flow_return_audit::FlowReturnError;
+    let canonical = "/det/cancel.ts";
+    let cold_host = build_host(&[(canonical, CANCEL_TS)]);
+    let cold = observe(&cold_host, canonical, "witness");
+    let cold_bytes = generated_bytes(&cold_host);
+    let cancellable = |host: &VerterHost, token: CancellationToken| {
+        host.get_flow_return_type_with_audit_cancellable(
+            &identity(canonical, "witness"),
+            ReturnProjectionDemand::whole_return(),
+            token,
+        )
+    };
+
+    let host = build_host(&[(canonical, CANCEL_TS)]);
+    let token = CancellationToken::new();
+    token.cancel();
+    let cancelled = cancellable(&host, token);
+    assert!(
+        matches!(cancelled.as_result(), Err(FlowReturnError::Cancelled)),
+        "DET-05: a request cancelled before it started answered {:?}",
+        cancelled.as_result().map(|result| result.degradation())
+    );
+    assert_eq!(
+        observe(&host, canonical, "witness"),
+        cold,
+        "DET-05: the retry after a pre-start cancellation disagrees with a cold host"
+    );
+    assert_eq!(
+        generated_bytes(&host),
+        cold_bytes,
+        "DET-05: the retry after a pre-start cancellation generated different bytes"
+    );
+
+    // bounded-loop: one concurrent cancellation per delay.
+    for delay_micros in [0_u64, 20, 100, 500, 2_000, 10_000] {
+        let host = build_host(&[(canonical, CANCEL_TS)]);
+        let token = CancellationToken::new();
+        let canceller = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_micros(delay_micros));
+                token.cancel();
+            })
+        };
+        let attempt = cancellable(&host, token);
+        canceller.join().expect("the canceller thread finishes");
+        match attempt.as_result() {
+            Ok(result) => assert_eq!(
+                render_result(&host, result),
+                cold,
+                "DET-05: an attempt cancelled {delay_micros}µs in answered a value a cold \
+                 host does not"
+            ),
+            Err(FlowReturnError::Cancelled) => {}
+            Err(other) => {
+                panic!("DET-05: an attempt cancelled {delay_micros}µs in failed with {other:?}")
+            }
+        }
+        assert_eq!(
+            observe(&host, canonical, "witness"),
+            cold,
+            "DET-05: the retry after a cancellation {delay_micros}µs in disagrees with a cold host"
+        );
+        assert_eq!(
+            generated_bytes(&host),
+            cold_bytes,
+            "DET-05: the retry after a cancellation {delay_micros}µs in generated different bytes"
+        );
+    }
+}
+
 fn drive_det_05_subset() {
+    drive_det_05_cancel_and_retry();
     let host = build_host(&[("/det/edit.ts", EDIT_ORIGINAL_TS)]);
     let canonical = "/det/edit.ts";
     let cold = observe(&host, canonical, "witness");

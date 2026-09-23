@@ -1304,6 +1304,53 @@ impl RequestContext {
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
         projection_op_budget: usize,
     ) -> Arc<Self> {
+        Self::constructed(
+            request_id,
+            canonical_id,
+            kind,
+            footprint_capture,
+            timing_capture,
+            audit_accumulator,
+            projection_op_budget,
+            CancellationToken::new(),
+        )
+    }
+
+    /// Construct a new per-request context whose cancellation is the
+    /// CALLER's token: cancelling any clone of `cancellation` cancels this
+    /// request, and the dispatch observes it at its next cancellation check.
+    pub fn with_kind_timing_and_cancellation(
+        request_id: u64,
+        canonical_id: Arc<str>,
+        kind: verter_audit::RequestKind,
+        footprint_capture: bool,
+        timing_capture: bool,
+        audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+        cancellation: CancellationToken,
+    ) -> Arc<Self> {
+        Self::constructed(
+            request_id,
+            canonical_id,
+            kind,
+            footprint_capture,
+            timing_capture,
+            audit_accumulator,
+            0,
+            cancellation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn constructed(
+        request_id: u64,
+        canonical_id: Arc<str>,
+        kind: verter_audit::RequestKind,
+        footprint_capture: bool,
+        timing_capture: bool,
+        audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+        projection_op_budget: usize,
+        cancellation: CancellationToken,
+    ) -> Arc<Self> {
         // Sniff the scheduler's TLS slot for an enclosing parent
         // request. When a sub-request is created inside another
         // audited request's TLS context (either on the same thread or
@@ -1320,7 +1367,7 @@ impl RequestContext {
         let trace_id = uuid::Uuid::new_v4().to_string();
         Arc::new(Self {
             request_id,
-            cancellation: CancellationToken::new(),
+            cancellation,
             trace_id,
             canonical_id,
             kind,

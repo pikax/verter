@@ -100,9 +100,11 @@ is degraded on the baseline. Its cost is not folded into any ratio above.
 
 Recorded plainly so no reader mistakes absence for a pass:
 
-* Cancellation latency: the audited entry installs its own request context,
-  so no caller can cancel the request it drives (determinism row DET-05
-  records the same boundary).
+* Cancellation latency: the audited entry takes the caller’s cancellation
+  token, and determinism row DET-05 drives its correctness (a cancelled
+  request answers `Cancelled` or a complete answer, and its retry equals a
+  cold host), but the benchmark harness has no cancellation workload, so how
+  long a cancelled request takes to stop is not measured.
 * Completion and diagnostic agreement rates against the pinned official
   compiler on a full project check.
 * A LOCKED cell: `performance-gates.toml` has no signature-kernel cell.
