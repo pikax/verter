@@ -430,6 +430,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => {
                 let params: Vec<_> = params
                     .iter()
@@ -481,6 +482,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,
+                        predicate: predicate
+                            .map(|predicate| predicate.map_type(|ty| projected(memo, ty, context))),
                     },
                 )
             }

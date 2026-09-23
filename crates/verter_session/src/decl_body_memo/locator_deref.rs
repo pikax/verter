@@ -990,7 +990,8 @@ fn navigate_signature_parts(
                 signature.parameters.clone(),
                 signature.return_type.clone().map(Arc::new),
                 signature.type_parameters.clone(),
-            );
+            )
+            .with_predicate(signature.predicate.clone());
             if signature.has_implementation_body
                 && !signature.has_authored_return
                 && !signature.jsdoc_return
@@ -1061,11 +1062,14 @@ fn signature_lexical_root(
         return None;
     }
     Some(DerefedLexicalRoot {
-        expr: TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-            signature.parameters.clone(),
-            signature.return_type.clone().map(Arc::new),
-            signature.type_parameters.clone(),
-        ))),
+        expr: TypeExpr::Function(Arc::new(
+            FunctionExpr::synthetic(
+                signature.parameters.clone(),
+                signature.return_type.clone().map(Arc::new),
+                signature.type_parameters.clone(),
+            )
+            .with_predicate(signature.predicate.clone()),
+        )),
         path: Arc::from(rest.to_vec().into_boxed_slice()),
     })
 }
@@ -1490,6 +1494,13 @@ fn push_function_infer_needles<'a>(function: &'a FunctionExpr, stack: &mut Vec<&
     );
     if let Some(return_type) = function.return_type.as_deref() {
         stack.push(peek_parenthesized(return_type));
+    }
+    if let Some(target) = function
+        .predicate
+        .as_deref()
+        .and_then(|predicate| predicate.ty.as_deref())
+    {
+        stack.push(peek_parenthesized(target));
     }
     for parameter in &function.type_parameters {
         if let Some(constraint) = parameter.constraint.as_deref() {

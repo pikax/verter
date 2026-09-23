@@ -680,16 +680,33 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                 }
             })
             .collect();
+        // The predicate target prints in the return position, so its
+        // degradations anchor there.
+        let predicate = function.predicate.map(|predicate| {
+            let ty = predicate.ty.map(|target| {
+                let target = target.prefix(MaterializePathSegment::FunctionReturn);
+                degraded_leaves.extend(target.degraded_leaves.iter().cloned());
+                Arc::new(target.expr)
+            });
+            Arc::new(verter_type_expr::TypePredicate {
+                subject: predicate.subject,
+                asserts: predicate.asserts,
+                ty,
+            })
+        });
         MaterializedFunction {
-            function: Arc::new(FunctionExpr::with_spans(
-                parameters,
-                return_type,
-                type_params,
-                FunctionSpans {
-                    signature: function.signature_span,
-                    return_type: function.return_type_span,
-                },
-            )),
+            function: Arc::new(
+                FunctionExpr::with_spans(
+                    parameters,
+                    return_type,
+                    type_params,
+                    FunctionSpans {
+                        signature: function.signature_span,
+                        return_type: function.return_type_span,
+                    },
+                )
+                .with_predicate(predicate),
+            ),
             degraded_leaves,
         }
     }
@@ -845,7 +862,8 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
             function.function.return_type.clone(),
             function.function.type_parameters.clone(),
             function.function.spans,
-        );
+        )
+        .with_predicate(function.function.predicate.clone());
         let degraded_leaves = function
             .degraded_leaves
             .into_iter()
@@ -868,7 +886,8 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
             function.function.return_type.clone(),
             function.function.type_parameters.clone(),
             function.function.spans,
-        );
+        )
+        .with_predicate(function.function.predicate.clone());
         let degraded_leaves = function
             .degraded_leaves
             .into_iter()

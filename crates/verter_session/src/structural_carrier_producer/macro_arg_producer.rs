@@ -988,6 +988,17 @@ fn lower_function_signature(
             verter_type_expr::facts::FunctionReturnSource::Absent,
         )
     };
+    let predicate = match func.predicate.as_deref() {
+        Some(predicate) => {
+            let target = predicate
+                .ty
+                .as_deref()
+                .map(|target| lower_node(graph, target, scope, &inner_ctx))
+                .transpose()?;
+            crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+        }
+        None => None,
+    };
     Ok(graph.intern_node_with_scope(
         SemanticNodeData::Signature {
             kind,
@@ -998,6 +1009,7 @@ fn lower_function_signature(
             return_carrier,
             signature_span: func.spans.signature,
             return_type_span: func.spans.return_type,
+            predicate,
         },
         scope.clone(),
     ))

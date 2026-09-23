@@ -227,7 +227,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Foo {\n    kind: 'foo';\n    n: number;\n}\nexport declare function isFoo(x: unknown): x is Foo;\nexport declare function witness(): typeof isFoo;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A TYPE-PREDICATE signature print ((x: unknown) => x is Foo): the consumer-expanded answer is an EMPTY surface (measured `{  }`, degraded) — the callable and its predicate are both lost. Predicate propagation into signature observations is owed by the `SignaturesOfType` result projection." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV08_assertion_signature",
@@ -240,7 +240,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Bar {\n    kind: 'bar';\n}\nexport declare function assertBar(x: unknown): asserts x is Bar;\nexport declare function witness(): typeof assertBar;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "An ASSERTION signature print (asserts x is Bar): the consumer-expanded answer is an EMPTY surface (measured `{  }`, degraded) — the same `SignaturesOfType` result-projection gap as the predicate twin." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV09_explicit_type_arguments",

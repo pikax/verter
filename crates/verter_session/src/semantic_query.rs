@@ -145,6 +145,8 @@ pub mod carrier;
 pub mod composite;
 mod flow_return_result;
 pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
+mod signature_predicate;
+pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -9285,6 +9287,10 @@ pub enum SemanticNodeData {
         /// OXC span of the return-type annotation, stamped from the IR
         /// `FunctionExpr`'s return span. `None` when absent.
         return_type_span: Option<verter_span::Span>,
+        /// The signature's type predicate, beside a `boolean` (type
+        /// predicate) or `void` (assertion) `return_type`. `None` for an
+        /// ordinary signature. Participates in node interning.
+        predicate: Option<SignaturePredicate>,
     },
     /// An index-composed callable whose body-derived return is deferred to
     /// its return carrier. It has NO return-type slot, so a deferred
@@ -9668,6 +9674,7 @@ impl PartialEq for SemanticNodeData {
                     return_carrier: arc,
                     signature_span: asig,
                     return_type_span: aret,
+                    predicate: apred,
                 },
                 Self::Signature {
                     kind: bk,
@@ -9678,6 +9685,7 @@ impl PartialEq for SemanticNodeData {
                     return_carrier: brc,
                     signature_span: bsig,
                     return_type_span: bret,
+                    predicate: bpred,
                 },
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
@@ -9694,6 +9702,7 @@ impl PartialEq for SemanticNodeData {
                     && arc == brc
                     && asig == bsig
                     && aret == bret
+                    && apred == bpred
             }
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
@@ -9845,6 +9854,7 @@ impl std::hash::Hash for SemanticNodeData {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => {
                 kind.hash(state);
                 params.hash(state);
@@ -9857,6 +9867,7 @@ impl std::hash::Hash for SemanticNodeData {
                 // Spans participate in identity (provenance-aware interning).
                 signature_span.hash(state);
                 return_type_span.hash(state);
+                predicate.hash(state);
             }
             Self::DeferredCallable(callable) => {
                 callable.hash(state);

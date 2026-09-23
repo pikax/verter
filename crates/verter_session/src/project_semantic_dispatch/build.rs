@@ -1659,6 +1659,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
                 signature_span: None,
                 return_type_span: None,
+                predicate: None,
             },
             scope.clone(),
         );
@@ -2723,6 +2724,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     // Composed signature — no single source site.
                                     signature_span: None,
                                     return_type_span: None,
+                                    // A construct signature carries no
+                                    // predicate.
+                                    predicate: None,
                                 }),
                                 _ => *base_sig,
                             },
@@ -6258,6 +6262,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return_carrier,
             signature_span,
             return_type_span,
+            predicate,
         } = data.as_ref()
         else {
             return node;
@@ -6272,6 +6277,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
             return_type_span: *return_type_span,
+            predicate: *predicate,
         };
         drop(data);
         graph.intern_preserving_scope(node, twin)
@@ -6677,6 +6683,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
                 ..
             }) => self.graph().intern_node(SemanticNodeData::Signature {
                 kind: *kind,
@@ -6696,6 +6703,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
                 signature_span: *signature_span,
                 return_type_span: *return_type_span,
+                // The substituted predicate target rides through: an
+                // instantiated `x is T` narrows to the argument.
+                predicate: *predicate,
             }),
             _ => result,
         }
@@ -6790,6 +6800,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     // A nested signature re-declaring `name` shadows: its
@@ -6806,6 +6817,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     stack.extend(params.iter().map(|param| param.ty));
                     stack.push(*return_type);
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                     // A non-shadowing nested signature's own type-parameter
                     // declarations can reference the searched OUTER binder in
                     // constraint/default position (`<U extends T>` /
@@ -7126,7 +7138,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// parameter list — the authored `this` receiver removed. Every other axis
     /// (kind, return type and carrier, binders, occurrence, spans) is carried
     /// through unchanged: the signature is the same occurrence minus its
-    /// receiver slot.
+    /// receiver slot. A type predicate does not survive: TypeScript rebuilds
+    /// the signature as `(...args: A) => R` (measured on 7.0.2:
+    /// `OmitThisParameter<(this: Foo, x: unknown) => x is Foo>` is
+    /// `(x: unknown) => boolean`).
     pub(super) fn intern_signature_without_receiver(
         &self,
         function_node: SemanticNodeId,
@@ -7157,6 +7172,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
             return_type_span: *return_type_span,
+            predicate: None,
         };
         drop(data);
         self.graph().intern_preserving_scope(function_node, rebuilt)
@@ -9900,6 +9916,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 let mut direct = false;
@@ -9924,13 +9941,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return ConditionalInferRoute::OutOfScope;
                     }
                 }
-                if matches!(
-                    graph.node_data(*return_type).as_deref(),
-                    Some(SemanticNodeData::Infer { .. })
-                ) {
-                    direct = true;
-                } else if self.subtree_contains_infer(*return_type) {
-                    return ConditionalInferRoute::OutOfScope;
+                // The predicate target sits where the return does: a bare
+                // `x is infer U` is a direct return-position site.
+                for position in std::iter::once(*return_type)
+                    .chain(predicate.and_then(|predicate| predicate.ty))
+                {
+                    if matches!(
+                        graph.node_data(position).as_deref(),
+                        Some(SemanticNodeData::Infer { .. })
+                    ) {
+                        direct = true;
+                    } else if self.subtree_contains_infer(position) {
+                        return ConditionalInferRoute::OutOfScope;
+                    }
                 }
                 for tp in type_parameters.iter() {
                     if tp
@@ -10025,6 +10048,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -10039,6 +10063,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::Conditional {
                     check,

@@ -884,6 +884,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 if is_whole_surface_published(parent_context) {
@@ -898,6 +899,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         if let Some(d) = tp.default {
                             stack.push(ReduceFrame::descend(d, parent_context));
                         }
+                    }
+                    if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
+                        stack.push(ReduceFrame::descend(target, parent_context));
                     }
                 }
             }
@@ -1623,6 +1627,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => rebuild_function(
                 self,
                 node,
@@ -1634,6 +1639,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier.clone(),
                 *signature_span,
                 *return_type_span,
+                *predicate,
                 &state.mapping,
                 context,
             )
@@ -2039,10 +2045,18 @@ fn rebuild_function(
     return_carrier: crate::semantic_query::SignatureReturnCarrier,
     signature_span: Option<verter_span::Span>,
     return_type_span: Option<verter_span::Span>,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     let mut changed = false;
+    let new_predicate = predicate.map(|predicate| {
+        predicate.map_type(|target| {
+            let new_target = mapping.get(&(target, context)).copied().unwrap_or(target);
+            changed |= new_target != target;
+            new_target
+        })
+    });
     let new_params: Vec<crate::semantic_query::FunctionParam> = params
         .iter()
         .map(|p| {
@@ -2106,6 +2120,7 @@ fn rebuild_function(
             },
             signature_span,
             return_type_span,
+            predicate: new_predicate,
         },
     ))
 }
@@ -4231,12 +4246,16 @@ impl<'a> OpenWalk<'a> {
             SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
             } => {
                 (self.role.descend_value_surfaces()
                     || self.position == OperandPosition::ValueSensitive)
                     && (params.iter().any(|p| self.node_is_open(ctx, p.ty))
-                        || self.node_is_open(ctx, *return_type))
+                        || self.node_is_open(ctx, *return_type)
+                        || predicate
+                            .and_then(|predicate| predicate.ty)
+                            .is_some_and(|target| self.node_is_open(ctx, target)))
             }
             SemanticNodeData::Array { element, .. } => {
                 (self.role.descend_value_surfaces()

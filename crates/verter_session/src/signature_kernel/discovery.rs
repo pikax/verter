@@ -125,7 +125,7 @@ pub struct BinderInput {
 pub enum ResultInput {
     Declared {
         return_type: SemanticNodeId,
-        predicate_or_assertion: Option<SemanticNodeId>,
+        predicate_or_assertion: Option<crate::semantic_query::SignaturePredicate>,
     },
     Body {
         locator: u64,
@@ -269,9 +269,17 @@ pub fn publish_signature(
             predicate_or_assertion,
         } => SignatureResultRecipe::Declared {
             return_type: store.intern_type_token(return_type, None)?,
-            predicate_or_assertion: predicate_or_assertion
-                .map(|node| store.intern_type_token(node, None))
-                .transpose()?,
+            predicate_or_assertion: match predicate_or_assertion {
+                Some(predicate) => Some(super::records::PredicateEffect {
+                    subject: predicate.subject,
+                    asserts: predicate.asserts,
+                    ty: predicate
+                        .ty
+                        .map(|node| store.intern_type_token(node, None))
+                        .transpose()?,
+                }),
+                None => None,
+            },
         },
         ResultInput::Body { locator } => SignatureResultRecipe::Body {
             return_obligation_key: ReturnObligationKey {

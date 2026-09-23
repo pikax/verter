@@ -2707,6 +2707,13 @@ fn push_type_expr_children<'a>(expr: &'a TypeExpr, pending: &mut Vec<&'a TypeExp
         if let Some(return_type) = function.return_type.as_deref() {
             pending.push(return_type);
         }
+        if let Some(target) = function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref())
+        {
+            pending.push(target);
+        }
         for parameter in &function.type_parameters {
             push_type_param(parameter, pending);
         }

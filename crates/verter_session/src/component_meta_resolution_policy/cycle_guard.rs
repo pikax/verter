@@ -539,6 +539,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             params,
             return_type,
             type_parameters,
+            predicate,
             ..
         } => {
             // The kind is semantic identity: `() => R` and `new () => R`
@@ -563,6 +564,15 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u64(type_parameters.len() as u64);
             for param in type_parameters.iter() {
                 hasher.write(param.name.as_bytes());
+            }
+            // Trailing, present only on a predicate signature, so every
+            // predicate-less signature keeps its fingerprint.
+            if let Some(predicate) = predicate {
+                predicate.subject.hash(hasher);
+                hasher.write_u8(u8::from(predicate.asserts));
+                if let Some(target) = predicate.ty {
+                    hash_node_rec(ctx, target, hasher, seen, depth + 1);
+                }
             }
         }
         SemanticNodeData::MergedDecl { contributors } => {

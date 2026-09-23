@@ -67,6 +67,7 @@ fn function_with_return_span(
         return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span,
+        predicate: None,
     })
 }
 

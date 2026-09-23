@@ -88,7 +88,7 @@ use verter_semantic::analysis::type_eval_build::{
     TopLevelLiteralPolicy,
 };
 use verter_type_expr::{PrimitiveName, TypeExpr};
-use verter_type_expr_oxc::lower_ts_type;
+use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
 
 /// The demand selection one content lowering serves: the value-selected
 /// expression spans and the value-selected slot declaration spans of ONE
@@ -175,6 +175,9 @@ impl FlowSliceSelection {
 pub struct SliceContent {
     pub bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
     pub declared_return: Option<GatedType>,
+    /// The authored return's type predicate (`x is T`, `asserts x`, …),
+    /// beside the `boolean` / `void` [`Self::declared_return`].
+    pub declared_predicate: Option<SlicePredicate>,
     /// Formal parameters in source order (rest parameter last).
     pub params: Arc<[SliceParam]>,
     /// The function's OWN type parameters (the root signature's binders —
@@ -1364,6 +1367,28 @@ pub enum FrameShadowedName {
 /// live in this module, so "produce a `TypeExpr` in slice content
 /// without deciding what the frame does to it" is inexpressible at every
 /// call site rather than merely discouraged: a new producer must pick
+/// A function's authored type predicate: its subject and assertion flag,
+/// with the target gated exactly like the return it stands beside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlicePredicate {
+    predicate: Arc<verter_type_expr::TypePredicate>,
+    target: Option<GatedType>,
+}
+
+impl SlicePredicate {
+    /// The authored predicate (subject, `asserts`, ungated target).
+    #[must_use]
+    pub fn predicate(&self) -> &verter_type_expr::TypePredicate {
+        &self.predicate
+    }
+
+    /// The gated target; `None` for `asserts x` / `asserts this`.
+    #[must_use]
+    pub fn target(&self) -> Option<&GatedType> {
+        self.target.as_ref()
+    }
+}
+
 /// [`Lowerer::gate`] or the explicitly-named
 /// [`GatedType::root_signature`].
 #[derive(Debug, Clone, PartialEq)]
@@ -1910,12 +1935,19 @@ pub(crate) fn build_flow_slice_content(
         },
         None => SignatureScope::Root,
     };
-    let declared_return = node.return_type().map(|annotation| {
-        signature_scope.gate(
-            lower_ts_type(&annotation.type_annotation, source),
-            signature_scope.param_binders(),
-        )
-    });
+    let (declared_return, declared_predicate) = match node.return_type() {
+        Some(annotation) => {
+            let (returned, predicate) =
+                lower_return_annotation(&annotation.type_annotation, source);
+            let gate = |ty: TypeExpr| signature_scope.gate(ty, signature_scope.param_binders());
+            let declared_predicate = predicate.map(|predicate| SlicePredicate {
+                target: predicate.ty.as_deref().cloned().map(gate),
+                predicate,
+            });
+            (Some(gate(returned)), declared_predicate)
+        }
+        None => (None, None),
+    };
     let anchor = node_span(&node).start;
     let params = match lower_params(
         node.params(),
@@ -1931,6 +1963,7 @@ pub(crate) fn build_flow_slice_content(
             return Some(SliceContent {
                 bindings,
                 declared_return,
+                declared_predicate,
                 can_fall_through: NormalCompletion::minted(
                     false,
                     CompletionConstruction::SynthesizedRegion,
@@ -2117,6 +2150,7 @@ pub(crate) fn build_flow_slice_content(
     Some(SliceContent {
         bindings,
         declared_return,
+        declared_predicate,
         can_fall_through: NormalCompletion::minted(
             region
                 .can_fall_through

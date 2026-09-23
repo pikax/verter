@@ -45,7 +45,7 @@ use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
 use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier,
     MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement,
-    TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
+    TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicateSubject, ValueRef,
 };
 
 use crate::analysis::type_eval::{EnumMemberValue, FunctionSignature, ValueDeclKind};
@@ -1159,6 +1159,32 @@ impl<'a> Walker<'a> {
             self.walk_node(ret);
         } else {
             self.buf.push(0);
+        }
+        // Trailing, present only on a predicate signature, so every
+        // predicate-less function keeps its bytes. The subject is its
+        // parameter SLOT, never the parameter's spelling (parameter
+        // renames stay cosmetic).
+        if let Some(predicate) = func.predicate.as_deref() {
+            self.buf.push(0x72);
+            match &predicate.subject {
+                TypePredicateSubject::This => self.buf.push(0),
+                TypePredicateSubject::Parameter(name) => {
+                    self.buf.push(1);
+                    let slot = func
+                        .parameters
+                        .iter()
+                        .position(|param| param.name.as_deref() == Some(name.as_ref()))
+                        .map_or(u32::MAX, |slot| slot as u32);
+                    self.buf.extend_from_slice(&slot.to_le_bytes());
+                }
+            }
+            self.buf.push(u8::from(predicate.asserts));
+            if let Some(target) = predicate.ty.as_deref() {
+                self.buf.push(1);
+                self.walk_node(target);
+            } else {
+                self.buf.push(0);
+            }
         }
         self.type_param_frame.pop();
     }

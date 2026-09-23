@@ -282,6 +282,7 @@ impl SemanticNodeData {
                 return_type,
                 type_parameters,
                 return_carrier,
+                predicate,
                 ..
             } => {
                 params.iter().map(|param| param.ty).for_each(&mut visit);
@@ -294,6 +295,10 @@ impl SemanticNodeData {
                     decl.constraint.into_iter().for_each(&mut visit);
                     decl.default.into_iter().for_each(&mut visit);
                 }
+                predicate
+                    .and_then(|predicate| predicate.ty)
+                    .into_iter()
+                    .for_each(visit);
             }
             Self::DeferredCallable(_) => return ChildWalk::Sealed,
             Self::SyntheticBinding { value_node, .. } => visit(SemanticNodeId(*value_node)),

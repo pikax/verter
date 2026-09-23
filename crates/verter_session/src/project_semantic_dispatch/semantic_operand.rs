@@ -1019,6 +1019,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     stack.extend(params.iter().map(|param| param.ty));
@@ -1027,6 +1028,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.extend(parameter.constraint);
                         stack.extend(parameter.default);
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 // The unresolved carriers expose their structural type
                 // arguments only through the sanctioned single accessor;

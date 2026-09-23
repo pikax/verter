@@ -872,6 +872,7 @@ fn nullary_function(
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     })
 }
 

@@ -378,6 +378,7 @@ fn intern_span_participates_in_identity() {
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
+        predicate: None,
     };
     let id_a = store.intern_node(mk(10));
     let id_a_again = store.intern_node(mk(10));

@@ -1472,6 +1472,7 @@ fn parity_function_and_constructor_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert_classifier_parity(&host, func, "function-materialized");
     assert!(
@@ -1505,6 +1506,7 @@ fn parity_function_and_constructor_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert_classifier_parity(&host, func_miss_param, "function-miss-param");
     assert!(
@@ -2001,6 +2003,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     // The oracle shape the node raises to (param `has_ts_annotation: false`).
@@ -2557,6 +2560,7 @@ fn publication_score_corpus(
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     vec![
@@ -3112,6 +3116,7 @@ fn function_with_unraisable_return_fails_whole() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert!(
         !fold_raises(&host, node),
@@ -3141,6 +3146,7 @@ fn function_with_unraisable_parameter_fails_whole() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert!(
         !fold_raises(&host, node),

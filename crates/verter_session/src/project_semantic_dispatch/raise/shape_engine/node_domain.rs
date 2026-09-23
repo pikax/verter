@@ -20,10 +20,10 @@ use verter_type_expr::{
 
 use super::fold::{FoldedFunction, FoldedTupleElement};
 use super::{
-    FactShapeTag, RaisedFunction, RaisedFunctionParam, RaisedObjectMember, RaisedRecursiveFrame,
-    RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts, RaisedShapeKey, RaisedShapeResult,
-    RaisedShapeSummary, RaisedTerm, RaisedTupleElement, RaisedTypeParam, RootOnlySummary,
-    ShapeInterner,
+    FactShapeTag, RaisedFunction, RaisedFunctionParam, RaisedObjectMember, RaisedPredicate,
+    RaisedRecursiveFrame, RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts, RaisedShapeKey,
+    RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement, RaisedTypeParam,
+    RootOnlySummary, ShapeInterner,
 };
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
@@ -115,6 +115,11 @@ impl RaisedShapeAlg<'_> {
                 is_const: tp.is_const,
             })
             .collect();
+        let predicate = function.predicate.map(|predicate| RaisedPredicate {
+            subject: predicate.subject,
+            asserts: predicate.asserts,
+            ty: predicate.ty.map(|target| target.key),
+        });
         (
             RaisedFunction {
                 parameters,
@@ -122,6 +127,7 @@ impl RaisedShapeAlg<'_> {
                 type_parameters,
                 signature_span: function.signature_span,
                 return_type_span: function.return_type_span,
+                predicate,
             },
             materialized,
         )
@@ -939,7 +945,17 @@ impl DeclarationFactsAlg {
         if let Some(return_type) = function.return_type.as_ref() {
             safe &= return_type.safe;
         }
+        // A predicate prints its target in the return position.
+        if let Some(target) = Self::predicate_target(function) {
+            safe &= target.safe;
+        }
         safe
+    }
+    fn predicate_target(function: &FoldedFunction<DeclarationOut>) -> Option<&DeclarationOut> {
+        function
+            .predicate
+            .as_ref()
+            .and_then(|predicate| predicate.ty.as_ref())
     }
     fn function_paths(
         function: &FoldedFunction<DeclarationOut>,
@@ -950,6 +966,9 @@ impl DeclarationFactsAlg {
         }
         if let Some(return_type) = function.return_type.as_ref() {
             paths.extend(return_type.typeof_paths.iter().cloned());
+        }
+        if let Some(target) = Self::predicate_target(function) {
+            paths.extend(target.typeof_paths.iter().cloned());
         }
         paths
     }
@@ -1489,12 +1508,24 @@ fn function_expr_to_raised(
             is_const: tp.is_const,
         })
         .collect();
+    let predicate = function
+        .predicate
+        .as_deref()
+        .map(|predicate| RaisedPredicate {
+            subject: predicate.subject.clone(),
+            asserts: predicate.asserts,
+            ty: predicate
+                .ty
+                .as_deref()
+                .map(|target| type_expr_to_key(interner, target)),
+        });
     RaisedFunction {
         parameters,
         return_type,
         type_parameters,
         signature_span: function.spans.signature,
         return_type_span: function.spans.return_type,
+        predicate,
     }
 }
 

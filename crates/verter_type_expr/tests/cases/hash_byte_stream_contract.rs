@@ -50,7 +50,8 @@ use verter_type_expr::{
     IndexSignature, IndexSignatureSpans, LiteralValue, MappedModifier, MemberSpans,
     MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
     RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
-    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, UnknownValue, ValueRef,
+    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, TypePredicate,
+    TypePredicateSubject, UnknownValue, ValueRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -399,6 +400,13 @@ fn ref_hash_function<H: Hasher>(func: &FunctionExpr, h: &mut H) {
         ref_hash_type_param(tp, h);
     }
     func.spans.hash(h);
+    // Marker-only-when-present: a predicate-less function's stream is the
+    // pre-predicate stream.
+    if let Some(predicate) = func.predicate.as_deref() {
+        predicate.subject.hash(h);
+        predicate.asserts.hash(h);
+        ref_hash_opt(predicate.ty.as_deref(), h);
+    }
 }
 
 fn ref_hash_param<H: Hasher>(p: &FunctionParam, h: &mut H) {
@@ -644,6 +652,28 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
             None,
             Vec::new(),
         ))),
+    ));
+    // A predicate signature: the trailing predicate marker (subject,
+    // `asserts`, optional target) — targeted and targetless forms.
+    v.push((
+        "function-type-predicate",
+        TypeExpr::Function(Arc::new(sample_function(true).with_predicate(Some(
+            Arc::new(TypePredicate {
+                subject: TypePredicateSubject::Parameter(Arc::from("a")),
+                asserts: false,
+                ty: Some(arc(TypeExpr::named("Base"))),
+            }),
+        )))),
+    ));
+    v.push((
+        "function-assertion-this",
+        TypeExpr::Function(Arc::new(sample_function(false).with_predicate(Some(
+            Arc::new(TypePredicate {
+                subject: TypePredicateSubject::This,
+                asserts: true,
+                ty: None,
+            }),
+        )))),
     ));
     // ConstructorType variant directly — same FunctionExpr payload as the
     // Function corpus item, so the only stream difference is the leading

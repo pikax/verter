@@ -201,6 +201,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let call_sig_obj = graph.intern_node(SemanticNodeData::Object(
         empty_surface().with_call_signatures(StdArc::from(vec![func].into_boxed_slice())),
@@ -356,6 +357,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     let reference = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
@@ -780,6 +782,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         }
     };
     let asymmetric = [

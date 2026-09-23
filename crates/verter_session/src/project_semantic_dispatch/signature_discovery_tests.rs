@@ -401,6 +401,7 @@ fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let object = callable(&d, vec![node], vec![]);
     let store = d.graph().signature_store();
@@ -1314,6 +1315,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
             ),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         });
         let store = d.graph().signature_store();
         let list = candidates(ready(discover(&d, node, SignatureKind::Call)), store);
@@ -1351,6 +1353,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
             return_carrier: SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span,
+            predicate: None,
         })
     };
     let first = authored_at(Some(verter_span::Span::new(1, 2)), string);

@@ -7,8 +7,8 @@
 use std::mem::{align_of, size_of};
 
 use crate::semantic_query::{
-    OutcomeEvidenceId, ResultEvaluationContextId, SemanticContextId, CONTEXT_FREE_EVALUATION,
-    CONTEXT_FREE_EVIDENCE,
+    OutcomeEvidenceId, PredicateSubject, ResultEvaluationContextId, SemanticContextId,
+    CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE,
 };
 
 /// Graph epoch. Zero is never issued.
@@ -252,13 +252,29 @@ pub struct BinderSpace {
     pub binders: Box<[BinderDeclaration]>,
 }
 
+/// A declared result's predicate or assertion effect: TypeScript's
+/// `TypePredicate` with its target in token space. The declared return
+/// beside it is already the checker's `boolean` (type predicate) or
+/// `void` (assertion).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct PredicateEffect {
+    /// The positional parameter (receiver excluded) or the receiver the
+    /// effect talks about.
+    pub subject: PredicateSubject,
+    /// An assertion (`asserts …`) rather than a type predicate.
+    pub asserts: bool,
+    /// The narrowed-to / asserted type; `None` for the targetless
+    /// `asserts x` / `asserts this`.
+    pub ty: Option<TypeToken>,
+}
+
 /// Closed immutable result recipe. No transaction pointer, inference
 /// context, or stack closure.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SignatureResultRecipe {
     Declared {
         return_type: TypeToken,
-        predicate_or_assertion: Option<TypeToken>,
+        predicate_or_assertion: Option<PredicateEffect>,
     },
     Body {
         return_obligation_key: ReturnObligationKey,
@@ -366,9 +382,9 @@ pub struct AppliedResult {
     /// The forced return, already in call space. `None` when the demand
     /// was effects-only (no return was read).
     pub return_type: Option<TypeToken>,
-    /// Predicate/assertion effect payload, when the demand read effects and
-    /// the signature declares one.
-    pub effects: Option<TypeToken>,
+    /// Predicate/assertion effect payload, already in call space, when the
+    /// demand read effects and the signature declares one.
+    pub effects: Option<PredicateEffect>,
 }
 
 impl AppliedResult {

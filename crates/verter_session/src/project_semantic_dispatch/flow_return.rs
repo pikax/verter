@@ -7309,6 +7309,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(instance),
                 signature_span: None,
                 return_type_span: None,
+                // A constructor declares no type predicate.
+                predicate: None,
             })
         };
         let construct_signatures: Vec<SemanticNodeId> = match (&class.constructor, &base) {
@@ -13276,6 +13278,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &content.type_parameters,
             context,
             content.declared_return.as_ref(),
+            content.declared_predicate.as_ref(),
             &content.body,
             content.can_fall_through,
             content.empty_completion,
@@ -13369,6 +13372,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         declared_return: Option<&crate::flow_slice_content::GatedType>,
+        declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: NormalCompletion,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
@@ -13490,6 +13494,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         crate::semantic_query::ProjectionReductionContext::structural_transit(),
                     )
                 };
+            // The predicate target takes the same frame gate and binder
+            // environment as the return it stands beside.
+            let predicate = declared_predicate.and_then(|declared| {
+                let target = declared.target().map(|target| {
+                    if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, target) {
+                        self.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                        );
+                        self.unmodeled_position()
+                    } else {
+                        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                        self.dispatch.shallow_lower_type_expr_with_context(
+                            target.ty(),
+                            &binder_env.env,
+                            &binder_env.scope,
+                            &binder_env.name_resolution,
+                            binder_env.scope_payload.as_ref(),
+                            &binder_env.shadowing,
+                            &mut substitutions,
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        )
+                    }
+                });
+                crate::semantic_query::SignaturePredicate::resolve(
+                    declared.predicate(),
+                    &signature_params,
+                    target,
+                )
+            });
             return graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params: Arc::from(signature_params.into_boxed_slice()),
@@ -13502,6 +13535,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
                     return_type,
                 ),
+                predicate,
             });
         }
         let Some(planned) = planned else {
@@ -13915,6 +13949,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // return carrier is the interned node itself.
             occurrence: None,
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+            predicate: None,
         })
     }
 
