@@ -392,10 +392,8 @@ pub struct SemanticGraphStore {
     /// iteration) instead of trading correctness for it.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
     /// The `VerterStableV1` member view of each union built in this store's
-    /// arena, so a resident view is never sorted again. Keyed by the store's
-    /// OWN node ids, so it lives with the store: node ids are arena-local,
-    /// and one table for the process would hand a store the view of an
-    /// unrelated union of another store that happens to share the id.
+    /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
+    /// contract with a payload-retiring holder: `union_views.rs`.
     union_views: Mutex<
         FxHashMap<
             crate::semantic_query::semantic_context::SemanticUnionMembersKey,
