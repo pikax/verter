@@ -31,13 +31,23 @@
 //!   (without `const`, which aliases cannot carry), so the arguments a use
 //!   selects stay observable in every public member.
 //! - The props parameter is required exactly when an authored prop or model
-//!   is required. When the syntax cannot decide (a props type named from
-//!   another module), the parameter is the conditional rest tuple so
-//!   TypeScript decides — never a blanket optional parameter.
-//! - Exposed members come from the checking body's expose provider
-//!   ([`EXPOSE_PROVIDER`]), instantiated with the binder, so private setup
-//!   bindings never reach the instance and generic-dependent exposed members
-//!   stay specialized.
+//!   is required at the constructor: a `withDefaults` default makes its prop
+//!   omissible, every same-name interface declaration contributes, and a
+//!   `required` flag is read through `as const` / `satisfies` / parentheses.
+//!   When the syntax cannot decide (a props type named from another module,
+//!   a non-literal `required`), the parameter is the conditional rest tuple
+//!   so TypeScript decides — never a blanket optional parameter.
+//! - Runtime values Vue hoists out of setup (runtime props / emits options,
+//!   non-literal `withDefaults` defaults, a non-literal model `required`)
+//!   are rendered as module-scope constants; one that names a binder
+//!   parameter is rendered as a function over the binder and read through
+//!   an instantiation expression, so the selected arguments reach it.
+//! - Exposed members come from the expose provider ([`EXPOSE_PROVIDER`]),
+//!   rendered in the same declaration as the one generic function over the
+//!   setup statements that returns the `defineExpose` argument, instantiated
+//!   with the binder, so TypeScript types the exposed members from the
+//!   authored bindings, private setup bindings never reach the instance and
+//!   generic-dependent exposed members stay specialized.
 //! - Authored `any` and framework-legal open domains (runtime prop names,
 //!   an untyped `defineModel()`, a component without declared events) keep
 //!   Vue's own typing; nothing else is widened.
@@ -48,9 +58,10 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpressionElement, ArrowFunctionExpression, CallExpression, Class, Declaration,
-    ExportDefaultDeclarationKind, Expression, Function, ObjectExpression, ObjectPropertyKind,
-    Program, PropertyKey, Statement, TSSignature, TSType, TSTypeName,
+    ArrayExpressionElement, ArrowFunctionExpression, AwaitExpression, CallExpression, Class,
+    Declaration, ExportDefaultDeclarationKind, Expression, ForOfStatement, Function,
+    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement, TSSignature, TSType,
+    TSTypeName,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -71,15 +82,22 @@ pub const PUBLIC_COMPONENT: &str = "__VerterPublicComponent";
 pub const PUBLIC_PROPS: &str = "__VerterPublicProps";
 /// Name of the rendered instance alias.
 pub const PUBLIC_INSTANCE: &str = "__VerterPublicInstance";
-/// The checking body's expose provider: a function over the authored binder
-/// returning the `defineExpose` argument. The contract names it; the
-/// checking body (or its declaration emit) supplies it.
+/// The expose provider: a function over the authored binder whose body is
+/// the setup statements and which returns the `defineExpose` argument.
+/// Rendered in the public declaration whenever setup exposes members.
 pub const EXPOSE_PROVIDER: &str = "__VerterExpose";
 /// Hoisted runtime props options (Vue hoists `defineProps({...})` out of
 /// setup, so it may only reference module scope).
 pub const RUNTIME_PROPS: &str = "__VerterRuntimeProps";
 /// Hoisted runtime emits options.
 pub const RUNTIME_EMITS: &str = "__VerterRuntimeEmits";
+/// Hoisted `withDefaults` defaults whose keys are not all statically named.
+pub const PROPS_DEFAULTS: &str = "__VerterPropsDefaults";
+/// Prefix of a hoisted non-literal `defineModel` `required` value; the model
+/// ordinal follows.
+pub const MODEL_REQUIRED: &str = "__VerterModelRequired";
+/// Props with defaulted keys made omissible for the external argument.
+pub const PROPS_WITH_DEFAULTS: &str = "__VerterPropsWithDefaults";
 
 /// Where the public constructor comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,10 +178,32 @@ pub struct PublicModel {
     pub name: String,
     /// Authored value type text; `None` is Vue's open `any`.
     pub value_type: Option<String>,
-    /// `{ required: true }`.
-    pub required: bool,
+    /// `required` option: `Required` for a literal `true` (also through
+    /// `as const` / `satisfies` / parentheses), `Optional` when absent or
+    /// literally false, `Undetermined` when TypeScript decides from the
+    /// hoisted value's type.
+    pub required: PropsRequirement,
     /// Call range in the carrier.
     pub call: SourceRange,
+}
+
+/// The `withDefaults` defaults of a type-declared `defineProps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropsDefaults {
+    /// Defaults argument range in the carrier.
+    pub expression: SourceRange,
+    /// Statically named default keys; `None` when a spread, a computed key or
+    /// a non-literal argument leaves the key set to TypeScript.
+    pub keys: Option<Vec<String>>,
+}
+
+/// A runtime value Vue hoists out of setup, rendered at module scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HoistedValue {
+    name: String,
+    text: String,
+    /// Names a binder parameter: rendered as a function over the binder.
+    generic: bool,
 }
 
 /// One exposed member.
@@ -275,6 +315,8 @@ pub struct VuePublicConstructorContract {
     pub binder: Vec<PublicBinderParam>,
     /// Props declaration.
     pub props: DeclaredSurface,
+    /// `withDefaults` defaults of the props declaration.
+    pub props_defaults: Option<PropsDefaults>,
     /// Events declaration.
     pub emits: DeclaredSurface,
     /// Models, in source order.
@@ -290,6 +332,14 @@ pub struct VuePublicConstructorContract {
     /// The public instance.
     pub instance: PublicInstanceProjection,
     binder_dependent: Vec<PublicSurface>,
+    hoisted: Vec<HoistedValue>,
+    /// Setup statements (imports excluded, `export` modifiers dropped) in
+    /// source order: the expose provider's body.
+    setup_statements: Vec<String>,
+    /// Setup awaits at top level, so the provider is `async`.
+    setup_is_async: bool,
+    /// The `defineExpose` argument text the provider returns.
+    expose_argument: Option<String>,
 }
 
 impl VuePublicConstructorContract {
@@ -320,35 +370,45 @@ impl VuePublicConstructorContract {
         }
     }
 
-    /// The rendered public declaration: props and instance aliases, the
-    /// constructor value, and its default export. `None` when the authored
-    /// default export is the constructor.
+    /// The rendered public declaration: the hoisted runtime values, the
+    /// expose provider, the props and instance aliases, the constructor
+    /// value, and its default export. `None` when the authored default export
+    /// is the constructor.
     #[must_use]
     pub fn declaration(&self) -> Option<String> {
         (self.source == ConstructorSource::ScriptSetup).then(|| self.render())
     }
 
     fn render(&self) -> String {
-        let alias_binder = self.binder_list(false);
-        let construct_binder = self.binder_list(true);
-        let args = if self.binder.is_empty() {
-            String::new()
-        } else {
-            let names: Vec<&str> = self.binder.iter().map(|p| p.name.as_str()).collect();
-            format!("<{}>", names.join(", "))
-        };
+        let alias_binder = self.binder_list(BinderSite::Alias);
+        let construct_binder = self.binder_list(BinderSite::Construct);
+        let args = self.binder_args();
         let mut out = String::new();
-        if let DeclaredSurface::RuntimeOptions { text, .. } = &self.props {
-            out.push_str(&format!("const {RUNTIME_PROPS} = ({text});\n"));
+        for value in &self.hoisted {
+            if value.generic {
+                out.push_str(&format!(
+                    "const {} = {}() => ({});\n",
+                    value.name,
+                    self.binder_list(BinderSite::Arrow),
+                    value.text
+                ));
+            } else {
+                out.push_str(&format!("const {} = ({});\n", value.name, value.text));
+            }
         }
-        if let DeclaredSurface::RuntimeOptions { text, .. } = &self.emits {
-            out.push_str(&format!("const {RUNTIME_EMITS} = ({text});\n"));
+        let provider = self.render_expose_provider(&mut out);
+        if self.defaults_apply() {
+            // Key-remapped mapped types over `keyof P` keep each member's
+            // authored modifiers; a defaulted key only gains `?`.
+            out.push_str(&format!(
+                "type {PROPS_WITH_DEFAULTS}<P, K extends PropertyKey> = {{ [Q in keyof P as Q extends K ? never : Q]: P[Q] }} & {{ [Q in keyof P as Q extends K ? Q : never]?: P[Q] }};\n"
+            ));
         }
 
         let mut props = vec!["import(\"vue\").PublicProps".to_string()];
         match &self.props {
             DeclaredSurface::None => {}
-            DeclaredSurface::TypeArgument { text, .. } => props.push(format!("({text})")),
+            DeclaredSurface::TypeArgument { text, .. } => props.push(self.defaulted(text)),
             DeclaredSurface::RuntimeNames { names } => {
                 let members: Vec<String> = names
                     .iter()
@@ -357,15 +417,26 @@ impl VuePublicConstructorContract {
                 props.push(format!("{{ {} }}", members.join("; ")));
             }
             DeclaredSurface::RuntimeOptions { .. } => props.push(format!(
-                "import(\"vue\").ExtractPublicPropTypes<typeof {RUNTIME_PROPS}>"
+                "import(\"vue\").ExtractPublicPropTypes<{}>",
+                self.hoisted_type(RUNTIME_PROPS)
             )),
         }
         if !self.models.is_empty() {
             let mut members = Vec::new();
-            for model in &self.models {
+            let mut undetermined = Vec::new();
+            for (ordinal, model) in self.models.iter().enumerate() {
                 let value = model.value_type.as_deref().unwrap_or("any");
-                let optional = if model.required { "" } else { "?" };
-                members.push(format!("{}{optional}: {value}", quote(&model.name)));
+                let key = quote(&model.name);
+                match model.required {
+                    PropsRequirement::Required => members.push(format!("{key}: {value}")),
+                    PropsRequirement::Optional => members.push(format!("{key}?: {value}")),
+                    // Vue's `required` is read from the hoisted value's type,
+                    // exactly as the runtime props options are.
+                    PropsRequirement::Undetermined => undetermined.push(format!(
+                        "({} extends true ? {{ {key}: {value} }} : {{ {key}?: {value} }})",
+                        self.hoisted_type(&format!("{MODEL_REQUIRED}{ordinal}"))
+                    )),
+                }
                 members.push(format!(
                     "{}?: Partial<Record<string, true>>",
                     quote(&format!("{}Modifiers", model_modifiers_base(&model.name)))
@@ -376,6 +447,7 @@ impl VuePublicConstructorContract {
                 ));
             }
             props.push(format!("{{ {} }}", members.join("; ")));
+            props.extend(undetermined);
         }
         if let Some(options) = self.emit_options() {
             props.push(format!("import(\"vue\").EmitsToProps<{options}>"));
@@ -407,10 +479,14 @@ impl VuePublicConstructorContract {
             "type {PUBLIC_INSTANCE}{alias_binder} = Omit<import(\"vue\").ComponentPublicInstance, \"$props\" | \"$emit\" | \"$slots\"> & {{\n  readonly $props: {PUBLIC_PROPS}{args};\n  $emit: {};\n  readonly $slots: {slots};\n}}",
             emit.join(" & ")
         ));
-        if self.expose.open || !self.expose.members.is_empty() {
-            out.push_str(&format!(
-                " & import(\"vue\").ShallowUnwrapRef<ReturnType<typeof {EXPOSE_PROVIDER}{args}>>"
-            ));
+        if provider {
+            let exposed = format!("ReturnType<typeof {EXPOSE_PROVIDER}{args}>");
+            let exposed = if self.setup_is_async {
+                format!("Awaited<{exposed}>")
+            } else {
+                exposed
+            };
+            out.push_str(&format!(" & import(\"vue\").ShallowUnwrapRef<{exposed}>"));
         }
         out.push_str(";\n");
 
@@ -434,6 +510,71 @@ impl VuePublicConstructorContract {
         out
     }
 
+    /// The expose provider: the setup statements inside one function over
+    /// the binder, returning the `defineExpose` argument, so TypeScript types
+    /// the exposed members from the authored bindings. Returns whether it was
+    /// rendered.
+    fn render_expose_provider(&self, out: &mut String) -> bool {
+        let Some(argument) = &self.expose_argument else {
+            return false;
+        };
+        if !self.expose.open && self.expose.members.is_empty() {
+            return false;
+        }
+        let asyncness = if self.setup_is_async { "async " } else { "" };
+        out.push_str(&format!(
+            "{asyncness}function {EXPOSE_PROVIDER}{}() {{\n",
+            self.binder_list(BinderSite::Construct)
+        ));
+        for statement in &self.setup_statements {
+            out.push_str(statement);
+            out.push('\n');
+        }
+        out.push_str(&format!("return ({argument});\n}}\n"));
+        true
+    }
+
+    /// Whether `withDefaults` makes any key of the type-declared props
+    /// omissible.
+    fn defaults_apply(&self) -> bool {
+        matches!(self.props, DeclaredSurface::TypeArgument { .. })
+            && self
+                .props_defaults
+                .as_ref()
+                .is_some_and(|defaults| defaults.keys.as_ref().is_none_or(|k| !k.is_empty()))
+    }
+
+    /// The authored props type, with `withDefaults` keys made omissible.
+    fn defaulted(&self, text: &str) -> String {
+        let Some(defaults) = self
+            .props_defaults
+            .as_ref()
+            .filter(|_| self.defaults_apply())
+        else {
+            return format!("({text})");
+        };
+        let keys = match &defaults.keys {
+            Some(keys) => keys
+                .iter()
+                .map(|key| quote(key))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            None => format!("keyof {}", self.hoisted_type(PROPS_DEFAULTS)),
+        };
+        format!("{PROPS_WITH_DEFAULTS}<({text}), {keys}>")
+    }
+
+    /// The type of one hoisted value, instantiated with the binder when it
+    /// names a binder parameter.
+    fn hoisted_type(&self, name: &str) -> String {
+        match self.hoisted.iter().find(|value| value.name == name) {
+            Some(value) if value.generic => {
+                format!("ReturnType<typeof {name}{}>", self.binder_args())
+            }
+            _ => format!("typeof {name}"),
+        }
+    }
+
     fn emit_options(&self) -> Option<String> {
         match &self.emits {
             DeclaredSurface::None => None,
@@ -444,20 +585,31 @@ impl VuePublicConstructorContract {
                 let names: Vec<String> = names.iter().map(|name| quote(name)).collect();
                 Some(format!("({})[]", names.join(" | ")))
             }
-            DeclaredSurface::RuntimeOptions { .. } => Some(format!("typeof {RUNTIME_EMITS}")),
+            DeclaredSurface::RuntimeOptions { .. } => Some(self.hoisted_type(RUNTIME_EMITS)),
         }
     }
 
-    fn binder_list(&self, construct: bool) -> String {
+    /// `<T, U>`: the binder parameter names as type arguments.
+    fn binder_args(&self) -> String {
         if self.binder.is_empty() {
             return String::new();
         }
+        let names: Vec<&str> = self.binder.iter().map(|p| p.name.as_str()).collect();
+        format!("<{}>", names.join(", "))
+    }
+
+    fn binder_list(&self, site: BinderSite) -> String {
+        if self.binder.is_empty() {
+            return String::new();
+        }
+        // Aliases cannot carry `const`; every function site keeps it.
+        let with_const = site != BinderSite::Alias;
         let params: Vec<String> = self
             .binder
             .iter()
             .map(|param| {
                 let mut text = String::new();
-                if construct && param.is_const {
+                if with_const && param.is_const {
                     text.push_str("const ");
                 }
                 text.push_str(&param.name);
@@ -472,8 +624,22 @@ impl VuePublicConstructorContract {
                 text
             })
             .collect();
-        format!("<{}>", params.join(", "))
+        // An arrow's trailing comma keeps `<T,>() =>` a type parameter list
+        // under the TSX grammar too.
+        let trailing = if site == BinderSite::Arrow { "," } else { "" };
+        format!("<{}{trailing}>", params.join(", "))
     }
+}
+
+/// Where a binder parameter list is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinderSite {
+    /// A type alias: no `const` modifiers.
+    Alias,
+    /// The construct signature or the expose provider.
+    Construct,
+    /// A hoisted binder-dependent value's arrow function.
+    Arrow,
 }
 
 /// Vue names the modifiers prop `modelModifiers` for the default model and
@@ -534,6 +700,7 @@ pub fn project_public_constructor(
         source: ConstructorSource::AuthoredDefault,
         binder,
         props: DeclaredSurface::None,
+        props_defaults: None,
         emits: DeclaredSurface::None,
         models: Vec::new(),
         slots: None,
@@ -544,6 +711,10 @@ pub fn project_public_constructor(
         props_requirement: PropsRequirement::Optional,
         instance: PublicInstanceProjection::default(),
         binder_dependent: Vec::new(),
+        hoisted: Vec::new(),
+        setup_statements: Vec::new(),
+        setup_is_async: false,
+        expose_argument: None,
     };
     let (Some(program), Some(block)) = (setup_program, setup) else {
         return Ok(contract);
@@ -576,17 +747,24 @@ pub fn project_public_constructor(
         contract: &mut contract,
         requirement: PropsRequirement::Optional,
         dependent: FxHashSet::default(),
+        pending_defaults: None,
+        top_level_await: false,
     };
     collector.visit_program(program);
     let requirement = collector.requirement;
+    let top_level_await = collector.top_level_await;
     let mut dependent: Vec<PublicSurface> = collector.dependent.into_iter().collect();
     dependent.sort_unstable();
     contract.props_requirement = requirement;
+    contract.setup_is_async = top_level_await;
     // The expose provider is instantiated with the whole binder, so a
     // generic component's exposed members follow the selected arguments.
     let exposes = !contract.expose.members.is_empty() || contract.expose.open;
-    if exposes && !contract.binder.is_empty() {
-        dependent.push(PublicSurface::Expose);
+    if exposes {
+        contract.setup_statements = provider_statements(program, block.content);
+        if !contract.binder.is_empty() {
+            dependent.push(PublicSurface::Expose);
+        }
     }
     contract.binder_dependent = dependent;
     contract.instance = instance_projection(&contract.expose, semantic.scoping());
@@ -642,6 +820,36 @@ fn project_binder(
         .collect())
 }
 
+/// The expose provider's body: the setup statements in source order. Imports
+/// and ambient `declare` statements live at module scope; an `export`
+/// modifier is dropped so the declaration stays a function-local statement.
+fn provider_statements(program: &Program<'_>, content: &str) -> Vec<String> {
+    let text = |span: oxc_span::Span| content[span.start as usize..span.end as usize].to_string();
+    program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::ImportDeclaration(_)
+            | Statement::ExportAllDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_)
+            | Statement::TSExportAssignment(_)
+            | Statement::TSNamespaceExportDeclaration(_) => None,
+            Statement::ExportNamedDeclaration(export) => export
+                .declaration
+                .as_ref()
+                .filter(|declaration| !declaration.declare())
+                .map(|declaration| text(declaration.span())),
+            other => match other.as_declaration() {
+                Some(declaration) if declaration.declare() => None,
+                Some(Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_)) => {
+                    None
+                }
+                _ => Some(text(other.span())),
+            },
+        })
+        .collect()
+}
+
 /// Top-level type declarations of both blocks, for syntactic prop
 /// optionality only.
 struct LocalTypes<'a> {
@@ -649,46 +857,57 @@ struct LocalTypes<'a> {
 }
 
 impl<'a> LocalTypes<'a> {
-    fn requirement_of_name(&self, name: &str) -> PropsRequirement {
+    /// Joins every same-name declaration: interfaces merge across both
+    /// blocks, so a required member in any of them is required.
+    fn requirement_of_name(&self, name: &str, defaulted: &[String]) -> PropsRequirement {
+        let mut found: Option<PropsRequirement> = None;
         for program in self.programs.iter().flatten() {
             for statement in &program.body {
                 let declaration = match statement {
                     Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
                     other => other.as_declaration(),
                 };
-                match declaration {
+                let requirement = match declaration {
                     Some(Declaration::TSInterfaceDeclaration(interface))
                         if interface.id.name == name =>
                     {
-                        if !interface.extends.is_empty() {
-                            return PropsRequirement::Undetermined;
+                        if interface.extends.is_empty() {
+                            members_requirement(&interface.body.body, defaulted)
+                        } else {
+                            PropsRequirement::Undetermined
                         }
-                        return members_requirement(&interface.body.body);
                     }
                     Some(Declaration::TSTypeAliasDeclaration(alias)) if alias.id.name == name => {
-                        return match &alias.type_annotation {
-                            TSType::TSTypeLiteral(literal) => members_requirement(&literal.members),
+                        match &alias.type_annotation {
+                            TSType::TSTypeLiteral(literal) => {
+                                members_requirement(&literal.members, defaulted)
+                            }
                             _ => PropsRequirement::Undetermined,
-                        };
+                        }
                     }
-                    _ => {}
-                }
+                    _ => continue,
+                };
+                found = Some(found.map_or(requirement, |seen| seen.join(requirement)));
             }
         }
-        PropsRequirement::Undetermined
+        found.unwrap_or(PropsRequirement::Undetermined)
     }
 
-    fn requirement_of_type(&self, ty: &TSType<'_>) -> PropsRequirement {
+    fn requirement_of_type(&self, ty: &TSType<'_>, defaulted: &[String]) -> PropsRequirement {
         match ty {
-            TSType::TSTypeLiteral(literal) => members_requirement(&literal.members),
-            TSType::TSParenthesizedType(inner) => self.requirement_of_type(&inner.type_annotation),
+            TSType::TSTypeLiteral(literal) => members_requirement(&literal.members, defaulted),
+            TSType::TSParenthesizedType(inner) => {
+                self.requirement_of_type(&inner.type_annotation, defaulted)
+            }
             TSType::TSIntersectionType(intersection) => intersection
                 .types
                 .iter()
-                .map(|ty| self.requirement_of_type(ty))
+                .map(|ty| self.requirement_of_type(ty, defaulted))
                 .fold(PropsRequirement::Optional, PropsRequirement::join),
             TSType::TSTypeReference(reference) => match &reference.type_name {
-                TSTypeName::IdentifierReference(id) => self.requirement_of_name(&id.name),
+                TSTypeName::IdentifierReference(id) => {
+                    self.requirement_of_name(&id.name, defaulted)
+                }
                 _ => PropsRequirement::Undetermined,
             },
             _ => PropsRequirement::Undetermined,
@@ -696,14 +915,23 @@ impl<'a> LocalTypes<'a> {
     }
 }
 
-fn members_requirement(members: &[TSSignature<'_>]) -> PropsRequirement {
+/// A member is required unless it is optional or has a `withDefaults`
+/// default (`defaulted`), which makes it omissible for the caller.
+fn members_requirement(members: &[TSSignature<'_>], defaulted: &[String]) -> PropsRequirement {
+    let is_defaulted = |key: &PropertyKey<'_>, computed: bool| {
+        !computed && static_key(key).is_some_and(|name| defaulted.contains(&name))
+    };
     let mut requirement = PropsRequirement::Optional;
     for member in members {
         let next = match member {
-            TSSignature::TSPropertySignature(signature) if !signature.optional => {
+            TSSignature::TSPropertySignature(signature)
+                if !signature.optional && !is_defaulted(&signature.key, signature.computed) =>
+            {
                 PropsRequirement::Required
             }
-            TSSignature::TSMethodSignature(signature) if !signature.optional => {
+            TSSignature::TSMethodSignature(signature)
+                if !signature.optional && !is_defaulted(&signature.key, signature.computed) =>
+            {
                 PropsRequirement::Required
             }
             TSSignature::TSPropertySignature(_)
@@ -716,19 +944,57 @@ fn members_requirement(members: &[TSSignature<'_>]) -> PropsRequirement {
     requirement
 }
 
+/// Runtime props options: Vue's public props type requires exactly the
+/// options whose `required` type is `true`; a value the syntax cannot read
+/// leaves the decision to TypeScript over the hoisted options.
 fn runtime_props_requirement(object: &ObjectExpression<'_>) -> PropsRequirement {
     let mut requirement = PropsRequirement::Optional;
     for property in &object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             return PropsRequirement::Undetermined;
         };
-        if let Expression::ObjectExpression(options) = &property.value {
-            if literal_true(options, "required") {
-                requirement = PropsRequirement::Required;
+        let next = match &property.value {
+            Expression::ObjectExpression(options) => required_option(options),
+            // A constructor list or `null` declares the type only.
+            Expression::ArrayExpression(_) | Expression::NullLiteral(_) => {
+                PropsRequirement::Optional
             }
-        }
+            _ => PropsRequirement::Undetermined,
+        };
+        requirement = requirement.join(next);
     }
     requirement
+}
+
+/// The `required` option of one prop or model options object.
+fn required_option(object: &ObjectExpression<'_>) -> PropsRequirement {
+    match literal_property(object, "required") {
+        None => PropsRequirement::Optional,
+        Some(value) => match literal_boolean(value) {
+            Some(true) => PropsRequirement::Required,
+            Some(false) => PropsRequirement::Optional,
+            None => PropsRequirement::Undetermined,
+        },
+    }
+}
+
+/// A boolean literal whose TypeScript type stays that literal: parentheses,
+/// `as const` / `<const>`, `satisfies` and `!` keep it; any other assertion
+/// may widen it (`true as boolean`), so the syntax does not decide.
+fn literal_boolean(expression: &Expression<'_>) -> Option<bool> {
+    match expression {
+        Expression::BooleanLiteral(literal) => Some(literal.value),
+        Expression::ParenthesizedExpression(inner) => literal_boolean(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => literal_boolean(&inner.expression),
+        Expression::TSNonNullExpression(inner) => literal_boolean(&inner.expression),
+        Expression::TSAsExpression(inner) if inner.type_annotation.is_const_type_reference() => {
+            literal_boolean(&inner.expression)
+        }
+        Expression::TSTypeAssertion(inner) if inner.type_annotation.is_const_type_reference() => {
+            literal_boolean(&inner.expression)
+        }
+        _ => None,
+    }
 }
 
 fn static_key(key: &PropertyKey<'_>) -> Option<String> {
@@ -756,11 +1022,22 @@ fn literal_property<'e, 'a>(
         })
 }
 
-fn literal_true(object: &ObjectExpression<'_>, name: &str) -> bool {
-    matches!(
-        literal_property(object, name),
-        Some(Expression::BooleanLiteral(literal)) if literal.value
-    )
+/// Statically named keys of a defaults object; `None` when a spread, a
+/// computed key or a non-literal argument leaves the key set open.
+fn static_default_keys(expression: &Expression<'_>) -> Option<Vec<String>> {
+    let Expression::ObjectExpression(object) = expression.without_parentheses() else {
+        return None;
+    };
+    object
+        .properties
+        .iter()
+        .map(|property| match property {
+            ObjectPropertyKind::ObjectProperty(property) if !property.computed => {
+                static_key(&property.key)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn apply_static_options(object: &ObjectExpression<'_>, options: &mut StaticOptions) {
@@ -831,7 +1108,7 @@ fn instance_projection(
     }
 }
 
-/// Binder-parameter references inside one authored type.
+/// Binder-parameter references inside one authored type or hoisted value.
 struct BinderRefs<'n> {
     names: &'n [&'n str],
     found: bool,
@@ -858,6 +1135,11 @@ struct PublicCollector<'m, 'c> {
     contract: &'c mut VuePublicConstructorContract,
     requirement: PropsRequirement,
     dependent: FxHashSet<PublicSurface>,
+    /// `withDefaults` first-argument span and its defaults, awaiting the
+    /// wrapped `defineProps` the walk visits next.
+    pending_defaults: Option<(oxc_span::Span, PropsDefaults)>,
+    /// Setup awaits at top level.
+    top_level_await: bool,
 }
 
 impl PublicCollector<'_, '_> {
@@ -865,23 +1147,90 @@ impl PublicCollector<'_, '_> {
         self.content[span.start as usize..span.end as usize].to_string()
     }
 
-    fn note_binder(&mut self, surface: PublicSurface, ty: &TSType<'_>) {
+    fn names_binder_in_type(&self, ty: &TSType<'_>) -> bool {
         let mut refs = BinderRefs {
             names: self.binder_names,
             found: false,
         };
         refs.visit_ts_type(ty);
-        if refs.found {
+        refs.found
+    }
+
+    fn names_binder_in_value(&self, expression: &Expression<'_>) -> bool {
+        let mut refs = BinderRefs {
+            names: self.binder_names,
+            found: false,
+        };
+        refs.visit_expression(expression);
+        refs.found
+    }
+
+    fn note_binder(&mut self, surface: PublicSurface, ty: &TSType<'_>) {
+        if self.names_binder_in_type(ty) {
             self.dependent.insert(surface);
         }
     }
 
+    /// Hoist one runtime value Vue moves out of setup. A value naming a
+    /// binder parameter is rendered over the binder and reaches `surface`.
+    /// `contextual` is the type Vue checks the value against in place; the
+    /// hoisted value `satisfies` it so its literal members (a `required:
+    /// true`) keep their literal types instead of widening.
+    fn hoist(
+        &mut self,
+        name: String,
+        expression: &Expression<'_>,
+        surface: PublicSurface,
+        contextual: Option<&str>,
+    ) {
+        let generic = self.names_binder_in_value(expression);
+        if generic {
+            self.dependent.insert(surface);
+        }
+        let text = self.text(expression.span());
+        let text = match contextual {
+            Some(contextual) => format!("({text}) satisfies {contextual}"),
+            None => text,
+        };
+        self.contract.hoisted.retain(|value| value.name != name);
+        self.contract.hoisted.push(HoistedValue {
+            name,
+            text,
+            generic,
+        });
+    }
+
     fn declared(&mut self, call: &CallExpression<'_>, surface: PublicSurface) -> DeclaredSurface {
+        let defaults = match self.pending_defaults.take() {
+            Some((span, defaults))
+                if surface == PublicSurface::Props
+                    && span.start <= call.span.start
+                    && call.span.end <= span.end =>
+            {
+                Some(defaults)
+            }
+            other => {
+                self.pending_defaults = other;
+                None
+            }
+        };
         if let Some(ty) = call.type_arguments.as_ref().and_then(|a| a.params.first()) {
             self.note_binder(surface, ty);
             if surface == PublicSurface::Props {
-                let requirement = self.locals.requirement_of_type(ty);
+                let defaulted = defaults
+                    .as_ref()
+                    .and_then(|d| d.keys.clone())
+                    .unwrap_or_default();
+                let mut requirement = self.locals.requirement_of_type(ty, &defaulted);
+                // Defaults whose keys the syntax cannot read may cover any
+                // required prop: TypeScript decides over the rendered type.
+                if defaults.as_ref().is_some_and(|d| d.keys.is_none())
+                    && requirement == PropsRequirement::Required
+                {
+                    requirement = PropsRequirement::Undetermined;
+                }
                 self.requirement = self.requirement.join(requirement);
+                self.contract.props_defaults = defaults;
             }
             return DeclaredSurface::TypeArgument {
                 expression: range(ty.span(), self.base),
@@ -906,27 +1255,70 @@ impl PublicCollector<'_, '_> {
                 return DeclaredSurface::RuntimeNames { names };
             }
         }
-        if surface == PublicSurface::Props {
+        let (hoisted, contextual) = if surface == PublicSurface::Props {
             let requirement = match argument {
                 Expression::ObjectExpression(object) => runtime_props_requirement(object),
                 _ => PropsRequirement::Undetermined,
             };
             self.requirement = self.requirement.join(requirement);
-        }
+            (
+                RUNTIME_PROPS,
+                Some("import(\"vue\").ComponentObjectPropsOptions"),
+            )
+        } else {
+            (RUNTIME_EMITS, None)
+        };
+        self.hoist(hoisted.to_string(), argument, surface, contextual);
         DeclaredSurface::RuntimeOptions {
             expression: range(argument.span(), self.base),
             text: self.text(argument.span()),
         }
     }
 
+    /// `withDefaults(defineProps<T>(), defaults)`: record the defaults for
+    /// the wrapped `defineProps`, hoisting them when their keys are open.
+    fn with_defaults(&mut self, call: &CallExpression<'_>) {
+        let mut arguments = call.arguments.iter().filter_map(|a| a.as_expression());
+        let (Some(props), Some(defaults)) = (arguments.next(), arguments.next()) else {
+            return;
+        };
+        let keys = static_default_keys(defaults);
+        if keys.is_none() {
+            self.hoist(
+                PROPS_DEFAULTS.to_string(),
+                defaults,
+                PublicSurface::Props,
+                None,
+            );
+        }
+        self.pending_defaults = Some((
+            props.span(),
+            PropsDefaults {
+                expression: range(defaults.span(), self.base),
+                keys,
+            },
+        ));
+    }
+
     fn model(&mut self, call: &CallExpression<'_>) {
+        let ordinal = self.contract.models.len();
         let mut name = "modelValue".to_string();
-        let mut required = false;
+        let mut required = PropsRequirement::Optional;
         for argument in call.arguments.iter().filter_map(|a| a.as_expression()) {
             match argument {
                 Expression::StringLiteral(literal) => name = literal.value.to_string(),
                 Expression::ObjectExpression(object) => {
-                    required |= literal_true(object, "required")
+                    required = required_option(object);
+                    if required == PropsRequirement::Undetermined {
+                        if let Some(value) = literal_property(object, "required") {
+                            self.hoist(
+                                format!("{MODEL_REQUIRED}{ordinal}"),
+                                value,
+                                PublicSurface::Models,
+                                None,
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -939,9 +1331,7 @@ impl PublicCollector<'_, '_> {
                 self.note_binder(PublicSurface::Models, ty);
                 self.text(ty.span())
             });
-        if required {
-            self.requirement = PropsRequirement::Required;
-        }
+        self.requirement = self.requirement.join(required);
         self.contract.models.push(PublicModel {
             name,
             value_type,
@@ -951,9 +1341,11 @@ impl PublicCollector<'_, '_> {
     }
 
     fn expose(&mut self, call: &CallExpression<'_>) {
+        let argument = call.arguments.first().and_then(|a| a.as_expression());
+        self.contract.expose_argument = argument.map(|argument| self.text(argument.span()));
         let expose = &mut self.contract.expose;
         expose.call = Some(range(call.span, self.base));
-        let Some(argument) = call.arguments.first().and_then(|a| a.as_expression()) else {
+        let Some(argument) = argument else {
             return;
         };
         let Expression::ObjectExpression(object) = argument else {
@@ -993,6 +1385,7 @@ impl PublicCollector<'_, '_> {
             }
             "defineModel" => self.model(call),
             "defineExpose" => self.expose(call),
+            "withDefaults" => self.with_defaults(call),
             "defineOptions" => {
                 if let Some(Expression::ObjectExpression(object)) =
                     call.arguments.first().and_then(|a| a.as_expression())
@@ -1022,6 +1415,20 @@ impl<'a> Visit<'a> for PublicCollector<'_, '_> {
         self.depth += 1;
         walk::walk_class(self, it);
         self.depth -= 1;
+    }
+
+    fn visit_await_expression(&mut self, it: &AwaitExpression<'a>) {
+        if self.depth == 0 {
+            self.top_level_await = true;
+        }
+        walk::walk_await_expression(self, it);
+    }
+
+    fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
+        if self.depth == 0 && it.r#await {
+            self.top_level_await = true;
+        }
+        walk::walk_for_of_statement(self, it);
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {

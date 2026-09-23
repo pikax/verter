@@ -2,12 +2,12 @@
 // `Picker.vue` (the carrier inlined in the Rust tests
 // `picker_probe_fixture_is_the_rendered_declaration` and
 // `public_constructor_reads_admitted_carrier_blocks`). Everything from
-// `type __VerterPublicProps` to the default export is the product's rendered
+// `function __VerterExpose` to the default export is the product's rendered
 // declaration byte for byte; those tests fail if the two drift. The expose
-// provider stands in for the checking body's declaration emit and the
-// retained import for the public-dependency capture, neither of which is
-// this product: the provider returns the authored
-// `defineExpose({ reset, current })` argument over the same binder.
+// provider is part of that declaration: TypeScript types the exposed
+// `reset` and `current` from the authored setup bindings. The retained
+// import stands in for the module-scope setup imports the checking module
+// hoists, which is not this product.
 //
 // <script setup lang="ts" generic="const T extends string | number = string">
 // import { ref, type VNode } from "vue";
@@ -21,13 +21,20 @@
 // defineExpose({ reset, current });
 // defineOptions({ name: "Picker", inheritAttrs: false });
 // </script>
-import type { Ref, VNode } from "vue";
+import { ref, type VNode } from "vue";
 
-declare function __VerterExpose<const T extends string | number = string>(): {
-  reset: () => void;
-  current: Ref<T | undefined>;
-};
-
+function __VerterExpose<const T extends string | number = string>() {
+const props = defineProps<{ test: T; label?: string }>();
+const emit = defineEmits<{ change: [value: T]; close: [] }>();
+defineSlots<{ default(props: { item: T }): VNode[] }>();
+const open = defineModel<boolean>("open");
+const secret = ref(0);
+const current = ref<T>();
+function reset(): void { secret.value = 0; }
+defineExpose({ reset, current });
+defineOptions({ name: "Picker", inheritAttrs: false });
+return ({ reset, current });
+}
 type __VerterPublicProps<T extends string | number = string> = import("vue").PublicProps & ({ test: T; label?: string }) & { "open"?: boolean; "openModifiers"?: Partial<Record<string, true>>; "onUpdate:open"?: (value: boolean) => void } & import("vue").EmitsToProps<import("vue").TypeEmitsToOptions<({ change: [value: T]; close: [] })>>;
 type __VerterPublicInstance<T extends string | number = string> = Omit<import("vue").ComponentPublicInstance, "$props" | "$emit" | "$slots"> & {
   readonly $props: __VerterPublicProps<T>;

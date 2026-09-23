@@ -1246,7 +1246,7 @@ fn public_constructor_reads_admitted_carrier_blocks() {
     use verter_compiler::framework_common::SetupProjectionRefusal;
 
     const FIXTURE: &str =
-        include_str!("../../../../tests/sfc-projection/STP16/probes/components/Picker.vue.d.ts");
+        include_str!("../../../../tests/sfc-projection/STP16/probes/components/Picker.vue.ts");
     const SFC: &str = concat!(
         "<template>\n",
         "<slot :item=\"props.test\" />\n",

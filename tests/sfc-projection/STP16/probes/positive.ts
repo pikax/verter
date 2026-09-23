@@ -1,5 +1,8 @@
 import { ref } from "vue";
 import Comp from "./components/Picker.vue";
+import Defaulted from "./components/Defaulted.vue";
+import Merged from "./components/Merged.vue";
+import Strict from "./components/Strict.vue";
 
 type Equals<A, B> =
   (<X>() => X extends A ? 1 : 2) extends <X>() => X extends B ? 1 : 2 ? true : false;
@@ -67,3 +70,36 @@ Comp({ test: 0 });
 // STP16-private-leak: setup-private bindings stay off the instance.
 // @ts-expect-error `secret` is not exposed
 export const privateMember = explicitNumber.secret;
+
+// STP16-required-api: the constructor argument is required exactly when a
+// prop or model is required at the constructor.
+// A `withDefaults` default makes its prop omissible.
+export const defaultedEmpty = new Defaulted();
+export const defaultedProp: Equals<
+  InstanceType<typeof Defaulted>["$props"]["test"],
+  string | undefined
+> = true;
+// @ts-expect-error a defaulted prop keeps its authored type
+export const defaultedWrong = new Defaulted({ test: 1 });
+// A later same-name interface declaration contributes its required prop.
+// @ts-expect-error `id` is required by the second `Props` declaration
+export const mergedEmpty = new Merged();
+// @ts-expect-error `required: true as const` keeps the model required
+export const mergedWithoutModel = new Merged({ id: 1 });
+export const merged = new Merged({ id: 1, modelValue: "x" });
+// `required: true as const` in runtime options keeps the prop required.
+// @ts-expect-error `value` is required
+export const strictEmpty = new Strict();
+
+// STP16-public-specialization: binder-dependent runtime options follow the
+// selected argument on the props and the events.
+export const strictSelected = new Strict<"a">({ value: "a" });
+// @ts-expect-error `"b"` is not the selected `"a"`
+export const strictWrong = new Strict<"a">({ value: "b" });
+export const strictInferred: Equals<InstanceType<typeof Strict<"a">>["$props"]["value"], "a"> =
+  true;
+export function strictEmit(instance: InstanceType<typeof Strict<"a">>): void {
+  instance.$emit("change", "a");
+  // @ts-expect-error the payload follows the selected `"a"`
+  instance.$emit("change", "b");
+}

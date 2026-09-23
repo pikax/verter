@@ -22,7 +22,8 @@ crates/verter_vue_conformance/corpus/goldens/**
 # actual compiler output.
 tests/sfc-projection/STP12/probes/generated/JSDocGeneric.vue.verter.js.d.ts
 
-# Public constructor declaration fixture — it ends with the compiler's rendered
-# declaration byte for byte, pinned by the public-constructor Rust tests, so
-# formatting it would disconnect the probe from actual compiler output.
-tests/sfc-projection/STP16/probes/components/Picker.vue.d.ts
+# Public constructor declaration fixtures — each ends with the compiler's
+# rendered declaration byte for byte, pinned by the public-constructor Rust
+# tests, so formatting them would disconnect the probes from actual compiler
+# output.
+tests/sfc-projection/STP16/probes/components/

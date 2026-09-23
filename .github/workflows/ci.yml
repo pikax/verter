@@ -812,12 +812,20 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.js == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The sfc-projection node verifiers under test:scripts:ci compile
+    # verter_compiler and rebuild it once per applied dirty-twin source patch,
+    # so this lane's Rust work grows with every verified node.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       # gen-svelte-goldens invokes the Rust semantic-comment extractor. Pin the
       # toolchain instead of relying on GitHub-hosted runner preinstalls.
       - uses: dtolnay/rust-toolchain@1.97.1
+      # Reuse the compiled dependency graph across runs; each dirty twin then
+      # rebuilds only the patched crate.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: js-build-test
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:

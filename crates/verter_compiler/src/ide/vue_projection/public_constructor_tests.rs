@@ -53,7 +53,7 @@ fn constructor_members(rendered: &str) -> Vec<&str> {
 fn picker_probe_fixture_is_the_rendered_declaration() {
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/sfc-projection/STP16/probes/components/Picker.vue.d.ts"
+        "/../../tests/sfc-projection/STP16/probes/components/Picker.vue.ts"
     ));
     let fixture = FIXTURE.replace("\r\n", "\n");
     let rendered = declaration(&picker());
@@ -61,6 +61,70 @@ fn picker_probe_fixture_is_the_rendered_declaration() {
         fixture.ends_with(&rendered),
         "the probe fixture must end with the rendered declaration:\n{rendered}"
     );
+}
+
+/// One probe component: its pinned declaration fixture and the authored
+/// script pair it is rendered from.
+struct RequirementProbe {
+    name: &'static str,
+    fixture: &'static str,
+    normal: Option<&'static str>,
+    setup: &'static str,
+    generic: Option<&'static str>,
+}
+
+/// Probe components TypeScript checks at the constructor: `withDefaults`
+/// defaults, same-name interfaces merged across both blocks with an
+/// `as const` required model, and binder-dependent runtime options.
+const REQUIREMENT_PROBES: [RequirementProbe; 3] = [
+    RequirementProbe {
+        name: "Defaulted.vue.ts",
+        fixture: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/sfc-projection/STP16/probes/components/Defaulted.vue.ts"
+        )),
+        normal: None,
+        setup: "withDefaults(defineProps<{ test: string; label?: string }>(), { test: \"x\" });\n",
+        generic: None,
+    },
+    RequirementProbe {
+        name: "Merged.vue.ts",
+        fixture: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/sfc-projection/STP16/probes/components/Merged.vue.ts"
+        )),
+        normal: Some("interface Props { label?: string }\n"),
+        setup: "interface Props { id: number }\ndefineProps<Props>();\ndefineModel<string>({ required: true as const });\n",
+        generic: None,
+    },
+    RequirementProbe {
+        name: "Strict.vue.ts",
+        fixture: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/sfc-projection/STP16/probes/components/Strict.vue.ts"
+        )),
+        normal: None,
+        setup: "import type { PropType } from \"vue\";\ndefineProps({ value: { type: String as unknown as PropType<T>, required: true as const } });\ndefineEmits({ change: (payload: T) => true });\n",
+        generic: Some("T extends string"),
+    },
+];
+
+#[test]
+fn requirement_probe_fixtures_are_the_rendered_declarations() {
+    for probe in REQUIREMENT_PROBES {
+        let contract = project_public_constructor(
+            probe.normal.map(block),
+            Some(block(probe.setup)),
+            probe.generic,
+        )
+        .expect("projects");
+        let rendered = declaration(&contract);
+        assert!(
+            probe.fixture.replace("\r\n", "\n").ends_with(&rendered),
+            "{} must end with the rendered declaration:\n{rendered}",
+            probe.name
+        );
+    }
 }
 
 #[test]
@@ -107,8 +171,11 @@ fn required_props_keep_one_constructor_with_a_required_argument() {
         None,
     );
     assert_eq!(runtime.props_requirement, PropsRequirement::Required);
-    assert!(declaration(&runtime)
-        .starts_with("const __VerterRuntimeProps = ({ id: { type: Number, required: true } });\n"));
+    // The hoisted options satisfy Vue's props options type, so `required:
+    // true` stays the literal `true` that makes the public prop required.
+    assert!(declaration(&runtime).starts_with(
+        "const __VerterRuntimeProps = (({ id: { type: Number, required: true } }) satisfies import(\"vue\").ComponentObjectPropsOptions);\n"
+    ));
 }
 
 #[test]
@@ -156,7 +223,10 @@ fn private_setup_bindings_stay_off_the_instance() {
         contract.instance.private_bindings,
         vec!["ref", "props", "emit", "open", "secret"]
     );
-    assert!(!declaration(&contract).contains("secret"));
+    // The provider body reads `secret`; the public aliases never name it.
+    let rendered = declaration(&contract);
+    let public = &rendered[rendered.find("type __VerterPublicProps").expect("aliases")..];
+    assert!(!public.contains("secret"), "{public}");
     // A setup without `defineExpose` keeps the instance closed.
     let closed = project("const secret = 1;\ndefineProps<{ a?: string }>();\n", None);
     assert_eq!(closed.instance.private_bindings, vec!["secret"]);
@@ -272,6 +342,153 @@ fn binder_arguments_reach_every_public_surface() {
     // A non-generic component renders without binder arguments.
     let plain = project("defineExpose({ a: 1 });\n", None);
     assert!(declaration(&plain).contains("ReturnType<typeof __VerterExpose>"));
+    assert!(plain.receipt().binder_dependent_surfaces.is_empty());
+}
+
+#[test]
+fn expose_provider_is_rendered_from_the_setup_statements() {
+    let rendered = declaration(&picker());
+    // One provider over the binder: the setup statements (imports stay at
+    // module scope) returning the `defineExpose` argument.
+    let provider = &rendered[rendered
+        .find("function __VerterExpose<const T extends string | number = string>() {\n")
+        .expect("provider is declared in the declaration")..];
+    assert!(!provider.contains("import "), "{provider}");
+    assert!(provider.contains("const current = ref<T>();\n"));
+    assert!(provider.contains("return ({ reset, current });\n}\n"));
+    assert_eq!(rendered.matches("function __VerterExpose").count(), 1);
+    // Top-level await makes the provider async and the instance awaits it;
+    // exported setup declarations stay function-local.
+    let awaited = project(
+        "export interface Row { id: number }\nconst rows: Row[] = await load();\ndefineExpose({ rows });\n",
+        None,
+    );
+    let rendered = declaration(&awaited);
+    assert!(rendered.starts_with(
+        "async function __VerterExpose() {\ninterface Row { id: number }\nconst rows: Row[] = await load();\n"
+    ));
+    assert!(rendered.contains("ShallowUnwrapRef<Awaited<ReturnType<typeof __VerterExpose>>>"));
+}
+
+#[test]
+fn with_defaults_makes_defaulted_props_omissible() {
+    let defaulted = project(
+        "withDefaults(defineProps<{ test: string; label?: string }>(), { test: 'x' });\n",
+        None,
+    );
+    assert_eq!(defaulted.props_requirement, PropsRequirement::Optional);
+    assert_eq!(
+        defaulted
+            .props_defaults
+            .as_ref()
+            .and_then(|d| d.keys.clone()),
+        Some(vec!["test".to_string()])
+    );
+    let rendered = declaration(&defaulted);
+    assert!(rendered
+        .contains("__VerterPropsWithDefaults<({ test: string; label?: string }), \"test\">"));
+    assert!(rendered.contains("new (props?: __VerterPublicProps): __VerterPublicInstance;"));
+    // A prop without a default stays required.
+    let partial = project(
+        "const props = withDefaults(defineProps<{ a: string; b: number }>(), { a: 'x' });\n",
+        None,
+    );
+    assert_eq!(partial.props_requirement, PropsRequirement::Required);
+    // Defaults whose keys the syntax cannot read leave the decision to
+    // TypeScript over the hoisted defaults.
+    let open = project(
+        "import { base } from './base';\nwithDefaults(defineProps<{ a: string }>(), { ...base });\n",
+        None,
+    );
+    assert_eq!(open.props_requirement, PropsRequirement::Undetermined);
+    let rendered = declaration(&open);
+    assert!(rendered.starts_with("const __VerterPropsDefaults = ({ ...base });\n"));
+    assert!(rendered.contains("keyof typeof __VerterPropsDefaults>"));
+}
+
+#[test]
+fn required_flags_read_through_const_assertions() {
+    for setup in [
+        "defineModel<string>({ required: true as const });\n",
+        "defineModel<string>({ required: <const>true });\n",
+        "defineModel<string>({ required: (true satisfies boolean) });\n",
+        "defineProps({ id: { type: String, required: true as const } });\n",
+    ] {
+        assert_eq!(
+            project(setup, None).props_requirement,
+            PropsRequirement::Required,
+            "{setup}"
+        );
+    }
+    let model = project("defineModel<string>({ required: true as const });\n", None);
+    assert_eq!(model.models[0].required, PropsRequirement::Required);
+    assert!(declaration(&model).contains("{ \"modelValue\": string;"));
+    // A value whose type may be `boolean` is TypeScript's decision.
+    let widened = project(
+        "import { strict } from './flags';\ndefineModel<string>({ required: strict });\n",
+        None,
+    );
+    assert_eq!(widened.props_requirement, PropsRequirement::Undetermined);
+    let rendered = declaration(&widened);
+    assert!(rendered.starts_with("const __VerterModelRequired0 = (strict);\n"));
+    assert!(rendered.contains(
+        "(typeof __VerterModelRequired0 extends true ? { \"modelValue\": string } : { \"modelValue\"?: string })"
+    ));
+    assert!(rendered.contains("new (...args: {} extends __VerterPublicProps ?"));
+    let runtime = project(
+        "import { strict } from './flags';\ndefineProps({ id: { type: String, required: strict } });\n",
+        None,
+    );
+    assert_eq!(runtime.props_requirement, PropsRequirement::Undetermined);
+}
+
+#[test]
+fn merged_interfaces_join_their_requirements() {
+    let merged = project(
+        "interface Props { label?: string }\ninterface Props { id: number }\ndefineProps<Props>();\n",
+        None,
+    );
+    assert_eq!(merged.props_requirement, PropsRequirement::Required);
+    // The merge spans the normal script and the setup block.
+    let split = project_public_constructor(
+        Some(block("interface Props { label?: string }\n")),
+        Some(block(
+            "interface Props { id: number }\ndefineProps<Props>();\n",
+        )),
+        None,
+    )
+    .expect("projects");
+    assert_eq!(split.props_requirement, PropsRequirement::Required);
+    let optional = project(
+        "interface Props { label?: string }\ninterface Props { id?: number }\ndefineProps<Props>();\n",
+        None,
+    );
+    assert_eq!(optional.props_requirement, PropsRequirement::Optional);
+}
+
+#[test]
+fn binder_dependent_runtime_options_are_rendered_over_the_binder() {
+    let contract = project(
+        "import type { PropType } from 'vue';\ndefineProps({ value: { type: String as PropType<T>, required: true } });\ndefineEmits({ change: (payload: T) => true });\n",
+        Some("T extends string"),
+    );
+    assert_eq!(
+        contract.receipt().binder_dependent_surfaces,
+        vec![PublicSurface::Props, PublicSurface::Events]
+    );
+    let rendered = declaration(&contract);
+    assert!(rendered.starts_with(
+        "const __VerterRuntimeProps = <T extends string,>() => (({ value: { type: String as PropType<T>, required: true } }) satisfies import(\"vue\").ComponentObjectPropsOptions);\nconst __VerterRuntimeEmits = <T extends string,>() => ({ change: (payload: T) => true });\n"
+    ));
+    assert!(rendered.contains(
+        "import(\"vue\").ExtractPublicPropTypes<ReturnType<typeof __VerterRuntimeProps<T>>>"
+    ));
+    assert!(rendered.contains("import(\"vue\").EmitFn<ReturnType<typeof __VerterRuntimeEmits<T>>>"));
+    // Options that name no binder parameter stay plain module constants.
+    let plain = project("defineProps({ id: Number });\n", Some("T extends string"));
+    assert!(declaration(&plain).starts_with(
+        "const __VerterRuntimeProps = (({ id: Number }) satisfies import(\"vue\").ComponentObjectPropsOptions);\n"
+    ));
     assert!(plain.receipt().binder_dependent_surfaces.is_empty());
 }
 

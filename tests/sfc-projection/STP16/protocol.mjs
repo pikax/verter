@@ -61,8 +61,15 @@ const RUST_CASES = Object.freeze({
   "STP16-required-api": [
     "required_props_keep_one_constructor_with_a_required_argument",
     FIXTURE_TEST,
+    "requirement_probe_fixtures_are_the_rendered_declarations",
+    "with_defaults_makes_defaulted_props_omissible",
+    "required_flags_read_through_const_assertions",
+    "merged_interfaces_join_their_requirements",
   ],
-  "STP16-public-members": ["instance_publishes_typed_framework_and_exposed_members"],
+  "STP16-public-members": [
+    "instance_publishes_typed_framework_and_exposed_members",
+    "expose_provider_is_rendered_from_the_setup_statements",
+  ],
   "STP16-private-leak": ["private_setup_bindings_stay_off_the_instance"],
   "STP16-generic-constraint": [
     "generic_constraints_stay_on_the_single_construct_signature",
@@ -70,12 +77,17 @@ const RUST_CASES = Object.freeze({
   ],
   "STP16-public-callable": ["default_export_is_never_callable"],
   "STP16-type-precision": ["rendered_fields_keep_authored_types"],
-  "STP16-public-specialization": ["binder_arguments_reach_every_public_surface"],
+  "STP16-public-specialization": [
+    "binder_arguments_reach_every_public_surface",
+    "binder_dependent_runtime_options_are_rendered_over_the_binder",
+  ],
 });
 
 // Each rejected design is a source patch against the owned product plus the
-// discriminators that must FAIL while it is applied (lib discriminators in
-// the unit lane, the carrier test in the production `--test main` lane).
+// unit discriminators that must FAIL while it is applied. The production
+// carrier test runs in the clean lane only: it renders through the same
+// product, so rebuilding the integration binary per twin adds cost, not
+// discrimination.
 const DIRTY_TWIN_PATCHES = Object.freeze({
   DIRTY_OPTIONAL_REQUIRED_PROPS: Object.freeze({
     patches: Object.freeze([
@@ -87,7 +99,6 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
     discriminators: Object.freeze([
       "required_props_keep_one_constructor_with_a_required_argument",
       FIXTURE_TEST,
-      CARRIER_TEST,
     ]),
   }),
   DIRTY_DROPPED_EXPOSED_MEMBERS: Object.freeze({
@@ -97,10 +108,7 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
         replace: "if name.is_empty() && !expose.members.iter().any(|member| member.name == name) {",
       }),
     ]),
-    discriminators: Object.freeze([
-      "instance_publishes_typed_framework_and_exposed_members",
-      CARRIER_TEST,
-    ]),
+    discriminators: Object.freeze(["instance_publishes_typed_framework_and_exposed_members"]),
   }),
   DIRTY_PRIVATE_LEAK: Object.freeze({
     patches: Object.freeze([
@@ -119,7 +127,7 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
     }`,
       }),
     ]),
-    discriminators: Object.freeze(["private_setup_bindings_stay_off_the_instance", CARRIER_TEST]),
+    discriminators: Object.freeze(["private_setup_bindings_stay_off_the_instance"]),
   }),
   DIRTY_OVERLOAD_FALLBACK: Object.freeze({
     patches: Object.freeze([
@@ -131,14 +139,13 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
     discriminators: Object.freeze([
       "generic_constraints_stay_on_the_single_construct_signature",
       FIXTURE_TEST,
-      CARRIER_TEST,
     ]),
   }),
   DIRTY_UNCONSTRAINED_BINDER: Object.freeze({
     patches: Object.freeze([
       Object.freeze({
         find: "if let Some(constraint) = &param.constraint {",
-        replace: "if let Some(constraint) = param.constraint.as_ref().filter(|_| !construct) {",
+        replace: "if let Some(constraint) = param.constraint.as_ref().filter(|_| !with_const) {",
       }),
     ]),
     discriminators: Object.freeze([
@@ -158,7 +165,7 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
   DIRTY_ANY_FIELD: Object.freeze({
     patches: Object.freeze([
       Object.freeze({
-        find: 'DeclaredSurface::TypeArgument { text, .. } => props.push(format!("({text})")),',
+        find: "DeclaredSurface::TypeArgument { text, .. } => props.push(self.defaulted(text)),",
         replace:
           'DeclaredSurface::TypeArgument { .. } => props.push("Record<string, any>".to_string()),',
       }),
@@ -196,7 +203,7 @@ export function validateStp16Products({ repoRoot = REPO_ROOT } = {}) {
     "tests/sfc-projection/STP16/manifest.json",
     "tests/sfc-projection/STP16/probes/positive.ts",
     "tests/sfc-projection/STP16/probes/negative.ts",
-    "tests/sfc-projection/STP16/probes/components/Picker.vue.d.ts",
+    "tests/sfc-projection/STP16/probes/components/Picker.vue.ts",
   ]) {
     if (!fs.existsSync(path.join(repoRoot, rel))) {
       errors.push(err("STP16-required-api", "removed-fixture", `missing ${rel}`));
@@ -365,19 +372,14 @@ export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
       );
       continue;
     }
-    const libNames = spec.discriminators.filter((name) => name !== CARRIER_TEST);
-    const carrierNames = spec.discriminators.filter((name) => name === CARRIER_TEST);
+    const names = spec.discriminators;
     fs.writeFileSync(abs, mutated);
     let run = null;
-    let carrierRun = null;
     try {
       if (fs.readFileSync(abs, "utf8") !== mutated) {
         throw new Error(`${twin} mutation did not land on disk`);
       }
-      run = cargo(repoRoot, [...LIB_LANE, "--", "--test-threads=1", ...libNames]);
-      if (carrierNames.length > 0) {
-        carrierRun = cargo(repoRoot, [...CARRIER_LANE, "--", "--test-threads=1", ...carrierNames]);
-      }
+      run = cargo(repoRoot, [...LIB_LANE, "--", "--test-threads=1", ...names]);
     } catch (error) {
       errors.push(err("STP16-private-leak", "missing-check", String(error?.message || error)));
     } finally {
@@ -386,26 +388,21 @@ export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
     if (run === null) {
       continue;
     }
-    if (run.error || carrierRun?.error) {
+    if (run.error) {
       errors.push(
         err(
           "STP16-private-leak",
           "missing-check",
-          `${twin} run failed to spawn: ${(run.error || carrierRun.error).message}`,
+          `${twin} run failed to spawn: ${run.error.message}`,
         ),
       );
       continue;
     }
     const output = String(run.stdout || "");
-    const carrierOutput = String(carrierRun?.stdout || "");
     // Rejection proof requires each named discriminator to FAIL: a nonzero
     // status alone is not proof, since a compile error or an unrelated
     // failure also exits nonzero while the owning discriminator passes.
-    const rejected =
-      run.status !== 0 &&
-      libNames.every((name) => testFailed(output, name)) &&
-      (carrierRun === null ||
-        (carrierRun.status !== 0 && carrierNames.every((name) => testFailed(carrierOutput, name))));
+    const rejected = run.status !== 0 && names.every((name) => testFailed(output, name));
     if (!rejected) {
       errors.push(
         err(
