@@ -942,12 +942,30 @@ fn det_04_worker_counts_1_2_4_8() {
 #[ignore = "the cancelled/retried-work and partial-persisted-cache axes have no public \
             drivable surface: the audited flow-return entry installs its own request \
             context, and nothing persists a semantic cache across a process; the cold, \
-            warm, edit-revert and epoch-rebuild axes below are the drivable subset"]
+            warm, edit-revert and epoch-rebuild axes are the drivable subset"]
 fn det_05_cold_warm_edit_revert() {
-    match matrix_row("DET-05").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-05 is registered ready ({test}) — update this row"),
+    assert_registered_ignored("DET-05");
+    drive_det_05_subset();
+}
+
+/// DET-05's drivable subset, run by default: an ignored test runs in no CI
+/// lane, so leaving the driven axes only inside the ignored row would let
+/// them rot unobserved.
+#[test]
+fn det_05_drivable_subset() {
+    assert_registered_ignored("DET-05");
+    drive_det_05_subset();
+}
+
+/// An ignored row's body opens by checking the registration still says so:
+/// a row re-registered Ready must move to its own driver.
+fn assert_registered_ignored(id: &str) {
+    if let Driver::Ready { test } = matrix_row(id).driver {
+        panic!("{id} is registered ready ({test}) — update this row");
     }
+}
+
+fn drive_det_05_subset() {
     let host = build_host(&[("/det/edit.ts", EDIT_ORIGINAL_TS)]);
     let canonical = "/det/edit.ts";
     let cold = observe(&host, canonical, "witness");
@@ -1002,30 +1020,79 @@ fn det_05_cold_warm_edit_revert() {
     );
 }
 
-/// DET-07 — duplicate same-shaped declarations with distinct authored
-/// origins and an anonymous class-expression unit: no early carrier
-/// loss (both duplicates answer), and BOTH bases give the SAME
-/// shape-normalized content because they are same-shaped authored
-/// facts. The virtual-unit and recursive-binder anchor axes stage with
-/// the virtual-unit and recursive-binder registration (the row's staging note).
+/// A recursive generic binder, authored identically in two files.
+const RECURSIVE_TS: &str = r#"
+interface Rec<T> { value: T; next: Rec<T> | null }
+export function witness(r: Rec<number>) { return r.next; }
+"#;
+
+/// The duplicate witness again, inside a VIRTUAL unit: a Vue SFC's script.
+const VIRTUAL_SFC: &str =
+    "<script lang=\"ts\">\nexport function witness() { return 1 as number | string; }\n</script>\n";
+
+/// One shape reached two ways: authored, and synthesized by a mapped
+/// utility. The witnesses READ THROUGH the shape (`v.a`) rather than return
+/// `v`: returning the parameter publishes its declared alias by NAME, and
+/// two differently named aliases never print alike whatever they denote.
+const SYNTHETIC_TS: &str = r#"
+type Authored = { a?: 1; b?: 2 };
+type Synthetic = Partial<{ a: 1; b: 2 }>;
+export function authored(v: Authored) { return v.a; }
+export function synthetic(v: Synthetic) { return v.a; }
+"#;
+
+/// DET-07 — duplicate shapes with distinct authored/synthetic origins,
+/// anonymous/virtual units and recursive binders: no early carrier loss and
+/// no discovery-based anchor.
+///
+/// * Authored duplicates in two files, and the same witness inside a Vue
+///   SFC's virtual script unit, all answer, and answer the same shape on
+///   both bases.
+/// * An anonymous class-expression unit answers.
+/// * A shape reached by a mapped utility (`Partial<…>`) and the same shape
+///   written out answer the same shape.
+/// * A recursive generic binder authored identically in two files keeps its
+///   recursive carrier in both. The two files' answers are NOT required to
+///   print alike: `VerterStableV1` orders a union's arms by stable-key
+///   fingerprint, a declaration's fingerprint includes its own identity, so
+///   `recA.ts`'s `Rec` and `recB.ts`'s `Rec` are different types that may
+///   sort differently against `null`. What must hold is that each file's
+///   answer depends on its ORIGIN and never on DISCOVERY: the same file
+///   answers the same way whichever arrives first.
 #[test]
 fn det_07_duplicate_origins_and_anonymous_units() {
     assert_ready("DET-07", "det_07_duplicate_origins_and_anonymous_units");
-    let host = build_host(&[
+    let files: [(&'static str, &'static str); 7] = [
         ("/det/dupA.ts", DUPLICATE_A_TS),
         ("/det/dupB.ts", DUPLICATE_B_TS),
         ("/det/anon.ts", ANONYMOUS_TS),
-    ]);
+        ("/det/Virtual.vue", VIRTUAL_SFC),
+        ("/det/recA.ts", RECURSIVE_TS),
+        ("/det/recB.ts", RECURSIVE_TS),
+        ("/det/synthetic.ts", SYNTHETIC_TS),
+    ];
+    let host = build_host(&files);
+
+    // Authored duplicates, and the same witness in a virtual unit.
     let a = observe(&host, "/det/dupA.ts", "witness");
     let b = observe(&host, "/det/dupB.ts", "witness");
-    assert!(
-        !a.contains("<absent>") && !b.contains("<absent>"),
-        "DET-07: a duplicate-origin carrier was lost — {a} vs {b}"
-    );
+    let virtual_unit = observe(&host, "/det/Virtual.vue", "witness");
+    for (label, answer) in [("dupA", &a), ("dupB", &b), ("virtual unit", &virtual_unit)] {
+        assert!(
+            !answer.contains("<absent>"),
+            "DET-07: the {label} carrier was lost — {answer}"
+        );
+    }
     assert_eq!(
         a.replace("/det/dupA", "/det/DUP"),
         b.replace("/det/dupB", "/det/DUP"),
         "DET-07: same-shaped authored duplicates must give same-shaped observations"
+    );
+    assert_eq!(
+        a.replace("/det/dupA", "/det/DUP"),
+        virtual_unit.replace("/det/Virtual", "/det/DUP"),
+        "DET-07: the virtual unit's duplicate must give the same-shaped observation as the \
+         authored one"
     );
     let bytes_rows = generated_byte_rows(&host);
     assert_eq!(
@@ -1033,11 +1100,58 @@ fn det_07_duplicate_origins_and_anonymous_units() {
         bytes_rows.get("/det/dupB.ts"),
         "DET-07: same-shaped authored duplicates must generate same-shaped bytes"
     );
+
+    // An anonymous unit.
     let anonymous = observe(&host, "/det/anon.ts", "witness");
     assert!(
         !anonymous.contains("<absent>"),
         "DET-07: the anonymous unit's carrier was lost — {anonymous}"
     );
+
+    // Authored and synthetic origins of one shape.
+    let authored = observe(&host, "/det/synthetic.ts", "authored");
+    let synthetic = observe(&host, "/det/synthetic.ts", "synthetic");
+    assert!(
+        !authored.contains("<absent>") && !synthetic.contains("<absent>"),
+        "DET-07: an authored or synthetic carrier was lost — {authored} vs {synthetic}"
+    );
+    assert_eq!(
+        authored, synthetic,
+        "DET-07: one shape reached through an authored and a synthetic origin must give the \
+         same observation"
+    );
+
+    // Recursive binders: the carrier survives, and the answer depends on the
+    // file's origin, never on which file was discovered first.
+    let rec_a = observe(&host, "/det/recA.ts", "witness");
+    let rec_b = observe(&host, "/det/recB.ts", "witness");
+    for (label, answer) in [("recA", &rec_a), ("recB", &rec_b)] {
+        assert!(
+            !answer.contains("<absent>") && answer.contains("Rec"),
+            "DET-07: the recursive binder's carrier was lost in {label} — {answer}"
+        );
+    }
+    let mut reversed_files = files;
+    reversed_files.reverse();
+    let reversed = build_host(&reversed_files);
+    assert_eq!(
+        observe(&reversed, "/det/recA.ts", "witness"),
+        rec_a,
+        "DET-07: recA's answer changed with the order the files were discovered in"
+    );
+    assert_eq!(
+        observe(&reversed, "/det/recB.ts", "witness"),
+        rec_b,
+        "DET-07: recB's answer changed with the order the files were discovered in"
+    );
+    let reversed_rows = generated_byte_rows(&reversed);
+    for canonical in ["/det/recA.ts", "/det/recB.ts"] {
+        assert_eq!(
+            reversed_rows.get(canonical),
+            generated_byte_rows(&host).get(canonical),
+            "DET-07: {canonical}'s generated bytes changed with discovery order"
+        );
+    }
 }
 
 /// DET-10 — relocation: the same content under a different logical
@@ -1346,10 +1460,20 @@ fn det_apply_tsconfig(
             policy: strictNullChecks leaves an optional parameter's answer unchanged, so a \
             resident parent kept on the old policy is indistinguishable from a correct one"]
 fn det_09_policy_change_with_resident_parents() {
-    match matrix_row("DET-09").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-09 is registered ready ({test}) — update this row"),
-    }
+    assert_registered_ignored("DET-09");
+    drive_det_09_subset();
+}
+
+/// DET-09's drivable subset, run by default — so the "answers do not move"
+/// pin fails in CI the day the lane honours the policy, rather than inside
+/// an ignored test nobody runs.
+#[test]
+fn det_09_drivable_subset() {
+    assert_registered_ignored("DET-09");
+    drive_det_09_subset();
+}
+
+fn drive_det_09_subset() {
     const LEAF_TS: &str = "export function leaf(v?: string) { return v; }";
     const LEAF_FORMATTED_TS: &str = "export function leaf(v?: string) {\n    return v;\n}\n";
     const PARENT_TS: &str =
