@@ -31520,7 +31520,8 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         &host,
         "/ws.ts",
         "class Box { readonly tag = \"box\" }\n\
-         function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\n\
+         declare function box(strings: TemplateStringsArray): Box\n\
+         function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }\n\
          interface Props extends ReturnType<typeof makeProps> { extra: string }",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);

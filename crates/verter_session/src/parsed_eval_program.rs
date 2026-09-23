@@ -158,6 +158,16 @@ impl ParsedEvalProgram {
         Some(lower(cell.borrow_dependent().nodes.call(span)?))
     }
 
+    /// The `new` twin of [`Self::with_indexed_call`].
+    pub(crate) fn with_indexed_construct<R>(
+        &self,
+        span: verter_span::Span,
+        lower: impl for<'a> FnOnce(&'a oxc_ast::ast::NewExpression<'a>) -> R,
+    ) -> Option<R> {
+        let cell = self.functions.get()?;
+        Some(lower(cell.borrow_dependent().nodes.construct(span)?))
+    }
+
     /// Whether the parse recovered from errors (`ParserReturn::errors`
     /// non-empty). See the field docs — non-usage provers fail open on this.
     pub(crate) fn had_errors(&self) -> bool {

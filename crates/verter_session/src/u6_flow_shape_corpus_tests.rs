@@ -2023,6 +2023,54 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "N115_member_intersection_call_stays_pinned",
         "fcc30d7ea292ad2c5e12b0ab968cc3f9bcd0416e4ab600c0771dc083497d50d8",
     ),
+    (
+        "C02_intersection_degraded",
+        "db37a5dcdb52d7e7968d18816250c27f22cbde5b9e09943574d7ed24bf3b5929",
+    ),
+    (
+        "C04_emits_intersection_degraded",
+        "73af8fecfde91be35d35a3371f6aa4c7cc15e772a26cf4d13a7e337610bc5604",
+    ),
+    (
+        "C06_withdefaults_intersection_degraded",
+        "ab903f56e020ff3535ec3f5115aaab1967e0dc7809721c9ec4e1f9e59b55f30b",
+    ),
+    (
+        "C08_heritage_extends_degraded",
+        "7c92ae7ea54d35b5d018f9eb9442c98e1ceaee0a62a0a015d8f1e1faf9c2cb0f",
+    ),
+    (
+        "C10_heritage_members_degraded",
+        "c7368c1839e91fd51a87cfd3965979e40015b71ed9b49a3099b46e10f5bed2e2",
+    ),
+    (
+        "C11_props_intersection_unmodelled_arm",
+        "dad745f7df447eebbfc1e4bed58e42314ddf0eb2dd9c6d2048fbc3efc21e565c",
+    ),
+    (
+        "C12_heritage_unmodelled_clause",
+        "3afcacdde73b907df9459911c8c09bf9429d2b269caa448f61e9ae606099521f",
+    ),
+    (
+        "D01_helper_new",
+        "389311dd67ae54929907d18976e3abcc4b64a836e236098f0dd37f4ea068a759",
+    ),
+    (
+        "D09_new_spread",
+        "87deaca059d969e1814ee31d994c41634a926c24a96741fb41029634a2e62eb8",
+    ),
+    (
+        "D10_callee_new_spread_only",
+        "be4f8762ee3ba5ba6e26a1b2fa75820be6cf36abc1d73bd18b1907e00b48f319",
+    ),
+    (
+        "D11_callee_new_spread_key",
+        "7b7d5d93c035401af5532178670391472114a6901120739142630b747120371e",
+    ),
+    (
+        "G03_emits_new_spread",
+        "91947af5d9430228abb3f409c16a917195753c624b392120f5ee11856437531c",
+    ),
 ];
 
 // The suite
@@ -3165,9 +3213,21 @@ mod corpus_suite {
             ),
             (
                 "D01_helper_new",
+                "checker prints `{ label: string; made: Box; }`; the renderer spells the \
+                 same node `{ label: string, made: DeclRef(Box) }` — a declaration \
+                 reference and member terminators differ",
+            ),
+            (
+                "D12_helper_tagged",
                 "checker prints `{ label: string; made: Box; }`; the renderer spells \
                  `{ label: string, made: Opaque(UnmodeledPosition) }` — print syntax AND \
                  semantics differ; the Degraded divergence is held by the semantic test",
+            ),
+            (
+                "X12_class_getter_member",
+                "checker prints `{ label: string; n: number; }`; the renderer spells \
+                 `{ label: () => string, n: number }` — print syntax AND semantics \
+                 differ; the KnownOwed divergence is held by the semantic test",
             ),
             (
                 "N09_narrow_then_write",
@@ -4493,6 +4553,7 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
     "F05_defineoptions_runtime_spread",
     "C16_pick_keyof_closed_interface_publishes_every_key",
     "C17_pick_aliased_keyof_closed_interface_publishes_every_key",
+    "C20_withdefaults_intersection_degraded_tagged",
 ];
 
 /// Value-indistinct rows (the `checker` names a value [`NodeShape`]
@@ -4514,9 +4575,51 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
 #[cfg(test)]
 const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
     (
+        "C02_intersection_degraded",
+        Owner::SharedTypeResolution,
+        "member `made` Other — the constructed `Box` instance (`DeclRef`); the checker column \
+         is the macro's COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
         "C03_emits_intersection_clean",
         Owner::SharedTypeResolution,
         "member `evA` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "C04_emits_intersection_degraded",
+        Owner::SharedTypeResolution,
+        "root Other — the constructed `Box` instance (`DeclRef`); the checker column is the \
+         macro's COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C06_withdefaults_intersection_degraded",
+        Owner::FrameworkOnly,
+        "member `made` Other — the constructed `Box` instance (`DeclRef`); the checker column \
+         is the macro's COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C08_heritage_extends_degraded",
+        Owner::SharedTypeResolution,
+        "member `made` Other — the constructed `Box` instance (`DeclRef`); the checker column \
+         names the heritage interface, not the flow return a deep pin compares",
+    ),
+    (
+        "C10_heritage_members_degraded",
+        Owner::U2MappedTemplate,
+        "member `made` Other — the constructed `Box` instance (`DeclRef`); the checker column \
+         is the mapped heritage probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C11_props_intersection_unmodelled_arm",
+        Owner::SharedTypeResolution,
+        "root Other — the constructed `Box` instance (`DeclRef`); the checker column is the \
+         macro's COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C12_heritage_unmodelled_clause",
+        Owner::SharedTypeResolution,
+        "root Other — the constructed `Box` instance (`DeclRef`); the checker column names \
+         the heritage interface, not the flow return a deep pin compares",
     ),
     (
         "C13_emits_heritage_clean",
@@ -4843,8 +4946,16 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// `deep_pinned_rows_semantic_equality_follows_their_verdict` correctly
 /// rejects), or a recorded CHECKER text the deep-pin comparer cannot yet
 /// parse. Each ledger entry records which class it is in.
+///
+/// Seven entries are the intersection / heritage / `withDefaults` rows
+/// (C02, C04, C06, C08, C10, C11, C12) whose `new Box()` resolves to the
+/// instance: their checker column is the MACRO's composed probe, while a
+/// deep pin compares the flow function's own return against it, so a
+/// recursive pin would assert a divergence the rows do not have. The
+/// unmodelled-position dispositions of those shapes are carried by their
+/// tagged-template twins.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 65;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4858,14 +4969,14 @@ const OPEN_DEBTS: &[&str] = &[
     // silently DROPPED instead of failing closed. This is the family the 15
     // existing `ReturnType<typeof …>` tests structurally could not reach:
     // none of them uses `&` or `extends`.
-    "C04_emits_intersection_degraded",
-    "C11_props_intersection_unmodelled_arm",
-    "C12_heritage_unmodelled_clause",
+    "C19_emits_intersection_unmodelled_tagged",
+    "C23_props_intersection_unmodelled_arm_tagged",
+    "C24_heritage_unmodelled_clause_tagged",
     // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
     // The file loses its whole type-check surface for programs the checker
     // types without difficulty.
-    "D10_callee_new_spread_only",
-    "D11_callee_new_spread_key",
+    "D14_callee_tagged_spread_only",
+    "D15_callee_tagged_spread_key",
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
@@ -4905,6 +5016,9 @@ const OPEN_DEBTS: &[&str] = &[
     // computes the contextual union.
     "CC06_contextual_arrow_param",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
+    // A class getter read through an instance publishes the getter's
+    // function type instead of the property type, clean and warm.
+    "X12_class_getter_member",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // The macro lane correctly rejects a generator return, but the TSX lane
@@ -5009,7 +5123,9 @@ const OPEN_DEBTS: &[&str] = &[
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
-    (Owner::U2MappedTemplate, 4, 2, 1),
+    // A `new` resolves to the instance: C10's constructed member matches the
+    // checker, and its tagged-template twin C22 keeps the degraded member.
+    (Owner::U2MappedTemplate, 5, 3, 1),
     (Owner::U6CallResolve, 33, 32, 1),
     // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
@@ -5034,7 +5150,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // owner with its B03/B04 class, so the substrate total drops by one
     // from D13's 64 to 63. The async return wrap greens X18 (the
     // `Promise<…>` carrier matches the checker).
-    (Owner::U6FlowReturnSubstrate, 63, 48, 2),
+    // A `new` resolves to the instance: D01, D09 and G03 match the checker;
+    // their tagged-template twins D12, D13 and G07 keep the unmodelled
+    // position, and X12's class getter read through the constructed
+    // instance is parked (the getter publishes its function type).
+    (Owner::U6FlowReturnSubstrate, 66, 51, 3),
     (Owner::U6NarrowTypeof, 48, 29, 19),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
@@ -5050,13 +5170,20 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6NarrowLattice, 38, 25, 13),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
-    (Owner::SharedTypeResolution, 14, 9, 3),
+    // A `new` resolves to the instance: C02, C04, C08, C11 and C12 match the
+    // checker; the dropped-arm debt rides their tagged-template twins C19,
+    // C23 and C24, with C18 and C21 keeping the degraded member.
+    (Owner::SharedTypeResolution, 19, 14, 3),
     // H02's D14 deep pin re-labelled the row KnownOwed: the checker's
     // union normal form carries `?: undefined` cross members the composed
     // spread alternatives omit (extensionally equal), so matching drops
     // to zero and every row here is parked.
-    (Owner::SharedCompilePipeline, 8, 0, 8),
-    (Owner::FrameworkOnly, 7, 5, 0),
+    // D10 and D11 construct their spread source and match the checker; the
+    // TSX-fault debt rides their tagged-template twins D14 and D15.
+    (Owner::SharedCompilePipeline, 10, 2, 8),
+    // C06 constructs its member and matches; its twin C20 keeps the degraded
+    // member.
+    (Owner::FrameworkOnly, 8, 6, 0),
 ];
 
 #[cfg(test)]
@@ -5167,13 +5294,13 @@ mod conformance {
 const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     // SHARED.TYPE_RESOLUTION — the intersection / heritage surface reducer
     // drops an arm whose flow return is wholly unmodelled.
-    "C04_emits_intersection_degraded",
-    "C11_props_intersection_unmodelled_arm",
-    "C12_heritage_unmodelled_clause",
+    "C19_emits_intersection_unmodelled_tagged",
+    "C23_props_intersection_unmodelled_arm_tagged",
+    "C24_heritage_unmodelled_clause_tagged",
     // SHARED.COMPILE_PIPELINE — the TSX (IDE) lane deletes the file's whole
     // type-check surface for programs the checker types without difficulty.
-    "D10_callee_new_spread_only",
-    "D11_callee_new_spread_key",
+    "D14_callee_tagged_spread_only",
+    "D15_callee_tagged_spread_key",
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",

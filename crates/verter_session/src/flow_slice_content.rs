@@ -56,7 +56,8 @@
 //! itself is [`SliceCall::DirectSelf`], an index-exact direct call is
 //! [`SliceCall::Direct`] — and any other call rides the symbolic
 //! `ReturnType<typeof …>` carrier (or `any` for an unrepresentable
-//! callee) as [`SliceCall::Symbolic`].
+//! callee) as [`SliceCall::Symbolic`]. A `new` expression is
+//! [`SliceCall::Construct`] over its lowered constructor value.
 
 use std::sync::Arc;
 
@@ -1272,16 +1273,36 @@ impl SliceCallSite {
 
 /// The [`SliceCallSite`] of one authored call expression.
 fn call_site(call: &oxc_ast::ast::CallExpression<'_>) -> SliceCallSite {
-    let fixed = call
-        .arguments
+    authored_call_site(
+        &call.arguments,
+        call.type_arguments.is_some(),
+        call.span.into(),
+    )
+}
+
+/// The [`SliceCallSite`] of one authored `new` expression.
+fn construct_site(new: &oxc_ast::ast::NewExpression<'_>) -> SliceCallSite {
+    authored_call_site(
+        &new.arguments,
+        new.type_arguments.is_some(),
+        new.span.into(),
+    )
+}
+
+fn authored_call_site(
+    arguments: &[oxc_ast::ast::Argument<'_>],
+    has_explicit_type_arguments: bool,
+    span: verter_span::Span,
+) -> SliceCallSite {
+    let fixed = arguments
         .iter()
         .take_while(|argument| !matches!(argument, oxc_ast::ast::Argument::SpreadElement(_)))
         .count();
     SliceCallSite::new(
         fixed as u32,
-        fixed != call.arguments.len(),
-        call.type_arguments.is_some(),
-        call.span.into(),
+        fixed != arguments.len(),
+        has_explicit_type_arguments,
+        span,
     )
 }
 
@@ -1337,6 +1358,12 @@ pub enum SliceCall {
     },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
+    /// A `new` expression. The constructor is lowered as a flow value (a
+    /// parameter or local rides its binding carrier, a free name the
+    /// shared leaf lowering), and the evaluator resolves the construction
+    /// through the call executor over the constructor's construct
+    /// signatures — the checker's `resolveNewExpression`.
+    Construct(Box<SliceExpr>),
 }
 
 /// One name an answer references that the frame's LEXICAL AUTHORITY
@@ -7421,6 +7448,14 @@ impl Lowerer<'_> {
                 };
                 SliceExpr::Call(SliceCall::Nested(Box::new(function)), call_site(call))
             }
+            // A `new` expression: the constructor is a flow value of this
+            // frame, and the construction resolves at the evaluator's one
+            // call sink. Its arguments are parse facts the sink re-reads
+            // from the retained snapshot, exactly like a call's.
+            Expression::NewExpression(new) => SliceExpr::Call(
+                SliceCall::Construct(Box::new(self.lower_expr(&new.callee, mode))),
+                construct_site(new),
+            ),
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
                     let name = callee.name.as_str();
@@ -7707,8 +7742,8 @@ impl Lowerer<'_> {
                             guard,
                         }
                     }
-                    // A CALL POSITION with no structural arm (`new f()`,
-                    // `` tag`…` ``, `f?.()`, `await f()`, `(0, new f())`). The
+                    // A CALL POSITION with no structural arm (`` tag`…` ``,
+                    // `f?.()`, `` (0, tag`…`) ``). The
                     // fail-closed verdict is the CLASSIFIER's, taken on the
                     // expression FORM — not on whether the shallow pass
                     // happened to mint a `ReturnType<callee>` carrier the

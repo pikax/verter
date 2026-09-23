@@ -41,17 +41,20 @@ const POS_CANONICAL: &str = "/ws/flow-positional.ts";
 /// making the position local, deletes it.
 const POS_FIXTURE: &str = r#"
 export class Box { readonly tag = "box"; }
+// A tagged template is a call form the substrate has no arm for — the
+// unmodelled position every row below places.
+export declare function box(strings: TemplateStringsArray): Box;
 
 // ── B-F1: one unmodelled member inside an object literal ─────────────
 export function objectWithUnmodeledCall() {
-  return { label: "x", made: new Box() };
+  return { label: "x", made: box`b` };
 }
 
 // The byte-equivalent local-binding spelling — already survived at HEAD
 // through `FailedBindingInitializer`, and is the control that proves the
 // disposition must not depend on where the evaluator was standing.
 export function objectWithUnmodeledLocal() {
-  const b = new Box();
+  const b = box`b`;
   return { label: "x", made: b };
 }
 
@@ -70,7 +73,7 @@ export function objectWithUnmodeledBinding() {
 // rule this file states — characterized, with its owner, by
 // `flow_return_frame_seal_tests::an_unmodeled_array_element_collapses_the_array_and_is_owed`.
 export function arrayWithUnmodeledCall() {
-  return { label: "x", made: ["s", new Box()] };
+  return { label: "x", made: ["s", box`b`] };
 }
 
 // ── A-F2 / A-F3: the residual warm-fabricated-`any` call forms ───────
@@ -264,7 +267,7 @@ fn is_unresolved_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 ///
 /// This is B-F1 at the evaluator boundary. The checker's answer for
 /// `objectWithUnmodeledCall` is `{ label: string; made: Box }`; the
-/// substrate cannot type `new Box()` (that is `U6.CALL_RESOLVE`), so
+/// substrate has no arm for the tagged template `` box`b` ``, so
 /// `made` is the typed unresolved marker — never a fabricated `any`,
 /// which is indistinguishable from an authored one at every downstream
 /// gate, and never a discarded composite.
