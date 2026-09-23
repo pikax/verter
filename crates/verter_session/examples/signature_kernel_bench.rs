@@ -32,9 +32,10 @@
 //! * `throughput_wN`     — N threads querying one warm host whose scheduler has N workers.
 //! * `soak`              — edit/revert one module repeatedly; live heap after each round.
 //!
-//! Cancellation is NOT a workload: the audited flow-return entry installs its
-//! own request context, so a caller cannot cancel the request it drives (the
-//! determinism matrix's DET-05 records the same boundary).
+//! Cancellation is NOT a workload here: the baseline tree has no
+//! caller-cancellable entry, so no matched workload exists. The candidate-only
+//! `signature_kernel_cancel_probe` records cancellation/restart latency, and the
+//! runner runs it inside the same session.
 //!
 //! Allocation is counted by a process-wide counting allocator that is OFF
 //! during timing passes (relaxed loads only) and ON for a separate

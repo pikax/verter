@@ -12,6 +12,11 @@
 // and digests of the raw logs. Raw machine-bound logs stay under --out, never in the
 // tracked tree.
 //
+// Inside the same control bracket it also runs the candidate's cancellation probe
+// (crates/verter_session/examples/signature_kernel_cancel_probe.rs) once per candidate
+// invocation. The baseline has no caller-cancellable entry, so the probe's
+// cancellation/restart distributions are recorded absolute, never gated.
+//
 //   node scripts/benchmark/signature-kernel-perf.mjs [options]
 //
 //   --out <dir>            output directory (default: <tmp>/sk-perf-<timestamp>)
@@ -42,6 +47,9 @@ import os from "node:os";
 import path from "node:path";
 
 const HARNESS_REL = "crates/verter_session/examples/signature_kernel_bench.rs";
+const CANCEL_PROBE_REL = "crates/verter_session/examples/signature_kernel_cancel_probe.rs";
+// The harness arguments the cancellation probe shares.
+const CANCEL_PROBE_ARGS = ["--modules", "--depth", "--cold-samples"];
 const BASELINE_TITLE = "resolve effective tsconfig semantic options into the type environment";
 const POLICY = {
   // performance-gates.toml [statistics] + the charter's 5% investigation gate.
@@ -435,6 +443,7 @@ function main() {
   const revs = { baseline, candidate };
   const binaries = {};
   let controlBinary = null;
+  let cancelProbe = null;
   try {
     for (const arm of ["baseline", "candidate"]) {
       prepareTree(repo, trees[arm], revs[arm], arm);
@@ -449,6 +458,21 @@ function main() {
         "verter_session",
         "signature_kernel_bench",
       );
+    }
+    // The probe is the candidate's own file: it needs the candidate's cancellable entry.
+    const probePath = path.join(trees.candidate, CANCEL_PROBE_REL);
+    if (fs.existsSync(probePath)) {
+      cancelProbe = {
+        sha256: sha256(fs.readFileSync(probePath)),
+        binary: buildExample(
+          trees.candidate,
+          path.join(out, "target", "candidate"),
+          "verter_session",
+          "signature_kernel_cancel_probe",
+        ),
+      };
+    } else {
+      log(`the candidate has no ${CANCEL_PROBE_REL}; cancellation is not measured`);
     }
     if (!opts.skipControl) {
       controlBinary = buildExample(
@@ -533,6 +557,36 @@ function main() {
       runs[arm].push({ document: JSON.parse(text), wall_ms: Date.now() - started });
     });
 
+    const cancelRuns = [];
+    if (cancelProbe) {
+      const probeArgs = Object.entries(opts.forwarded)
+        .filter(([flag]) => CANCEL_PROBE_ARGS.includes(flag))
+        .flat();
+      for (let i = 0; i < opts.invocations; i++) {
+        coolDown();
+        for (const name of foreignProcesses()) foreignDuringSession.add(name);
+        log(`cancellation probe ${i + 1}/${opts.invocations}: candidate`);
+        const invocation = spawnSync(cancelProbe.binary, probeArgs, {
+          cwd: trees.candidate,
+          env: { ...process.env, SK_BENCH_REV: revs.candidate },
+          encoding: "utf8",
+          maxBuffer: 1 << 30,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        if (invocation.status !== 0) {
+          const tail = (invocation.stderr || "").trim().split("\n").slice(-5).join("\n");
+          throw new Error(
+            `cancellation probe exited ${invocation.status ?? invocation.signal} on invocation ${i + 1}:\n${tail}`,
+          );
+        }
+        const rawName = `cancel-${String(i + 1).padStart(2, "0")}-candidate.json`;
+        const text = invocation.stdout.trim();
+        fs.writeFileSync(path.join(out, "raw", rawName), text);
+        rawDigests.push({ file: rawName, sha256: sha256(text) });
+        cancelRuns.push(JSON.parse(text));
+      }
+    }
+
     coolDown();
     const controlEnd = controlBinary ? (log("control benchmark (session end)…"), control()) : null;
     const thermalAtEnd = thermalReport();
@@ -561,6 +615,8 @@ function main() {
       controlDrift,
       idle,
       sessionVoid,
+      cancelProbe,
+      cancelRuns,
     });
     fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
     fs.writeFileSync(path.join(out, "summary.md"), renderMarkdown(summary));
@@ -584,6 +640,8 @@ function summarize({
   controlDrift,
   idle,
   sessionVoid,
+  cancelProbe,
+  cancelRuns,
 }) {
   const first = runs.baseline[0].document;
   const workloadNames = Object.keys(first.workloads);
@@ -713,7 +771,40 @@ function summarize({
     workloads,
     throughput,
     soak,
+    cancellation: summarizeCancellation(cancelProbe, cancelRuns),
     raw_logs: rawDigests,
+  };
+}
+
+/** The candidate-only cancellation probe: absolute distributions, no ratio, no verdict. */
+function summarizeCancellation(probe, runs) {
+  if (!probe || runs.length === 0) return null;
+  const distributions = {};
+  for (const name of Object.keys(runs[0].workloads)) {
+    const pooled = runs.flatMap((r) => r.workloads[name].samples_ns);
+    const medians = runs
+      .map((r) => r.workloads[name].samples_ns)
+      .filter((xs) => xs.length > 0)
+      .map(median);
+    distributions[name] =
+      pooled.length === 0
+        ? { n: 0 }
+        : {
+            p50: quantile(pooled, 0.5),
+            p95: quantile(pooled, 0.95),
+            p99: quantile(pooled, 0.99),
+            n: pooled.length,
+            // Between-invocation spread of the medians, relative to their median.
+            spread_percent: ((Math.max(...medians) - Math.min(...medians)) / median(medians)) * 100,
+          };
+  }
+  return {
+    probe: { path: CANCEL_PROBE_REL, sha256: probe.sha256 },
+    invocations: runs.length,
+    corpus: runs[0].corpus,
+    fractions: runs[0].fractions,
+    completed_before_cancel: runs.reduce((sum, r) => sum + r.completed_before_cancel, 0),
+    distributions,
   };
 }
 
@@ -848,6 +939,32 @@ function renderMarkdown(s) {
     const k = s.soak[arm];
     lines.push(
       `| ${arm} | ${k.early_live_bytes} | ${k.late_live_bytes} | ${pct(k.growth_percent)} | ${k.verdict} |`,
+    );
+  }
+  lines.push("", "## Cancellation and restart (candidate only, ms)", "");
+  const c = s.cancellation;
+  if (!c) {
+    lines.push("Not measured: the candidate has no cancellation probe.");
+  } else {
+    const at = c.fractions.map((f) => `${Math.round(f * 100)}%`).join(", ");
+    lines.push(
+      `Probe \`${c.probe.path}\` sha256 \`${c.probe.sha256.slice(0, 16)}…\`; ${c.invocations} invocation(s), ${c.corpus.modules} modules, depth ${c.corpus.depth}. Cancellations land at ${at} of the median cold request; ${c.completed_before_cancel} completed before theirs landed.`,
+      "",
+      "| Distribution | p50 / p95 / p99 | n | between-invocation spread |",
+      "|---|---|---|---|",
+    );
+    for (const [name, d] of Object.entries(c.distributions)) {
+      lines.push(
+        d.n === 0
+          ? `| ${name} | n/a | 0 | n/a |`
+          : `| ${name} | ${ms(d.p50)} / ${ms(d.p95)} / ${ms(d.p99)} | ${d.n} | ${d.spread_percent.toFixed(1)}% |`,
+      );
+    }
+    lines.push(
+      "",
+      "`cold_request` is the uncancelled request on a fresh host; `cancel_stop` runs from",
+      "`cancel()` to the request returning `Cancelled`; `restart` is the retry on the same",
+      "host. The baseline has no caller-cancellable entry, so these are recorded, not gated.",
     );
   }
   lines.push(

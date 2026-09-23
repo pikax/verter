@@ -103,8 +103,11 @@ Recorded plainly so no reader mistakes absence for a pass:
 * Cancellation latency: the audited entry takes the caller’s cancellation
   token, and determinism row DET-05 drives its correctness (a cancelled
   request answers `Cancelled` or a complete answer, and its retry equals a
-  cold host), but the benchmark harness has no cancellation workload, so how
-  long a cancelled request takes to stop is not measured.
+  cold host). The baseline has no cancellable entry, so no matched workload
+  exists; the candidate-only probe
+  (`crates/verter_session/examples/signature_kernel_cancel_probe.rs`), which
+  the runner runs inside the same session, records the stop and restart
+  distributions. No locked session has run it yet.
 * Completion and diagnostic agreement rates against the pinned official
   compiler on a full project check.
 * A LOCKED cell: `performance-gates.toml` has no signature-kernel cell.

@@ -1064,6 +1064,7 @@
           "crates/verter_napi/src/typeinfo.rs",
           "crates/verter_session/benches/projection_safety_bench.rs",
           "crates/verter_session/examples/signature_kernel_bench.rs",
+          "crates/verter_session/examples/signature_kernel_cancel_probe.rs",
           "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
           "crates/verter_session/tests/allocation_cases/flow_products.rs",
           "crates/verter_session/tests/allocator_canaries.rs",
@@ -1200,6 +1201,7 @@
             "consumersAffected": [
               "crates/verter_session/benches/projection_safety_bench.rs",
               "crates/verter_session/examples/signature_kernel_bench.rs",
+              "crates/verter_session/examples/signature_kernel_cancel_probe.rs",
               "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
               "crates/verter_session/tests/allocation_cases/flow_products.rs",
               "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
