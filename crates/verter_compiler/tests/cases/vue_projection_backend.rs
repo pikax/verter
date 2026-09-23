@@ -1147,3 +1147,88 @@ fn binding_views_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// The production attribute-operations path runs on real Vue SFC carrier
+/// bytes: raw spellings keep distinct runtime keys, listeners accumulate
+/// across an interleaved spread, a later definite prop overwrites, an
+/// opaque spread stays a possible writer, and a prop/event collision
+/// validates both channels.
+#[test]
+fn attribute_operations_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        Certainty, ConsumerChannel, RuntimeKey,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "import Foo from './Foo.vue';\n",
+        "const h = () => {};\n",
+        "const attrs = {};\n",
+        "</script>\n",
+        "<template>\n",
+        "<Foo :on-save=\"h\" />\n",
+        "<Foo @save=\"h\" v-bind=\"attrs\" :onSave=\"h\" />\n",
+        "<Foo title=\"a\" v-bind=\"attrs\" :title=\"'b'\" />\n",
+        "<Foo :title=\"'b'\" v-bind=\"attrs\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///attrs.vue", SFC);
+    let projection = VueProjectionBackend
+        .attribute_operations(SFC, &artifact, "file:///attrs.vue")
+        .expect("projects");
+    assert!(projection.complete);
+    assert_eq!(projection.sequences.len(), 4);
+
+    let kebab = &projection.key_plans[0];
+    assert_eq!(
+        kebab.writes[0].key,
+        RuntimeKey::Static("on-save".to_string())
+    );
+    let kebab_relation = projection
+        .relation(&projection.sequences[0].use_id, "on-save")
+        .expect("kebab relation");
+    assert!(!kebab_relation.channels.iter().any(|channel| matches!(
+        channel,
+        ConsumerChannel::EmittedEvent { events, .. } if events.iter().any(|e| e == "save")
+    )));
+
+    let save = projection.key_plans[1].effective("onSave").expect("onSave");
+    let listeners: Vec<u32> = save
+        .contributors
+        .iter()
+        .filter(|c| c.certainty == Certainty::Definite)
+        .map(|c| c.op_index)
+        .collect();
+    assert_eq!(listeners, vec![0, 2]);
+    let collision = projection
+        .relation(&projection.sequences[1].use_id, "onSave")
+        .expect("collision");
+    for channel_is in [
+        |c: &ConsumerChannel| matches!(c, ConsumerChannel::DeclaredProp { .. }),
+        |c: &ConsumerChannel| matches!(c, ConsumerChannel::EmittedEvent { .. }),
+    ] {
+        assert_eq!(
+            collision
+                .obligations
+                .iter()
+                .filter(|o| channel_is(&o.channel))
+                .count(),
+            2
+        );
+    }
+
+    let overwrite = projection.key_plans[2].effective("title").expect("title");
+    assert_eq!(overwrite.contributors.len(), 1);
+    assert_eq!(overwrite.contributors[0].op_index, 2);
+    let optional = projection.key_plans[3].effective("title").expect("title");
+    let certainties: Vec<Certainty> = optional.contributors.iter().map(|c| c.certainty).collect();
+    assert_eq!(certainties, vec![Certainty::Definite, Certainty::Possible]);
+
+    assert_eq!(
+        VueProjectionBackend
+            .attribute_operations("<template></template>", &artifact, "file:///attrs.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
