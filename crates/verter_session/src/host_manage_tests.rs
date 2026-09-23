@@ -19631,3 +19631,80 @@ defineProps<IconProps>()
         );
     }
 }
+
+/// The caches a document's own content keys (resolved-import facts, the
+/// resolver's component-meta states, the overlay source registration) follow
+/// the current content across edits and are released by the close: the
+/// retention snapshot's counts hold flat over edits and drop at the close.
+/// Discriminating: each of the three gained one key per edit before (the
+/// WSP6 churn lane's heap profile attributed the residual per-cycle growth
+/// to them).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn edits_keep_the_content_keyed_caches_flat_and_a_close_releases_them() {
+    let (_ws, host) = activity_gate_fixture();
+    let edited = |edit: usize| {
+        format!(
+            "<script setup lang=\"ts\">
+import type {{ IconProps }} from './types/icon'
+             // edit {edit}
+defineProps<IconProps>()
+</script>
+<template><div /></template>"
+        )
+    };
+    let query = |host: &VerterHost| {
+        host.set_import_dependencies(
+            "/src/Consumer.vue",
+            vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+        );
+        let meta = host
+            .get_component_meta("/src/Consumer.vue")
+            .expect("component meta");
+        assert!(meta.props.iter().any(|prop| prop.name == "name"));
+    };
+    // Two edits fill the window of two contents each cache keeps; the
+    // counts must not move from there on.
+    upsert_vue(&host, "/src/Consumer.vue", &edited(0));
+    query(&host);
+    upsert_vue(&host, "/src/Consumer.vue", &edited(1));
+    query(&host);
+    let baseline = host.retention_snapshot();
+    for edit in 2..=5 {
+        upsert_vue(&host, "/src/Consumer.vue", &edited(edit));
+        query(&host);
+        let after = host.retention_snapshot();
+        assert_eq!(
+            after.resolved_import_facts, baseline.resolved_import_facts,
+            "edit {edit}: resolved-import facts follow the current content"
+        );
+        assert_eq!(
+            after.component_meta_states, baseline.component_meta_states,
+            "edit {edit}: component-meta states follow the current view"
+        );
+        assert_eq!(
+            after.registered_sources, baseline.registered_sources,
+            "edit {edit}: a superseded overlay registration is retracted"
+        );
+    }
+    host.evict("/src/Consumer.vue");
+    let closed = host.retention_snapshot();
+    assert!(
+        closed.resolved_import_facts < baseline.resolved_import_facts,
+        "the close releases the document's resolved-import facts ({} -> {})",
+        baseline.resolved_import_facts,
+        closed.resolved_import_facts
+    );
+    assert!(
+        closed.component_meta_states < baseline.component_meta_states,
+        "the close releases the document's component-meta states ({} -> {})",
+        baseline.component_meta_states,
+        closed.component_meta_states
+    );
+    assert!(
+        closed.registered_sources <= baseline.registered_sources,
+        "the close retracts the document's overlay registration ({} -> {})",
+        baseline.registered_sources,
+        closed.registered_sources
+    );
+}

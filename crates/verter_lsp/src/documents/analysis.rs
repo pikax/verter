@@ -148,7 +148,7 @@ impl DocumentRegistry {
         *self.semantic_workspace.write() = Some(Arc::clone(&workspace));
         if let Some(host) = self.semantic_host.read().clone() {
             let semantic_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
-            host.set_workspace(semantic_workspace);
+            host.host().set_workspace(semantic_workspace);
         }
         // A task may have been scheduled after the pre-install fence while a
         // host still held the old workspace. Advance once more after every host
@@ -159,26 +159,28 @@ impl DocumentRegistry {
         self.invalidate_semantic_publications();
     }
 
-    fn semantic_host(&self) -> Arc<VerterHost> {
+    fn semantic_host(&self) -> super::SharedHost {
         if let Some(host) = self.semantic_host.read().clone() {
             return host;
         }
         let mut slot = self.semantic_host.write();
         if let Some(host) = slot.as_ref() {
-            return Arc::clone(host);
+            return host.clone();
         }
-        let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
-            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
-            // Isolation is also a fairness boundary: native enrichment cannot
-            // occupy the projection scheduler or saturate all host CPU workers.
-            host_cpu_threads: Some(1),
-            ..verter_session::HostConfig::default()
-        }));
+        let host = super::SharedHost::new(Arc::new(VerterHost::new_standalone(
+            verter_session::HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
+                // Isolation is also a fairness boundary: native enrichment cannot
+                // occupy the projection scheduler or saturate all host CPU workers.
+                host_cpu_threads: Some(1),
+                ..verter_session::HostConfig::default()
+            },
+        )));
         if let Some(workspace) = self.semantic_workspace.read().clone() {
             let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
-            host.set_workspace(workspace);
+            host.host().set_workspace(workspace);
         }
-        *slot = Some(Arc::clone(&host));
+        *slot = Some(host.clone());
         host
     }
 
@@ -235,10 +237,14 @@ impl DocumentRegistry {
                 return;
             }
 
-            let host = registry.semantic_host();
+            let semantic_host = registry.semantic_host();
             let work_source = Arc::clone(&source);
             let work_canonical = canonical_id.clone();
             let analysis = tokio::task::spawn_blocking(move || {
+                // One guard for the whole blocking computation: the semantic
+                // host is never closed on today, and this keeps that a fact
+                // the gate enforces rather than one this call relies on.
+                let host = semantic_host.host();
                 let request = UpsertRequest {
                     canonical_id: Some(work_canonical.clone()),
                     input_id: work_canonical.clone(),

@@ -77,6 +77,14 @@ pub struct SemanticReleaseReport {
     /// Union member views (V8's per-store `union_views`) whose union or a
     /// member was released.
     pub union_views_released: usize,
+    /// Live nodes the close-time scan walked: the whole live set, on every
+    /// pass of the scan (see `arena.rs`, **Cost**).
+    pub nodes_scanned: usize,
+    /// Physical arena slots before and after the release.
+    pub storage_slots_before: usize,
+    pub storage_slots_after: usize,
+    /// Wall time of the payload release, in microseconds.
+    pub elapsed_micros: u64,
     /// Shape-cache entries dropped by the owning store (see the type doc).
     pub shape_entries_released: usize,
 }
@@ -105,6 +113,9 @@ impl SemanticGraphStore {
         below: u64,
     ) -> SemanticReleaseReport {
         let mut report = SemanticReleaseReport::default();
+        let started = std::time::Instant::now();
+        report.nodes_scanned = self.arena.live_len();
+        report.storage_slots_before = self.arena.storage_slots();
         // Arm the warm-read liveness guard BEFORE any payload is dropped so
         // a warm hit racing the tombstone cannot serve a released node.
         self.released_any.store(true, Ordering::Release);
@@ -192,6 +203,8 @@ impl SemanticGraphStore {
         // raced the tombstone could have landed a mapping whose value names
         // a released node; clearing again after the tombstone closes it.
         self.clear_hash_cons_memos();
+        report.storage_slots_after = self.arena.storage_slots();
+        report.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         report
     }
 

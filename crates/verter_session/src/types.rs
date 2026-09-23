@@ -4990,6 +4990,24 @@ pub struct HostRetentionSnapshot {
     pub refusals_oversized: u64,
     /// Reservations refused because the active class was exhausted.
     pub refusals_active: u64,
+    /// Close-time semantic releases queued behind in-flight computations
+    /// and not yet applied.
+    pub deferred_releases: usize,
+    /// Resolved-import fact entries (one key per document content hash;
+    /// follows the current content, released on close).
+    pub resolved_import_facts: usize,
+    /// Resolver component-meta states (one key per document, mode and view
+    /// fingerprint; follows the current view, released on close).
+    pub component_meta_states: usize,
+    /// Registered source snapshots (the base registration per document plus
+    /// the current overlay; superseded overlays are retracted).
+    pub registered_sources: usize,
+    /// Records interned in the signature kernel's current epoch (append-only
+    /// within an epoch; reported, see `SignatureStore::interned_len`).
+    pub signature_records: usize,
+    /// What the activity gate has applied so far: counts, the longest a
+    /// queued release waited, and the last release's own cost.
+    pub reclaim: crate::project_type_store::semantic_activity::SemanticReclaimStats,
 }
 
 #[derive(Debug, Default)]

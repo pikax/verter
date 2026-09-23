@@ -65,7 +65,7 @@ pub struct DocumentRegistry {
     /// editor-critical projection host. The host is created lazily only when the
     /// client opts in, owns a single CPU worker, and is never queried inline by an
     /// LSP handler.
-    semantic_host: RwLock<Option<Arc<VerterHost>>>,
+    semantic_host: RwLock<Option<SharedHost>>,
     semantic_workspace: RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     semantic_enabled: std::sync::atomic::AtomicBool,
     /// Epoch fencing optional semantic work across disable/re-enable and

@@ -219,6 +219,9 @@ pub enum SourceValidationError {
 pub struct RegisteredSourceAuthority {
     namespace: SourceAuthorityNamespaceId,
     current: Mutex<HashMap<(CanonicalFileId, FileIncarnation), RegisteredSourceSnapshot>>,
+    /// Registration order, for [`Self::retain_recent_incarnations`].
+    registered_at: Mutex<HashMap<(CanonicalFileId, FileIncarnation), u64>>,
+    next_registration: std::sync::atomic::AtomicU64,
 }
 
 impl RegisteredSourceAuthority {
@@ -226,6 +229,8 @@ impl RegisteredSourceAuthority {
         Ok(Self {
             namespace: SourceAuthorityNamespaceId(random_bytes()?),
             current: Mutex::new(HashMap::new()),
+            registered_at: Mutex::new(HashMap::new()),
+            next_registration: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -257,14 +262,92 @@ impl RegisteredSourceAuthority {
             byte_len,
             source,
         };
+        let order = self
+            .next_registration
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.current
             .lock()
             .map_err(|_| SourceRegistrationError::AuthorityUnavailable)?
-            .insert((canonical, file_incarnation), snapshot.clone());
+            .insert((canonical.clone(), file_incarnation), snapshot.clone());
+        if let Ok(mut registered_at) = self.registered_at.lock() {
+            registered_at.insert((canonical, file_incarnation), order);
+        }
         Ok(snapshot)
     }
 
     /// Validate that a sealed snapshot is still the exact current source.
+    /// Drop this document's registrations that `keep` rejects, and say how
+    /// many. A registration that supersedes an earlier one of the same
+    /// document (an overlay re-registered under a new view fingerprint, or a
+    /// close) retracts it, so the registry follows the document's current
+    /// content instead of every content it ever had. A validation of a
+    /// retracted snapshot fails as stale, exactly as a superseded base
+    /// registration's does.
+    pub fn retain_incarnations(
+        &self,
+        canonical: &CanonicalFileId,
+        mut keep: impl FnMut(FileIncarnation) -> bool,
+    ) -> usize {
+        let Ok(mut current) = self.current.lock() else {
+            return 0;
+        };
+        let before = current.len();
+        current
+            .retain(|(registered, incarnation), _| registered != canonical || keep(*incarnation));
+        if let Ok(mut registered_at) = self.registered_at.lock() {
+            registered_at.retain(|key, _| current.contains_key(key));
+        }
+        before - current.len()
+    }
+
+    /// Among this document's registrations that `selects`, keep the `keep`
+    /// most recently registered and drop the rest; say how many went. An
+    /// overlay re-registered under a new view fingerprint keeps its
+    /// predecessor (a validation in flight may still hold it) and retracts
+    /// everything older.
+    pub fn retain_recent_incarnations(
+        &self,
+        canonical: &CanonicalFileId,
+        keep: usize,
+        mut selects: impl FnMut(FileIncarnation) -> bool,
+    ) -> usize {
+        let Ok(registered_at) = self.registered_at.lock() else {
+            return 0;
+        };
+        let mut selected: Vec<(u64, FileIncarnation)> = registered_at
+            .iter()
+            .filter(|((registered, incarnation), _)| {
+                registered == canonical && selects(*incarnation)
+            })
+            .map(|((_, incarnation), order)| (*order, *incarnation))
+            .collect();
+        drop(registered_at);
+        selected.sort_unstable_by_key(|(order, _)| std::cmp::Reverse(*order));
+        let retract: Vec<FileIncarnation> = selected
+            .into_iter()
+            .skip(keep)
+            .map(|(_, incarnation)| incarnation)
+            .collect();
+        if retract.is_empty() {
+            return 0;
+        }
+        self.retain_incarnations(canonical, |incarnation| !retract.contains(&incarnation))
+    }
+
+    /// Registrations across every document (retention observability).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.current
+            .lock()
+            .map(|current| current.len())
+            .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn validate_current(
         &self,
         snapshot: &RegisteredSourceSnapshot,
@@ -675,6 +758,66 @@ mod tests {
             )
             .expect("registered snapshot");
         (authority, snapshot)
+    }
+
+    /// An overlay re-registered under a new view fingerprint retracts the
+    /// registration it supersedes and nothing else: the base registration
+    /// and the new overlay stay, the old overlay reads as stale.
+    #[test]
+    fn retain_incarnations_retracts_only_the_superseded_registrations() {
+        let (authority, base) = minted();
+        let register = |incarnation: u64, source: &str| {
+            authority
+                .register_source(
+                    base.canonical().clone(),
+                    FileIncarnation::new(incarnation),
+                    SourceGeneration::new(12),
+                    crate::FileLanguage::vue(),
+                    Arc::from(source),
+                )
+                .expect("registered snapshot")
+        };
+        let overlay_bit = 1_u64 << 63;
+        let first = register(overlay_bit | 1, "<template>one</template>");
+        let second = register(overlay_bit | 2, "<template>two</template>");
+        assert_eq!(authority.len(), 3);
+        let third = register(overlay_bit | 3, "<template>three</template>");
+        let retracted = authority.retain_recent_incarnations(base.canonical(), 2, |incarnation| {
+            incarnation.get() & overlay_bit != 0
+        });
+        assert_eq!(
+            retracted, 1,
+            "only the oldest overlay goes; the current one and its predecessor stay"
+        );
+        assert!(
+            authority.validate_current(&third).is_ok(),
+            "the current overlay stays"
+        );
+        let retracted = authority.retain_incarnations(base.canonical(), |incarnation| {
+            incarnation == second.file_incarnation() || incarnation.get() & overlay_bit == 0
+        });
+        assert_eq!(
+            retracted, 1,
+            "the newest overlay goes when only the second is kept"
+        );
+        assert_eq!(authority.len(), 2);
+        assert!(
+            authority.validate_current(&base).is_ok(),
+            "the base registration stays"
+        );
+        assert!(
+            authority.validate_current(&second).is_ok(),
+            "the current overlay stays"
+        );
+        assert!(
+            authority.validate_current(&first).is_err(),
+            "the superseded overlay reads as stale"
+        );
+        let closed = authority.retain_incarnations(base.canonical(), |incarnation| {
+            incarnation.get() & overlay_bit == 0
+        });
+        assert_eq!(closed, 1, "a close retracts the last overlay");
+        assert!(authority.validate_current(&base).is_ok());
     }
 
     #[test]

@@ -15,6 +15,10 @@ use crate::resolver_core::{
     ValidatedFactAdmission, ValidatedFactCache,
 };
 
+/// View fingerprints per (document, mode) whose component-meta states the
+/// runtime keeps: the current one and the one before it.
+const RECENT_COMPONENT_META_VIEWS: usize = 2;
+
 pub struct StableRequestState<K, V>
 where
     K: Eq + Hash,
@@ -164,6 +168,17 @@ where
         self.cache.retain(predicate);
     }
 
+    /// Keys with at least one candidate (retention observability).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
     pub(crate) fn singleflight(
         &self,
     ) -> &SingleflightGroup<K, StableExecutionValue<Option<V>>, ()> {
@@ -196,6 +211,11 @@ where
     pub fallthrough: FallthroughResolverState,
     /// Top-level materialized component-meta request state.
     pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
+    /// View fingerprints admitted most recently per (document, mode), newest
+    /// last, [`RECENT_COMPONENT_META_VIEWS`] deep (see
+    /// [`Self::note_component_meta_view`]).
+    recent_component_meta_views:
+        parking_lot::Mutex<rustc_hash::FxHashMap<(String, u32), std::collections::VecDeque<u64>>>,
     /// Host-owned prepared declaration bundles, keyed by canonical file ID.
     /// Validated by file whole hash and import-route facts.
     pub prepared_decl_bundles: StableRequestState<String, PreparedDeclBundle>,
@@ -253,6 +273,7 @@ where
         Self {
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
+            recent_component_meta_views: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
@@ -273,6 +294,7 @@ where
         Self {
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
+            recent_component_meta_views: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
@@ -342,6 +364,56 @@ where
     }
 
     /// Take a snapshot of the current counter values.
+    /// Note that `key` is the component-meta state being admitted, and drop
+    /// the states cached for the same document and mode under all but the
+    /// two most recent view fingerprints: the view a request in flight still
+    /// holds is at most one edit old, and an older view can never be asked
+    /// for again. Without this the cache gains a key per edit for the life
+    /// of the host.
+    pub fn note_component_meta_view(&self, key: &ResolutionNodeKey) {
+        let superseded = {
+            let mut recent = self.recent_component_meta_views.lock();
+            let fingerprints = recent
+                .entry((key.symbol_id.clone(), key.behavior_flags))
+                .or_default();
+            if !fingerprints.contains(&key.view_fingerprint) {
+                fingerprints.push_back(key.view_fingerprint);
+            }
+            if fingerprints.len() > RECENT_COMPONENT_META_VIEWS {
+                fingerprints.pop_front()
+            } else {
+                None
+            }
+        };
+        if let Some(superseded) = superseded {
+            self.component_meta.retain(|cached| {
+                cached.symbol_id != key.symbol_id
+                    || cached.behavior_flags != key.behavior_flags
+                    || cached.view_fingerprint != superseded
+            });
+        }
+    }
+
+    /// Drop the component-meta states cached for `canonical_id` under every
+    /// view fingerprint (a close: none of them can be asked for again), and
+    /// say how many keys went.
+    pub fn release_component_meta_states(&self, canonical_id: &str) -> usize {
+        self.recent_component_meta_views
+            .lock()
+            .retain(|(symbol_id, _), _| symbol_id != canonical_id);
+        let before = self.component_meta.len();
+        self.component_meta
+            .retain(|key| key.symbol_id != canonical_id);
+        before - self.component_meta.len()
+    }
+
+    /// Cached component-meta states across every document, mode and view
+    /// fingerprint (retention observability).
+    #[must_use]
+    pub fn component_meta_state_count(&self) -> usize {
+        self.component_meta.len()
+    }
+
     pub fn counter_snapshot(&self) -> crate::resolver_core::ResolverCountersSnapshot {
         self.counters.snapshot()
     }

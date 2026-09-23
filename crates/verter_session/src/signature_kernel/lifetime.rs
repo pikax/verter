@@ -210,6 +210,27 @@ impl SignatureStore {
     }
 
     /// Live readers of the current epoch plus still-pinned retired epochs.
+    /// Records interned across every table of the current epoch (retention
+    /// observability). The tables are append-only within an epoch and their
+    /// type tokens name node ids, so a close strands the records that named
+    /// the released nodes until the epoch is replaced.
+    #[must_use]
+    pub fn interned_len(&self) -> usize {
+        let inner = self.current.load();
+        inner.shapes.len()
+            + inner.templates.len()
+            + inner.descriptors.len()
+            + inner.recipes.len()
+            + inner.provenances.len()
+            + inner.substitutions.len()
+            + inner.layouts.len()
+            + inner.slots.len()
+            + inner.spaces.len()
+            + inner.sets.len()
+            + inner.results.len()
+            + inner.strings.len()
+    }
+
     #[must_use]
     pub fn live_reader_count(&self) -> u64 {
         self.current

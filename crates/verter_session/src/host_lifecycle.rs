@@ -878,6 +878,19 @@ impl VerterHost {
                 .relation_proof_count(),
             relate_keys: self.project_type_store.semantic_graph().relate_key_count(),
             union_views: self.project_type_store.semantic_graph().union_view_count(),
+            deferred_releases: self.project_type_store.deferred_release_count(),
+            resolved_import_facts: self
+                .project_type_store
+                .resolved_import_facts()
+                .entry_count(),
+            component_meta_states: self.resolver.runtime.component_meta_state_count(),
+            registered_sources: self.carrier_publication.source_authority.len(),
+            signature_records: self
+                .project_type_store
+                .semantic_graph()
+                .signature_store()
+                .interned_len(),
+            reclaim: self.project_type_store.deferred_release_stats(),
             shape_cache_entries: self.project_type_store.shape_cache_db().live_count(),
             flow_graphs: self.project_type_store.flow_slice().graphs_entry_count(),
             flow_hash_entries: self
@@ -1032,6 +1045,37 @@ impl VerterHost {
                 "evict queued the document's semantic substrate release"
             );
         }
+        // What the document's own content keyed: its resolved-import facts
+        // (one key per content hash), the resolver's component-meta states
+        // (one key per view fingerprint) and its overlay source registrations
+        // (one per view fingerprint). Each already follows the current content
+        // on an edit; the close drops the last one.
+        let import_facts_released = self
+            .project_type_store
+            .resolved_import_facts()
+            .release_canonical(canonical_id);
+        let meta_states_released = self
+            .resolver
+            .runtime
+            .release_component_meta_states(canonical_id);
+        let overlay_sources_retracted = self
+            .carrier_publication
+            .source_authority
+            .retain_incarnations(
+                &verter_language::registered_source_authority::CanonicalFileId::new(canonical_id),
+                |registered| {
+                    registered.get()
+                        & crate::host_manage::overlay_materialize::OVERLAY_INCARNATION_BIT
+                        == 0
+                },
+            );
+        tracing::debug!(
+            canonical_id,
+            import_facts_released,
+            meta_states_released,
+            overlay_sources_retracted,
+            "evict released the document's content-keyed caches"
+        );
 
         // Capture pre-evict whole_hash from the scheduler so
         // `ensure_loaded` can detect no-op reloads (identical content)

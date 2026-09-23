@@ -112,6 +112,17 @@ impl<T> AppendInterner<T> {
     /// Intern `value`. Fully initializes the record before publishing a handle.
     /// Duplicate publishers race on the shard; equality selects one id. A
     /// cancelled or panicking producer publishes nothing.
+    /// Slots claimed in this epoch (retention observability).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        usize::try_from(self.claimed_slots.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn intern(&self, value: T, cancelled: Option<&AtomicBool>) -> Result<u64, InternError>
     where
         T: Eq + Hash,

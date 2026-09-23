@@ -292,6 +292,8 @@ mod semantic_graph_self_root_tests;
 /// (Tier 1B / D102 / D125).
 pub mod component_meta_payload;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod guarded_host;
+pub use guarded_host::{GuardedHost, HostRef};
 pub mod host_analyze_audit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_audit_bridge;

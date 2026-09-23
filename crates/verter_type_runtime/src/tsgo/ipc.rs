@@ -1028,6 +1028,22 @@ async fn deliver_document_sync(
 /// "overlay not found for closed file", the engine dies, and the restart re-reads
 /// the whole workspace while every open document waits. So a close with no
 /// recorded open sends NO frame and only releases the local content cache.
+/// A closed document's cached diagnostics are stale the moment it closes
+/// (the next open republishes), so the cache forgets them; without this the
+/// cache keeps one entry per document ever opened for the life of the
+/// engine. Keys are matched in normalized form because the publish path
+/// stores the engine's own spelling of the URI.
+async fn forget_cached_diagnostics(
+    diagnostics_cache: &Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    path: &str,
+) {
+    let closed = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
+    diagnostics_cache
+        .lock()
+        .await
+        .retain(|uri, _| normalize_file_uri(uri) != closed);
+}
+
 async fn deliver_document_close(
     transport: &LspTransport,
     versions: &Mutex<HashMap<String, i32>>,
@@ -2484,7 +2500,9 @@ impl TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
+            forget_cached_diagnostics(&diagnostics_cache, &path_owned).await;
             deliver_document_close(
                 &transport,
                 &versions,
@@ -2780,11 +2798,13 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
+        let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
                 async {
+                    forget_cached_diagnostics(&diagnostics_cache, &path_owned).await;
                     deliver_document_close(
                         &transport,
                         &versions,

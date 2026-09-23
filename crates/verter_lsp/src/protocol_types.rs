@@ -408,6 +408,26 @@ pub struct RetentionStatistics {
     pub relation_proofs: usize,
     pub relate_keys: usize,
     pub union_views: usize,
+    /// Close-time semantic releases still queued behind in-flight
+    /// computations.
+    pub deferred_releases: usize,
+    pub resolved_import_facts: usize,
+    pub component_meta_states: usize,
+    pub registered_sources: usize,
+    pub signature_records: usize,
+    /// Queued releases applied so far, the longest one waited for a
+    /// zero-reader instant, and the slowest / summed release wall time.
+    pub releases_applied: u64,
+    pub release_wait_max_micros: u64,
+    pub release_elapsed_max_micros: u64,
+    pub release_elapsed_total_micros: u64,
+    /// Times the gate drained readers for a starving release, and the
+    /// longest an arriving computation waited for one (see
+    /// `verter_session::project_type_store::semantic_activity`).
+    pub release_drains: u64,
+    pub release_drain_wait_max_micros: u64,
+    /// The last close-time release applied, or `None` before the first.
+    pub last_release: Option<LastReleaseStatistics>,
     pub shape_cache_entries: usize,
     pub flow_graphs: usize,
     pub flow_hash_entries: usize,
@@ -446,6 +466,18 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             relation_proofs: snapshot.relation_proofs,
             relate_keys: snapshot.relate_keys,
             union_views: snapshot.union_views,
+            deferred_releases: snapshot.deferred_releases,
+            resolved_import_facts: snapshot.resolved_import_facts,
+            component_meta_states: snapshot.component_meta_states,
+            registered_sources: snapshot.registered_sources,
+            signature_records: snapshot.signature_records,
+            releases_applied: snapshot.reclaim.releases_applied,
+            release_wait_max_micros: snapshot.reclaim.wait_max_micros,
+            release_elapsed_max_micros: snapshot.reclaim.elapsed_max_micros,
+            release_elapsed_total_micros: snapshot.reclaim.elapsed_total_micros,
+            release_drains: snapshot.reclaim.drains,
+            release_drain_wait_max_micros: snapshot.reclaim.drain_wait_max_micros,
+            last_release: snapshot.reclaim.last.map(LastReleaseStatistics::from),
             shape_cache_entries: snapshot.shape_cache_entries,
             flow_graphs: snapshot.flow_graphs,
             flow_hash_entries: snapshot.flow_hash_entries,
@@ -461,6 +493,39 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             refusals_oversized: snapshot.refusals_oversized,
             refusals_active: snapshot.refusals_active,
             heap_in_use_bytes: crate::heap_in_use::heap_in_use_bytes(),
+        }
+    }
+}
+
+/// One applied close-time semantic release: how long it waited behind
+/// in-flight computations, what its O(live nodes) scan cost, and what it
+/// found (`retention.lastRelease`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastReleaseStatistics {
+    pub wait_micros: u64,
+    pub elapsed_micros: u64,
+    pub nodes_scanned: usize,
+    pub nodes_released: usize,
+    pub storage_slots_before: usize,
+    pub storage_slots_after: usize,
+    pub memo_entries_evicted: usize,
+}
+
+impl From<verter_session::project_type_store::semantic_activity::SemanticReleaseReceipt>
+    for LastReleaseStatistics
+{
+    fn from(
+        receipt: verter_session::project_type_store::semantic_activity::SemanticReleaseReceipt,
+    ) -> Self {
+        Self {
+            wait_micros: receipt.wait_micros,
+            elapsed_micros: receipt.elapsed_micros,
+            nodes_scanned: receipt.nodes_scanned,
+            nodes_released: receipt.nodes_released,
+            storage_slots_before: receipt.storage_slots_before,
+            storage_slots_after: receipt.storage_slots_after,
+            memo_entries_evicted: receipt.memo_entries_evicted,
         }
     }
 }
