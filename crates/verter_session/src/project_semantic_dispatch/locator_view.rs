@@ -513,17 +513,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if arm_ids.len() == 1 {
                     arm_ids[0]
                 } else {
-                    // Order- and scope-preserving rebuild of the heritage
-                    // carrier's projected arms: own-body-last order is
-                    // topology and display fidelity.
-                    self.graph().intern_preserving_scope(
-                        body,
-                        SemanticNodeData::Intersection(
+                    // Order- and scope-preserving rebuild of the projected
+                    // arms: own-body-last order is topology and display
+                    // fidelity. An interface or class body (its reference
+                    // arms are `extends` heritage) is minted a heritage
+                    // body, which inherits signatures by concatenation; an
+                    // alias's intersection stays an intersection.
+                    let arms: Arc<[SemanticNodeId]> = Arc::from(arm_ids.into_boxed_slice());
+                    let list = match reference_arm_role {
+                        MemberMergeRole::Heritage => {
+                            crate::semantic_query::composite::CompositeList::heritage(arms)
+                        }
+                        MemberMergeRole::Authored | MemberMergeRole::OwnBody => {
                             crate::semantic_query::composite::CompositeList::preserving_rebuild(
-                                Arc::from(arm_ids.into_boxed_slice()),
-                            ),
-                        ),
-                    )
+                                arms,
+                            )
+                        }
+                    };
+                    self.graph()
+                        .intern_preserving_scope(body, SemanticNodeData::Intersection(list))
                 }
             }
             _ => {

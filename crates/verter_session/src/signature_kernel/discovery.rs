@@ -1,7 +1,7 @@
 //! Record-level signature discovery: publishing candidates from neutral
 //! input, signature-equivalence comparison, union common-match then
-//! restricted synthesis, and intersection dedup with constructor/mixin
-//! composition.
+//! restricted synthesis, intersection dedup with constructor/mixin
+//! composition, and a declaration's heritage concatenation.
 //!
 //! Everything here works over V2 records and is independent of the
 //! semantic graph; the graph-facing subject walk lives with the dispatcher
@@ -1137,6 +1137,28 @@ fn is_mixin_constructor(
         && loaded.layout.rest.as_ref().is_some_and(|r| {
             r.kind == RestKind::Array && r.tail.is_empty() && types.is_any(r.slot.ty)
         }))
+}
+
+/// The signatures of one kind an interface or class declaration with
+/// `extends` heritage carries (TypeScript's `resolveObjectTypeMembers`).
+/// `members` are the per-member candidate lists of the declaration's body
+/// in body order — its bases in clause order, its own body LAST — and the
+/// answer is the own body's signatures first, then each base's, in clause
+/// order.
+///
+/// A declaration is not an intersection type, so nothing is dropped and
+/// nothing is composed ([`intersection_signatures`] does both): a
+/// signature identical to one already present stays, a base reached twice
+/// through a diamond contributes twice, and a mixin constructor base keeps
+/// its own construct signature. Call resolution therefore tries the own
+/// signatures first, and conditional inference (`ReturnType`,
+/// `InstanceType`), which reads the LAST signature, reads the last base's.
+#[must_use]
+pub fn heritage_signatures(members: &[Vec<SignatureCandidate>]) -> Vec<SignatureCandidate> {
+    let Some((own, bases)) = members.split_last() else {
+        return Vec::new();
+    };
+    own.iter().chain(bases.iter().flatten()).copied().collect()
 }
 
 /// Intersection signatures for one kind. `members` are the per-member

@@ -4949,6 +4949,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+        self.prepared_type_decl(identity)
+            .map(|prepared| prepared.kind)
+    }
+
+    /// Whether the prepared declaration rooted at `identity` declares type
+    /// parameters.
+    pub(super) fn prepared_decl_is_generic(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<bool> {
+        self.prepared_type_decl(identity)
+            .map(|prepared| !prepared.type_parameters.is_empty())
+    }
+
+    fn prepared_type_decl(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<Arc<PreparedTypeDecl>> {
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&identity.canonical_id),
             owner: identity.owner,
@@ -4965,11 +4983,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.decl_name.as_ref(),
         );
         match adapter.resolve_prepared_type_decl(base, &ri) {
-            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared.kind),
+            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared),
             PreparedTypeDeclResolution::AuthoredPartial {
                 declaration: prepared,
                 ..
-            } => Some(prepared.kind),
+            } => Some(prepared),
             PreparedTypeDeclResolution::Missing => None,
             PreparedTypeDeclResolution::Failed { .. } => {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
@@ -12753,7 +12771,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// list is the budgeted derived value, and re-deciding gives the
     /// authority another complete attempt), so it routes canonical. Every
     /// other category preserves verbatim: `OrderedCarrier` order IS
-    /// overload precedence; `PreservingRebuild` lost its original's
+    /// overload precedence; a `Heritage` body is a declaration, not an
+    /// intersection type; `PreservingRebuild` lost its original's
     /// category, so re-deciding is unproven; `QuerySubject` shape is
     /// caller contract; `TestFixture` is a deliberately raw fixture.
     ///
@@ -12778,7 +12797,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use crate::semantic_query::composite::CompositeOriginCategory as C;
         let derived = match category {
             C::Canonical(_) | C::CanonicalUnproven | C::AuthoredShell => true,
-            C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
+            C::OrderedCarrier | C::Heritage | C::PreservingRebuild | C::QuerySubject => false,
             #[cfg(any(test, feature = "test-support"))]
             C::TestFixture => false,
         };

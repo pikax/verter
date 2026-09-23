@@ -221,13 +221,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // canonical authority, Global intern.
                     self.intern_normalized_union_or_intersection(&ids, false)
                 } else {
-                    // Order- and scope-preserving projection rebuild: an
-                    // ordered heritage/overload carrier (or a possibly-
-                    // callable rebuilt arm set) keeps its verbatim order.
+                    // Order- and scope-preserving projection rebuild: a
+                    // heritage body or an ordered overload carrier (or a
+                    // possibly-callable rebuilt arm set) keeps its verbatim
+                    // order, and a heritage body stays one.
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
                                 Arc::from(ids.into_boxed_slice()),
                             ),
                         ),

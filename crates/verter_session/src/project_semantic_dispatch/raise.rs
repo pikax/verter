@@ -1582,6 +1582,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self,
                 node,
                 arms,
+                arms.origin_category(),
                 /* is_union */ true,
                 &state.mapping,
                 context,
@@ -1591,6 +1592,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self,
                 node,
                 arms,
+                arms.origin_category(),
                 /* is_union */ false,
                 &state.mapping,
                 context,
@@ -1960,6 +1962,7 @@ fn rebuild_union_or_intersection(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     arms: &[SemanticNodeId],
+    category: crate::semantic_query::composite::CompositeOriginCategory,
     is_union: bool,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
@@ -1980,17 +1983,14 @@ fn rebuild_union_or_intersection(
     }
     // Order- and scope-preserving rebuild: the reduced arms replace the
     // originals 1:1, inheriting the original carrier's semantics.
+    let new_arms: Arc<[SemanticNodeId]> = Arc::from(new_arms.into_boxed_slice());
     let data = if is_union {
         SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
-                new_arms.into_boxed_slice(),
-            )),
+            crate::semantic_query::composite::CompositeList::rebuilt_from(category, new_arms),
         )
     } else {
         SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
-                new_arms.into_boxed_slice(),
-            )),
+            crate::semantic_query::composite::CompositeList::rebuilt_from(category, new_arms),
         )
     };
     Some(dispatch.graph().intern_preserving_scope(node, data))

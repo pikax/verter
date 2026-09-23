@@ -3,7 +3,8 @@
 //!
 //! The subject walk settles a type to its signature-bearing shape (carriers
 //! and aliases through the shared settlement rail, unions through the
-//! `VerterStableV1` arm order, intersections in authored order, constrained
+//! `VerterStableV1` arm order, intersections in authored order, a
+//! declaration's heritage body own signatures first, constrained
 //! type parameters through their constraint, apparent primitives and
 //! collections through the resolved global population) and publishes the
 //! candidates through the record-level discovery in
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashSet, FxHasher};
 
+use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
     CanonicalTypeSubstitution, IncompleteReason, LiteralValue, ProjectionReductionContext,
     QueryOutcome, Ready, ResolveOverloadSetConsumer, ResultEvaluationContextId, SemanticContext,
@@ -23,12 +25,12 @@ use crate::semantic_query::{
     CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE,
 };
 use crate::signature_kernel::{
-    intersection_signatures, publish_signature, set_from_candidates, union_signatures,
-    AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId, DeclarationParentId,
-    DiscoveryError, DiscoveryTypes, ParamInput, RestInput, ResultDemand, ResultInput,
-    SemanticReadView, SignatureCandidate, SignatureDescriptorId, SignatureInput, SignatureKind,
-    SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags, SignatureStore,
-    SlotTypeFacts, SourceLocatorId, TypeToken,
+    heritage_signatures, intersection_signatures, publish_signature, set_from_candidates,
+    union_signatures, AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId,
+    DeclarationParentId, DiscoveryError, DiscoveryTypes, ParamInput, RestInput, ResultDemand,
+    ResultInput, SemanticReadView, SignatureCandidate, SignatureDescriptorId, SignatureInput,
+    SignatureKind, SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags,
+    SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
 };
 use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 
@@ -352,18 +354,26 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 union_signatures(self.types.store, self.types, &lists)
             }
             SemanticNodeData::Intersection(members) => {
+                // An interface or class body with heritage is a
+                // declaration, not an intersection type: it inherits its
+                // bases' signatures by concatenation, own first.
+                let heritage = members.origin_category() == CompositeOriginCategory::Heritage;
                 let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                 drop(data);
                 let mut lists = Vec::with_capacity(members.len());
                 for member in members {
                     lists.push(self.discover(member)?);
                 }
-                intersection_signatures(
-                    self.types.store,
-                    self.types,
-                    kernel_kind(self.kind),
-                    &lists,
-                )
+                if heritage {
+                    Ok(heritage_signatures(&lists))
+                } else {
+                    intersection_signatures(
+                        self.types.store,
+                        self.types,
+                        kernel_kind(self.kind),
+                        &lists,
+                    )
+                }
             }
             SemanticNodeData::Primitive(primitive) => {
                 let name = match primitive {

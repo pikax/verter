@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use crate::semantic_query::{IncompleteReason, SemanticNodeId};
 
 use super::discovery::{
-    intersection_signatures, publish_signature, signatures_identical, union_signatures,
-    BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput, ResultInput,
-    SignatureInput,
+    heritage_signatures, intersection_signatures, publish_signature, signatures_identical,
+    union_signatures, BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput,
+    ResultInput, SignatureInput,
 };
 use super::lifetime::SignatureStore;
 use super::positional::SlotTypeFacts;
@@ -450,4 +450,46 @@ fn union_synthesis_interns_one_provenance_per_candidate_whatever_the_arm_count()
             "{arms} arms: one sequence and one provenance per synthesized candidate"
         );
     }
+}
+
+/// A declaration with heritage is not an intersection type: TypeScript's
+/// `resolveObjectTypeMembers` gives it its OWN signatures first, then each
+/// base's in clause order, and drops nothing. Measured on TypeScript 7.0.2
+/// over `interface A { (a: string): 'A' }`, `interface B1 extends A
+/// { (b1: number): 'B1' }`, `interface B2 extends A { (b2: boolean): 'B2' }`
+/// and `interface DM extends B1, B2 {}`: `ReturnType<DM>` is `"A"` — the
+/// shared base's signature, reached again through `B2`, is the LAST — while
+/// the intersection `B1 & B2` dedups it and `ReturnType<B1 & B2>` is `"B2"`.
+/// Over `interface C extends A { (): number }` a call resolves to the own
+/// `number` signature and `ReturnType<C>` reads the base's.
+#[test]
+fn heritage_lists_own_signatures_first_and_drops_nothing() {
+    let store = SignatureStore::new();
+    let types = DeclaredReturns {
+        store: &store,
+        returns: RefCell::new(Vec::new()),
+    };
+    let root = types.declared(1, 100, 200);
+    let left = types.declared(2, 101, 201);
+    let right = types.declared(3, 102, 202);
+    let own = types.declared(4, 103, 203);
+
+    // `DM`'s body: bases in clause order, the own body LAST. Each base is
+    // itself a declaration listing its own signature before the root's.
+    let members = [vec![left, root], vec![right, root], vec![own]];
+    assert_eq!(
+        heritage_signatures(&members),
+        vec![own, left, root, right, root],
+        "own signatures first, then every base's in clause order, the repeated root kept"
+    );
+    assert_eq!(
+        intersection_signatures(&store, &types, SignatureKind::Call, &members).unwrap(),
+        vec![left, root, right, own],
+        "an intersection over the same members keeps authored arm order and drops the \
+         identical repeat"
+    );
+    assert!(
+        heritage_signatures(&[]).is_empty(),
+        "a body with no member carries no signature"
+    );
 }

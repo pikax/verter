@@ -331,9 +331,13 @@ defineEmits<{
 }
 
 // @ai-generated - Discriminates heritage call-signature identities against
-// the resolved surface's base-before-own order.
+// the resolved surface's own-before-base order. TypeScript 7.0.2 lists a
+// derived interface's own call signatures before its base's: over this
+// fixture `de('save', payload)` resolves to the own `boolean` signature,
+// while `ReturnType<DerivedEmits>` (the LAST signature) is the base's
+// `number`.
 #[test]
-fn vue_public_projection_orders_inherited_callable_emits_base_before_own() {
+fn vue_public_projection_orders_inherited_callable_emits_own_before_base() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -386,31 +390,31 @@ defineEmits<DerivedEmits>()
     assert_eq!(save.overloads.len(), 2, "base and own overloads survive");
     assert_eq!(
         save.overloads[0].parameters[0].name.as_deref(),
-        Some("basePayload"),
-        "the inherited occurrence leads the resolved surface"
+        Some("ownPayload"),
+        "the derived own signature leads the resolved surface"
     );
     assert_eq!(
         save.overloads[0].return_type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-        "the inherited return remains attached to the inherited payload"
-    );
-    assert_eq!(
-        save.overloads[1].parameters[0].name.as_deref(),
-        Some("ownPayload"),
-        "the derived own signature follows its heritage"
-    );
-    assert_eq!(
-        save.overloads[1].return_type,
         verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
         "the derived return remains attached to the derived payload"
     );
     assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("basePayload"),
+        "the inherited occurrence follows the own signatures"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the inherited return remains attached to the inherited payload"
+    );
+    assert_eq!(
         save.derived_handler.overloads[0].return_type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
     );
     assert_eq!(
         save.derived_handler.overloads[1].return_type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
     );
 }
 
