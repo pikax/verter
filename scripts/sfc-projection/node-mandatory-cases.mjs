@@ -111,6 +111,13 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP14-alias-cycle",
     "STP14-duplicate-error",
   ]),
+  STP15: Object.freeze([
+    "STP15-read-ref",
+    "STP15-readonly-write",
+    "STP15-setter-domain",
+    "STP15-unused",
+    "STP15-mutation",
+  ]),
   STS0: Object.freeze([
     "STS0-svelte-inventory",
     "STS0-svelte-abi",
@@ -133,4 +140,5 @@ export const STP11_MANDATORY_CASES = NODE_MANDATORY_CASES.STP11;
 export const STP12_MANDATORY_CASES = NODE_MANDATORY_CASES.STP12;
 export const STP13_MANDATORY_CASES = NODE_MANDATORY_CASES.STP13;
 export const STP14_MANDATORY_CASES = NODE_MANDATORY_CASES.STP14;
+export const STP15_MANDATORY_CASES = NODE_MANDATORY_CASES.STP15;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

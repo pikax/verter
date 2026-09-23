@@ -91,6 +91,10 @@ mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod canonical_algebra;
 pub(crate) mod carrier;
+// The operational budget owner: work units, query-boundary depth, and the
+// request cancellation signal for one connected semantic demand. The
+// dispatcher holds a ledger; it does not implement one.
+pub(crate) mod connected_demand;
 pub(crate) mod cycle_gate;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
@@ -286,74 +290,6 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `build_instantiate` invocations share the active set.
 pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
-const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
-const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
-
-#[derive(Debug)]
-struct ConnectedDemandState {
-    active: std::cell::Cell<bool>,
-    work_used: std::cell::Cell<usize>,
-    work_limit: std::cell::Cell<usize>,
-    query_depth: std::cell::Cell<u16>,
-    query_depth_limit: std::cell::Cell<u16>,
-    tripped: std::cell::Cell<crate::semantic_query::PartialReasonSet>,
-}
-
-impl ConnectedDemandState {
-    fn new(work_limit: usize, query_depth_limit: u16) -> Self {
-        Self {
-            active: std::cell::Cell::new(false),
-            work_used: std::cell::Cell::new(0),
-            work_limit: std::cell::Cell::new(work_limit),
-            query_depth: std::cell::Cell::new(0),
-            query_depth_limit: std::cell::Cell::new(query_depth_limit),
-            tripped: std::cell::Cell::new(crate::semantic_query::PartialReasonSet::empty()),
-        }
-    }
-
-    fn begin(&self, work_limit: usize, query_depth_limit: u16) {
-        self.work_used.set(0);
-        self.work_limit.set(work_limit);
-        self.query_depth.set(0);
-        self.query_depth_limit.set(query_depth_limit);
-        self.tripped
-            .set(crate::semantic_query::PartialReasonSet::empty());
-        self.active.set(true);
-    }
-}
-
-/// Panic-safe lifetime of one connected semantic demand. The outermost
-/// dispatch or direct projector installs the state; nested query and worklist
-/// entries join it without holding a `RefCell` borrow across semantic work.
-struct ConnectedDemandGuard<'g> {
-    state: &'g ConnectedDemandState,
-    root: bool,
-    entered_query_depth: bool,
-}
-
-impl ConnectedDemandGuard<'_> {
-    fn is_root(&self) -> bool {
-        self.root
-    }
-}
-
-impl Drop for ConnectedDemandGuard<'_> {
-    fn drop(&mut self) {
-        if self.entered_query_depth {
-            self.state
-                .query_depth
-                .set(self.state.query_depth.get().saturating_sub(1));
-        }
-        if self.root {
-            verter_debug_assert!(
-                self.state.query_depth.get() == 0,
-                "connected-demand root dropped while a nested query boundary remained active"
-            );
-            self.state.active.set(false);
-        }
-    }
-}
-
 /// Host-bound dispatcher for [`SemanticQueryApi`].
 ///
 /// The dispatcher borrows the host for the duration of a query — every
@@ -509,11 +445,10 @@ pub struct ProjectSemanticDispatch<'a> {
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
     pub(super) canonical_evidence_epoch: std::cell::Cell<u64>,
-    connected_demand: ConnectedDemandState,
-    #[cfg(test)]
-    connected_work_limit_for_tests: std::cell::Cell<usize>,
-    #[cfg(test)]
-    connected_query_depth_limit_for_tests: std::cell::Cell<u16>,
+    /// Operational work/depth/cancellation accounting for the connected
+    /// demands rooted at this dispatcher. The dispatcher holds the ledger but
+    /// owns none of its logic — see [`connected_demand`].
+    connected_demand: connected_demand::ConnectedDemandLedger<'a>,
 }
 
 /// One cold-build-local taint frame: the OR-accumulator a single cold
@@ -655,86 +590,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             relation_env: std::cell::OnceCell::new(),
             canonical_evidence_epoch: std::cell::Cell::new(0),
-            connected_demand: ConnectedDemandState::new(
-                MAX_CONNECTED_PROJECTION_WORK,
-                MAX_CONNECTED_QUERY_DEPTH,
+            connected_demand: connected_demand::ConnectedDemandLedger::new(
+                connected_demand::DemandCancellation::from_context(ctx),
             ),
-            #[cfg(test)]
-            connected_work_limit_for_tests: std::cell::Cell::new(MAX_CONNECTED_PROJECTION_WORK),
-            #[cfg(test)]
-            connected_query_depth_limit_for_tests: std::cell::Cell::new(MAX_CONNECTED_QUERY_DEPTH),
         }
     }
 
-    fn connected_work_limit(&self) -> usize {
-        #[cfg(test)]
-        {
-            self.connected_work_limit_for_tests.get()
-        }
-        #[cfg(not(test))]
-        {
-            MAX_CONNECTED_PROJECTION_WORK
-        }
-    }
-
-    fn connected_query_depth_limit(&self) -> u16 {
-        #[cfg(test)]
-        {
-            self.connected_query_depth_limit_for_tests.get()
-        }
-        #[cfg(not(test))]
-        {
-            MAX_CONNECTED_QUERY_DEPTH
-        }
+    /// The operational budget ledger for demands rooted at this dispatcher.
+    ///
+    /// A budget consumer takes this instead of the dispatcher: the ledger
+    /// carries the whole work/depth/cancellation contract and no semantic
+    /// capability, so a consumer typed on it cannot re-enter dispatch.
+    pub(super) fn connected_demand(&self) -> &connected_demand::ConnectedDemandLedger<'a> {
+        &self.connected_demand
     }
 
     fn enter_connected_demand(
         &self,
         query_boundary: bool,
     ) -> (
-        ConnectedDemandGuard<'_>,
+        connected_demand::ConnectedDemandGuard<'_>,
         Option<crate::semantic_query::PartialReasonSet>,
     ) {
-        let state = &self.connected_demand;
-        let root = !state.active.get();
-        if root {
-            state.begin(
-                self.connected_work_limit(),
-                self.connected_query_depth_limit(),
-            );
-        }
-        if self.ctx.is_cancelled() {
-            state.tripped.set(
-                state
-                    .tripped
-                    .get()
-                    .union(crate::semantic_query::PartialReasonSet::CANCELLED),
-            );
-        }
-        let mut entered_query_depth = false;
-        let tripped = state.tripped.get();
-        let trip = if !tripped.is_empty() {
-            Some(tripped)
-        } else if query_boundary && state.query_depth.get() >= state.query_depth_limit.get() {
-            let tripped =
-                tripped.union(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
-            state.tripped.set(tripped);
-            Some(tripped)
-        } else {
-            if query_boundary {
-                state.query_depth.set(state.query_depth.get() + 1);
-                entered_query_depth = true;
-            }
-            None
-        };
-        (
-            ConnectedDemandGuard {
-                state,
-                root,
-                entered_query_depth,
-            },
-            trip,
-        )
+        self.connected_demand.enter(query_boundary)
     }
 
     /// Whether the connected-demand ledger has ALREADY tripped on this
@@ -742,94 +620,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// evidence about the queried surface — the caller must report the
     /// budget, not a semantic verdict.
     pub(super) fn connected_demand_tripped(&self) -> bool {
-        !self.connected_demand.tripped.get().is_empty()
+        self.connected_demand.has_tripped()
     }
 
     pub(super) fn charge_connected_work(
         &self,
     ) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        let state = &self.connected_demand;
-        verter_debug_assert!(
-            state.active.get(),
-            "connected work must be charged inside a connected-demand guard"
-        );
-        if self.ctx.is_cancelled() {
-            return Err(
-                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
-            );
-        }
-        let tripped = state.tripped.get();
-        if !tripped.is_empty() {
-            return Err(tripped);
-        }
-        let work_used = state.work_used.get();
-        if work_used >= state.work_limit.get() {
-            let tripped =
-                tripped.union(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT);
-            state.tripped.set(tripped);
-            return Err(tripped);
-        }
-        state.work_used.set(work_used + 1);
-        Ok(())
-    }
-
-    /// Snapshot the remaining work available to a query-free terminal run.
-    /// The caller commits exactly the units it consumes before any nested
-    /// semantic dispatch.
-    #[inline(always)]
-    pub(super) fn connected_work_available(
-        &self,
-    ) -> Result<usize, crate::semantic_query::PartialReasonSet> {
-        let state = &self.connected_demand;
-        verter_debug_assert!(
-            state.active.get(),
-            "connected work must be observed inside a connected-demand guard"
-        );
-        if self.ctx.is_cancelled() {
-            return Err(
-                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
-            );
-        }
-        let tripped = state.tripped.get();
-        if !tripped.is_empty() {
-            return Err(tripped);
-        }
-        let work_used = state.work_used.get();
-        Ok(state.work_limit.get().saturating_sub(work_used))
-    }
-
-    #[inline(always)]
-    pub(super) fn commit_connected_work(&self, consumed: usize) {
-        if consumed == 0 {
-            return;
-        }
-        let state = &self.connected_demand;
-        verter_debug_assert!(state.active.get());
-        let work_used = state.work_used.get();
-        verter_debug_assert!(work_used.saturating_add(consumed) <= state.work_limit.get());
-        state.work_used.set(work_used + consumed);
+        self.connected_demand.charge()
     }
 
     pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
-        self.connected_demand
-            .active
-            .get()
-            .then(|| self.connected_demand.tripped.get())
-            .filter(|tripped| !tripped.is_empty())
+        self.connected_demand.active_trip()
     }
 
     fn trip_connected_demand(
         &self,
         reason: crate::semantic_query::PartialReasonSet,
     ) -> crate::semantic_query::PartialReasonSet {
-        let state = &self.connected_demand;
-        verter_debug_assert!(
-            state.active.get(),
-            "an operational limit can trip only inside a connected demand"
-        );
-        let tripped = state.tripped.get().union(reason);
-        state.tripped.set(tripped);
-        tripped
+        self.connected_demand.record_trip(reason)
     }
 
     fn connected_limit_carrier(
@@ -893,26 +701,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticQueryKey::Relate { source, .. } => *source,
             _ => {
-                let state = &self.connected_demand;
-                let (limit, actual, rail) = if state.active.get() {
-                    if reasons.contains(
-                        crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
-                    ) {
-                        (
-                            usize::from(state.query_depth_limit.get()),
-                            u64::from(state.query_depth.get()),
-                            "connected-query-depth",
-                        )
-                    } else {
-                        (
-                            state.work_limit.get(),
-                            state.work_used.get() as u64,
-                            "projection-work",
-                        )
-                    }
-                } else {
-                    (0, 0, "unknown")
-                };
+                let (limit, actual, rail) = self.connected_demand.limit_report(reasons);
                 self.opaque(QueryError::BudgetExceeded(BudgetExceededFailure {
                     domain: BudgetDomain::ProjectionOperation,
                     limit,
@@ -985,12 +774,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     #[cfg(test)]
     pub(super) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
-        assert!(
-            !self.connected_demand.active.get(),
-            "test limits must be set before entering a connected demand"
-        );
-        self.connected_work_limit_for_tests.set(work);
-        self.connected_query_depth_limit_for_tests.set(depth);
+        self.connected_demand.set_limits_for_tests(work, depth);
     }
 
     /// Fold a discarded nested-read's metadata into the TOP cold-build-local

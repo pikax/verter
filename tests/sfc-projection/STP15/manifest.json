@@ -1,0 +1,56 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP15",
+  "kind": "implementation",
+  "products": ["TemplateReadView", "TemplateWriteTarget", "BindingUsageSet"],
+  "mandatoryCases": [
+    "STP15-read-ref",
+    "STP15-readonly-write",
+    "STP15-setter-domain",
+    "STP15-unused",
+    "STP15-mutation"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP15/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP15/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP15/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP15/probes/tsconfig.json",
+    "hoverNeedle": "stp15HoverTarget",
+    "definitionNeedle": "stp15DefinitionTarget",
+    "expectedNegativeCode": 2540,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP15-read-ref",
+      "disposition": "accept",
+      "twins": ["template-unwrapped-count", "script-keeps-ref-value"]
+    },
+    {
+      "id": "STP15-readonly-write",
+      "disposition": "reject",
+      "twins": ["getter-only-computed-assignment-errors"]
+    },
+    {
+      "id": "STP15-setter-domain",
+      "disposition": "accept",
+      "twins": ["setter-accepts-declared-string-domain"]
+    },
+    {
+      "id": "STP15-unused",
+      "disposition": "reject",
+      "twins": ["no-synthetic-void-reads"]
+    },
+    {
+      "id": "STP15-mutation",
+      "disposition": "reject",
+      "twins": ["live-view-no-immutable-snapshot"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP15 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::binding_views",
+  "runtimeCorrectness": true,
+  "notes": "Live template read/write views and actual usage accounting. Top-level refs read unwrapped in the template while script keeps the Ref wrapper; nested refs stay wrapped. Writes resolve through one checked entry point: mutable refs, setter-domain writables, reactive members and model refs pass; getter-only computed and readonly props are refused. Usage is authored references only, so unused bindings stay visible. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::binding_views. STP58 owns atomic Vue activation."
+}
