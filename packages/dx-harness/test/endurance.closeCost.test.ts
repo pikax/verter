@@ -215,7 +215,8 @@ describe.sequential(`endurance: close cost on the WSP equal-work slice [${config
       generated = true;
     }
     derivation = deriveCorpusProbes(root, { maxFiles: FILE_BUDGET });
-    rig = await spawnRig(root, config, false);
+    // A 2615-file project takes the provider well past the default startup gate.
+    rig = await spawnRig(root, config, false, { readyTimeoutMs: 900_000 });
   }, 1_800_000);
 
   afterAll(async () => {
