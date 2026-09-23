@@ -270,6 +270,7 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
         CompositeOriginCategory::QuerySubject => 6,
         #[cfg(any(test, feature = "test-support"))]
         CompositeOriginCategory::TestFixture => 7,
+        CompositeOriginCategory::Heritage => 9,
     }
 }
 

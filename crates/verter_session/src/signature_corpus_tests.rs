@@ -990,9 +990,19 @@ fn union_order_is_the_only_difference_from_the_checker() {
 /// application by its alias when the alias constructs the type it settles
 /// on — each with its omitted defaulted arguments filled — and every other
 /// alias (a conditional, a bare parameter, a primitive, a union that
-/// collapsed to one member) as what it resolves to. Every checker print is
-/// TypeScript 7.0.2's, measured on this exact module through the corpus's
-/// two-step wrapper.
+/// collapsed to one member) as what it resolves to. An alias of a
+/// non-generic declaration is that declaration (`ToFace` prints `Face`,
+/// `ToToObj` prints `ObjNoGen`), while one of a generic interface
+/// application keeps its own name (`ToGFace`, `PromAlias<number>`). A
+/// mapped utility application is printed by the utility's name
+/// (`Partial<{ a: 1; }>`, `Pick<…, "a">`); an alias of a homomorphic one
+/// (`Partial` / `Readonly`, or an alias declaring one) takes the mapped
+/// name unless its declared source is a union (`P<{ a: 1 }>` and
+/// `PP<{ a: 1 }>` print `Partial<{ a: 1; }>`, `MpA<{ a: 1 }>` prints
+/// `Mp<{ a: 1; }>`, `PU` prints `PU`), and an alias of a keyed one keeps
+/// its own (`PickA<…>`, `Rec<"x">`). Every checker print is TypeScript
+/// 7.0.2's, measured on this exact module through the corpus's two-step
+/// wrapper.
 #[test]
 fn the_print_altitude_names_declaration_applications_as_the_checker_does() {
     use crate::signature_corpus_rows_tests::Family;
@@ -1016,6 +1026,27 @@ type OuterCond<T = string> = Cond<T>;
 type ObjNoGen = { a: 1 };
 type Fn<T> = (x: T) => void;
 type Lit<T> = T;
+interface Face { a: 1 }
+class Klass { k = 1 }
+type ToFace = Face;
+type ToToFace = ToFace;
+type ToKlass = Klass;
+type ToObj = ObjNoGen;
+type ToToObj = ToObj;
+type ToGFace = GI<string>;
+type ToGFaceDefault = GI;
+type GenToFace<T> = GI<T>;
+type PromAlias<T> = Promise<T>;
+type P<T> = Partial<T>;
+type PP<T> = P<T>;
+type PFace = Partial<Face>;
+type NonGenP = Partial<{ z: 1 }>;
+type RO<T> = Readonly<T>;
+type PU = Partial<Face | ObjNoGen>;
+type PickA<T extends { a: unknown }> = Pick<T, 'a'>;
+type Rec<K extends string> = Record<K, number>;
+type OmitA<T> = Omit<T, 'a'>;
+type MpA<T> = Mp<T>;
 export function witness() { return 1; }";
     let mut failures = Vec::new();
     for (probe, checker) in [
@@ -1037,6 +1068,30 @@ export function witness() { return 1; }";
         ("ObjNoGen", "ObjNoGen"),
         ("Fn<number>", "Fn<number>"),
         ("Lit<{ z: 1 }>", "{ z: 1; }"),
+        ("ToFace", "Face"),
+        ("ToToFace", "Face"),
+        ("ToKlass", "Klass"),
+        ("ToObj", "ObjNoGen"),
+        ("ToToObj", "ObjNoGen"),
+        ("ToGFace", "ToGFace"),
+        ("ToGFaceDefault", "ToGFaceDefault"),
+        ("GenToFace<boolean>", "GenToFace<boolean>"),
+        ("PromAlias<number>", "PromAlias<number>"),
+        ("P<{ a: 1 }>", "Partial<{ a: 1; }>"),
+        ("PP<{ a: 1 }>", "Partial<{ a: 1; }>"),
+        ("PFace", "Partial<Face>"),
+        ("NonGenP", "Partial<{ z: 1; }>"),
+        ("RO<Face>", "Readonly<Face>"),
+        ("PU", "PU"),
+        ("PickA<{ a: 1; b: 2 }>", "PickA<{ a: 1; b: 2; }>"),
+        ("Rec<'x'>", "Rec<\"x\">"),
+        ("OmitA<{ a: 1; b: 2 }>", "OmitA<{ a: 1; b: 2; }>"),
+        ("MpA<{ a: 1 }>", "Mp<{ a: 1; }>"),
+        ("Partial<{ a: 1 }>", "Partial<{ a: 1; }>"),
+        ("Pick<{ a: 1; b: 2 }, 'a'>", "Pick<{ a: 1; b: 2; }, \"a\">"),
+        ("Record<'x', number>", "Record<\"x\", number>"),
+        ("Omit<{ a: 1; b: 2 }, 'a'>", "Omit<{ a: 1; b: 2; }, \"a\">"),
+        ("Partial<Face | ObjNoGen>", "Partial<Face | ObjNoGen>"),
     ] {
         let row = Row {
             id: "SV_CONTROL_print_altitude",

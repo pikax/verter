@@ -2924,18 +2924,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relation_combine_candidates(&members, VariancePhase::Covariant)
             }
             Some(SemanticNodeData::Intersection(members)) => {
+                let category = members.origin_category();
                 let members = members
                     .iter()
                     .map(|member| self.call_shape_transform(*member, policy, memo))
                     .collect::<Vec<_>>();
                 // Order- and scope-preserving rebuild: an intersection
                 // reaching call-shape transformation may be an
-                // overload-ordered carrier, so the transformed arms keep
-                // their declaration order verbatim.
+                // overload-ordered carrier or a heritage body, so the
+                // transformed arms keep their declaration order verbatim
+                // and a heritage body stays one.
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Intersection(
-                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                        crate::semantic_query::composite::CompositeList::rebuilt_from(
+                            category,
                             Arc::from(members.into_boxed_slice()),
                         ),
                     ),

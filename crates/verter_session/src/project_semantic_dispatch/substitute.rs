@@ -345,16 +345,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                let rebuilt = if new_members.iter().any(|member| {
-                    crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
-                        self.graph(),
-                        *member,
-                    )
-                }) {
+                // A heritage body is a declaration, not an intersection type:
+                // its substitution stays a heritage body whatever it carries.
+                let category = members.origin_category();
+                let rebuilt = if category
+                    == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+                    || new_members.iter().any(|member| {
+                        crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
+                            self.graph(),
+                            *member,
+                        )
+                    }) {
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
                                 Arc::from(new_members.into_boxed_slice()),
                             ),
                         ),

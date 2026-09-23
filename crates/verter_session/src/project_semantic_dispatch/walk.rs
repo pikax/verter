@@ -1036,12 +1036,13 @@ pub(crate) fn reduce_merged_decl_with_graph(
     }
     // Preserve heritage: own-body object LAST so the intersection heritage-shadow
     // reducer lets the merged own members shadow inherited same-name members.
-    // ORDERED carrier: arm order is own-body-last topology and rendered
-    // type-text fidelity — never the commutative canonical route.
+    // A HERITAGE body: arm order is own-body-last topology and rendered
+    // type-text fidelity — never the commutative canonical route — and its
+    // signatures inherit by concatenation, own first.
     let mut arms = heritage_arms;
     arms.push(own_object);
     graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+        crate::semantic_query::composite::CompositeList::heritage(Arc::from(
             arms.into_boxed_slice(),
         )),
     ))
@@ -4225,11 +4226,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         } else {
             match kind {
                 ExpansionCombineKind::Intersection => {
-                    self.graph().intern_node(SemanticNodeData::Intersection(
-                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
-                            Arc::from(expanded.into_boxed_slice()),
-                        ),
-                    ))
+                    let expanded = Arc::from(expanded.into_boxed_slice());
+                    self.graph()
+                        .intern_node(SemanticNodeData::Intersection(match category {
+                            Some(category) => {
+                                crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                    category, expanded,
+                                )
+                            }
+                            None => {
+                                crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                    expanded,
+                                )
+                            }
+                        }))
                 }
                 ExpansionCombineKind::Union => self.graph().intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
@@ -4568,7 +4578,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     buffer_id,
                     parent_target,
                     node: intersection,
-                    heritage,
                 } => {
                     let mut arm_surfaces =
                         intersection_buffers.remove(&buffer_id).unwrap_or_default();
@@ -4591,16 +4600,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         self.dispatch.deposit_canonical_evidence(canonical_evidence);
                         merged
                     };
-                    // A heritage overlay is an intersection NODE but not an
-                    // intersection TYPE: an interface/class inherits its
-                    // bases' signatures by concatenation (TypeScript's
-                    // `resolveObjectTypeMembers`), keeping identical ones the
-                    // intersection rule would collapse. It keeps the merge's
-                    // lists.
-                    let merged = if heritage {
-                        merged
-                    } else {
-                        merged.map(|surface| self.with_discovered_signatures(intersection, surface))
+                    // The signature lists come from `SignaturesOfType`, which
+                    // answers a heritage body (an interface/class declaration)
+                    // by concatenation and any other intersection by the
+                    // intersection rules. Arms that are all bare signatures
+                    // (an overload group) contribute no member surface, yet
+                    // the intersection is the callable their signatures make.
+                    let merged = match merged {
+                        Some(surface) => {
+                            Some(self.with_discovered_signatures(intersection, surface))
+                        }
+                        None => {
+                            let callable = self.with_discovered_signatures(
+                                intersection,
+                                ShallowSurface::from_entries(Vec::new(), None),
+                            );
+                            (!callable.entries.is_empty()).then_some(callable)
+                        }
                     };
                     self.contribute_surface(
                         parent_target,
@@ -5024,7 +5040,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     buffer_id,
                     parent_target: target,
                     node: cur,
-                    heritage: heritage_overlay_body,
                 });
                 if !arms.is_empty() {
                     work.push(Frame::VisitArmAt {
@@ -6738,9 +6753,6 @@ enum Frame {
         /// The intersection whose arms the buffer merges: its signature
         /// entries are the discovery authority's answer for this node.
         node: SemanticNodeId,
-        /// Whether the intersection is an interface/class body's heritage
-        /// overlay rather than an intersection type.
-        heritage: bool,
     },
     FlushUnion {
         buffer_id: usize,
