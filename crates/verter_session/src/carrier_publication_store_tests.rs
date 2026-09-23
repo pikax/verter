@@ -1507,3 +1507,103 @@ fn a_generation_that_loses_currency_while_adopting_is_superseded() {
         "the fence rejects the ENVELOPE, never the retained parse: adoption must not re-parse"
     );
 }
+
+/// The publish fence binds the stable leader's DOUBLE-CHECKED adoption too.
+///
+/// A generation whose initial retained read missed becomes the stable-parse
+/// leader and re-reads the retained store before parsing. If another
+/// generation parsed, retained and unlisted the unit in between, that
+/// double-checked read adopts it — and must still answer to the currency
+/// fence, or a generation that lost currency serves a stale snapshot as
+/// `Adopted` on exactly the schedule that made
+/// `concurrent_differing_generations_of_one_content_parse_once` flaky.
+///
+/// Deterministic: the loser misses its initial read and is parked right
+/// after it; the winner then registers, parses and retains; only then is
+/// the loser released onto its double-checked read.
+#[test]
+fn a_superseded_stable_leader_is_fenced_on_its_double_checked_adoption() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Parks the first reader AFTER its (missing) retained read until the
+    /// test thread has published the winning generation.
+    struct MissThenParkUnits {
+        inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore,
+        arrive: Barrier,
+        release: Barrier,
+        gated: AtomicBool,
+    }
+
+    impl crate::carrier_publication_store::persistence::CarrierStableUnitStore for MissThenParkUnits {
+        fn retained(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        ) -> Option<crate::carrier_publication_store::persistence::RetainedStableUnit> {
+            let unit = self.inner.retained(id, accepted);
+            if self.gated.swap(false, Ordering::SeqCst) {
+                self.arrive.wait();
+                self.release.wait();
+            }
+            unit
+        }
+
+        fn retain(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+            artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+            cohort: crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort,
+        ) {
+            self.inner.retain(id, accepted, artifact, cohort);
+        }
+
+        fn discard(
+            &self,
+            id: &crate::carrier_publication_store::FrameworkArtifactId,
+            accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
+        ) {
+            self.inner.discard(id, accepted);
+        }
+    }
+
+    let (source, grammar) = authorities();
+    let units = Arc::new(MissThenParkUnits {
+        inner: crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default(),
+        arrive: Barrier::new(2),
+        release: Barrier::new(2),
+        gated: AtomicBool::new(true),
+    });
+    let store = Arc::new(CarrierPublicationStore::with_dependencies(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        units.clone(),
+        Arc::new(crate::types::MetaProvenance::default()),
+    ));
+    let bytes = "<template><p>lead then adopt</p></template>";
+    // The first generation is CURRENT when it enters, misses the empty
+    // retained store, and parks before it can list its stable parse.
+    let first = accepted(&source, &grammar, 1, bytes);
+    let loser_store = Arc::clone(&store);
+    let loser = thread::spawn(move || loser_store.publish_or_get(&first, request(1, &first)));
+    units.arrive.wait();
+    // The winning generation steals currency, parses and retains the unit.
+    let second = accepted(&source, &grammar, 2, bytes);
+    match store.publish_or_get(&second, request(2, &second)) {
+        PublicationOutcome::Published(_) => {}
+        other => panic!("the current generation must publish and retain, got {other:?}"),
+    }
+    units.release.wait();
+
+    let outcome = loser.join().expect("loser worker");
+    assert!(
+        matches!(outcome, PublicationOutcome::Superseded(_)),
+        "a stable leader that lost currency must be superseded on its double-checked \
+         adoption, not serve a stale snapshot, got {outcome:?}"
+    );
+    assert_eq!(
+        store.audit_snapshot().parser_started,
+        1,
+        "the double-checked read adopts the retained unit: exactly one parse"
+    );
+}

@@ -838,7 +838,10 @@ mod tests {
         let alias = dispatch
             .graph()
             .intern_node(SemanticNodeData::Alias(terminal));
-        dispatch.connected_work_limit_for_tests.set(0);
+        dispatch.set_connected_limits_for_tests(
+            0,
+            crate::project_semantic_dispatch::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+        );
         let _scope = crate::request_context::ColdComputeCompletenessScope::enter();
         assert_eq!(
             dispatch.demand_symbol_identity(alias, &[expected()]),
