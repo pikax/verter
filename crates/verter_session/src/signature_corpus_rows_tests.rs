@@ -272,7 +272,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function pickA<T extends {\n    a: 1;\n}>(v: T): T['a'];\nexport declare function witness(): 1;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the consumer-expanded answer is an EMPTY surface (measured `{  }`), so the indexed access is never forced through the constraint. Owed by the constrained-substitution stage." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV12_grouping_witness_L",

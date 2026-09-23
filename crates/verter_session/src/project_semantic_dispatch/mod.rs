@@ -4073,6 +4073,8 @@ mod broad_runtime_tests;
 mod cycle_gate_tests;
 
 #[cfg(test)]
+mod projected_terminal_surface_tests;
+#[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
 mod truthiness_domain_tests;
