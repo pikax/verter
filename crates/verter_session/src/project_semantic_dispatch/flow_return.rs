@@ -1330,7 +1330,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    return the `Hold` sentinel.
     /// 2. **Warm read** — a validated published `Complete` result
     ///    (carrier-validated).
-    /// 3. **Cold compute** — the machinery ROOT goes through the family
+    /// 3. **Transaction reuse** — the key already closed on this
+    ///    transaction as a proven inline SCC root whose reads were recorded
+    ///    clean; they are replayed into the scopes live now (see
+    ///    [`Self::reusable_completed_flow_member`]).
+    /// 4. **Cold compute** — the machinery ROOT goes through the family
     ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
     ///    nested flow evaluation computes INLINE on the transaction (its
     ///    publish is batched at its SCC's close and drained by the root).
@@ -1364,7 +1368,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.graph().get_flow_return_result(self.ctx, &key) {
             return FlowReturnStep::Complete(result);
         }
-        // (3) Cold compute. Root versus inline is decided by the generic
+        // (3) Transaction reuse.
+        if let Some(result) = self.reusable_completed_flow_member(&key) {
+            return FlowReturnStep::Complete(result);
+        }
+        // (4) Cold compute. Root versus inline is decided by the generic
         // obligation transaction: any open frame — of any domain — makes
         // this evaluation inline.
         if self.dispatch_txn.borrow().obligations.decides_root() {
@@ -1372,6 +1380,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             self.execute_flow_return_inline(key)
         }
+    }
+
+    /// The proven value of `key` when it already closed on this transaction
+    /// as a reusable inline member, after replaying what its evaluation
+    /// read into the scopes live now.
+    ///
+    /// Such a member is proven but not yet published: its publish is
+    /// batched behind the machinery root, so the warm read cannot see it,
+    /// and without this every later demand re-evaluated the body. A body
+    /// whose callee is demanded both generically and under a call's
+    /// instantiation — each of which re-demands both forms of ITS callee —
+    /// then doubled per level: a generic call chain was exponential in its
+    /// length, and ran out of connected-work budget at eleven levels.
+    ///
+    /// Reuse is as sound as re-evaluating. The value is the member's
+    /// proof, the one its batched publish will admit, and the one its
+    /// first caller received. A re-evaluation's effect on the enclosing
+    /// builds is its reads: the replay fans the recorded facts into the
+    /// live tracers, re-deposits the canonical self-roots on the live
+    /// build frame, and advances the canonical-evidence epoch when the
+    /// evaluation did. Only a CLEAN evaluation is reusable, so it had no
+    /// partial, cache-suppressing or non-cacheable rail to replay.
+    fn reusable_completed_flow_member(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
+        let (value, reuse) = {
+            let txn = self.dispatch_txn.borrow();
+            let member = txn
+                .flow
+                .completed_members
+                .iter()
+                .rev()
+                .find(|member| &member.key == key)?;
+            let reuse = member.reuse.clone()?;
+            (member.result.value().clone(), reuse)
+        };
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&reuse.reads.facts);
+        self.deposit_operand_self_roots(&reuse.observed_self_roots);
+        if reuse.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        Some(value)
     }
 
     /// The machinery ROOT path: the full family singleflight. After a
@@ -1485,10 +1534,89 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
             ));
         }
-        let idx = self.flow_frame_open(&key);
-        self.prepare_flow_return_demand(&key, idx);
-        let evaluated = self.evaluate_flow_return(&key);
-        self.flow_frame_close(idx, evaluated)
+        let run = || {
+            let idx = self.flow_frame_open(&key);
+            self.prepare_flow_return_demand(&key, idx);
+            let evaluated = self.evaluate_flow_return(&key);
+            self.flow_frame_close(idx, evaluated)
+        };
+        // A recording is only replayable when every channel an enclosing
+        // build observes is observable here: a live tracer (a producer
+        // skips deriving an observation without one), a live build-local
+        // frame (so the capture frame below leaves `is_empty` unchanged),
+        // and a cold-compute completeness that can show a partial fold.
+        // Anything else runs exactly as before and is never reused.
+        let completeness_scope_active =
+            crate::request_context::cold_compute_completeness_scope_active();
+        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+            && !self.build_local_taint.borrow().is_empty()
+            && !(completeness_scope_active
+                && crate::request_context::current_cold_compute_completeness().is_partial());
+        if !recordable {
+            return run();
+        }
+        // Completeness: a live scope that is still complete turns partial on
+        // any partial fold (the merge is monotone), so it is read in place —
+        // a nested scope would change which reason a reason-less fold adds
+        // to it. With no scope live, a fold is observable by nobody; a
+        // private scope makes it visible here and is discarded unbubbled,
+        // so nothing outside sees a difference.
+        let private_completeness = (!completeness_scope_active)
+            .then(crate::request_context::ColdComputeCompletenessScope::enter);
+        let evidence_epoch = self.canonical_evidence_epoch.get();
+        let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        // The frame's rails reach the enclosing build exactly as if they had
+        // folded there directly: OR, union and deduplicated roots commute.
+        self.fold_observed_frame_into_top(&observed);
+        let clean = matches!(step, FlowReturnStep::Complete(_))
+            && !reads.non_cacheable
+            && !observed.result_is_partial
+            && !observed.cache_suppress
+            && !folded_partial;
+        if clean {
+            self.offer_flow_member_reuse(
+                &key,
+                queued_before,
+                super::dispatch_txn::FlowMemberReuse {
+                    reads,
+                    observed_self_roots: observed.observed_self_roots,
+                    canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                        != evidence_epoch,
+                },
+            );
+        }
+        step
+    }
+
+    /// Mark the member `key` just closed as reusable on this transaction —
+    /// only if THIS evaluation queued it, i.e. it closed as its own proven
+    /// inline SCC root. A frame that closed provisionally queued nothing
+    /// yet, and an older member under the same key was produced by a
+    /// different evaluation than the one recorded. Members queued at or
+    /// after `queued_before` are this evaluation's: no machinery root can
+    /// drain the queue while an inline frame is open, and a nested frame
+    /// cannot share its key (the re-entry intercept holds it).
+    fn offer_flow_member_reuse(
+        &self,
+        key: &FlowReturnKey,
+        queued_before: usize,
+        reuse: super::dispatch_txn::FlowMemberReuse,
+    ) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let Some(queued) = txn.flow.completed_members.get_mut(queued_before..) else {
+            return;
+        };
+        if let Some(member) = queued.iter_mut().rev().find(|member| &member.key == key) {
+            member.reuse = Some(reuse);
+        }
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
@@ -3390,6 +3518,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     inline_flight,
                                     self_roots,
                                     materialized,
+                                    // Attached by the inline executor once
+                                    // it knows what the evaluation read.
+                                    reuse: None,
                                 },
                             );
                         }

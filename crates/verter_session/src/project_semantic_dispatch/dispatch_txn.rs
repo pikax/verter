@@ -2842,6 +2842,35 @@ pub(crate) struct CompletedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
+    /// Set when a later demand for the same key on this transaction may
+    /// reuse the proven value instead of re-evaluating the body (§12:
+    /// shared body-obligation consumers reuse completed return work): the
+    /// member closed as its OWN SCC root, so its value came only from work
+    /// inside its frame, and every read that work made was recorded and
+    /// clean. `None` for a member closed inside a larger component, whose
+    /// value also rests on frames outside its own, and for any member
+    /// whose evaluation was not recorded or read something a replay cannot
+    /// reproduce.
+    pub(crate) reuse: Option<FlowMemberReuse>,
+}
+
+/// What reusing a completed flow member replays at the demanding site: the
+/// reads its evaluation made on every channel an enclosing build observes,
+/// so a scope that was not live when the member ran still sees them — the
+/// transaction-local counterpart of a warm hit bubbling its stored
+/// signature. Only a CLEAN evaluation is recorded as reusable (no
+/// non-cacheable read, no partial or cache-suppressing taint, a complete
+/// cold-compute scope), so these three rails are all a replay needs.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowMemberReuse {
+    /// The fact reads, fanned out again into the live tracers.
+    pub(crate) reads: crate::resolver_core::resolver_context::RecordedFactReads,
+    /// The file self-roots canonical construction deposited, re-deposited
+    /// on the live build-local frame.
+    pub(crate) observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// Whether the evaluation deposited canonical evidence, which a
+    /// substitution's cache decision watches for.
+    pub(crate) canonical_evidence_deposited: bool,
 }
 
 /// A call member whose mixed component closed cleanly, queued for the

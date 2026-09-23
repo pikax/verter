@@ -204,6 +204,13 @@ pub fn current_cold_compute_completeness() -> ResultCompleteness {
         .unwrap_or(ResultCompleteness::Complete)
 }
 
+/// Whether a per-cold-compute completeness scope is active on this thread
+/// — i.e. whether a partial fold made now is observable at all.
+#[must_use]
+pub(crate) fn cold_compute_completeness_scope_active() -> bool {
+    COLD_COMPUTE_COMPLETENESS.with(|s| !s.borrow().is_empty())
+}
+
 thread_local! {
     /// Depth of active [`DeferredPartialStickyScope`]s on this thread.
     /// While non-zero, the `mark_request_result_partial*` /

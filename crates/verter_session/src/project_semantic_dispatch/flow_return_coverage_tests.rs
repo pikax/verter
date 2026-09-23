@@ -2001,6 +2001,123 @@ fn synthesized_optional_member_read_folds_undefined_like_the_authored_one() {
         "a SYNTHESIZED optional member must read exactly like the authored one"
     );
 }
+
+/// A generic call chain `c{n}<T>(x: T) { return c{n-1}(x); }` of `levels`
+/// functions over `c0`, and a witness `w` calling the last one. `c0` is
+/// imported from `dep` when `import_c0`, else defined locally with `tag`.
+fn generic_chain(levels: usize, import_c0: bool, tag: &str) -> String {
+    let mut source = if import_c0 {
+        "import { c0 } from \"./dep\";\n".to_string()
+    } else {
+        generic_chain_head(tag)
+    };
+    for level in 1..levels {
+        source.push_str(&format!(
+            "export function c{level}<T>(x: T) {{ return c{}(x); }}\n",
+            level - 1
+        ));
+    }
+    source.push_str(&format!(
+        "export function w(v: number | string) {{ return c{}(v); }}\n",
+        levels - 1
+    ));
+    source
+}
+
+fn generic_chain_head(tag: &str) -> String {
+    format!("export function c0<T>(x: T) {{ return {{ v: x, tag: \"{tag}\" as const }}; }}\n")
+}
+
+/// The answer for `w` over a `levels`-long chain, and the connected work
+/// units its demand charged.
+fn generic_chain_work(levels: usize) -> (Outcome, usize) {
+    let path = format!("/ws/cov/chain_{levels}.ts");
+    let host = host_with(&[(path.as_str(), generic_chain(levels, false, "o").as_str())]);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, &path, "w");
+        let outcome = eval_key_on(&host, dispatch, key);
+        (outcome, dispatch.connected_demand.work_used.get())
+    })
+}
+
+/// §12 hard gate "shared body-obligation consumers reuse completed return
+/// work": each chain level demands its callee both generically and under
+/// the call's instantiation, and each of those re-demands both forms of
+/// the level below. Before a completed inline member was reusable on its
+/// own transaction, every repeat re-evaluated the body and the work
+/// DOUBLED per level (20504 units at eleven levels, against 306 now); the
+/// host's audited entry ran out of connected-work budget at eleven. Every
+/// added level must now cost the same.
+///
+/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB): eleven
+/// levels nest 22 connected queries, deeper than a default test thread
+/// holds in an unoptimized build.
+#[test]
+fn a_generic_call_chain_reuses_each_completed_callee() {
+    let worker = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let (short, _) = generic_chain_work(2);
+            assert!(
+                matches!(
+                    short,
+                    Outcome::Value {
+                        degradation: None,
+                        ..
+                    }
+                ),
+                "the two-level chain must answer cleanly: {short:?}"
+            );
+            let (nine, work_nine) = generic_chain_work(9);
+            let (ten, work_ten) = generic_chain_work(10);
+            let (eleven, work_eleven) = generic_chain_work(11);
+            for (levels, outcome) in [(9, nine), (10, ten), (11, eleven)] {
+                assert_eq!(
+                    outcome, short,
+                    "a {levels}-level chain answers exactly like a two-level one"
+                );
+            }
+            assert_eq!(
+                work_eleven - work_ten,
+                work_ten - work_nine,
+                "every added level must cost the same connected work \
+                 ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 levels)"
+            );
+        })
+        .expect("spawn the chain worker");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// A reused member's reads are REPLAYED into the builds demanding it, so
+/// an edit to a callee in another file still reaches every consumer: the
+/// callee's body fact must root whatever was built from the reused value,
+/// or the second read below would serve the stale tag.
+#[test]
+fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
+    const DEP: &str = "/ws/cov/chain_dep/dep.ts";
+    const MAIN: &str = "/ws/cov/chain_dep/main.ts";
+    let main = generic_chain(6, true, "");
+    let host = host_with(&[(DEP, &generic_chain_head("before")), (MAIN, &main)]);
+    let before = eval(&host, MAIN, "w");
+    assert!(
+        format!("{before:?}").contains("before"),
+        "the chain carries the callee's tag: {before:?}"
+    );
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(DEP.to_string()),
+        input_id: DEP.to_string(),
+        source: Arc::from(generic_chain_head("after").as_str()),
+        file_language: lang(DEP),
+        aliases: Vec::new(),
+    });
+    let after = eval(&host, MAIN, "w");
+    assert!(
+        format!("{after:?}").contains("after") && !format!("{after:?}").contains("before"),
+        "an edit to the reused callee must reach the chain's answer: {after:?}"
+    );
+}
 /// CANARY (landed) — a `super.m()` call in a derived class method
 /// resolves to the base member's declared return.
 ///

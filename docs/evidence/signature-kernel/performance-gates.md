@@ -18,7 +18,7 @@ the strength of a number nobody can recompute from this checkout.
 |---|---|---|
 | Complete direct Empty/One read | No result heap allocation or candidate-table access; common evidence protocol retained | `tests/allocator_canaries.rs` → `signature_kernel_warm_positional::warm_positional_read_does_not_allocate_or_lock`. A counting `#[global_allocator]` asserts **zero** allocations over repeated warm `One` and `Many` reads, and `SemanticReadView::shard_lock_acquires()` asserts the read took **no** intern-shard lock. Runs in its own test binary (allowlisted in `scripts/integration-test-layout-allowlist.json`) because the allocator is process-global. |
 | Repeated complete signature/intersection query | No producer rebuild or new semantic records | `signature_kernel/substitution_tests.rs` → `repeated_warm_read_walks_no_descriptor_chain` (`descriptor_chain_walks() == 0` on the repeated read); `cache_runtime/node_tests.rs` → `lookup_dedups_cold_compute_under_same_view`; `project_global_cache_tests.rs` → `semantic_subqueries_dedup_across_request_boundaries`. |
-| Shared body-obligation consumers | Reuse completed return/effect work under the same full demand | `lazy_decl_body_tests.rs` → `lazy_decl_body_singleflight_lowers_once`; the `ReduceUnion` / `ReduceIntersection` rows of `semantic_query/query_key_spec_table.txt` register both families as `Singleflight`, and the spec table is enumerated against the live key enum. |
+| Shared body-obligation consumers | Reuse completed return/effect work under the same full demand | `lazy_decl_body_tests.rs` → `lazy_decl_body_singleflight_lowers_once`; the `ReduceUnion` / `ReduceIntersection` rows of `semantic_query/query_key_spec_table.txt` register both families as `Singleflight`, and the spec table is enumerated against the live key enum. Within one transaction, a proven inline flow-return member is reused rather than re-evaluated: `flow_return_coverage_tests.rs` → `a_generic_call_chain_reuses_each_completed_callee` asserts every added level of a generic call chain costs the same connected work (it doubled per level before: 20504 units at eleven levels, 306 now), `flow_return_tests.rs` → `a_reused_flow_member_replays_its_reads_into_the_live_scopes` holds that a reuse replays the member's facts, self-roots and canonical evidence into the demanding build, and `a_reused_callee_still_invalidates_its_consumers_on_edit` holds that an edit to the reused callee still reaches the chain. |
 | Augmented type lookup | No whole-program scan; no unrelated contributor invalidation | `FileArtifactStore::ensure_augmentation_index_populated` is an inverse index, not a scan; `g_misc3/module_augmentation_stitching.rs` → `session_overlay_augmenter_isolated_from_base_index` holds the no-unrelated-invalidation half across the base/session overlay boundary. |
 | Composite construction | No eager overload Cartesian product; no quadratic prefix provenance copying | **Structural only.** `signature_kernel::discovery::union_signatures` is two phases: phase 1 takes signatures matched in every arm; phase 2 (restricted synthesis) fires only when phase 1 found nothing AND at most one arm has several signatures, so the product can never open. There is no dedicated regression test that would fail if a future edit removed the phase-2 precondition — **recorded as a coverage gap**, not as a satisfied gate. |
 | Concurrent repeated demand | Coalesced computation without recursion deadlock or partial publication | `g_block/semantic_determinism_matrix.rs` → `signature_kernel_interned_identities_are_schedule_independent` (duplicate publishers and opposite intern orders at 1/2/4/8 workers converge on one logical identity) and `det_04_worker_counts_1_2_4_8`; `signature_kernel/lifetime_tests.rs` → `concurrent_replace_epoch_publishes_in_order`. |
@@ -70,3 +70,19 @@ existing locked runner definition is `performance-gates.toml` at the repository
 root (`class = "apple-silicon-laptop-8core-24gib"`), whose cells do not cover
 the signature-kernel families. Extending it is a lock-record change under that
 file's own recalibration rules, not a local adjustment.
+
+The measurement exists: `crates/verter_session/examples/signature_kernel_bench.rs`
+drives every workload above through the public host API, and
+`scripts/benchmark/signature-kernel-perf.mjs` runs it against the pre-kernel
+baseline under the lock's statistics and idle-machine policy. Its output is a
+run report, never tracked here; a distribution is published only from a
+session on the locked runner class.
+
+## Known limits
+
+* **Connected-query depth.** Each level of a generic call chain nests two
+  connected queries, and the dispatch's depth guard (24) is a stack-safety
+  bound, so a chain longer than eleven levels ends in a typed budget refusal
+  rather than a stack overflow. The work per level is constant (see *Shared
+  body-obligation consumers*); raising the bound is a stack-budget decision,
+  not a performance one.

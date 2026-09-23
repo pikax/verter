@@ -16,7 +16,8 @@
 //! `ResolverContext::current_fact_tracer`, never through the TLS slot directly;
 //! the slot is private to this module.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
 use smallvec::SmallVec;
 
@@ -55,6 +56,63 @@ thread_local! {
     /// is single-threaded (TLS).
     static ACTIVE_TRACERS: RefCell<SmallVec<[*const FactReadSetCell; 8]>> =
         RefCell::new(SmallVec::new());
+
+    /// Per-thread stack of passive [`FactReadRecorder`]s. Same SAFETY
+    /// contract and reentrancy discipline as `ACTIVE_TRACERS`: each pointer
+    /// is installed and removed by one `record_fact_reads` scope, whose
+    /// guard pops it on drop, unwinding included.
+    static ACTIVE_RECORDERS: RefCell<SmallVec<[*const FactReadRecorder; 4]>> =
+        RefCell::new(SmallVec::new());
+}
+
+/// A passive witness of the fact reads made while it is installed: every
+/// fanned-out observation, and whether any non-cacheable read was marked.
+///
+/// It is NOT a tracer. It never becomes [`current_tracer`], owns no
+/// local-only non-cacheability mark, and no admission decision reads it,
+/// so installing one changes nothing the tracers observe. It exists so a
+/// computation's reads can be REPLAYED into scopes that were not live when
+/// it ran — what a warm hit does with its stored signature.
+#[derive(Default)]
+pub(crate) struct FactReadRecorder {
+    facts: RefCell<HashSet<FactVersionRef>>,
+    non_cacheable: Cell<bool>,
+}
+
+impl FactReadRecorder {
+    /// The distinct facts observed, and whether a non-cacheable read was.
+    pub(crate) fn into_parts(self) -> (Vec<FactVersionRef>, bool) {
+        (
+            self.facts.into_inner().into_iter().collect(),
+            self.non_cacheable.get(),
+        )
+    }
+}
+
+/// Pops the recorder its scope installed, unwinding included.
+pub(super) struct RecorderScope(());
+
+impl Drop for RecorderScope {
+    fn drop(&mut self) {
+        ACTIVE_RECORDERS.with(|slot| {
+            slot.borrow_mut().pop();
+        });
+    }
+}
+
+/// Install `recorder` for the lifetime of the returned scope.
+///
+/// SAFETY: the caller keeps `recorder` alive for as long as the scope,
+/// and drops the scope first.
+pub(super) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope {
+    ACTIVE_RECORDERS.with(|slot| {
+        slot.borrow_mut().push(recorder as *const FactReadRecorder);
+    });
+    RecorderScope(())
+}
+
+fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
+    ACTIVE_RECORDERS.with(|slot| slot.borrow().clone())
 }
 
 /// Push `cell` onto the tracer stack.
@@ -112,6 +170,13 @@ pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
 #[inline]
 pub(super) fn observe_fan_out(fact: FactVersionRef) {
     verter_audit::attribute_n!(FactObserve, 1);
+    for recorder in active_recorders() {
+        // SAFETY: see `ACTIVE_RECORDERS`.
+        unsafe { &*recorder }
+            .facts
+            .borrow_mut()
+            .insert(fact.clone());
+    }
     // Collect pointers under a short borrow, then drop the borrow
     // before calling into FactReadSetCell so re-entrant installs
     // from inside an observer don't cause RefCell panics.
@@ -142,6 +207,13 @@ pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
         return;
     }
     verter_audit::attribute_n!(FactObserve, sig.len());
+    for recorder in active_recorders() {
+        // SAFETY: see `ACTIVE_RECORDERS`.
+        unsafe { &*recorder }
+            .facts
+            .borrow_mut()
+            .extend(sig.iter().cloned());
+    }
     let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
         ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
     for ptr in ptrs {
@@ -167,6 +239,12 @@ pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
 /// discipline as [`observe_fan_out`].
 #[inline]
 pub(super) fn note_non_cacheable_read(propagation: NonCacheablePropagation) {
+    // A recorder notes EVERY mark, local-only included: a recording that
+    // saw one is never replayed, so the conservative read costs only reuse.
+    for recorder in active_recorders() {
+        // SAFETY: see `ACTIVE_RECORDERS`.
+        unsafe { &*recorder }.non_cacheable.set(true);
+    }
     let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
         ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
     let first = match propagation {
@@ -214,6 +292,47 @@ mod propagation_tests {
         clear();
         assert!(outer.non_cacheable_read_observed());
         assert!(inner.non_cacheable_read_observed());
+    }
+}
+
+#[cfg(test)]
+mod recorder_tests {
+    use super::*;
+
+    /// A recorder sees what the tracers see, but is never one: the tracer
+    /// stays the top scope and still owns a local-only mark.
+    #[test]
+    fn a_recorder_witnesses_fan_out_without_becoming_a_tracer() {
+        let tracer = FactReadSetCell::new();
+        install(&tracer);
+        let recorder = FactReadRecorder::default();
+        {
+            let _scope = install_recorder(&recorder);
+            assert!(std::ptr::eq(
+                current_tracer().expect("the tracer stays installed"),
+                &tracer
+            ));
+            let fact = FactVersionRef::FileWholeHash {
+                canonical_id: "/rec.ts".to_string(),
+                hash: [3u8; 16],
+            };
+            observe_fan_out(fact.clone());
+            observe_fan_out_borrowed(&[fact]);
+            note_non_cacheable_read(NonCacheablePropagation::LocalOnly);
+        }
+        // Observed after the scope closed: not recorded.
+        observe_fan_out(FactVersionRef::FileWholeHash {
+            canonical_id: "/after.ts".to_string(),
+            hash: [4u8; 16],
+        });
+        clear();
+        assert!(
+            tracer.non_cacheable_read_observed(),
+            "the tracer still owns the local-only mark"
+        );
+        let (facts, non_cacheable) = recorder.into_parts();
+        assert_eq!(facts.len(), 1, "one distinct fact, recorded once");
+        assert!(non_cacheable);
     }
 }
 
