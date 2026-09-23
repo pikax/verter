@@ -884,7 +884,13 @@ jobs:
         # architecture-health, the lane self-tests in their lanes, the
         # aggregate test in the step below); `test:scripts` keeps them for
         # local runs.
-        run: pnpm run test:scripts:ci
+        #
+        # rust-cache exports CARGO_INCREMENTAL=0 for the job. The sfc-projection
+        # dirty twins re-edit one verter_compiler source file and rebuild the
+        # crate once per twin, so a non-incremental rebuild of the whole crate
+        # per twin (measured ~2.3x slower than incremental) dominates this
+        # lane; re-enable incremental for this step only.
+        run: CARGO_INCREMENTAL=1 pnpm run test:scripts:ci
       - name: CI aggregate completeness
         # Every job in this workflow must be listed in the `CI Required`
         # aggregate; the checker fails this lane when one is missing.
