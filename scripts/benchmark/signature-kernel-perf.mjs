@@ -22,6 +22,9 @@
 //   --exclude <Kind,Kind>  witness kinds NOT queried (forwarded); exclude the kinds the census
 //                          shows the arms answer differently, so every ratio is a matched workload
 //   --settle <s>           open the session no sooner than this long after the builds (default 180)
+//   --cooldown <s>         pause this long before each control and each invocation, so every
+//                          measurement opens from the same thermal state (default 0; a fanless
+//                          laptop throttles under a long session and drifts the control)
 //   --skip-control         skip the control benchmark (a session without it is not lock evidence)
 //   --quick                small corpus, 2 invocations, no control — a pipeline smoke test only
 //   --keep                 keep the build worktrees; a later run with the same --out reuses them
@@ -79,6 +82,7 @@ function parseArgs(argv) {
     skipControl: false,
     keep: false,
     settleSeconds: POLICY.settleSeconds,
+    cooldownSeconds: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -110,6 +114,9 @@ function parseArgs(argv) {
         break;
       case "--settle":
         opts.settleSeconds = Number(value());
+        break;
+      case "--cooldown":
+        opts.cooldownSeconds = Number(value());
         break;
       case "--skip-control":
         opts.skipControl = true;
@@ -152,6 +159,8 @@ function parseArgs(argv) {
     throw new Error("--invocations must be a positive integer");
   if (!Number.isFinite(opts.settleSeconds) || opts.settleSeconds < 0)
     throw new Error("--settle must be a non-negative number of seconds");
+  if (!Number.isFinite(opts.cooldownSeconds) || opts.cooldownSeconds < 0)
+    throw new Error("--cooldown must be a non-negative number of seconds");
   if (opts.quick) opts.settleSeconds = 0;
   return opts;
 }
@@ -339,6 +348,13 @@ function buildExample(tree, targetDir, pkg, example) {
 
 // ── machine / session facts ──────────────────────────────────────────────
 
+/** The OS thermal report, one line, or null where there is none. */
+function thermalReport() {
+  if (process.platform !== "darwin") return null;
+  const report = tryRun("pmset", ["-g", "therm"]);
+  return report ? report.replace(/\s+/g, " ").trim() : null;
+}
+
 function machineFacts() {
   const facts = {
     platform: process.platform,
@@ -433,6 +449,14 @@ function main() {
     if (controlBinary) {
       for (let i = 0; i < POLICY.controlWarmupRuns; i++) control();
     }
+    // Every measurement — both controls and every invocation — opens after the same
+    // cool-down, so each starts from the same thermal state and the control drift
+    // still catches a lasting change of the machine.
+    const coolDown = () => {
+      if (opts.cooldownSeconds > 0) sleepMs(opts.cooldownSeconds * 1000);
+    };
+    const thermalAtStart = thermalReport();
+    coolDown();
     const controlStart = controlBinary
       ? (log("control benchmark (session start)…"), control())
       : null;
@@ -448,6 +472,7 @@ function main() {
     // up), but a foreign build process voids the session wherever it appears.
     const foreignDuringSession = new Set();
     order.forEach((arm, index) => {
+      coolDown();
       for (const name of foreignProcesses()) foreignDuringSession.add(name);
       log(`invocation ${index + 1}/${order.length}: ${arm}`);
       const started = Date.now();
@@ -477,7 +502,9 @@ function main() {
       runs[arm].push({ document: JSON.parse(text), wall_ms: Date.now() - started });
     });
 
+    coolDown();
     const controlEnd = controlBinary ? (log("control benchmark (session end)…"), control()) : null;
+    const thermalAtEnd = thermalReport();
     for (const name of foreignProcesses()) foreignDuringSession.add(name);
     const controlDrift = controlBinary
       ? (Math.abs(controlEnd - controlStart) / controlStart) * 100
@@ -486,6 +513,8 @@ function main() {
       at_start: idleAtStart,
       foreign_processes_during_session: [...foreignDuringSession].sort(),
       satisfied: idleAtStart.idle && foreignDuringSession.size === 0,
+      // The OS's own thermal report, where it has one (macOS `pmset -g therm`).
+      thermal: { at_start: thermalAtStart, at_end: thermalAtEnd },
     };
     const sessionVoid =
       (controlDrift !== null && controlDrift > POLICY.maxControlDriftPercent) || !idle.satisfied;
@@ -636,6 +665,7 @@ function summarize({
       invocations_per_arm: opts.invocations,
       order: "ABBA",
       settle_seconds: opts.settleSeconds,
+      cooldown_seconds: opts.cooldownSeconds,
       control_warmup_runs: controlStart === null ? 0 : POLICY.controlWarmupRuns,
       control_wall_median_ms:
         controlStart === null ? null : { start: controlStart, end: controlEnd },
@@ -683,8 +713,13 @@ function renderMarkdown(s) {
   );
   const control = s.session.control_wall_median_ms;
   lines.push(
-    `- Control: ${control === null ? "not run" : `${control.start.toFixed(2)} ms at start, ${control.end.toFixed(2)} ms at end`}, after a ${s.session.settle_seconds}s settle and ${s.session.control_warmup_runs} warm-up run(s)`,
+    `- Control: ${control === null ? "not run" : `${control.start.toFixed(2)} ms at start, ${control.end.toFixed(2)} ms at end`}, after a ${s.session.settle_seconds}s settle and ${s.session.control_warmup_runs} warm-up run(s); ${s.session.cooldown_seconds}s cool-down before each control and invocation`,
   );
+  if (idle.thermal?.at_start || idle.thermal?.at_end) {
+    lines.push(
+      `- Thermal: at start \`${idle.thermal.at_start ?? "n/a"}\`; at end \`${idle.thermal.at_end ?? "n/a"}\``,
+    );
+  }
   lines.push(
     `- Idle: load average at start ${idle.at_start.load_average_1m === null ? "n/a on this platform" : idle.at_start.load_average_1m.toFixed(2)} after ${idle.at_start.waited_seconds}s; foreign build processes at start ${idle.at_start.foreign_processes.join(", ") || "none"}, during the session ${idle.foreign_processes_during_session.join(", ") || "none"}`,
   );
