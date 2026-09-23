@@ -3686,3 +3686,48 @@ fn realize_of_derived_union_collapses_duplicate_realized_arms() {
          collapses to it instead of publishing `Union(f, f)`"
     );
 }
+
+// ─────────────────────── builtin runtime nominals ────────────────────────
+
+/// A builtin runtime nominal's application carrier (`Date`) is the RESOLVED
+/// type the structural-fact demand settles on — not an unresolved
+/// declaration — and it carries no call signature: a COMPLETE non-callable,
+/// never an incomplete realization.
+#[test]
+fn a_builtin_nominal_carrier_realizes_to_a_complete_non_callable() {
+    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let date = instantiation_ref(&graph, "Date", vec![]);
+    assert!(
+        matches!(
+            realize_callable_member(&dispatch, date, navigate()),
+            SurfaceResolution::NoSurface(_)
+        ),
+        "a `Date` carrier is a complete non-callable"
+    );
+}
+
+/// A builtin runtime nominal first parameter (`(value: Date) => …`) names no
+/// event and is DECIDED: the enumeration stays complete.
+#[test]
+fn event_names_builtin_nominal_first_param_is_a_complete_non_contributor() {
+    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let date = instantiation_ref(&graph, "Date", vec![]);
+    let f = function(&graph, vec![param(Some("value"), date, false, false)], date);
+
+    let view = CallableNodeView::new(&dispatch, f);
+    assert!(
+        !matches!(
+            view.event_names(navigate()),
+            SurfaceResolution::Incomplete(_)
+        ),
+        "a `Date` first param is a decided non-contributor, never an incomplete enumeration"
+    );
+}

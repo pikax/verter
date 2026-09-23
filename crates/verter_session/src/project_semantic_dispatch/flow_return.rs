@@ -40,6 +40,7 @@ use super::flow_products::{
 };
 use super::flow_return_callee::{
     CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
+    UtilityClause,
 };
 use super::flow_return_products::{
     FlowBindingLayer, FlowFrameProducts as FlowProductStore, FlowWriteObservation,
@@ -1279,12 +1280,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             FlowReturnStep::Complete(result) if result.degradation().is_none() => {
                 // `ReturnType<…>` is a signature UTILITY, not a call: it
                 // has no call site to be argument-free at, so every free
-                // clause parameter instantiates at `unknown` and a
-                // declared default never applies (`ReturnType<typeof
+                // clause parameter instantiates at its BASE constraint and
+                // a declared default never applies (`ReturnType<typeof
                 // id>` over `id<T = number>(x: T)` is `{ … unknown … }`,
-                // not `number`). That is precisely the policy the
-                // WHOLE-return route applies through
-                // `instantiate_free_signature_params_at_unknown`; this
+                // not `number`; over `id<T extends { k: number }>` it
+                // reads `T` as `{ k: number }`). That is precisely the
+                // policy the WHOLE-return route applies through
+                // `instantiate_signature_params_at_base_constraints`; this
                 // route is the same utility over the same callee one
                 // path segment longer, so it applies the same policy —
                 // returning the flow return's raw member position would
@@ -1292,13 +1294,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // value, and the two routes would disagree about one
                 // callee.
                 //
-                // The clause NAMES come from the shallow function-program
-                // fact rather than from composing the callee's signature,
-                // so the member demand stays as narrow as it was: a
-                // whole-signature composition here would materialise
-                // exactly the sibling members this rail exists to leave
-                // cold.
-                self.instantiate_callee_clause_at_unknown(&identity, result.return_type())
+                // The clause comes from the shallow function-program
+                // fact and its lowered constraints rather than from
+                // composing the callee's signature, so the member demand
+                // stays as narrow as it was: a whole-signature
+                // composition here would materialise exactly the sibling
+                // members this rail exists to leave cold.
+                self.instantiate_callee_clause_at_base_constraints(&identity, result.return_type())
             }
             // Degraded success / typed failure / in-flight hold: the
             // generic unwrap route decides (it already owns these
@@ -1307,49 +1309,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Instantiate the served callee's OWN type-parameter clause at
-    /// `unknown` over a value taken from its body-derived return — the
-    /// signature-UTILITY policy, applied without composing a signature.
+    /// Instantiate the served callee's OWN type-parameter clause at its
+    /// base constraints over a value taken from its body-derived return —
+    /// the signature-UTILITY policy, applied without composing a
+    /// signature.
     ///
     /// A clause the route could not READ is a MISS (`None`), never "the
-    /// callee declares none". The two were the same value here — a
-    /// failed read returned the callee's return UNTOUCHED, its own
-    /// binders intact and warm-admissible — while the CALL-site route
-    /// degraded on the identical miss. The clause reader is now shared
-    /// (both take a `FunctionProgramEntry` witness) and both states are
-    /// distinct, so the asymmetry has no spelling.
-    fn instantiate_callee_clause_at_unknown(
+    /// callee declares none" — a failed read must not return the callee's
+    /// return UNTOUCHED, its own binders intact and warm-admissible, while
+    /// the CALL-site route degrades on the identical miss. Both readers
+    /// take a `FunctionProgramEntry` witness and both states are distinct,
+    /// so that asymmetry has no spelling.
+    fn instantiate_callee_clause_at_base_constraints(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let clause = self.served_callee_clause(identity)?;
-        if clause.is_empty() {
-            return Some(node);
-        }
-        // A body-derived return is evaluated with the callee's clause
-        // BOUND, so its parameters spell as binders (and, for a
-        // still-deferred head, as a bare name) — never as a resolved
-        // same-named file-scope declaration, which would be a different
-        // symbol.
-        Some(self.instantiate_named_params_at_unknown(
-            clause.param_names(),
-            node,
-            crate::semantic_query::ClauseSpelling::WithDeferredHeads,
-        ))
+        Some(self.served_callee_clause(identity)?.instantiate(self, node))
     }
 
-    /// The OWN clause of a served function position, read from the
-    /// shallow per-file function-program index.
+    /// The OWN clause of a served function position under the
+    /// signature-utility policy: its parameters from the shallow per-file
+    /// function-program index and, for a generic callee, their
+    /// constraints from the lowered clause.
     ///
     /// `None` is a READ FAILURE (the file is not served at this version,
-    /// or the position is not indexed) — never an empty clause. The
-    /// clause itself is built by its owning module from the index entry,
-    /// so this route cannot assemble one either.
+    /// the position is not indexed, or an authored constraint could not be
+    /// recovered) — never an empty or unconstrained clause. The clause
+    /// itself is built by its owning module from the index entry, so this
+    /// route cannot assemble one either.
     fn served_callee_clause(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
-    ) -> Option<CalleeClause> {
+    ) -> Option<UtilityClause> {
         let canonical = identity.anchor.canonical_id.as_ref();
         let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
@@ -1364,7 +1356,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let index = decl_bodies.function_program_index();
         let matched = index.get(&key)?;
-        Some(CalleeClause::read_from_program_entry_at_unknown(matched))
+        let entry = matched.entry();
+        // The lowered clause is demanded at most once, and only for a
+        // generic callee.
+        let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
+        UtilityClause::read_from_program_entry(matched, |ordinal, param| {
+            let clause =
+                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(entry));
+            // Matched by ORDINAL with the name as a cross-check, exactly as
+            // the call-site route matches a declared default: a
+            // disagreement means the two views are not the same clause,
+            // which is a miss, not a best guess.
+            let slice = clause.as_ref()?.get(ordinal)?;
+            if slice.name != param.name {
+                return None;
+            }
+            match slice.constraint.as_ref() {
+                None => Some(None),
+                Some(gated) => self
+                    .lower_type_expr_in_owner_scope_with_context(
+                        canonical,
+                        identity.anchor.owner,
+                        gated.ty(),
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    )
+                    .map(Some),
+            }
+        })
     }
 
     /// The whole-function `FlowReturn` authority. Every whole-function

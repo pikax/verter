@@ -3020,6 +3020,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // The COMPLETE builtin application carrier, returned verbatim where
+        // instantiating a builtin must not (or cannot) materialise a body.
+        let builtin_identity = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(decl_canonical),
+            owner: decl_owner,
+            whole_hash: decl_whole_hash,
+            decl_name: Arc::clone(decl_name),
+        };
+        let builtin_application_carrier = |identity: crate::semantic_query::DeclIdentity| {
+            let carrier = self.graph().intern_node_with_scope(
+                SemanticNodeData::InstantiationRef {
+                    base: identity,
+                    args: Arc::clone(args),
+                },
+                scope.clone(),
+            );
+            // Mirror `build_builtin_utility`'s `Instantiate` origin edge so
+            // origin-walks resolve through the carrier: sources are the
+            // builtin base node + each arg.
+            let fence = self.project_generation_signature();
+            let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
+            inst_sources.push(base);
+            inst_sources.extend(args.iter().copied());
+            self.graph().record_origin_edge(
+                carrier,
+                OriginEdgeKind::Instantiate,
+                Arc::from(inst_sources.into_boxed_slice()),
+                OriginMeta::None,
+                Arc::clone(&fence),
+            );
+            // Root the carrier value on the same file-derived arg set the
+            // materialised builtin would (an edit to a file-derived arg
+            // rejects this entry on the strict warm-read validator).
+            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+            let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                (QueryResult::Value(carrier), fence).into();
+            output.with_observed_self_roots(observed_self_roots)
+        };
+
+        // 1c. A builtin runtime NOMINAL (`Promise<T>`, `Function`, …) has no
+        // declaration body in this graph: its application carrier IS the
+        // type, and its members come from the lib through the apparent
+        // type. Instantiating it answers that carrier — `Promise<number>` is
+        // `Promise<number>`, never a miss.
+        if self.runtime_nominal_identity(&builtin_identity).is_some() {
+            return builtin_application_carrier(builtin_identity);
+        }
+
         // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
         // has NOT shadowed routes through the utility-specific dispatch
@@ -3043,45 +3091,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // carrier verbatim. The shared open-domain predicate decides
             // openness (no second walker); a CLOSED domain falls through to
             // `build_builtin_utility` and materialises path-precisely.
-            let builtin_identity = crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(decl_canonical),
-                owner: decl_owner,
-                whole_hash: decl_whole_hash,
-                decl_name: Arc::clone(decl_name),
-            };
             if crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
                 self,
                 &builtin_identity,
                 args.as_ref(),
             ) {
-                let carrier = self.graph().intern_node_with_scope(
-                    SemanticNodeData::InstantiationRef {
-                        base: builtin_identity,
-                        args: Arc::clone(args),
-                    },
-                    scope.clone(),
-                );
-                // Mirror `build_builtin_utility`'s `Instantiate` origin edge so
-                // origin-walks resolve through the carrier: sources are the
-                // builtin base node + each arg.
-                let fence = self.project_generation_signature();
-                let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-                inst_sources.push(base);
-                inst_sources.extend(args.iter().copied());
-                self.graph().record_origin_edge(
-                    carrier,
-                    OriginEdgeKind::Instantiate,
-                    Arc::from(inst_sources.into_boxed_slice()),
-                    OriginMeta::None,
-                    Arc::clone(&fence),
-                );
-                // Root the carrier value on the same file-derived arg set the
-                // materialised builtin would (an edit to a file-derived arg
-                // rejects this entry on the strict warm-read validator).
-                let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-                let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                    (QueryResult::Value(carrier), fence).into();
-                return output.with_observed_self_roots(observed_self_roots);
+                return builtin_application_carrier(builtin_identity);
             }
 
             // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
@@ -3233,70 +3248,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );
-        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        for (index, param) in prepared.type_parameters.iter().enumerate() {
-            let arg_id = if let Some(explicit) = args.get(index).copied() {
-                explicit
-            } else if let Some(default) = param.default.as_ref() {
-                // The default bound is a content-free locator of the authored
-                // `T = D` position — lowered through the ONE located body
-                // source. The prior-sibling PREFIX params re-derive the
-                // bound's own binder frame; `env` (the arguments bound so
-                // far) substitutes an earlier parameter referenced by the
-                // default (`<T, U = T>`). Propagate the full
-                // `ProjectionReductionContext` so a `StructuralTransit`
-                // instantiation survives; provenance downgrades to
-                // structural — a type-parameter default is a substituted
-                // value, not the macro-T own body.
-                self.lower_located_body_with_resolution_debt(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
-                    prepared.kind,
-                    &prepared.type_parameters[..index],
-                    &prepared.name_resolution,
-                    &env,
-                    &scope,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    &mut substitutions,
-                    context.into_structural_provenance(),
-                    authored_resolution_debt.as_ref(),
-                )
-            } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
-                // Skeleton mode preserves open generics.
-                // Bind unbound param to a TypeParam shell so body lowering
+        let (env, _bindings) = self.bind_declared_type_arguments(
+            &prepared,
+            args,
+            &DeclarationBindingScope {
+                scope: &scope,
+                scope_payload: scope_payload.as_ref(),
+                shadowing: &shadowing,
+                authored_resolution_debt: authored_resolution_debt.as_ref(),
+            },
+            &mut substitutions,
+            context,
+            |index, param| {
+                // Skeleton mode preserves open generics: an unbound
+                // parameter binds a TypeParam shell so body lowering
                 // produces TypeParam graph nodes (instead of resolving
                 // T-refs to Opaque(Miss)). The relation engine treats
                 // TypeParam as deferred → Conditional branches stay live
-                // → the cycle gate's ref collector walks both → recursive refs
-                // through nested mapped/template-literal/conditional
-                // bodies become visible to the cycle gate.
-                let display_name: Arc<str> = Arc::from(param.name.as_str());
-                let decl_identity = crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::clone(decl_canonical),
-                    owner: decl_owner,
-                    whole_hash: decl_whole_hash,
-                    decl_name: Arc::clone(decl_name),
-                };
-                self.graph().intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl: decl_identity,
-                        param_index: index as u16,
-                        constraint: None,
-                        default: None,
-                        display_name,
-                    },
-                    scope.clone(),
-                )
-            } else {
-                // Existing Navigate/Expanded behavior preserved: unbound
-                // param means `Opaque(Miss)` propagates through the body.
-                // Callers that genuinely need open-generic access must
-                // explicitly request Skeleton mode.
-                continue;
-            };
-            env.insert(param.name.clone(), arg_id);
-        }
+                // → the cycle gate's ref collector walks both → recursive
+                // refs through nested mapped/template-literal/conditional
+                // bodies become visible to the cycle gate. Every other mode
+                // leaves it unbound, so `Opaque(Miss)` propagates through
+                // the body; callers that genuinely need open-generic access
+                // must explicitly request Skeleton mode.
+                (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
+                    let decl_identity = crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::clone(decl_canonical),
+                        owner: decl_owner,
+                        whole_hash: decl_whole_hash,
+                        decl_name: Arc::clone(decl_name),
+                    };
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::TypeParam {
+                            decl: decl_identity,
+                            param_index: index as u16,
+                            constraint: None,
+                            default: None,
+                            display_name: Arc::from(param.name.as_str()),
+                        },
+                        scope.clone(),
+                    )
+                })
+            },
+        );
 
         // 5. Shallow-lower the body. Collects substitution facts for
         // origin-edge emission. `name_resolution` is the prepared
@@ -4427,6 +4422,144 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope.clone(),
         );
         Some(merged)
+    }
+
+    /// Bind a prepared declaration's type parameters for one application,
+    /// in declaration order: the supplied argument at each position, else
+    /// the parameter's declared DEFAULT, else whatever `unbound` supplies
+    /// (`None` leaves the parameter unbound).
+    ///
+    /// A default is a content-free locator of the authored `T = D`
+    /// position, lowered through the ONE located body source in the
+    /// declaration's scope. The prior-sibling PREFIX params re-derive the
+    /// bound's own binder frame, and the arguments bound so far substitute
+    /// an earlier parameter the default names — `<T, U = T[]>` applied to
+    /// `number` binds `U` to `number[]`. The full
+    /// `ProjectionReductionContext` propagates so a `StructuralTransit`
+    /// instantiation survives; provenance downgrades to structural — a
+    /// type-parameter default is a substituted value, not the macro-T own
+    /// body.
+    ///
+    /// Returns the binding environment by parameter name and each
+    /// parameter's binding in declaration order.
+    fn bind_declared_type_arguments(
+        &self,
+        prepared: &PreparedTypeDecl,
+        args: &[SemanticNodeId],
+        binding_scope: &DeclarationBindingScope<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        mut unbound: impl FnMut(
+            usize,
+            &verter_type_expr::facts::NarrowTypeParam,
+        ) -> Option<SemanticNodeId>,
+    ) -> (
+        FxHashMap<String, SemanticNodeId>,
+        Vec<Option<SemanticNodeId>>,
+    ) {
+        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        let mut bindings = Vec::with_capacity(prepared.type_parameters.len());
+        for (index, param) in prepared.type_parameters.iter().enumerate() {
+            let binding = match (args.get(index).copied(), param.default.as_ref()) {
+                (Some(explicit), _) => Some(explicit),
+                (None, Some(default)) => Some(self.lower_located_body_with_resolution_debt(
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
+                    prepared.kind,
+                    &prepared.type_parameters[..index],
+                    &prepared.name_resolution,
+                    &env,
+                    binding_scope.scope,
+                    binding_scope.scope_payload,
+                    binding_scope.shadowing,
+                    substitutions,
+                    context.into_structural_provenance(),
+                    binding_scope.authored_resolution_debt,
+                )),
+                (None, None) => unbound(index, param),
+            };
+            if let Some(binding) = binding {
+                env.insert(param.name.clone(), binding);
+            }
+            bindings.push(binding);
+        }
+        (env, bindings)
+    }
+
+    /// The COMPLETE argument list the generic declaration `identity` binds
+    /// for an application that supplies `args`: the supplied arguments,
+    /// then each omitted parameter's declared default under the bindings
+    /// before it — the application the checker names when it prints the
+    /// reference (`WithDefault` is `WithDefault<string>`, `Chain<number>`
+    /// is `Chain<number, number[]>`). The same binding
+    /// ([`Self::bind_declared_type_arguments`]) `Instantiate` applies, so
+    /// the named application and its instantiated body cannot disagree.
+    ///
+    /// `None` when the declaration cannot be recovered, or a parameter is
+    /// neither supplied nor defaulted.
+    pub(super) fn declared_application_arguments(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        let whole_hash = self
+            .ctx
+            .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
+            .map(|serve| serve.indexed.whole_hash)
+            .unwrap_or_default();
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&identity.canonical_id),
+            owner: identity.owner,
+            whole_hash,
+            local_scope: None,
+        };
+        let base = self
+            .graph()
+            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
+        let ri = ResolvedRootIdentity::new_in_owner(
+            identity.canonical_id.as_ref(),
+            identity.owner,
+            identity.decl_name.as_ref(),
+        );
+        let prepared =
+            match SessionDispatchHost::new(self.ctx).resolve_prepared_type_decl(base, &ri) {
+                PreparedTypeDeclResolution::Complete(prepared) => prepared,
+                PreparedTypeDeclResolution::AuthoredPartial { .. }
+                | PreparedTypeDeclResolution::Missing
+                | PreparedTypeDeclResolution::Failed { .. } => return None,
+            };
+        if args.len() > prepared.type_parameters.len() {
+            return None;
+        }
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(identity.canonical_id.as_ref())
+            .map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                    identity.owner,
+                )
+            });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let (_env, bindings) = self.bind_declared_type_arguments(
+            &prepared,
+            args,
+            &DeclarationBindingScope {
+                scope: &scope,
+                scope_payload: scope_payload.as_ref(),
+                shadowing: &shadowing,
+                authored_resolution_debt: None,
+            },
+            &mut Vec::new(),
+            context,
+            |_, _| None,
+        );
+        bindings
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .map(Arc::from)
     }
 
     /// Resolve the typed declaration kind of a prepared declaration rooted at
@@ -6228,9 +6361,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<crate::intrinsic_registry::RuntimeNominal> {
-        (identity.canonical_id.as_ref() == "__builtin__")
-            .then(|| self.runtime_nominal_global_name(identity.decl_name.as_ref()))
-            .flatten()
+        crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(identity)
     }
 
     /// Whether `identity` is the builtin-sentinel `Promise` carrier
@@ -6283,12 +6414,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         graph.intern_preserving_scope(node, twin)
     }
 
-    /// Instantiate a signature-utility extraction at `unknown`: every type
-    /// parameter OWNED by `function_node` that survives into `extracted`
-    /// substitutes to the `unknown` primitive (TS instantiates free
-    /// signature generics at `unknown` when a signature utility reads the
-    /// bare generic — `ReturnType<typeof id>` for `id<T>(x: T): T` is
-    /// `unknown`). A non-generic signature returns `extracted` unchanged.
+    /// Instantiate a signature-utility extraction at the BASE signature of
+    /// `function_node`: every type parameter it owns that survives into
+    /// `extracted` substitutes to its base constraint (see
+    /// [`Self::instantiate_clause_at_base_constraints`]) —
+    /// `ReturnType<typeof id>` for `id<T>(x: T): T` is `unknown`, and for
+    /// `id<T extends string>(x: T): T` it is `string`. A non-generic
+    /// signature returns `extracted` unchanged.
     ///
     /// The `Function` node's `type_parameters` carry [`TypeParamDecl`]s
     /// (name + constraint/default), not binder node ids; the binder NODES
@@ -6299,11 +6431,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// SHADOWING-AWARE: a function node inside `extracted` (its root
     /// included — `extracted` is not the owning signature) that
     /// re-declares the name owns every same-name binder in its subtree,
-    /// so those occurrences stay generic instead of collapsing to
-    /// `unknown`. Each discovered binder node substitutes through the
-    /// shared binder-identity substitution (never a name-rewrite of the
-    /// subtree).
-    pub(super) fn instantiate_free_signature_params_at_unknown(
+    /// so those occurrences stay generic. Each discovered binder node
+    /// substitutes through the shared binder-identity substitution (never
+    /// a name-rewrite of the subtree).
+    pub(super) fn instantiate_signature_params_at_base_constraints(
         &self,
         function_node: SemanticNodeId,
         extracted: SemanticNodeId,
@@ -6319,40 +6450,169 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let type_parameters = Arc::clone(type_parameters);
         drop(data);
-        self.instantiate_named_params_at_unknown(
-            type_parameters.iter().map(|decl| decl.name.as_ref()),
+        self.instantiate_clause_at_base_constraints(
+            type_parameters
+                .iter()
+                .map(|decl| (decl.name.as_ref(), decl.constraint)),
             extracted,
+            crate::semantic_query::ClauseSpelling::Bound,
             crate::semantic_query::ClauseSpelling::Bound,
         )
     }
 
-    /// The sb15 rule addressed by type-parameter NAME rather than by an
-    /// owning `Signature` node.
+    /// The signature-utility rule addressed by type-parameter NAME and
+    /// constraint rather than by an owning `Signature` node: TypeScript's
+    /// BASE signature (`getBaseSignature`), which is what `ReturnType` /
+    /// `Parameters` infer from when their argument is a generic signature.
     ///
-    /// [`Self::instantiate_free_signature_params_at_unknown`] reads the
-    /// declared parameter names off a signature node and is the entry for
-    /// every caller that HAS one. A caller that holds only a signature's
-    /// RETURN — the flow-return rail, whose callee answers with a bare
-    /// return node and never composes a signature — needs the same rule
-    /// against the callee's separately-inventoried clause, so both share
-    /// this body instead of the flow rail growing a second, drifting copy.
+    /// [`Self::instantiate_signature_params_at_base_constraints`] reads the
+    /// clause off a signature node and is the entry for every caller that
+    /// HAS one. A caller that holds only a signature's RETURN — the
+    /// flow-return rail, whose callee answers with a bare return node and
+    /// never composes a signature — applies the same rule to the callee's
+    /// separately-inventoried clause through this body.
     ///
-    /// Same semantics either way: each named parameter's binder
-    /// occurrences in `extracted` are collected SHADOWING-AWARE (a nested
-    /// signature re-declaring the name owns its whole subtree) and
-    /// substituted through the shared binder-identity substitution. An
-    /// empty name list returns `extracted` unchanged.
-    pub(super) fn instantiate_named_params_at_unknown<'n>(
+    /// Each parameter instantiates at its constraint (`unknown` when it has
+    /// none; a DEFAULT is never consulted), with sibling parameters inside
+    /// a constraint replaced by THEIR constraints for `N - 1` rounds and
+    /// every parameter still referenced after that erased to `any`. So
+    /// `<A extends string, B extends A>` reads `B` as `string`,
+    /// `<T extends { next: T }>` reads `T` as `{ next: any }`, and
+    /// `<A extends B[], B extends C[], C extends A[]>` reads each as
+    /// `any[][][]`. A constraint that reaches its own parameter through
+    /// bare parameter references alone (`<A extends B, B extends A>`, also
+    /// through a union or intersection arm) is circular: TypeScript
+    /// rejects it (TS2313) and treats the parameter as unconstrained.
+    ///
+    /// `constraint_spelling` names the spellings of a clause parameter
+    /// inside the constraints, `spelling` those inside `extracted` — the
+    /// two can be lowered in different scopes. An empty clause returns
+    /// `extracted` unchanged.
+    pub(super) fn instantiate_clause_at_base_constraints<'n>(
         &self,
-        names: impl IntoIterator<Item = &'n str>,
+        clause: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
         extracted: SemanticNodeId,
+        constraint_spelling: crate::semantic_query::ClauseSpelling,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
+        let clause: Vec<(&str, Option<SemanticNodeId>)> = clause.into_iter().collect();
+        if clause.is_empty() {
+            return extracted;
+        }
+        let names: Vec<&str> = clause.iter().map(|(name, _)| *name).collect();
+        let circular = self.circular_clause_constraints(&clause, constraint_spelling);
+        let intern = |primitive| {
+            self.graph()
+                .intern_node(SemanticNodeData::Primitive(primitive))
+        };
+        let unknown = intern(crate::semantic_query::PrimitiveKind::Unknown);
+        let constraints: Vec<SemanticNodeId> = clause
+            .iter()
+            .zip(&circular)
+            .map(|((_, constraint), circular)| match constraint {
+                Some(constraint) if !circular => *constraint,
+                _ => unknown,
+            })
+            .collect();
+        // Round 0 erases every parameter a constraint still names; round
+        // `r` replaces each named parameter with its round `r - 1` base.
+        // The substituted values name no clause parameter, so the
+        // per-name substitution is a simultaneous one.
+        let any = intern(crate::semantic_query::PrimitiveKind::Any);
+        let mut bases: Vec<SemanticNodeId> = constraints
+            .iter()
+            .map(|&constraint| {
+                self.instantiate_clause_params(
+                    names.iter().map(|&name| (name, Some(any))),
+                    constraint,
+                    constraint_spelling,
+                )
+            })
+            .collect();
+        for _ in 1..clause.len() {
+            bases = constraints
+                .iter()
+                .map(|&constraint| {
+                    self.instantiate_clause_params(
+                        names.iter().copied().zip(bases.iter().copied().map(Some)),
+                        constraint,
+                        constraint_spelling,
+                    )
+                })
+                .collect();
+        }
         self.instantiate_clause_params(
-            names.into_iter().map(|name| (name, None)),
+            names.iter().copied().zip(bases.iter().copied().map(Some)),
             extracted,
             spelling,
         )
+    }
+
+    /// Per clause parameter: whether its constraint reaches the parameter
+    /// itself through bare parameter references alone (a reference, or a
+    /// union / intersection arm that is one) — TypeScript's circular
+    /// constraint (TS2313), which it drops.
+    fn circular_clause_constraints(
+        &self,
+        clause: &[(&str, Option<SemanticNodeId>)],
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> Vec<bool> {
+        // The parameters each constraint names bare.
+        let edges: Vec<Vec<usize>> = clause
+            .iter()
+            .map(|(_, constraint)| {
+                let mut targets = Vec::new();
+                let mut stack: Vec<SemanticNodeId> = constraint.iter().copied().collect();
+                let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+                while let Some(node) = stack.pop() {
+                    if !visited.insert(node) {
+                        continue;
+                    }
+                    let Some(data) = self.graph().node_data(node) else {
+                        continue;
+                    };
+                    match data.as_ref() {
+                        SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_) => {
+                            let members = data.composite_members().expect("composite arm");
+                            stack.extend(members.iter().copied());
+                        }
+                        SemanticNodeData::Alias(target) => stack.push(*target),
+                        SemanticNodeData::TypeParam { .. }
+                        | SemanticNodeData::BareRef(_)
+                        | SemanticNodeData::DeclRef { .. } => {
+                            drop(data);
+                            targets.extend(clause.iter().enumerate().filter_map(
+                                |(index, (name, _))| {
+                                    self.collect_type_param_nodes_by_name(
+                                        node, name, /* root_is_own_signature */ false,
+                                        spelling,
+                                    )
+                                    .contains(&node)
+                                    .then_some(index)
+                                },
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                targets
+            })
+            .collect();
+        (0..clause.len())
+            .map(|start| {
+                let mut seen = vec![false; clause.len()];
+                let mut stack = edges[start].clone();
+                while let Some(index) = stack.pop() {
+                    if index == start {
+                        return true;
+                    }
+                    if !std::mem::replace(&mut seen[index], true) {
+                        stack.extend(edges[index].iter().copied());
+                    }
+                }
+                false
+            })
+            .collect()
     }
 
     /// The CALL-SITE form of the clause rule, and the one the flow
@@ -12436,4 +12696,15 @@ enum Thenability {
     Malformed,
     /// This reader cannot decide the protocol.
     Undecided,
+}
+
+/// The declaration scope a type-parameter binding lowers its defaults in:
+/// the declaration's file scope, its scope payload and shadow set, and the
+/// authored-resolution debt of a declaration recovered as a partial.
+struct DeclarationBindingScope<'s> {
+    scope: &'s NodeScopeId,
+    scope_payload: Option<&'s crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: &'s crate::resolver_core::scope_shadowing::ScopeShadowing,
+    authored_resolution_debt:
+        Option<&'s crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame>,
 }

@@ -468,6 +468,34 @@ enum ProgramShallowProjection {
     Failed,
 }
 
+/// Whether a NON-EMPTY projected path's terminal has a one-level surface
+/// for the Shallow terminal to synthesise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectedTerminalSurface {
+    /// An object-shaped terminal (object, intersection, merged
+    /// declaration, spread program, or a union of those): synthesise its
+    /// surface.
+    Structural,
+    /// A reference or deferred carrier (or a union reaching one, with no
+    /// surfaceless arm): synthesise the surface its body contributes, and
+    /// keep the carrier when that body contributes none.
+    Carrier,
+    /// A scalar, array, tuple, callable, binder or other surfaceless
+    /// terminal, or a union with such an arm: the terminal IS the
+    /// projection's answer.
+    Surfaceless,
+}
+
+/// What the Shallow terminal synthesis returns when no arm of the walk
+/// contributed a surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfacelessWalk {
+    /// The empty whole-surface projection's contract: an empty `Object`.
+    EmptySurface,
+    /// A projected carrier terminal: the terminal itself.
+    KeepTerminal,
+}
+
 /// Transient walker-internal surface representation. Not interned in the
 /// semantic graph — only the final merged surface is interned via
 /// `SemanticNodeData::Object` once synthesis completes.
@@ -3322,7 +3350,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 current = self.present_terminal_member_carriers(current);
             }
         } else if matches!(self.mode(), ProjectionMode::Shallow) {
-            current = self.expand_empty_path_shallow_terminal_surface(current);
+            if !self.original_path_non_empty {
+                current = self.expand_empty_path_shallow_terminal_surface(current);
+            } else {
+                // A projected path's terminal is the MEMBER's own type, and a
+                // one-level surface is a view of it only when it has one: a
+                // scalar, array, tuple, callable or binder terminal is the
+                // answer itself (`{ a: 1 }['a']` is `1`, never the empty
+                // surface `{}` a surface synthesis over it would produce),
+                // and so is a union with such an arm. A reference or
+                // deferred carrier is expanded, but one whose body
+                // contributes no surface keeps the carrier.
+                current = match self.projected_terminal_surface(current) {
+                    ProjectedTerminalSurface::Structural => {
+                        self.expand_empty_path_shallow_terminal_surface(current)
+                    }
+                    ProjectedTerminalSurface::Carrier => {
+                        self.shallow_terminal_surface_or_self(current)
+                    }
+                    ProjectedTerminalSurface::Surfaceless => current,
+                };
+            }
         } else if matches!(self.mode(), ProjectionMode::Navigate) && self.original_path_non_empty {
             // Navigate terminal of a projected path: retry IDENTITY for an
             // unresolved-reference carrier (`BareRef` / `ImportType`) so a
@@ -4219,6 +4267,63 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &mut self,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
+        self.shallow_terminal_surface(node, SurfacelessWalk::EmptySurface)
+    }
+
+    /// The shallow surface of a projected path's CARRIER terminal (a
+    /// reference or deferred shell), or the carrier itself when nothing
+    /// its body reaches contributes a surface — `type S = string`
+    /// projected through `{ s: S }['s']` is the reference, not `{}`.
+    fn shallow_terminal_surface_or_self(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        self.shallow_terminal_surface(node, SurfacelessWalk::KeepTerminal)
+    }
+
+    /// Whether a projected path's terminal has a one-level surface to
+    /// synthesise (see [`ProjectedTerminalSurface`]). Syntactic over the
+    /// terminal's own node: a transparent `Alias` classifies its target,
+    /// a union classifies from its arms, and nothing is dispatched.
+    fn projected_terminal_surface(&self, node: SemanticNodeId) -> ProjectedTerminalSurface {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        let mut verdict = ProjectedTerminalSurface::Structural;
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                return ProjectedTerminalSurface::Surfaceless;
+            };
+            match &*data {
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Intersection(_)
+                | SemanticNodeData::MergedDecl { .. }
+                | SemanticNodeData::ObjectSpreadProgram(_) => {}
+                SemanticNodeData::Alias(target) => stack.push(*target),
+                SemanticNodeData::Union(arms) => stack.extend(arms.iter().copied()),
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
+                | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Conditional { .. }
+                | SemanticNodeData::IndexedAccess { .. } => {
+                    verdict = ProjectedTerminalSurface::Carrier;
+                }
+                _ => return ProjectedTerminalSurface::Surfaceless,
+            }
+        }
+        verdict
+    }
+
+    /// The one iterative synthesis behind both Shallow terminals; see
+    /// [`SurfacelessWalk`] for what a walk that contributed nothing
+    /// returns.
+    fn shallow_terminal_surface(
+        &mut self,
+        node: SemanticNodeId,
+        surfaceless: SurfacelessWalk,
+    ) -> SemanticNodeId {
         // Fast path: an already-materialised `Object` root needs no
         // synthesis. The root seed carries no member-role override, no
         // heritage overlay, and no provenance downgrade (those
@@ -4591,10 +4696,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
 
         // Materialise the root contribution into a SurfaceView and
-        // intern it. Empty contribution → empty Object surface.
-        let surface_view = match root_contribution {
-            Some(surface) => surface_view_from_shallow(&surface),
-            None => empty_surface_view(),
+        // intern it. Empty contribution → empty Object surface, unless the
+        // caller keeps a surfaceless terminal as itself.
+        let surface_view = match (root_contribution, surfaceless) {
+            (Some(surface), _) => surface_view_from_shallow(&surface),
+            (None, SurfacelessWalk::EmptySurface) => empty_surface_view(),
+            (None, SurfacelessWalk::KeepTerminal) => return node,
         };
         self.graph()
             .intern_node(SemanticNodeData::Object(surface_view))

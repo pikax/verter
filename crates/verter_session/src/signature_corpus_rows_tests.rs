@@ -201,7 +201,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type WithDefault<T = string> = {\n    value: T;\n};\nexport declare function witness(): WithDefault<string>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Generic DEFAULT application (WithDefault bare -> WithDefault<string>): 7.0.2 applies the declared default; the consumer-expanded answer is the BARE alias reference (measured `DeclRef(WithDefault)`), so the default is never applied. Owed by the binder-space default application." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV06_default_references_binder",
@@ -214,7 +214,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type Chain<T, U = T[]> = {\n    self: T;\n    others: U;\n};\nexport declare function witness(): Chain<number, number[]>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A default REFERENCING ANOTHER BINDER (U = T[]): the recorded observation is the defaulted instantiation Chain<number, number[]>; the consumer-expanded answer is the alias EXPANSION instead (measured `{ self: number, others: Array(number) }`), losing the alias-applied form the checker prints. Owed by the binder-space default application." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV07_type_predicate",
@@ -266,7 +266,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type F<T> = {\n    f: T;\n};\ntype G<U> = F<U[]>;\nexport declare function witness(): G<boolean>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "The nested-instantiation probe REDUCES now, but to the alias's EXPANSION (measured `{ f: Array(boolean) }`) where 7.0.2 prints the alias-applied `G<boolean>`. Preserving the alias-applied display through a type-position instantiation is owed by the `SignaturesOfType` result projection." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV11_constrained_substitution",
@@ -279,7 +279,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function pickA<T extends {\n    a: 1;\n}>(v: T): T['a'];\nexport declare function witness(): 1;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained substitution through an indexed access (T['a'] over T extends { a: 1 }): the checker reduces to the literal 1; the consumer-expanded answer is an EMPTY surface (measured `{  }`), so the indexed access is never forced through the constraint. Owed by the constrained-substitution stage." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV12_grouping_witness_L",
@@ -432,10 +432,10 @@ pub(crate) const CORPUS: &[Row] = &[
         checker: "unknown",
         checker_is_any: false,
         checker_is_never: false,
-        checker_display_only: true,
+        checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T>(v: Awaited<T>): Awaited<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Deferred generic: the witness signature is (v: Awaited<T>) => Awaited<T>; instantiating the binder at its constraint prints unknown. The consumer-expanded answer is `unknown`, which does not carry the declared-return structure this row compares against. Deferred-symbolic instantiation through the constraint is owed." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV24_awaited_constrained_generic",
@@ -448,7 +448,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T extends Promise<number>>(v: T): Promise<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained generic async wrap: Promise<Promise<number>> (the body returns v: T unreduced); the consumer-expanded answer is a typed gap instead (measured `Opaque(Miss)`). The async-wrap/constraint interaction is owed by the runtime/lib `Awaited` lane." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV25_generic_union_dedup",

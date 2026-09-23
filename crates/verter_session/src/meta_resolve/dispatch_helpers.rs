@@ -235,6 +235,16 @@ fn realize_callable_member_at(
             )
         }
 
+        // A builtin runtime NOMINAL's application carrier (`Date`,
+        // `Promise<T>`, …) is not a residual: the demand settles on it
+        // because it IS the resolved type, and it carries no authored call
+        // signature to realize.
+        SemanticNodeData::InstantiationRef { base, .. }
+            if crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base).is_some() =>
+        {
+            SurfaceResolution::no_surface()
+        }
+
         // A residual carrier the shared demand stopped on without
         // resolving it (a no-progress fix-point): an UNRESOLVED
         // declaration is an incomplete realization, never a silent "not

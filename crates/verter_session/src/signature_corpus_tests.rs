@@ -442,13 +442,17 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // outcome, and a cyclic alias would silently decide the compared node by
     // the iteration budget.
     //
-    // The loop runs in its declaration-KEEPING mode: it stops at a named
-    // `DeclRef` rather than resolving it to the declaration's body. The
-    // recorded column prints a named interface by its NAME
-    // (`InstanceType<typeof CtorA & typeof CtorB>` prints `B`), and the
-    // checker-syntax matcher compares a name against a `DeclRef` — never
-    // against an expanded body. Resolving the reference would overshoot the
-    // printed answer by one step and read a correct answer as owed.
+    // The loop runs in its declaration-KEEPING mode: it stops where the
+    // checker prints a NAME rather than resolving it to the declaration's
+    // body — an interface or class by its name
+    // (`InstanceType<typeof CtorA & typeof CtorB>` prints `B`), an alias
+    // application the checker names by its alias (`G<boolean>` for
+    // `type G<U> = F<U[]>`), each with its omitted defaulted arguments
+    // filled the way the checker fills them (`WithDefault` prints
+    // `WithDefault<string>`). The checker-syntax matcher compares a name
+    // against that carrier — never against an expanded body — so resolving
+    // it would overshoot the printed answer by one step and read a correct
+    // answer as owed.
     let demand = dispatch.normalize_node_keeping_declaration_refs_for_tests(
         result.return_type(),
         crate::semantic_query::ProjectionReductionContext::published(
@@ -511,7 +515,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     };
     // The checker text is a basis only where it carries a STRUCTURAL
     // claim: a display-only column (a binder-at-constraint display,
-    // SV23/25/26) is checker PRINT OUTPUT, never semantic identity, so
+    // SV25/26) is checker PRINT OUTPUT, never semantic identity, so
     // those rows compare through their declared return alone and a
     // reduction to the display text must not satisfy or flip them.
     let matched_checker = !row.checker.is_empty()
@@ -520,7 +524,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     let matched_checker_in_order = matched_checker && structural_match(row.checker, true);
     // The declared return is a LIVE basis when the checker column is a
     // display-only binder instantiation (the dedup/order claim lives in
-    // the declaration bytes — SV23/25/26) or when the row records a
+    // the declaration bytes — SV25/26) or when the row records a
     // refusal (no checker text at all — SV21). Union arm ORDER is a
     // structured field of the declaration bytes, so this basis rides
     // the order-sensitive comparator: a wrong-order implementation must
@@ -979,4 +983,81 @@ fn union_order_is_the_only_difference_from_the_checker() {
             restored.rendered.as_deref().unwrap_or("<no value>")
         );
     }
+}
+
+/// The observation lane's print altitude names a declaration application
+/// the way the checker prints it: an interface by its name, an alias
+/// application by its alias when the alias constructs the type it settles
+/// on — each with its omitted defaulted arguments filled — and every other
+/// alias (a conditional, a bare parameter, a primitive, a union that
+/// collapsed to one member) as what it resolves to. Every checker print is
+/// TypeScript 7.0.2's, measured on this exact module through the corpus's
+/// two-step wrapper.
+#[test]
+fn the_print_altitude_names_declaration_applications_as_the_checker_does() {
+    use crate::signature_corpus_rows_tests::Family;
+    const SOURCE: &str = "\
+type WithDefault<T = string> = { value: T };
+type Chain<T, U = T[]> = { self: T; others: U };
+type F<T> = { f: T };
+type G<U> = F<U[]>;
+type Un<T> = T | undefined;
+type In<T> = T & { x: 1 };
+type Mp<T> = { [K in keyof T]: T[K] };
+type Prim = string;
+interface GI<T = number> { v: T }
+type Cond<T = string> = T extends string ? { s: 1 } : { n: 1 };
+type UnD<T = string> = T | number;
+type Arr<T> = T[];
+type Collapse<T> = T | string;
+type Nest<T = boolean> = G<T>;
+type Tup<T> = [T, T];
+type OuterCond<T = string> = Cond<T>;
+type ObjNoGen = { a: 1 };
+type Fn<T> = (x: T) => void;
+type Lit<T> = T;
+export function witness() { return 1; }";
+    let mut failures = Vec::new();
+    for (probe, checker) in [
+        ("WithDefault", "WithDefault<string>"),
+        ("Chain<number>", "Chain<number, number[]>"),
+        ("G<boolean>", "G<boolean>"),
+        ("Un<string>", "Un<string>"),
+        ("In<{ y: 2 }>", "In<{ y: 2; }>"),
+        ("Mp<{ a: 1 }>", "Mp<{ a: 1; }>"),
+        ("Prim", "string"),
+        ("GI", "GI<number>"),
+        ("Cond", "{ s: 1; }"),
+        ("UnD", "UnD<string>"),
+        ("Arr<number>", "Arr<number>"),
+        ("Collapse<string>", "string"),
+        ("Nest", "Nest<boolean>"),
+        ("Tup<number>", "Tup<number>"),
+        ("OuterCond", "{ s: 1; }"),
+        ("ObjNoGen", "ObjNoGen"),
+        ("Fn<number>", "Fn<number>"),
+        ("Lit<{ z: 1 }>", "{ z: 1; }"),
+    ] {
+        let row = Row {
+            id: "SV_CONTROL_print_altitude",
+            family: Family::SubstitutionStages,
+            source: SOURCE,
+            probe,
+            checker,
+            checker_is_any: false,
+            checker_is_never: false,
+            checker_display_only: false,
+            diagnostic: None,
+            decl_emit: "export declare function witness(): number;\n",
+            verdict: Verdict::MatchesChecker,
+        };
+        let live = live_probe_outcome(&row);
+        if !live.matched_checker {
+            failures.push(format!(
+                "`{probe}`: the checker prints `{checker}`, the lane measured `{}`",
+                live.rendered.as_deref().unwrap_or("<no value>")
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
