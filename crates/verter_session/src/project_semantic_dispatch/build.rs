@@ -3244,70 +3244,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );
-        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        for (index, param) in prepared.type_parameters.iter().enumerate() {
-            let arg_id = if let Some(explicit) = args.get(index).copied() {
-                explicit
-            } else if let Some(default) = param.default.as_ref() {
-                // The default bound is a content-free locator of the authored
-                // `T = D` position — lowered through the ONE located body
-                // source. The prior-sibling PREFIX params re-derive the
-                // bound's own binder frame; `env` (the arguments bound so
-                // far) substitutes an earlier parameter referenced by the
-                // default (`<T, U = T>`). Propagate the full
-                // `ProjectionReductionContext` so a `StructuralTransit`
-                // instantiation survives; provenance downgrades to
-                // structural — a type-parameter default is a substituted
-                // value, not the macro-T own body.
-                self.lower_located_body_with_resolution_debt(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
-                    prepared.kind,
-                    &prepared.type_parameters[..index],
-                    &prepared.name_resolution,
-                    &env,
-                    &scope,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    &mut substitutions,
-                    context.into_structural_provenance(),
-                    authored_resolution_debt.as_ref(),
-                )
-            } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
-                // Skeleton mode preserves open generics.
-                // Bind unbound param to a TypeParam shell so body lowering
+        let (env, _bindings) = self.bind_declared_type_arguments(
+            &prepared,
+            args,
+            &DeclarationBindingScope {
+                scope: &scope,
+                scope_payload: scope_payload.as_ref(),
+                shadowing: &shadowing,
+                authored_resolution_debt: authored_resolution_debt.as_ref(),
+            },
+            &mut substitutions,
+            context,
+            |index, param| {
+                // Skeleton mode preserves open generics: an unbound
+                // parameter binds a TypeParam shell so body lowering
                 // produces TypeParam graph nodes (instead of resolving
                 // T-refs to Opaque(Miss)). The relation engine treats
                 // TypeParam as deferred → Conditional branches stay live
-                // → the cycle gate's ref collector walks both → recursive refs
-                // through nested mapped/template-literal/conditional
-                // bodies become visible to the cycle gate.
-                let display_name: Arc<str> = Arc::from(param.name.as_str());
-                let decl_identity = crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::clone(decl_canonical),
-                    owner: decl_owner,
-                    whole_hash: decl_whole_hash,
-                    decl_name: Arc::clone(decl_name),
-                };
-                self.graph().intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl: decl_identity,
-                        param_index: index as u16,
-                        constraint: None,
-                        default: None,
-                        display_name,
-                    },
-                    scope.clone(),
-                )
-            } else {
-                // Existing Navigate/Expanded behavior preserved: unbound
-                // param means `Opaque(Miss)` propagates through the body.
-                // Callers that genuinely need open-generic access must
-                // explicitly request Skeleton mode.
-                continue;
-            };
-            env.insert(param.name.clone(), arg_id);
-        }
+                // → the cycle gate's ref collector walks both → recursive
+                // refs through nested mapped/template-literal/conditional
+                // bodies become visible to the cycle gate. Every other mode
+                // leaves it unbound, so `Opaque(Miss)` propagates through
+                // the body; callers that genuinely need open-generic access
+                // must explicitly request Skeleton mode.
+                (body_mode == crate::semantic_query::ProjectionMode::Skeleton).then(|| {
+                    let decl_identity = crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::clone(decl_canonical),
+                        owner: decl_owner,
+                        whole_hash: decl_whole_hash,
+                        decl_name: Arc::clone(decl_name),
+                    };
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::TypeParam {
+                            decl: decl_identity,
+                            param_index: index as u16,
+                            constraint: None,
+                            default: None,
+                            display_name: Arc::from(param.name.as_str()),
+                        },
+                        scope.clone(),
+                    )
+                })
+            },
+        );
 
         // 5. Shallow-lower the body. Collects substitution facts for
         // origin-edge emission. `name_resolution` is the prepared
@@ -4438,6 +4418,144 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope.clone(),
         );
         Some(merged)
+    }
+
+    /// Bind a prepared declaration's type parameters for one application,
+    /// in declaration order: the supplied argument at each position, else
+    /// the parameter's declared DEFAULT, else whatever `unbound` supplies
+    /// (`None` leaves the parameter unbound).
+    ///
+    /// A default is a content-free locator of the authored `T = D`
+    /// position, lowered through the ONE located body source in the
+    /// declaration's scope. The prior-sibling PREFIX params re-derive the
+    /// bound's own binder frame, and the arguments bound so far substitute
+    /// an earlier parameter the default names — `<T, U = T[]>` applied to
+    /// `number` binds `U` to `number[]`. The full
+    /// `ProjectionReductionContext` propagates so a `StructuralTransit`
+    /// instantiation survives; provenance downgrades to structural — a
+    /// type-parameter default is a substituted value, not the macro-T own
+    /// body.
+    ///
+    /// Returns the binding environment by parameter name and each
+    /// parameter's binding in declaration order.
+    fn bind_declared_type_arguments(
+        &self,
+        prepared: &PreparedTypeDecl,
+        args: &[SemanticNodeId],
+        binding_scope: &DeclarationBindingScope<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        mut unbound: impl FnMut(
+            usize,
+            &verter_type_expr::facts::NarrowTypeParam,
+        ) -> Option<SemanticNodeId>,
+    ) -> (
+        FxHashMap<String, SemanticNodeId>,
+        Vec<Option<SemanticNodeId>>,
+    ) {
+        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        let mut bindings = Vec::with_capacity(prepared.type_parameters.len());
+        for (index, param) in prepared.type_parameters.iter().enumerate() {
+            let binding = match (args.get(index).copied(), param.default.as_ref()) {
+                (Some(explicit), _) => Some(explicit),
+                (None, Some(default)) => Some(self.lower_located_body_with_resolution_debt(
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
+                    prepared.kind,
+                    &prepared.type_parameters[..index],
+                    &prepared.name_resolution,
+                    &env,
+                    binding_scope.scope,
+                    binding_scope.scope_payload,
+                    binding_scope.shadowing,
+                    substitutions,
+                    context.into_structural_provenance(),
+                    binding_scope.authored_resolution_debt,
+                )),
+                (None, None) => unbound(index, param),
+            };
+            if let Some(binding) = binding {
+                env.insert(param.name.clone(), binding);
+            }
+            bindings.push(binding);
+        }
+        (env, bindings)
+    }
+
+    /// The COMPLETE argument list the generic declaration `identity` binds
+    /// for an application that supplies `args`: the supplied arguments,
+    /// then each omitted parameter's declared default under the bindings
+    /// before it — the application the checker names when it prints the
+    /// reference (`WithDefault` is `WithDefault<string>`, `Chain<number>`
+    /// is `Chain<number, number[]>`). The same binding
+    /// ([`Self::bind_declared_type_arguments`]) `Instantiate` applies, so
+    /// the named application and its instantiated body cannot disagree.
+    ///
+    /// `None` when the declaration cannot be recovered, or a parameter is
+    /// neither supplied nor defaulted.
+    pub(super) fn declared_application_arguments(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        let whole_hash = self
+            .ctx
+            .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
+            .map(|serve| serve.indexed.whole_hash)
+            .unwrap_or_default();
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&identity.canonical_id),
+            owner: identity.owner,
+            whole_hash,
+            local_scope: None,
+        };
+        let base = self
+            .graph()
+            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
+        let ri = ResolvedRootIdentity::new_in_owner(
+            identity.canonical_id.as_ref(),
+            identity.owner,
+            identity.decl_name.as_ref(),
+        );
+        let prepared =
+            match SessionDispatchHost::new(self.ctx).resolve_prepared_type_decl(base, &ri) {
+                PreparedTypeDeclResolution::Complete(prepared) => prepared,
+                PreparedTypeDeclResolution::AuthoredPartial { .. }
+                | PreparedTypeDeclResolution::Missing
+                | PreparedTypeDeclResolution::Failed { .. } => return None,
+            };
+        if args.len() > prepared.type_parameters.len() {
+            return None;
+        }
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(identity.canonical_id.as_ref())
+            .map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle,
+                    identity.owner,
+                )
+            });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let (_env, bindings) = self.bind_declared_type_arguments(
+            &prepared,
+            args,
+            &DeclarationBindingScope {
+                scope: &scope,
+                scope_payload: scope_payload.as_ref(),
+                shadowing: &shadowing,
+                authored_resolution_debt: None,
+            },
+            &mut Vec::new(),
+            context,
+            |_, _| None,
+        );
+        bindings
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .map(Arc::from)
     }
 
     /// Resolve the typed declaration kind of a prepared declaration rooted at
@@ -12436,4 +12554,15 @@ enum Thenability {
     Malformed,
     /// This reader cannot decide the protocol.
     Undecided,
+}
+
+/// The declaration scope a type-parameter binding lowers its defaults in:
+/// the declaration's file scope, its scope payload and shadow set, and the
+/// authored-resolution debt of a declaration recovered as a partial.
+struct DeclarationBindingScope<'s> {
+    scope: &'s NodeScopeId,
+    scope_payload: Option<&'s crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: &'s crate::resolver_core::scope_shadowing::ScopeShadowing,
+    authored_resolution_debt:
+        Option<&'s crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame>,
 }

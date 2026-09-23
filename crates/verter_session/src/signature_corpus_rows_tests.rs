@@ -194,7 +194,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type WithDefault<T = string> = {\n    value: T;\n};\nexport declare function witness(): WithDefault<string>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Generic DEFAULT application (WithDefault bare -> WithDefault<string>): 7.0.2 applies the declared default; the consumer-expanded answer is the BARE alias reference (measured `DeclRef(WithDefault)`), so the default is never applied. Owed by the binder-space default application." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV06_default_references_binder",
@@ -207,7 +207,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type Chain<T, U = T[]> = {\n    self: T;\n    others: U;\n};\nexport declare function witness(): Chain<number, number[]>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "A default REFERENCING ANOTHER BINDER (U = T[]): the recorded observation is the defaulted instantiation Chain<number, number[]>; the consumer-expanded answer is the alias EXPANSION instead (measured `{ self: number, others: Array(number) }`), losing the alias-applied form the checker prints. Owed by the binder-space default application." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV07_type_predicate",
@@ -259,7 +259,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "type F<T> = {\n    f: T;\n};\ntype G<U> = F<U[]>;\nexport declare function witness(): G<boolean>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "The nested-instantiation probe REDUCES now, but to the alias's EXPANSION (measured `{ f: Array(boolean) }`) where 7.0.2 prints the alias-applied `G<boolean>`. Preserving the alias-applied display through a type-position instantiation is owed by the `SignaturesOfType` result projection." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV11_constrained_substitution",
