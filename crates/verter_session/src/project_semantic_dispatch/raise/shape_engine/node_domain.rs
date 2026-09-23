@@ -1702,6 +1702,17 @@ pub(super) fn project_root_summary(
             active.remove(&node);
             return result;
         }
+        // Raised as its instance surface, exactly as `fold_node` raises it.
+        SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+            if !active.insert(node) {
+                return Some(RootOnlySummary::from_summary(summary::opaque_sentinel(
+                    &QueryError::RaiseAliasCycle,
+                )));
+            }
+            let result = project_root_summary(dispatch, *surface, active);
+            active.remove(&node);
+            return result;
+        }
         SemanticNodeData::MergedDecl { contributors } => {
             let merged = crate::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
                 dispatch.graph(),

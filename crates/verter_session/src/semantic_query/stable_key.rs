@@ -71,6 +71,7 @@ pub mod subtag {
     pub const SIGNATURE: u8 = 8;
     pub const OBJECT: u8 = 9;
     pub const MERGED_DECL: u8 = 10;
+    pub const CLASS_EXPRESSION_INSTANCE: u8 = 11;
     pub const TYPE_PARAM: u8 = 1;
     pub const INFER: u8 = 2;
     pub const INFER_REF: u8 = 3;
@@ -610,6 +611,25 @@ fn encode_data(
             for arg in args.iter() {
                 encode_child(graph, *arg, seen, &mut enc, depth);
             }
+        }
+        // The class identity is the authored position (file, owner, offset);
+        // the printed name and qualifier ride along, and the instance
+        // surface descends as a child, so two instantiations of one class
+        // expression stay distinct.
+        SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            enc.header(category::AUTHORED, subtag::CLASS_EXPRESSION_INSTANCE);
+            enc.str(&identity.canonical_id);
+            encode_owner(&mut enc, identity.owner);
+            enc.u32(identity.offset);
+            enc.str(&identity.name);
+            match &identity.qualifier {
+                None => enc.u8(0),
+                Some(qualifier) => {
+                    enc.u8(1);
+                    enc.str(qualifier);
+                }
+            }
+            encode_child(graph, *surface, seen, &mut enc, depth);
         }
         SemanticNodeData::MergedDecl { contributors } => {
             enc.header(category::AUTHORED, subtag::MERGED_DECL);

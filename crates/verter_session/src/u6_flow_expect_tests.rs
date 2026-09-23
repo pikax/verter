@@ -587,6 +587,9 @@ pub(crate) fn render_node(
         SemanticNodeData::InstantiationRef { base, .. } => {
             format!("InstantiationRef({})", base.decl_name)
         }
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
+            format!("ClassExpressionInstance({})", identity.printed_name())
+        }
         SemanticNodeData::BareRef(_) => format!(
             "BareRef({})",
             data.bare_ref_head()
@@ -1060,7 +1063,8 @@ pub(crate) fn check_boundary_refusal(
 /// semantic equality.
 ///
 /// Grammar: string/number literals, primitives, bare and dotted names
-/// (`Intl.DateTimeFormatOptions`), `A | B`, `A & B`, `T[]` (mutable
+/// (`Intl.DateTimeFormatOptions`, `Mixin.(Anonymous class)`, `(Anonymous
+/// class)`), `A | B`, `A & B`, `T[]` (mutable
 /// arrays only), `Name<T, …>` generic arguments, objects whose members
 /// are properties (`name: T` with `readonly` / `?` modifiers), methods
 /// (`name(p: T, …): R`), accessors (`get name(): R`, `set name(p: T);`)
@@ -1074,7 +1078,8 @@ pub(crate) fn check_boundary_refusal(
 /// method kind, and value; a function print is a Call signature only
 /// (`new (…) => T` never satisfies it). Parameter names are ignored;
 /// types and arity are exact. A reference name matches a resolved
-/// `DeclRef` only — `BareRef` / `TypeParam` reach `_ => false`
+/// `DeclRef`, or a class-expression instance by the name the checker
+/// prints for it — `BareRef` / `TypeParam` reach `_ => false`
 /// (fail-closed). A generic-argument reference matches an
 /// `InstantiationRef` (name + exact argument list). Accessor prints and
 /// elided-member markers PARSE but match NOTHING (fail-closed; see the
@@ -1316,6 +1321,12 @@ pub(crate) mod checker_syntax {
         fn atom(&mut self) -> Result<CheckerType, String> {
             self.skip_ws();
             let rest = self.rest();
+            // The checker's print of an UNQUALIFIED anonymous class
+            // reference — a name, not a parenthesised type.
+            if rest.starts_with("(Anonymous class)") {
+                self.pos += "(Anonymous class)".len();
+                return Ok(CheckerType::Ref("(Anonymous class)".to_owned()));
+            }
             match rest.chars().next() {
                 Some('(') => {
                     // `(p: T, …) => R` or a parenthesised type — try the
@@ -1363,9 +1374,9 @@ pub(crate) mod checker_syntax {
                     // A dotted reference print (`Intl.NumberFormatOptions`)
                     // carries its qualification inside the name, including
                     // the checker's anonymous-class print segment
-                    // (`Mixin.(Anonymous class)`) — a name that can never
-                    // resolve to a live DeclRef, so it stays fail-closed at
-                    // match time while still parsing as checker text.
+                    // (`Mixin.(Anonymous class)`) — a name no `DeclRef`
+                    // carries; it matches a live class-expression instance
+                    // by its printed name.
                     loop {
                         self.skip_ws();
                         let rest = self.rest();
@@ -1747,13 +1758,21 @@ pub(crate) mod checker_syntax {
                 e == g
             }
             (CheckerType::Primitive(e), SemanticNodeData::Primitive(g)) => e == g,
-            // A reference name matches a resolved `DeclRef` only — plus
+            // A reference name matches a resolved `DeclRef` — plus
             // the ZERO-ARGUMENT generic carrier, whose raised print is
             // the identical bare reference. `BareRef` / `TypeParam` / an
             // argument-bearing carrier reach `_ => false` (fail-closed).
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
             }
+            // A class-expression instance matches the name the checker
+            // prints for it (`Mixin.(Anonymous class)`, `(Anonymous
+            // class)`, the variable a class expression initializes) — its
+            // printed NAME, never its structural surface.
+            (
+                CheckerType::Ref(name),
+                SemanticNodeData::ClassExpressionInstance { identity, .. },
+            ) => identity.printed_name() == *name,
             (
                 CheckerType::Ref(name),
                 SemanticNodeData::InstantiationRef {

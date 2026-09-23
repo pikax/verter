@@ -1024,6 +1024,13 @@ pub fn audit_key_for_node(
             base.decl_name,
             args.len()
         ),
+        SemanticNodeData::ClassExpressionInstance { identity, surface } => format!(
+            "ClassExpressionInstance({}::{}@{},surface={})",
+            identity.canonical_id,
+            identity.printed_name(),
+            identity.offset,
+            surface.0
+        ),
         SemanticNodeData::MergedDecl { contributors } => {
             format!("MergedDecl[{}]", contributors.len())
         }

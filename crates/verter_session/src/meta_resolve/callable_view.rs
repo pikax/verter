@@ -140,6 +140,8 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Signature { .. }
         | SemanticNodeData::MergedDecl { .. }
+        // A class expression's instance is a reached object shape.
+        | SemanticNodeData::ClassExpressionInstance { .. }
         // The nominal terminal is a RESOLVED scalar (it widens to the
         // `symbol` primitive), never an unresolved carrier.
         | SemanticNodeData::TypeOfNominal(_) => SnippetParamsArg::ResolvedNonTuple,

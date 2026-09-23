@@ -2374,18 +2374,26 @@ fn class_member_projection_uses_object_walker_arm() {
         walk_src.contains("SemanticNodeData::Object(surface)"),
         "walk.rs must carry the Object arm for member projection"
     );
-    // Negative: no parallel Class/Interface arms in the walker.
+    // Negative: no parallel Class/Interface arms in the walker. The arm
+    // is the VARIANT of that exact name; a longer variant name that merely
+    // starts with it (`ClassExpressionInstance`, which reads through to
+    // its Object surface) is not one.
+    let names_variant = |trimmed: &str, variant: &str| {
+        trimmed
+            .strip_prefix(variant)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    };
     for line in walk_src.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") {
             continue;
         }
         assert!(
-            !trimmed.starts_with("SemanticNodeData::Class"),
+            !names_variant(trimmed, "SemanticNodeData::Class"),
             "walk.rs must not carry a Class arm: `{line}`"
         );
         assert!(
-            !trimmed.starts_with("SemanticNodeData::Interface"),
+            !names_variant(trimmed, "SemanticNodeData::Interface"),
             "walk.rs must not carry an Interface arm: `{line}`"
         );
     }

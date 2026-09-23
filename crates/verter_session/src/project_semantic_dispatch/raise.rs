@@ -824,6 +824,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Alias(target) => {
                 stack.push(ReduceFrame::descend(*target, parent_context));
             }
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                if !matches!(parent_context.mode, ProjectionMode::Navigate) {
+                    stack.push(ReduceFrame::descend(*surface, parent_context));
+                }
+            }
             // Composite shapes — push children ONLY under whole-surface
             // `Published(Expanded)`. Per-prop / structural-transit
             // parents skip composite descent (the parent is the demand
@@ -1173,6 +1178,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(&(*target, context))
                 .copied()
                 .unwrap_or(*target),
+            // A class expression's instance is its name under `Navigate` (the
+            // shallow publication a `DeclRef` to a closed object keeps) and its
+            // reduced instance surface under `Expanded`.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                if matches!(mode, ProjectionMode::Navigate) {
+                    node
+                } else {
+                    state
+                        .mapping
+                        .get(&(*surface, context))
+                        .copied()
+                        .unwrap_or(*surface)
+                }
+            }
 
             // --- operator dispatches (context-aware via underlying key) ---
             SemanticNodeData::IndexedAccess { object, index } => {
@@ -4133,6 +4152,11 @@ impl<'a> OpenWalk<'a> {
 
             // --- carriers we can follow one transparent hop ---
             SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target),
+            // A class expression's instance surface may reach the outer
+            // type parameters of the declaration it is authored under.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                self.node_is_open(ctx, *surface)
+            }
             SemanticNodeData::DeclRef { identity } => {
                 // For the outer-generic-reachability question a declaration
                 // reference cannot carry the mapper's outer generic

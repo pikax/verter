@@ -6503,6 +6503,82 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(default)
     }
 
+    /// Apply instantiation-expression type arguments to a signature-bearing
+    /// OBJECT (`typeof f<string>` over a function declaration, `typeof
+    /// C<string>` over a generic class): every call and construct signature
+    /// the object carries — read from `SignaturesOfType` — whose own
+    /// type-parameter list accepts the arguments is instantiated, the
+    /// others are dropped, and the object's members and index signatures
+    /// are kept as they are. TypeScript's `getInstantiationExpressionType`
+    /// instantiates the same way. An object with no signature that accepts
+    /// the arguments is the same honest `Opaque(Miss)` a lone signature
+    /// answers, so every caller's drop contract holds.
+    fn instantiate_object_signatures(
+        &self,
+        node: SemanticNodeId,
+        surface: &crate::semantic_query::SurfaceView,
+        args: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let Ok((calls, constructs)) = self.shared_signature_buckets(node) else {
+            return self.opaque(QueryError::Miss);
+        };
+        let instantiate = |signatures: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
+            signatures
+                .iter()
+                .filter_map(|signature| self.instantiate_call_candidate(*signature, args))
+                .collect()
+        };
+        let mut call_signatures = Some(instantiate(&calls));
+        let mut construct_signatures = Some(instantiate(&constructs));
+        if call_signatures.as_ref().is_some_and(Vec::is_empty)
+            && construct_signatures.as_ref().is_some_and(Vec::is_empty)
+        {
+            return self.opaque(QueryError::Miss);
+        }
+        // The authored entry order is kept: each signature list takes the
+        // place of the first entry of its kind.
+        let mut entries = Vec::with_capacity(surface.entries.len());
+        for entry in surface.entries.iter() {
+            match entry {
+                crate::semantic_query::SurfaceEntry::CallSignature(_) => entries.extend(
+                    call_signatures
+                        .take()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::semantic_query::SurfaceEntry::CallSignature),
+                ),
+                crate::semantic_query::SurfaceEntry::ConstructSignature(_) => entries.extend(
+                    construct_signatures
+                        .take()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::semantic_query::SurfaceEntry::ConstructSignature),
+                ),
+                other => entries.push(other.clone()),
+            }
+        }
+        entries.extend(
+            call_signatures
+                .into_iter()
+                .flatten()
+                .map(crate::semantic_query::SurfaceEntry::CallSignature),
+        );
+        entries.extend(
+            construct_signatures
+                .into_iter()
+                .flatten()
+                .map(crate::semantic_query::SurfaceEntry::ConstructSignature),
+        );
+        self.graph().intern_preserving_scope(
+            node,
+            SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                entries,
+                surface.keyspace,
+                surface.closed().has_index_signature(),
+            )),
+        )
+    }
+
     /// Apply a call site's explicit type arguments to ONE candidate
     /// signature. `None` when the candidate cannot accept the argument
     /// list, which drops it from that call site's ordered bucket.
@@ -6530,7 +6606,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// to the matching argument (an unfilled trailing parameter takes its
     /// declared default when present), and the instantiated signature is
     /// re-interned WITHOUT the consumed type parameters — an instantiation
-    /// expression yields a non-generic signature. Returns the deferred
+    /// expression yields a non-generic signature. A signature-bearing
+    /// object instantiates every signature it carries
+    /// ([`Self::instantiate_object_signatures`]). Returns the deferred
     /// `Opaque(Miss)` shell when the node is not a generic function or the
     /// arguments cannot satisfy the parameter list (an honest miss, never
     /// a partially-substituted signature).
@@ -6549,6 +6627,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let callable = callable.clone();
             drop(data);
             return self.instantiate_deferred_callable(&callable, args);
+        }
+        if let SemanticNodeData::Object(surface) = &*data {
+            let surface = surface.clone();
+            drop(data);
+            return self.instantiate_object_signatures(node, &surface, args);
         }
         let SemanticNodeData::Signature {
             type_parameters, ..
@@ -6682,6 +6765,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(target) => stack.push(*target),
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());

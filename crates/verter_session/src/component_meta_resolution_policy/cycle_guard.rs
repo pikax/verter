@@ -325,6 +325,10 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
             }
         }
+        SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            identity.hash(hasher);
+            hash_node_rec(ctx, *surface, hasher, seen, depth + 1);
+        }
         SemanticNodeData::Literal(value) => {
             value.hash(hasher);
         }
