@@ -34,6 +34,10 @@ pnpm --filter verter-vscode build:dev  # Bundle extension
 # Run single fixture (fast, targeted)
 E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
 
+# Run an exact route list — what one CI shard runs (see `buildE2eCiShards` in
+# e2e/lib/routeInventory.ts; copy the list from the shard's step log)
+E2E_ROUTES=monorepo@tsgo,tsconfig-extends@tsgo pnpm --filter verter-vscode test:e2e:run
+
 # Run from monorepo root
 pnpm run test:e2e
 

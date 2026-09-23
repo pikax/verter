@@ -1076,3 +1076,74 @@ fn options_projection_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// STP15: the production binding-views path runs on real Vue SFC carrier
+/// bytes. The template read view unwraps the top-level `ref` while the
+/// write target refuses the getter-only computed and the readonly prop;
+/// the writable computed carries its declared setter domain.
+#[test]
+fn binding_views_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        BindingKind, ViewSnapshotKind, WriteDomain, WriteRejection,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<template>\n",
+        "<button @click=\"count++\">{{ doubled }}</button>\n",
+        "</template>\n",
+        "<script setup lang=\"ts\">\n",
+        "import { ref, computed } from 'vue';\n",
+        "const count = ref(0);\n",
+        "const nested = { c: ref(0) };\n",
+        "const doubled = computed(() => count.value * 2);\n",
+        "const label = computed({\n",
+        "  get: (): number => count.value,\n",
+        "  set: (v: string) => { count.value = Number(v); },\n",
+        "});\n",
+        "const { title } = defineProps<{ title: string }>();\n",
+        "</script>\n",
+    );
+    let artifact = registered_artifact("file:///bindings.vue", SFC);
+    let views = VueProjectionBackend
+        .binding_views(SFC, &artifact)
+        .expect("projects");
+    let count = views.read.lookup("count").expect("count");
+    assert_eq!(count.kind, BindingKind::Ref);
+    assert!(count.unwrapped && count.script_wraps_ref);
+    assert!(!views.read.lookup("nested").expect("nested").unwrapped);
+    assert_eq!(views.read.snapshot_kind(), ViewSnapshotKind::Live);
+    assert_eq!(
+        views.write.write_target("doubled"),
+        Err(WriteRejection::GetterOnlyComputed)
+    );
+    assert_eq!(
+        views.write.write_target("title"),
+        Err(WriteRejection::ReadonlyProp)
+    );
+    match &views.write.write_target("label").expect("label").domain {
+        WriteDomain::SetterParam(domain) => assert_eq!(domain, "string"),
+        other => panic!("setter domain must be the declared type, got {other:?}"),
+    }
+    // Usage is accounted from the admitted carrier's own regions through
+    // the owned backend boundary: no caller-supplied name slices.
+    let usage = VueProjectionBackend
+        .binding_usage(SFC, &artifact)
+        .expect("usage");
+    let count_use = usage
+        .used
+        .iter()
+        .find(|binding| binding.name == "count")
+        .expect("count");
+    assert!(
+        count_use.regions.template && count_use.regions.script,
+        "count is referenced in the admitted template and script"
+    );
+    assert!(usage.unused().contains(&"nested"));
+    assert_eq!(
+        VueProjectionBackend
+            .binding_views("<script></script>", &artifact)
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}

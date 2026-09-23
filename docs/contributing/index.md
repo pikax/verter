@@ -63,6 +63,10 @@ these pages deliver:
   classes, memo identity, scheduler generations, deterministic ordering.
 - [First Contribution](./first-contribution.md) — an end-to-end walkthrough
   (add a lint rule) that uses only the owning interfaces.
+- [Removing a Mechanism](./removing-a-mechanism.md) — what a deletion must
+  name (removed mechanism, surviving owner, preserved proof), how structural
+  rails replace scanners, and how to measure production, tests, comments and
+  generated data separately.
 
 ## Code Style
 

@@ -56,7 +56,7 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-use verter_semantic::analysis::type_solver::host::{BareRefOrigin, ResolvedRootIdentity};
+use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
@@ -91,6 +91,10 @@ mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod canonical_algebra;
 pub(crate) mod carrier;
+// The operational budget owner: work units, query-boundary depth, and the
+// request cancellation signal for one connected semantic demand. The
+// dispatcher holds a ledger; it does not implement one.
+pub(crate) mod connected_demand;
 pub(crate) mod cycle_gate;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
@@ -286,74 +290,6 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `build_instantiate` invocations share the active set.
 pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
-const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
-const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
-
-#[derive(Debug)]
-struct ConnectedDemandState {
-    active: std::cell::Cell<bool>,
-    work_used: std::cell::Cell<usize>,
-    work_limit: std::cell::Cell<usize>,
-    query_depth: std::cell::Cell<u16>,
-    query_depth_limit: std::cell::Cell<u16>,
-    tripped: std::cell::Cell<crate::semantic_query::PartialReasonSet>,
-}
-
-impl ConnectedDemandState {
-    fn new(work_limit: usize, query_depth_limit: u16) -> Self {
-        Self {
-            active: std::cell::Cell::new(false),
-            work_used: std::cell::Cell::new(0),
-            work_limit: std::cell::Cell::new(work_limit),
-            query_depth: std::cell::Cell::new(0),
-            query_depth_limit: std::cell::Cell::new(query_depth_limit),
-            tripped: std::cell::Cell::new(crate::semantic_query::PartialReasonSet::empty()),
-        }
-    }
-
-    fn begin(&self, work_limit: usize, query_depth_limit: u16) {
-        self.work_used.set(0);
-        self.work_limit.set(work_limit);
-        self.query_depth.set(0);
-        self.query_depth_limit.set(query_depth_limit);
-        self.tripped
-            .set(crate::semantic_query::PartialReasonSet::empty());
-        self.active.set(true);
-    }
-}
-
-/// Panic-safe lifetime of one connected semantic demand. The outermost
-/// dispatch or direct projector installs the state; nested query and worklist
-/// entries join it without holding a `RefCell` borrow across semantic work.
-struct ConnectedDemandGuard<'g> {
-    state: &'g ConnectedDemandState,
-    root: bool,
-    entered_query_depth: bool,
-}
-
-impl ConnectedDemandGuard<'_> {
-    fn is_root(&self) -> bool {
-        self.root
-    }
-}
-
-impl Drop for ConnectedDemandGuard<'_> {
-    fn drop(&mut self) {
-        if self.entered_query_depth {
-            self.state
-                .query_depth
-                .set(self.state.query_depth.get().saturating_sub(1));
-        }
-        if self.root {
-            verter_debug_assert!(
-                self.state.query_depth.get() == 0,
-                "connected-demand root dropped while a nested query boundary remained active"
-            );
-            self.state.active.set(false);
-        }
-    }
-}
-
 /// Host-bound dispatcher for [`SemanticQueryApi`].
 ///
 /// The dispatcher borrows the host for the duration of a query — every
@@ -509,11 +445,10 @@ pub struct ProjectSemanticDispatch<'a> {
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
     pub(super) canonical_evidence_epoch: std::cell::Cell<u64>,
-    connected_demand: ConnectedDemandState,
-    #[cfg(test)]
-    connected_work_limit_for_tests: std::cell::Cell<usize>,
-    #[cfg(test)]
-    connected_query_depth_limit_for_tests: std::cell::Cell<u16>,
+    /// Operational work/depth/cancellation accounting for the connected
+    /// demands rooted at this dispatcher. The dispatcher holds the ledger but
+    /// owns none of its logic — see [`connected_demand`].
+    connected_demand: connected_demand::ConnectedDemandLedger<'a>,
 }
 
 /// One cold-build-local taint frame: the OR-accumulator a single cold
@@ -655,86 +590,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             relation_env: std::cell::OnceCell::new(),
             canonical_evidence_epoch: std::cell::Cell::new(0),
-            connected_demand: ConnectedDemandState::new(
-                MAX_CONNECTED_PROJECTION_WORK,
-                MAX_CONNECTED_QUERY_DEPTH,
+            connected_demand: connected_demand::ConnectedDemandLedger::new(
+                connected_demand::DemandCancellation::from_context(ctx),
             ),
-            #[cfg(test)]
-            connected_work_limit_for_tests: std::cell::Cell::new(MAX_CONNECTED_PROJECTION_WORK),
-            #[cfg(test)]
-            connected_query_depth_limit_for_tests: std::cell::Cell::new(MAX_CONNECTED_QUERY_DEPTH),
         }
     }
 
-    fn connected_work_limit(&self) -> usize {
-        #[cfg(test)]
-        {
-            self.connected_work_limit_for_tests.get()
-        }
-        #[cfg(not(test))]
-        {
-            MAX_CONNECTED_PROJECTION_WORK
-        }
-    }
-
-    fn connected_query_depth_limit(&self) -> u16 {
-        #[cfg(test)]
-        {
-            self.connected_query_depth_limit_for_tests.get()
-        }
-        #[cfg(not(test))]
-        {
-            MAX_CONNECTED_QUERY_DEPTH
-        }
+    /// The operational budget ledger for demands rooted at this dispatcher.
+    ///
+    /// A budget consumer takes this instead of the dispatcher: the ledger
+    /// carries the whole work/depth/cancellation contract and no semantic
+    /// capability, so a consumer typed on it cannot re-enter dispatch.
+    pub(super) fn connected_demand(&self) -> &connected_demand::ConnectedDemandLedger<'a> {
+        &self.connected_demand
     }
 
     fn enter_connected_demand(
         &self,
         query_boundary: bool,
     ) -> (
-        ConnectedDemandGuard<'_>,
+        connected_demand::ConnectedDemandGuard<'_>,
         Option<crate::semantic_query::PartialReasonSet>,
     ) {
-        let state = &self.connected_demand;
-        let root = !state.active.get();
-        if root {
-            state.begin(
-                self.connected_work_limit(),
-                self.connected_query_depth_limit(),
-            );
-        }
-        if self.ctx.is_cancelled() {
-            state.tripped.set(
-                state
-                    .tripped
-                    .get()
-                    .union(crate::semantic_query::PartialReasonSet::CANCELLED),
-            );
-        }
-        let mut entered_query_depth = false;
-        let tripped = state.tripped.get();
-        let trip = if !tripped.is_empty() {
-            Some(tripped)
-        } else if query_boundary && state.query_depth.get() >= state.query_depth_limit.get() {
-            let tripped =
-                tripped.union(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
-            state.tripped.set(tripped);
-            Some(tripped)
-        } else {
-            if query_boundary {
-                state.query_depth.set(state.query_depth.get() + 1);
-                entered_query_depth = true;
-            }
-            None
-        };
-        (
-            ConnectedDemandGuard {
-                state,
-                root,
-                entered_query_depth,
-            },
-            trip,
-        )
+        self.connected_demand.enter(query_boundary)
     }
 
     /// Whether the connected-demand ledger has ALREADY tripped on this
@@ -742,94 +620,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// evidence about the queried surface — the caller must report the
     /// budget, not a semantic verdict.
     pub(super) fn connected_demand_tripped(&self) -> bool {
-        !self.connected_demand.tripped.get().is_empty()
+        self.connected_demand.has_tripped()
     }
 
     pub(super) fn charge_connected_work(
         &self,
     ) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        let state = &self.connected_demand;
-        verter_debug_assert!(
-            state.active.get(),
-            "connected work must be charged inside a connected-demand guard"
-        );
-        if self.ctx.is_cancelled() {
-            return Err(
-                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
-            );
-        }
-        let tripped = state.tripped.get();
-        if !tripped.is_empty() {
-            return Err(tripped);
-        }
-        let work_used = state.work_used.get();
-        if work_used >= state.work_limit.get() {
-            let tripped =
-                tripped.union(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT);
-            state.tripped.set(tripped);
-            return Err(tripped);
-        }
-        state.work_used.set(work_used + 1);
-        Ok(())
-    }
-
-    /// Snapshot the remaining work available to a query-free terminal run.
-    /// The caller commits exactly the units it consumes before any nested
-    /// semantic dispatch.
-    #[inline(always)]
-    pub(super) fn connected_work_available(
-        &self,
-    ) -> Result<usize, crate::semantic_query::PartialReasonSet> {
-        let state = &self.connected_demand;
-        verter_debug_assert!(
-            state.active.get(),
-            "connected work must be observed inside a connected-demand guard"
-        );
-        if self.ctx.is_cancelled() {
-            return Err(
-                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
-            );
-        }
-        let tripped = state.tripped.get();
-        if !tripped.is_empty() {
-            return Err(tripped);
-        }
-        let work_used = state.work_used.get();
-        Ok(state.work_limit.get().saturating_sub(work_used))
-    }
-
-    #[inline(always)]
-    pub(super) fn commit_connected_work(&self, consumed: usize) {
-        if consumed == 0 {
-            return;
-        }
-        let state = &self.connected_demand;
-        verter_debug_assert!(state.active.get());
-        let work_used = state.work_used.get();
-        verter_debug_assert!(work_used.saturating_add(consumed) <= state.work_limit.get());
-        state.work_used.set(work_used + consumed);
+        self.connected_demand.charge()
     }
 
     pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
-        self.connected_demand
-            .active
-            .get()
-            .then(|| self.connected_demand.tripped.get())
-            .filter(|tripped| !tripped.is_empty())
+        self.connected_demand.active_trip()
     }
 
     fn trip_connected_demand(
         &self,
         reason: crate::semantic_query::PartialReasonSet,
     ) -> crate::semantic_query::PartialReasonSet {
-        let state = &self.connected_demand;
-        verter_debug_assert!(
-            state.active.get(),
-            "an operational limit can trip only inside a connected demand"
-        );
-        let tripped = state.tripped.get().union(reason);
-        state.tripped.set(tripped);
-        tripped
+        self.connected_demand.record_trip(reason)
     }
 
     fn connected_limit_carrier(
@@ -893,26 +701,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticQueryKey::Relate { source, .. } => *source,
             _ => {
-                let state = &self.connected_demand;
-                let (limit, actual, rail) = if state.active.get() {
-                    if reasons.contains(
-                        crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
-                    ) {
-                        (
-                            usize::from(state.query_depth_limit.get()),
-                            u64::from(state.query_depth.get()),
-                            "connected-query-depth",
-                        )
-                    } else {
-                        (
-                            state.work_limit.get(),
-                            state.work_used.get() as u64,
-                            "projection-work",
-                        )
-                    }
-                } else {
-                    (0, 0, "unknown")
-                };
+                let (limit, actual, rail) = self.connected_demand.limit_report(reasons);
                 self.opaque(QueryError::BudgetExceeded(BudgetExceededFailure {
                     domain: BudgetDomain::ProjectionOperation,
                     limit,
@@ -985,12 +774,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     #[cfg(test)]
     pub(super) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
-        assert!(
-            !self.connected_demand.active.get(),
-            "test limits must be set before entering a connected demand"
-        );
-        self.connected_work_limit_for_tests.set(work);
-        self.connected_query_depth_limit_for_tests.set(depth);
+        self.connected_demand.set_limits_for_tests(work, depth);
     }
 
     /// Fold a discarded nested-read's metadata into the TOP cold-build-local
@@ -4086,79 +3870,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// DispatchHost trait + session-owned adapter
+// Session-owned dispatch host adapter
 // ──────────────────────────────────────────────────────────────────────────
 //
-// `DispatchHost` is the scope-free minimum-surface host seam dispatch
-// builders use to reach host-owned prepared declarations, root identities,
-// utility classification, and bare-reference origin classification.
+// [`SessionDispatchHost`] is the scope-free minimum-surface host seam dispatch
+// builders use to reach host-owned prepared declarations and utility
+// classification.
 //
-// The session-owned adapter [`SessionDispatchHost`] implements the trait
-// by consulting [`SemanticGraphStore::node_scope`] for each base node to
-// reconstruct the originating scope and fetch the scope's declaration-
-// scope payload via [`crate::resolver_core::bare_name_resolve`]. Dispatch
-// builders take `&dyn DispatchHost` rather than `&VerterHost`, so they
-// stay scope-free.
-
-/// Scope-free, minimum-surface host seam for dispatch builders.
-///
-/// Builders that need to reach host-owned prepared declarations, classify
-/// utility names, resolve root identities, or classify bare references take
-/// `&dyn DispatchHost`. The adapter internally queries
-/// [`SemanticGraphStore::node_scope`](crate::semantic_query_memo::SemanticGraphStore::node_scope)
-/// on the `base` id to route each lookup through the correct per-base
-/// scope — builders stay scope-free.
-///
-/// **Contract:** every method takes the base [`SemanticNodeId`] whose scope
-/// informs the lookup. Implementations resolve identities through
-/// [`crate::resolver_core::bare_name_resolve`] over the scope's
-/// declaration-scope payload.
-///
-/// Implementations: [`SessionDispatchHost`] routes per-base via the
-/// node-scope sidecar.
-pub trait DispatchHost {
-    /// Look up a prepared-declaration projection outcome by canonical root
-    /// identity, preserving a recoverable exact authored preparation failure
-    /// as a typed partial carrier.
-    fn resolve_prepared_type_decl(
-        &self,
-        base: SemanticNodeId,
-        root_identity: &ResolvedRootIdentity,
-    ) -> PreparedTypeDeclResolution;
-
-    /// Resolve a `(canonical_id, symbol_name)` pair into a stable root
-    /// declaration identity, following re-exports and barrel hops through
-    /// `base`'s scope.
-    #[allow(dead_code)]
-    fn root_identity(
-        &self,
-        base: SemanticNodeId,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Option<ResolvedRootIdentity>;
-
-    /// Decide, in ONE scope read, whether `name` in `base`'s scope is a
-    /// user-shadowed name, an unknown name, or the compiler-provided utility —
-    /// and for the last, carry its PROVEN identity. Scope matters because a
-    /// binding in scope A can shadow a built-in that is not shadowed in
-    /// scope B.
-    ///
-    /// Builders route on the returned identity and never re-decide on a
-    /// spelling. They are forbidden from calling `BuiltinUtility::from_name`
-    /// themselves — the
-    /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate` guard
-    /// fails `build.rs` for using a nominal carrier predicate — and this is
-    /// the seam that makes that unnecessary rather than merely inconvenient.
-    fn resolve_builtin_utility(&self, base: SemanticNodeId, name: &str)
-        -> BuiltinUtilityResolution;
-
-    /// Classify whether `name` resolves locally or through an import in
-    /// `base`'s scope. Used by lazy field expansion to keep imported
-    /// object-like refs symbolic until a deeper route is requested.
-    #[allow(dead_code)]
-    fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin;
-}
+// The adapter consults [`SemanticGraphStore::node_scope`] for each base node
+// to reconstruct the originating scope and fetch the scope's declaration-scope
+// payload via [`crate::resolver_core::bare_name_resolve`]. Dispatch builders
+// take the adapter rather than a `&VerterHost`, so they stay scope-free.
 
 /// The dispatch gate's decision for one utility-shaped name in one scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4173,12 +3895,12 @@ pub enum BuiltinUtilityResolution {
     Builtin(Option<BuiltinUtility>),
 }
 
-/// Session-owned [`DispatchHost`] implementation.
+/// Session-owned, scope-free host seam for dispatch builders.
 ///
 /// Given a base [`SemanticNodeId`], consults
 /// [`SemanticGraphStore::node_scope`] to reconstruct the originating
 /// [`NodeScopeId`]. Fetches the scope's declaration-scope payload via
-/// `prepared_decl_bundle` and routes each trait method through
+/// `prepared_decl_bundle` and routes each lookup through
 /// [`crate::resolver_core::bare_name_resolve`] helpers:
 ///
 /// - [`NodeScopeId::File { canonical_id, .. }`] → scope canonical + scope payload
@@ -4221,9 +3943,8 @@ impl<'a> SessionDispatchHost<'a> {
     /// Fetch the declaration-scope payload for `base`'s origin scope.
     /// Returns `None` when the scope is global/exempt, or when the scope
     /// has no prepared-decl bundle (e.g. a declaration file the host has
-    /// not yet shallow-indexed). The payload is consulted by the
-    /// `DispatchHost` trait methods for scope-local name resolution +
-    /// shadowing.
+    /// not yet shallow-indexed). The payload is consulted by the adapter's
+    /// lookup methods for scope-local name resolution + shadowing.
     fn scope_payload_for_base(
         &self,
         base: SemanticNodeId,
@@ -4238,12 +3959,10 @@ impl<'a> SessionDispatchHost<'a> {
                 ..
             } => {
                 // Instrumentation: callsite attribution for
-                // `prepared_decl_bundle_warm` reads. The four
-                // `DispatchHost` trait callbacks
-                // (`resolve_prepared_type_decl`, `root_identity`,
-                // `resolve_builtin_utility`, `bare_ref_origin`) all route
-                // through this helper — dominant expected source of
-                // the K-loop warm-read pressure.
+                // `prepared_decl_bundle_warm` reads. Both adapter lookups
+                // (`resolve_prepared_type_decl`, `resolve_builtin_utility`)
+                // route through this helper — dominant expected source of
+                // the warm-read pressure.
                 if let Some(obs) = verter_audit::current_observer() {
                     obs.record_event(
                         verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload,
@@ -4262,9 +3981,10 @@ impl<'a> SessionDispatchHost<'a> {
             NodeScopeId::Global => (None, None),
         }
     }
-}
 
-impl<'a> DispatchHost for SessionDispatchHost<'a> {
+    /// Look up a prepared-declaration projection outcome by canonical root
+    /// identity, preserving a recoverable exact authored preparation failure
+    /// as a typed partial carrier. Routed through `base`'s scope payload.
     fn resolve_prepared_type_decl(
         &self,
         base: SemanticNodeId,
@@ -4279,32 +3999,18 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         )
     }
 
-    fn root_identity(
-        &self,
-        base: SemanticNodeId,
-        canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: &str,
-    ) -> Option<ResolvedRootIdentity> {
-        let (scope, payload) = self.scope_payload_for_base(base);
-        // An empty caller canonical defers to the base's origin scope.
-        let (resolution_scope, resolution_owner) = if canonical_id.is_empty() {
-            scope
-                .as_ref()
-                .map(|(canonical, owner)| (canonical.as_str(), *owner))
-                .unwrap_or(("", verter_type_expr::TopLevelOwnerId::ordinary_file()))
-        } else {
-            (canonical_id, owner)
-        };
-        crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.ctx,
-            resolution_scope,
-            resolution_owner,
-            payload.as_ref(),
-            symbol_name,
-        )
-    }
-
+    /// Decide, in ONE scope read, whether `name` in `base`'s scope is a
+    /// user-shadowed name, an unknown name, or the compiler-provided utility —
+    /// and for the last, carry its PROVEN identity. Scope matters because a
+    /// binding in scope A can shadow a built-in that is not shadowed in
+    /// scope B.
+    ///
+    /// Builders route on the returned identity and never re-decide on a
+    /// spelling. They are forbidden from calling `BuiltinUtility::from_name`
+    /// themselves — the
+    /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate` guard
+    /// fails `build.rs` for using a nominal carrier predicate — and this is
+    /// the seam that makes that unnecessary rather than merely inconvenient.
     fn resolve_builtin_utility(
         &self,
         base: SemanticNodeId,
@@ -4337,22 +4043,6 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         } else {
             BuiltinUtilityResolution::Unknown
         }
-    }
-
-    fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin {
-        let (_scope, payload) = self.scope_payload_for_base(base);
-        if let Some(payload) = payload.as_ref() {
-            if payload.import_bindings().contains_key(name) {
-                return BareRefOrigin::Imported;
-            }
-            if payload.scope_type_bindings().contains_key(name)
-                || payload.scope_type_names().contains(name)
-                || payload.scope_value_names().contains(name)
-            {
-                return BareRefOrigin::Local;
-            }
-        }
-        BareRefOrigin::Unknown
     }
 }
 

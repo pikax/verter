@@ -626,10 +626,79 @@ impl Drop for PullSlot {
 }
 
 /// Move every deposited signal into the coordinator's pending map.
+/// Reap finished pulls. A pull that published INCOMPLETE — no committed IDE
+/// surface at pull time, a refused commit, a surface superseded mid-flight —
+/// leaves the open document owed a publication. The tick re-syncs it ONCE, so
+/// the receipt lands once the commit does; a second incomplete landing is left
+/// to the drain's re-arm rather than retried blindly. A cancelled or panicked
+/// pull owes nothing here: the abort path already armed its replacement.
+fn reap_finished_pulls(
+    deps: &SyncCoordinatorDeps,
+    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<bool>>,
+    pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
+    incomplete_resyncs: &mut HashMap<String, u8>,
+    last_attention: &HashMap<String, Instant>,
+) {
+    use futures_util::FutureExt;
+    let finished: Vec<String> = diagnostic_tasks
+        .iter()
+        .filter(|(_, task)| task.is_finished())
+        .map(|(canonical_id, _)| canonical_id.clone())
+        .collect();
+    for canonical_id in finished {
+        let Some(task) = diagnostic_tasks.remove(&canonical_id) else {
+            continue;
+        };
+        let complete = task
+            .now_or_never()
+            .and_then(|joined| joined.ok())
+            .unwrap_or(true);
+        if complete {
+            incomplete_resyncs.remove(&canonical_id);
+            continue;
+        }
+        let Some(uri) = deps.documents.canonical_id_to_uri(&canonical_id) else {
+            incomplete_resyncs.remove(&canonical_id);
+            continue;
+        };
+        let attempts = incomplete_resyncs.entry(canonical_id.clone()).or_insert(0);
+        if *attempts >= 1 {
+            continue;
+        }
+        *attempts += 1;
+        tracing::debug!(
+            "sync_coordinator: pull for {canonical_id} landed incomplete; re-syncing once"
+        );
+        deps.needs_provider_sync.insert(canonical_id.clone());
+        let received_at = Instant::now();
+        let attended = last_attention.get(&canonical_id).copied();
+        pending_files
+            .entry(canonical_id)
+            .and_modify(|(changed_at, pending)| {
+                *changed_at = (*changed_at).max(received_at);
+                pending.requires_sync = true;
+                pending.force_diagnostics = true;
+                pending.sync_retries_remaining = pending.sync_retries_remaining.max(1);
+            })
+            .or_insert((
+                received_at,
+                PendingSignal {
+                    uri: uri.to_string(),
+                    requires_sync: true,
+                    force_diagnostics: true,
+                    sync_retries_remaining: 1,
+                    received_at,
+                    user_received_at: attended,
+                    edited: false,
+                },
+            ));
+    }
+}
+
 fn absorb_inbox(
     inbox: &parking_lot::Mutex<HashMap<String, PendingSignal>>,
     pending_files: &mut HashMap<String, (Instant, PendingSignal)>,
-    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+    diagnostic_tasks: &mut HashMap<String, tokio::task::JoinHandle<bool>>,
 ) {
     let signals = std::mem::take(&mut *inbox.lock());
     for (canonical_id, signal) in signals {
@@ -683,7 +752,10 @@ async fn coordinator_loop(
     // Provider-state commits are serialized and allowed to finish. Diagnostics
     // are immutable snapshot reads, so a new edit can cancel only the stale
     // diagnostic task without risking a half-committed provider surface.
-    let mut diagnostic_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut diagnostic_tasks: HashMap<String, tokio::task::JoinHandle<bool>> = HashMap::new();
+    // Documents whose last pull landed incomplete and were re-synced once for
+    // it; cleared by the next complete publication.
+    let mut incomplete_resyncs: HashMap<String, u8> = HashMap::new();
 
     // A canonical id whose change is still in flight is NOT quiet, so it is
     // excluded from BOTH the deadline computation and the dispatch set. It is
@@ -715,7 +787,13 @@ async fn coordinator_loop(
         // taken nothing is dispatchable, so no timer is armed at all: the loop
         // parks until a slot frees or a signal arrives, instead of spinning on
         // an already-elapsed deadline.
-        diagnostic_tasks.retain(|_, task| !task.is_finished());
+        reap_finished_pulls(
+            &deps,
+            &mut diagnostic_tasks,
+            &mut pending_files,
+            &mut incomplete_resyncs,
+            &last_attention,
+        );
         // Background work may never fill the window: one slot is always kept
         // for a document the user touched, which would otherwise wait behind
         // pulls this side can no longer overtake.
@@ -1055,7 +1133,7 @@ async fn coordinator_loop(
                                 let slot = PullSlot(pull_done_tx.clone());
                                 async move {
                                     let _slot = slot;
-                                    {
+                                    let complete = {
                                         #[cfg(test)]
                                         let _live = DiagTaskLiveGuard::new(diag_tasks_live);
                                         publish_merged_diagnostics(
@@ -1063,14 +1141,15 @@ async fn coordinator_loop(
                                             &task_canonical_id,
                                             &signal.uri,
                                         )
-                                        .await;
-                                    }
+                                        .await
+                                    };
                                     #[cfg(test)]
                                     {
                                         diags_published_count
                                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                         diags_published.notify_waiters();
                                     }
+                                    complete
                                 }
                             }),
                         );
@@ -1087,7 +1166,13 @@ async fn coordinator_loop(
                         .collect();
                     last_attention.retain(|canonical_id, _| open.contains(canonical_id));
                 }
-                diagnostic_tasks.retain(|_, task| !task.is_finished());
+                reap_finished_pulls(
+                    &deps,
+                    &mut diagnostic_tasks,
+                    &mut pending_files,
+                    &mut incomplete_resyncs,
+                    &last_attention,
+                );
                 #[cfg(test)]
                 receipts
                     .dispatch_ticks
@@ -1960,13 +2045,21 @@ async fn self_file_diagnostics(
 /// Recomputes fresh verter diagnostics (host errors + lint rules) for the current
 /// document version, then merges with fresh TS diagnostics from the type provider.
 /// This ensures lint violations introduced during typing appear without reopening.
-async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &str, uri_str: &str) {
+/// Publish the merged batch. Returns whether the publication was COMPLETE
+/// (a provider batch merged, or no provider at all); an incomplete one leaves
+/// the open document owed a publication, which the tick re-syncs once.
+/// Nothing is owed for a document that is no longer open.
+async fn publish_merged_diagnostics(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri_str: &str,
+) -> bool {
     let uri: Uri = match uri_str.parse() {
         Ok(u) => u,
-        Err(_) => return,
+        Err(_) => return true,
     };
     let Some(publication) = deps.documents.begin_diagnostics_publication(&uri) else {
-        return;
+        return true;
     };
     let verter_diagnostics = compute_verter_diagnostics(deps, canonical_id, &uri);
     tracing::debug!(
@@ -1997,9 +2090,10 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         )
         .await;
     if deps.type_provider.is_none() {
-        return;
+        return true;
     }
     let batch = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
+    let complete = batch.complete;
     deps.documents
         .publish_diagnostics(
             &deps.client,
@@ -2010,6 +2104,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
             batch.surface,
         )
         .await;
+    complete
 }
 
 /// Compute the merged (Verter lint + `verter(project)` ownership + TypeScript

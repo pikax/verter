@@ -378,8 +378,8 @@ fn single_callable_arm_distinct_node_ids_with_equal_raised_shape_refuse() {
         "the two callables intern to distinct node ids (param-type nodes differ)"
     );
     assert_eq!(
-        crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
-            &host,
+        crate::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
+            &dispatch,
             f_direct,
             f_via_alias
         ),

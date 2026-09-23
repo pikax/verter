@@ -36425,3 +36425,63 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
          document stranded with no IDE features"
     );
 }
+
+/// A publication that lands INCOMPLETE (no committed provider surface at pull
+/// time, a refused commit) leaves the open document owed a current receipt.
+/// The drain that later settles that carrier re-arms the publication. Before,
+/// an incomplete publication left no receipt at all, the drain's generation
+/// bump found nothing to outdate, and the document stayed uncertified until
+/// the next editor signal — which an editor waiting on the receipt never sends.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incomplete_publication_is_re_armed_when_the_drain_settles_the_carrier() {
+    let fixture = watched_dependency_fixture(true).await;
+    let server = fixture.service.inner();
+    let healthy = format!("{}/src/Consumer.vue", fixture.root);
+    let healthy_uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    server
+        .sync_coordinator
+        .await_until(
+            || server.documents.diagnostics_ready(&healthy_uri),
+            || panic!("control: the open document settles into a complete receipt"),
+        )
+        .await;
+
+    // The provider batch could not be merged: the publication is incomplete.
+    let publication = server
+        .documents
+        .begin_diagnostics_publication(&healthy_uri)
+        .expect("an open document admits a publication");
+    server
+        .documents
+        .publish_diagnostics(
+            &server.client,
+            &healthy_uri,
+            &publication,
+            Vec::new(),
+            false,
+            None,
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&healthy_uri),
+        "precondition: an incomplete publication is not a current receipt"
+    );
+
+    let mut refreshes = server.documents.subscribe_diagnostics_refresh();
+    server.queue_snapshot_provider_sync(healthy.clone());
+    drain_pending_provider_sync_for(server).await;
+    let refresh = refreshes
+        .try_recv()
+        .expect("the drain re-arms the owed publication when it settles the carrier");
+    assert_eq!(refresh.uri, healthy_uri);
+    server
+        .sync_coordinator
+        .await_until(
+            || {
+                server.documents.diagnostics_ready(&healthy_uri)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            || panic!("the re-armed publication completes into a current receipt"),
+        )
+        .await;
+}

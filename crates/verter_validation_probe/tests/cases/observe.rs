@@ -1538,19 +1538,45 @@ fn the_observation_job_uploads_the_prefixed_artifact_and_never_disposes_on_a_num
         .expect("repo")
         .join(".github/workflows/validation-probe.yml");
     let text = std::fs::read_to_string(&path).expect("workflow");
-    let observe = text
-        .find("  observe:")
-        .expect("the workflow declares an observe job");
-    let job = &text[observe..];
-    assert!(job
+    // The probe job's package run executes the observation test, so the same
+    // job publishes the artifact; there is no second job re-preparing a runner
+    // for it.
+    assert!(
+        !text.contains("\n  observe:"),
+        "the observation artifact is uploaded by the probe job, not a duplicate job"
+    );
+    let upload = text
+        .find("      - name: Upload the observation artifact")
+        .expect("the probe job uploads the observation artifact");
+    let step_end = text[upload + 1..]
+        .find("      - name:")
+        .map(|at| upload + 1 + at)
+        .unwrap_or(text.len());
+    let step = &text[upload..step_end];
+    assert!(step
         .contains("validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}"));
     assert!(
-        !job.contains("--dispose"),
-        "the observation job must not inherit the probe disposition"
+        step.contains("if: always()"),
+        "the observation upload must publish even after a failing probe step"
     );
     assert!(
-        !job.contains("threshold") && !job.contains("rebaseline"),
-        "the observation job must not threshold or rebaseline"
+        !step.contains("--dispose"),
+        "the observation upload must not carry the probe disposition"
+    );
+    assert!(
+        !step.contains("threshold") && !step.contains("rebaseline"),
+        "the observation upload must not threshold or rebaseline"
+    );
+    // Published before the lane is disposed, like the summary. Only the STEPS
+    // are searched: the file's header prose names the disposition too.
+    let steps = text.find("jobs:").expect("the workflow declares jobs");
+    let dispose = steps
+        + text[steps..]
+            .find("--dispose")
+            .expect("the workflow disposes the lane");
+    assert!(
+        upload < dispose,
+        "the observation artifact is published before disposition"
     );
 }
 

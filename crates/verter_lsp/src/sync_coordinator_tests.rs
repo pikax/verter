@@ -3734,16 +3734,37 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
             .collect()
     };
 
-    // The re-arm: background receipts, oldest document first.
+    // The re-arm: every open document is owed a pull AT ONCE. The coordinator
+    // may wake between two deposits and dispatch from a partial batch, so the
+    // batch is made atomic the way an in-flight change is: a change ticket per
+    // document holds it off dispatch, and dropping them all releases the whole
+    // backlog together. Deposited newest first, as the real re-arm does (most
+    // recently used first), with the oldest document carrying the oldest receipt.
     let gate = provider.gate_diagnostics();
     provider.clear_calls();
     let overdue = Instant::now() - Duration::from_secs(60);
-    for (index, (canonical_id, uri)) in docs.iter().enumerate() {
+    let held: Vec<_> = docs
+        .iter()
+        .map(|(canonical_id, _)| handle.change_received(canonical_id.clone()))
+        .collect();
+    for (index, (canonical_id, uri)) in docs.iter().enumerate().rev() {
         handle.signal_diagnostics_only(
             canonical_id.clone(),
             uri.as_str().to_string(),
             overdue + Duration::from_millis(index as u64),
         );
+    }
+    // Release NEWEST first. `held` is dropped element by element, so the
+    // backlog is not freed in one instant however it is written: the
+    // coordinator can wake between two drops and dispatch what has been
+    // freed so far. Dropping in index order would free `docs[0]` — the
+    // OLDEST receipt, the one this test needs to still be unpulled when the
+    // user turns to it — before any other, and a coordinator that woke there
+    // would pull it into the background fill. Releasing in reverse makes any
+    // partial dispatch follow the newest-first order the real re-arm uses,
+    // and leaves `docs[0]` freed last.
+    for ticket in held.into_iter().rev() {
+        drop(ticket);
     }
     tokio::time::timeout(
         Duration::from_secs(20),
@@ -3752,6 +3773,16 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
     )
     .await
     .expect("the first pulls never reached the provider");
+    // The premise of the touch below: the oldest document is what a
+    // newest-first backlog serves LAST, so it must still be unpulled. Assert
+    // it rather than assume it — if a future scheduling change pulls it into
+    // the background fill, this fails HERE with the pulled set, instead of
+    // timing out 20 seconds later on a wait that can never be satisfied.
+    let filled = pulled_docs(&provider.calls());
+    assert!(
+        !filled.contains(&"Doc0".to_string()),
+        "the oldest document must still be unpulled when the user turns to it: {filled:?}"
+    );
 
     // The user turns to the OLDEST document, the one a newest-first backlog
     // would serve last. Nothing is released: it takes the slot kept for it.

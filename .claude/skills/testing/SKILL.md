@@ -140,6 +140,42 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
+### A declared check must be bound to a lane
+
+A committed test that no command runs is not coverage — it reads as coverage,
+which is worse than an absent test. A comment saying "checked by X" is not a
+binding; the binding is a named lane that runs X and fails when X fails.
+Before citing a check as evidence, find the command.
+
+The recurring trap is a fixture no default runner reaches. Vitest does not
+evaluate type-level assertions, and the package builds exclude spec files, so
+type-only contract fixtures compile nowhere unless a dedicated TypeScript
+project is run explicitly. `packages/component-meta/test/*.test-d.ts` is bound
+through `tsconfig.contract-tests.json` to
+`pnpm --filter @verter/component-meta run test:types`, which CI's *JS Build &
+Test* lane runs after `build:ts` (the fixtures assert the built `dist`
+declarations as well as the source ones). A new `*.test-d.ts` under that
+package's `test/` is picked up by pattern; a type contract placed anywhere else
+needs its own binding.
+
+Same rule for a new lane-external command: real-provider suites, Svelte
+conformance, compile-fail fixtures, and proto freshness are outside the
+canonical nextest surface, so a green core gate is not evidence for any of
+them.
+
+### Deletion evidence
+
+Retiring a mechanism, guard, or test requires naming the removed mechanism, the
+surviving owner of its invariant, and the preserved proof that still fails when
+the invariant breaks — in the same change, with the mechanism's exclusive
+helpers, fixtures, allowlists, module wiring, and owning-doc references removed
+alongside it. Report production, tests, comments, and generated/fixture data as
+SEPARATE measures; never pool them into one "lines removed" figure and never
+commit the numbers into the tree (they go stale, then get regenerated instead of
+re-derived). A test or guard retirement claims a maintenance and build benefit,
+never shipped runtime speed. Full contributor-facing text:
+`docs/contributing/removing-a-mechanism.md`.
+
 ### Pinned Vue Macro Runtime Oracle
 
 The official Vue macro baseline is generated only from the repository-pinned

@@ -190,6 +190,18 @@ export const ESCAPE_HATCH_RULES = [
       "CI workflow definitions decide what actually runs at landing time; a selector cannot reason about pipeline-level changes",
     test: (p) => p === ".github/workflows" || p.startsWith(".github/workflows/"),
   },
+  {
+    id: "ci-actions",
+    reason:
+      "local composite actions are steps of every job that uses them; a change there is a pipeline-level change like a workflow edit",
+    test: (p) => p === ".github/actions" || p.startsWith(".github/actions/"),
+  },
+  {
+    id: "toolchain",
+    reason:
+      "the pinned toolchain and cargo configuration change how every crate compiles and links",
+    test: (p) => p === "rust-toolchain.toml" || p === ".cargo" || p.startsWith(".cargo/"),
+  },
 ];
 
 /**

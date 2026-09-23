@@ -18,6 +18,7 @@ import {
   STP10_MANDATORY_CASES,
   STP11_MANDATORY_CASES,
   STP14_MANDATORY_CASES,
+  STP15_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
@@ -1208,6 +1209,40 @@ test("STP14 product-only verification skips Rust capture tests", async () => {
   } finally {
     process.env.PATH = originalPath;
   }
+});
+
+test("STP15 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP15/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP15_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP15 verify: live read/write views on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP15",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP15_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP15_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    // A template assignment to the getter-only computed stays a customer
+    // read-only diagnostic rather than a hidden pass.
+    assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2540));
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+  }
+  assert.equal(result.incremental, "fresh");
 });
 
 test("STS0 node manifest is runnable without STP1 mandatory cases", () => {

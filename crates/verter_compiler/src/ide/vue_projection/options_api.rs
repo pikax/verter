@@ -87,6 +87,10 @@ pub struct OptionsMember {
     pub name: String,
     /// Member classification.
     pub kind: OptionsMemberKind,
+    /// Authored `set(v: Domain)` annotation text for a writable computed,
+    /// sliced from the parsed block. `None` for getter-only entries and
+    /// for setters without an annotation.
+    pub setter_domain: Option<String>,
     /// Name span in carrier coordinates.
     pub range: SourceRange,
 }
@@ -493,6 +497,38 @@ pub fn project_options_block(
     Ok(projection)
 }
 
+/// Authored setter parameter domain of an Options computed accessor object:
+/// `computed({ get, set(v: Domain) {} })` yields `Some("Domain")`.
+/// Unannotated setters yield `None`; the domain is then recorded empty,
+/// never defaulted to the read type. The span comes from this same parse
+/// of `content`, so an out-of-bounds slice is an internal invariant break,
+/// never a plausible empty domain.
+fn options_setter_domain(content: &str, accessors: &ObjectExpression<'_>) -> Option<String> {
+    let set = accessors.properties.iter().find_map(|accessor| {
+        let ObjectPropertyKind::ObjectProperty(accessor) = accessor else {
+            return None;
+        };
+        if accessor.computed || key_name(&accessor.key).as_deref() != Some("set") {
+            return None;
+        }
+        Some(&accessor.value)
+    })?;
+    let params = match set {
+        Expression::ArrowFunctionExpression(arrow) => Some(arrow.params.as_ref()),
+        Expression::FunctionExpression(function) => Some(function.params.as_ref()),
+        _ => return None,
+    };
+    let first = params?.items.first()?;
+    let annotation = first.type_annotation.as_ref()?;
+    let span = annotation.type_annotation.span();
+    let (start, end) = (span.start as usize, span.end as usize);
+    assert!(
+        start <= end && end <= content.len(),
+        "setter annotation span {start}..{end} escapes the parsed Options block"
+    );
+    Some(content[start..end].to_string())
+}
+
 #[allow(clippy::too_many_lines)]
 fn collect_option_members(
     block: ScriptBlockInput<'_>,
@@ -500,10 +536,15 @@ fn collect_option_members(
     projection: &mut OptionsComponentProjection,
 ) {
     let base = block.content_start;
-    let mut push = |name: String, kind: OptionsMemberKind, start: u32, end: u32| {
+    let mut push = |name: String,
+                    kind: OptionsMemberKind,
+                    setter_domain: Option<String>,
+                    start: u32,
+                    end: u32| {
         projection.members.push(OptionsMember {
             name,
             kind,
+            setter_domain,
             range: range(base, start, end),
         });
     };
@@ -517,12 +558,12 @@ fn collect_option_members(
         match key.as_str() {
             "props" => {
                 for (name, start, end) in string_array_names(&property.value) {
-                    push(name, OptionsMemberKind::Prop, start, end);
+                    push(name, OptionsMemberKind::Prop, None, start, end);
                 }
                 for (name, kind, start, end) in
                     object_entries(&property.value, OptionsMemberKind::Prop)
                 {
-                    push(name, kind, start, end);
+                    push(name, kind, None, start, end);
                 }
             }
             "computed" => {
@@ -536,51 +577,58 @@ fn collect_option_members(
                     let Some(name) = key_name(&entry.key) else {
                         continue;
                     };
-                    let setter = match &entry.value {
-                        Expression::ObjectExpression(accessors) => {
+                    let (setter, setter_domain) = match &entry.value {
+                        Expression::ObjectExpression(accessors) => (
                             accessors.properties.iter().any(|accessor| {
                                 matches!(
                                     accessor,
                                     ObjectPropertyKind::ObjectProperty(accessor)
                                         if key_name(&accessor.key).as_deref() == Some("set")
                                 )
-                            })
-                        }
-                        _ => false,
+                            }),
+                            options_setter_domain(block.content, accessors),
+                        ),
+                        _ => (false, None),
                     };
                     let (start, end) = key_range(&entry.key);
-                    push(name, OptionsMemberKind::Computed { setter }, start, end);
+                    push(
+                        name,
+                        OptionsMemberKind::Computed { setter },
+                        setter_domain,
+                        start,
+                        end,
+                    );
                 }
             }
             "methods" => {
                 for (name, kind, start, end) in
                     object_entries(&property.value, OptionsMemberKind::Method)
                 {
-                    push(name, kind, start, end);
+                    push(name, kind, None, start, end);
                 }
             }
             "emits" => {
                 for (name, start, end) in string_array_names(&property.value) {
-                    push(name, OptionsMemberKind::Emit, start, end);
+                    push(name, OptionsMemberKind::Emit, None, start, end);
                 }
                 for (name, kind, start, end) in
                     object_entries(&property.value, OptionsMemberKind::Emit)
                 {
-                    push(name, kind, start, end);
+                    push(name, kind, None, start, end);
                 }
             }
             "components" => {
                 for (name, kind, start, end) in
                     object_entries(&property.value, OptionsMemberKind::Component)
                 {
-                    push(name, kind, start, end);
+                    push(name, kind, None, start, end);
                 }
             }
             "directives" => {
                 for (name, kind, start, end) in
                     object_entries(&property.value, OptionsMemberKind::Directive)
                 {
-                    push(name, kind, start, end);
+                    push(name, kind, None, start, end);
                 }
             }
             "data" => {

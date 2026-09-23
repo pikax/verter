@@ -95,12 +95,11 @@ test("provider runners use serial libtest commands instead of nextest", () => {
   }
 });
 
-test("CI builds one provider-free archive and runs providers independently", () => {
+test("CI builds one provider-free archive and runs providers serially in their own lane", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const build = yamlJob(workflow, "rust-test-build");
   const core = yamlJob(workflow, "rust-test");
-  const tsserver = yamlJob(workflow, "rust-tsserver-live");
-  const tsgo = yamlJob(workflow, "rust-tsgo-live");
+  const providers = yamlJob(workflow, "rust-providers-live");
   const success = yamlJob(workflow, "ci-success");
 
   assert.match(build, /cargo nextest archive --workspace/);
@@ -118,23 +117,23 @@ test("CI builds one provider-free archive and runs providers independently", () 
   assert.match(core, /provider-ci\.mjs filter core/);
   assert.match(core, /cargo nextest run --archive-file/);
   assert.match(success, /^\s*- rust-test\s*$/m);
-  for (const [lane, job] of [
-    ["tsserver", tsserver],
-    ["tsgo", tsgo],
-  ]) {
-    assert.match(job, /needs:\s*detect-changes/);
-    assert.match(job, /Swatinem\/rust-cache/);
-    assert.match(job, new RegExp(`provider-ci\\.mjs run ${lane}`));
-    assert.doesNotMatch(
-      job,
-      /cargo nextest|install-action@nextest|name:\s*rust-nextest-archive|actions\/download-artifact/,
-    );
-    assert.match(success, new RegExp(`^\\s*- rust-${lane}-live\\s*$`, "m"));
+  // One job compiles the workspace once and runs each engine's serial libtest
+  // lane in turn; neither engine's run goes through the nextest archive.
+  assert.match(providers, /needs:\s*detect-changes/);
+  assert.match(providers, /needs\.detect-changes\.outputs\.providers\s*==\s*'true'/);
+  assert.match(providers, /Swatinem\/rust-cache/);
+  assert.doesNotMatch(
+    providers,
+    /cargo nextest|install-action@nextest|name:\s*rust-nextest-archive|download-artifact/,
+  );
+  assert.match(success, /^\s*- rust-providers-live\s*$/m);
+  for (const lane of ["tsserver", "tsgo"]) {
+    assert.match(providers, new RegExp(`provider-ci\\.mjs run ${lane}`));
   }
-  assert.match(tsserver, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
-  assert.match(tsserver, /packages\/typescript-plugin\/src/);
-  assert.match(tsserver, /--exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/);
-  assert.match(tsgo, /VERTER_REQUIRE_TSGO:\s*"1"/);
+  assert.match(providers, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
+  assert.match(providers, /packages\/typescript-plugin\/src/);
+  assert.match(providers, /--exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/);
+  assert.match(providers, /VERTER_REQUIRE_TSGO:\s*"1"/);
   assert.doesNotMatch(core, /VERTER_REQUIRE_TS(?:GO|SERVER)/);
 });
 

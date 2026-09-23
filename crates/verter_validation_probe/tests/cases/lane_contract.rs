@@ -2055,9 +2055,12 @@ fn the_workflow_declares_exactly_one_probe_job() {
             jobs.push(trimmed.trim_end_matches(':').to_string());
         }
     }
+    // The observation artifact is published by the probe job itself (its
+    // package run already executes the observation test); a second job
+    // re-preparing the same runner for that one test is not declared.
     assert_eq!(
         jobs,
-        vec!["probe".to_string(), "observe".to_string()],
+        vec!["probe".to_string()],
         "the workflow declares {jobs:?}"
     );
     assert_eq!(

@@ -374,7 +374,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         let mut frames: SmallVec<[ProjectionFrame; 16]> = SmallVec::new();
-        let mut work_credit = match ConnectedWorkCredit::new(self) {
+        let mut work_credit = match ConnectedWorkCredit::new(self.connected_demand()) {
             Ok(credit) => credit,
             Err(reasons) => return ProjectedViewOutcome::partial(root, reasons),
         };
