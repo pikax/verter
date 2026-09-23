@@ -34,6 +34,7 @@ use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
+use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
 use crate::ide::vue_projection::options_api::project_options_pair;
 
 /// STP13 named products: the acceptance surface of
@@ -42,6 +43,15 @@ use crate::ide::vue_projection::options_api::project_options_pair;
 /// and the STP58 activation owner name the same types as this backend.
 pub use crate::ide::vue_projection::options_api::{
     CombinedScriptProjection, OptionsComponentProjection, OptionsTemplateBindingView,
+};
+
+/// STP15 named products: the acceptance surface of
+/// [`VueProjectionBackend::binding_views`]. Re-exported here (rather
+/// than through `ide`, which is crate-internal) so qualification harnesses
+/// and the STP58 activation owner name the same types as this backend.
+pub use crate::ide::vue_projection::binding_views::{
+    BindingKind, BindingUsageSet, TemplateReadBinding, TemplateReadView, TemplateWriteTarget,
+    UsageRegions, UsedBinding, ViewSnapshotKind, WritableBinding, WriteDomain, WriteRejection,
 };
 use crate::ide::vue_projection::script_setup::{
     project_script_pair, ScriptBlockInput, ScriptProjectionFacts, SetupProjectionRefusal,
@@ -170,6 +180,73 @@ impl VueProjectionBackend {
     ) -> Result<CombinedScriptProjection, SetupProjectionRefusal> {
         let (normal, setup, generic) = self.script_blocks(source, artifact)?;
         project_options_pair(normal, setup, generic)
+    }
+
+    /// Live template read/write views for the admitted parse: unwrapped
+    /// top-level ref reads, setter-domain write targets with getter-only
+    /// and readonly refusals, and no usage scaffolding (usage accounting
+    /// stays with [`BindingUsageSet`], built from authored references
+    /// only). Dormant relative to [`Self::project_ide`];
+    /// STP58 owns Vue atomic activation.
+    pub fn binding_views(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<BindingViewsProjection, SetupProjectionRefusal> {
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        project_binding_views(normal, setup, generic)
+    }
+
+    /// Actual usage accounting over the admitted carrier's own regions:
+    /// declared names come from [`project_binding_views`] read rows while
+    /// template, script and style bytes are sliced from the admitted
+    /// parse, never caller-supplied. Dormant relative to
+    /// [`Self::project_ide`]; STP58 owns Vue atomic activation.
+    pub fn binding_usage(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<BindingUsageSet, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        let exact_source = artifact.carrier_source().as_ref() == source;
+        if !exact_source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        let script = [
+            normal.as_ref().map(|block| block.content),
+            setup.as_ref().map(|block| block.content),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+        let views = project_binding_views(normal, setup, generic)?;
+        let declared: Vec<String> = views
+            .read
+            .bindings
+            .iter()
+            .map(|binding| binding.name.clone())
+            .collect();
+        let template = parsed
+            .template_ast()
+            .and_then(|ast| ast.root.content.as_ref())
+            .and_then(|content| source.get(content.start as usize..content.end as usize))
+            .unwrap_or("");
+        let mut style = String::new();
+        for node in parsed.style_nodes() {
+            if let Some(span) = node.content {
+                if let Some(text) = source.get(span.start as usize..span.end as usize) {
+                    style.push_str(text);
+                    style.push('\n');
+                }
+            }
+        }
+        Ok(BindingUsageSet::from_region_text(
+            &declared, template, &script, &style,
+        ))
     }
 
     /// Binder-aware public dependency capture for the admitted parse: the
