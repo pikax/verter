@@ -156,10 +156,22 @@ fn identity(canonical: &str, symbol: &str) -> verter_type_expr::facts::FlowFunct
 /// and structural order only — never node ids or allocation ordinals —
 /// with the workspace root normalized away so relocation compares.
 fn observe(host: &VerterHost, canonical: &str, symbol: &str) -> String {
-    let carrier = host.get_flow_return_type_with_audit(
-        &identity(canonical, symbol),
+    observe_demand(
+        host,
+        canonical,
+        symbol,
         ReturnProjectionDemand::whole_return(),
-    );
+    )
+}
+
+/// [`observe`] at an explicit demand point over the same function.
+fn observe_demand(
+    host: &VerterHost,
+    canonical: &str,
+    symbol: &str,
+    demand: ReturnProjectionDemand,
+) -> String {
+    let carrier = host.get_flow_return_type_with_audit(&identity(canonical, symbol), demand);
     let result = carrier
         .as_result()
         .ok()
@@ -592,10 +604,11 @@ const MATRIX: &[MatrixRow] = &[
         id: "DET-05",
         perturbation: "Cold, warm, partial persisted cache, edit/revert, cancelled/retried work, epoch rebuild",
         driver: Driver::Ignored {
-            reason: "the partial-persisted-cache, cancelled/retried-work and epoch-rebuild \
-                     axes have no public drivable surface: nothing published exposes cache \
-                     persistence, a request-cancellation drive, or an epoch-rebuild entry \
-                     point; the cold/warm/edit-revert subset is asserted in the ignored body",
+            reason: "the cancelled/retried-work and partial-persisted-cache axes have no \
+                     public drivable surface: the audited flow-return entry installs its own \
+                     request context, so a caller cannot cancel it, and nothing persists a \
+                     semantic cache across a process; the cold/warm/edit-revert and \
+                     epoch-rebuild subset is asserted in the ignored body",
         },
     },
     MatrixRow {
@@ -611,21 +624,17 @@ const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         id: "DET-08",
         perturbation: "Contextual body demands with the same descriptor/type arguments",
-        driver: Driver::Ignored {
-            reason: "a narrower (contextual) return demand fails closed with \
-                     UnmodeledDemandPoint — only the canonical whole-return demand point is \
-                     answerable — so distinct coexisting result memo entries under one \
-                     descriptor cannot be replayed",
-        },
+        driver: Driver::Ready { test: "det_08_contextual_body_demands" },
     },
     MatrixRow {
         id: "DET-09",
         perturbation: "Policy changes with resident parent caches",
         driver: Driver::Ignored {
-            reason: "no public surface mutates effective semantic policy on a live host, so \
-                     changing an option with resident parent caches cannot be driven until \
-                     effective options and their parent-cache invalidation are reachable \
-                     from a consumer",
+            reason: "no public answer on the flow-return observation lane depends on the \
+                     semantic policy — the policy change itself is drivable (an edited \
+                     tsconfig through configure_projects), but strictNullChecks leaves an \
+                     optional parameter's answer unchanged, so a resident parent kept on the \
+                     old policy is indistinguishable from a correct one",
         },
     },
     MatrixRow {
@@ -917,19 +926,23 @@ fn det_04_worker_counts_1_2_4_8() {
     }
 }
 
-/// DET-05 (ignored) — the cold/warm/edit-revert axes ARE driven below
-/// (cold equals warm on both bases; an authored edit changes both; the
-/// revert restores the original observation), but the row's remaining
-/// axes have no drivable surface: the partial PERSISTED cache and the
-/// epoch rebuild have no public persistence or epoch-rebuild entry
-/// point, and cancelled/retried work has no deterministic public drive.
-/// The row stays ignored naming the missing surface; the driven axes
-/// stay asserted so the un-ignoring change inherits a real body, not a
-/// stub.
+/// DET-05 (ignored) — the cold / warm / edit-revert / EPOCH-REBUILD axes
+/// ARE driven below (cold equals warm on both bases; an authored edit
+/// changes both; the revert restores the original observation; the public
+/// `clear_compile_cache` advances the store-view epoch and the same logical
+/// snapshot then gives the same observation and bytes). Two axes have no
+/// drivable surface. Cancelled/retried work: the audited flow-return entry
+/// mints and installs its OWN request context, so a caller cannot cancel
+/// the request it drives. Partial PERSISTED cache: the product persists no
+/// semantic cache across a process at all — backend/process identity and
+/// restart admission belong to the kernel-expansion cache-identity block.
+/// The row stays ignored naming both; the driven axes stay asserted so the
+/// un-ignoring change inherits a real body, not a stub.
 #[test]
-#[ignore = "the partial-persisted-cache, cancelled/retried-work and epoch-rebuild axes \
-            have no public drivable surface, so the row cannot honestly claim Ready; \
-            the cold/warm/edit-revert axes below are the drivable subset"]
+#[ignore = "the cancelled/retried-work and partial-persisted-cache axes have no public \
+            drivable surface: the audited flow-return entry installs its own request \
+            context, and nothing persists a semantic cache across a process; the cold, \
+            warm, edit-revert and epoch-rebuild axes below are the drivable subset"]
 fn det_05_cold_warm_edit_revert() {
     match matrix_row("DET-05").driver {
         Driver::Ignored { .. } => {}
@@ -965,6 +978,27 @@ fn det_05_cold_warm_edit_revert() {
     assert_eq!(
         cold, reverted,
         "DET-05: the revert did not restore the original completed observation"
+    );
+
+    // Epoch rebuild: `clear_compile_cache` is a public host operation that
+    // advances the store-view epoch. The same logical snapshot must give the
+    // same observation and, once the same demand re-warms it, the same bytes.
+    let epoch_before = host.store_view_epoch();
+    host.clear_compile_cache();
+    assert!(
+        host.store_view_epoch() > epoch_before,
+        "DET-05: clear_compile_cache did not advance the store-view epoch — the rebuild \
+         axis drove nothing"
+    );
+    assert_eq!(
+        observe(&host, canonical, "witness"),
+        cold,
+        "DET-05: the epoch rebuild changed the completed observation"
+    );
+    assert_eq!(
+        generated_bytes(&host),
+        cold_bytes,
+        "DET-05: the epoch rebuild changed the generated bytes of the same logical snapshot"
     );
 }
 
@@ -1137,92 +1171,272 @@ export function witness(v: "a" | "ab" | "abc" | "b") { return v; }
     );
 }
 
-/// DET-08 (ignored) — contextual body demands with the same
-/// descriptor/type arguments must give correctly DISTINCT coexisting
-/// result memo entries. The body asserts the KNOWN FAILURE the ignore
-/// reason names: driving a contextual (non-whole-return) demand point
-/// today fails CLOSED with the typed `UnmodeledDemandPoint` refusal —
-/// the entry-point's documented behavior for every narrower point — so
-/// distinct coexisting memo entries under one descriptor cannot be
-/// replayed yet. When the owning block lands, this body's refusal
-/// assertion FAILS (the demand answers), which is the un-ignore signal.
+/// DET-08 — contextual body demands with the same descriptor/type
+/// arguments: correctly DISTINCT, COEXISTING result memo entries.
+///
+/// One function, one descriptor, three demand points over its return: the
+/// whole return, and the member projections `a` and `b` — the narrower
+/// point the evaluator models for `ReturnType<typeof f>["a"]`, which
+/// evaluates ONLY the demanded member of an object-literal return. Each
+/// point must answer its own question (a member point is never the whole
+/// object and never its sibling), all three must coexist (a later demand
+/// never overwrites or evicts an earlier one's answer), and no answer may
+/// depend on the order the demands arrive in.
+///
+/// `Demand::shallow()` — the members-facet projection — is a point the
+/// evaluation does NOT model. It stays pinned to its typed
+/// `UnmodeledDemandPoint` refusal: never a silently widened whole-return
+/// answer standing in for the narrower question.
 #[test]
-#[ignore = "a narrower (contextual) return demand fails closed with UnmodeledDemandPoint — \
-            only the canonical whole-return demand point is answerable — so distinct \
-            coexisting result memo entries under one descriptor cannot be replayed"]
 fn det_08_contextual_body_demands() {
-    match matrix_row("DET-08").driver {
-        Driver::Ignored { .. } => {}
-        Driver::Ready { test } => panic!("DET-08 is registered ready ({test}) — update this row"),
-    }
+    assert_ready("DET-08", "det_08_contextual_body_demands");
     use verter_session::host_flow_return_audit::FlowReturnError;
-    use verter_session::semantic_query::demand::Demand;
-    use verter_session::semantic_query::{FlowReturnFailure, ReturnProjectionDemand};
-    let host = build_host(&[("/det/main.ts", MAIN_TS)]);
-    // The canonical whole-return point answers (the row's baseline).
-    let whole = host.get_flow_return_type_with_audit(
-        &identity("/det/main.ts", "localUnion"),
-        ReturnProjectionDemand::whole_return(),
+    use verter_session::semantic_query::demand::{Demand, ProjectionPath};
+    use verter_session::semantic_query::{FlowReturnFailure, PathSegment, PropertyKey};
+
+    const CONTEXT_TS: &str =
+        "export function contextual(v: number | string) { return { a: v, b: 1 as const }; }";
+    const CANONICAL: &str = "/det/context.ts";
+    const SYMBOL: &str = "contextual";
+    let member = |name: &str| {
+        let mut point = Demand::identity();
+        point.projection.path = ProjectionPath::from_segments([PathSegment::Member(
+            PropertyKey::identifier(Arc::<str>::from(name)),
+        )]);
+        ReturnProjectionDemand { point }
+    };
+    let demand_for = |label: &str| match label {
+        "whole" => ReturnProjectionDemand::whole_return(),
+        member_name => member(member_name),
+    };
+
+    // Two hosts, the three demands arriving in OPPOSITE orders.
+    let forward = build_host(&[(CANONICAL, CONTEXT_TS)]);
+    let reverse = build_host(&[(CANONICAL, CONTEXT_TS)]);
+    let mut answers: Vec<(&str, String)> = Vec::new();
+    for label in ["whole", "a", "b"] {
+        answers.push((
+            label,
+            observe_demand(&forward, CANONICAL, SYMBOL, demand_for(label)),
+        ));
+    }
+    let mut reversed: Vec<(&str, String)> = Vec::new();
+    for label in ["b", "a", "whole"] {
+        reversed.push((
+            label,
+            observe_demand(&reverse, CANONICAL, SYMBOL, demand_for(label)),
+        ));
+    }
+    let answer = |set: &[(&str, String)], label: &str| {
+        set.iter()
+            .find(|(l, _)| *l == label)
+            .map(|(_, a)| a.clone())
+            .expect("every demand was observed")
+    };
+    for label in ["whole", "a", "b"] {
+        assert_eq!(
+            answer(&answers, label),
+            answer(&reversed, label),
+            "DET-08: the `{label}` demand answered differently depending on which demands \
+             arrived before it"
+        );
+    }
+    assert_eq!(
+        generated_bytes(&forward),
+        generated_bytes(&reverse),
+        "DET-08: the same demands in opposite orders left different generated bytes"
     );
-    assert!(
-        whole.as_result().is_ok(),
-        "DET-08: the canonical whole-return demand must complete — the baseline of the \
-         contextual-demand comparison is gone"
+
+    // Distinct: no demand point answers another point's question.
+    let (whole, a, b) = (
+        answer(&answers, "whole"),
+        answer(&answers, "a"),
+        answer(&answers, "b"),
     );
-    // A contextual (narrower) demand point — `Demand::shallow()`, the
-    // members-facet projection over the same function — is a DISTINCT
-    // demand point that the evaluation does not model: it fails closed
-    // with the typed `UnmodeledDemandPoint` refusal, never a silently
-    // widened whole-return result. THAT refusal is the known failure.
-    let contextual = host.get_flow_return_type_with_audit(
-        &identity("/det/main.ts", "localUnion"),
+    assert_ne!(
+        a, whole,
+        "DET-08: the `a` member demand answered the WHOLE return: {a}"
+    );
+    assert_ne!(
+        b, whole,
+        "DET-08: the `b` member demand answered the WHOLE return: {b}"
+    );
+    assert_ne!(a, b, "DET-08: the two member demands share one answer: {a}");
+
+    // Coexisting: re-asking every point after all three were computed
+    // returns each one's own answer — a later demand overwrote nothing.
+    for label in ["whole", "a", "b"] {
+        assert_eq!(
+            observe_demand(&forward, CANONICAL, SYMBOL, demand_for(label)),
+            answer(&answers, label),
+            "DET-08: the `{label}` answer did not survive the other demands on the same \
+             descriptor"
+        );
+    }
+
+    // The unmodeled point still refuses, typed.
+    let unmodeled = forward.get_flow_return_type_with_audit(
+        &identity(CANONICAL, SYMBOL),
         ReturnProjectionDemand {
             point: Demand::shallow(),
         },
     );
-    match contextual.as_result() {
+    match unmodeled.as_result() {
         Err(FlowReturnError::Failure(FlowReturnFailure::UnmodeledDemandPoint)) => {}
         Err(other) => panic!(
-            "DET-08: the narrower demand refused with {other:?} — the typed refusal class \
-             changed; re-examine this row's registration"
+            "DET-08: the unmodeled members-facet demand refused with {other:?} — the typed \
+             refusal class changed"
         ),
         Ok(_) => panic!(
-            "DET-08: a contextual demand point ANSWERED — the demand lattice now models \
-             narrower points; un-ignore this row and assert the distinct coexisting memo \
-             entries under one descriptor"
+            "DET-08: the members-facet demand ANSWERED — it is now modeled; add it to the \
+             distinct-coexisting comparison above"
         ),
     }
 }
 
-/// DET-09 (ignored) — policy changes with resident parent caches:
-/// parents and leaves must use the new policy while formatting-only
-/// changes do not rebuild resolution. The body asserts the KNOWN STATE
-/// on the one axis that is expressible today: a formatting-only edit
-/// (pure whitespace) leaves the completed observation IDENTICAL — the
-/// resolution-visible answer does not move for a change that must not
-/// rebuild it. The policy-change-with-resident-parents axis itself has
-/// no drivable surface (the host owns no mid-flight effective-options
-/// mutation), which is what the ignore reason names.
+/// The DET-09 project root and its tsconfig.
+const DET_POLICY_ROOT: &str = "/det";
+const DET_POLICY_TSCONFIG: &str = "/det/tsconfig.json";
+
+/// Publish `tsconfig_json` as the DET-09 project's configuration, the way an
+/// edited tsconfig reaches a live host: the file's content changes, the real
+/// tsconfig loader re-reads it (extends-aware, effective-option
+/// canonicalising), and the host is re-configured through the same
+/// `configure_projects` entry the IDE uses. A tsconfig-backed project
+/// publishes as CONFIGURED; a project with no tsconfig publishes as a
+/// fallback that ignores its compiler options entirely.
+fn det_apply_tsconfig(
+    host: &VerterHost,
+    workspace: &verter_workspace::MemoryWorkspace,
+    tsconfig_json: &str,
+) {
+    workspace.inject_file(DET_POLICY_TSCONFIG.to_string(), Arc::from(tsconfig_json));
+    let mut project = verter_workspace::ide_project_config(
+        DET_POLICY_ROOT.to_string(),
+        DET_POLICY_ROOT.to_string(),
+        Some(DET_POLICY_TSCONFIG.to_string()),
+    );
+    project.compiler_options =
+        verter_workspace::load_compiler_options(workspace, DET_POLICY_TSCONFIG);
+    host.configure_projects(vec![project]);
+}
+
+/// DET-09 (ignored) — policy changes with resident parent caches: parents
+/// and leaves must use the new policy, and a formatting-only change must
+/// not rebuild resolution.
+///
+/// The policy change IS drivable: an edited tsconfig reaches a live host
+/// through [`det_apply_tsconfig`], and the effective option reads back from
+/// the file's own project. What is not drivable is the row's claim, because
+/// NO answer on this observation lane depends on the semantic policy. A
+/// value answer ignores `strictNullChecks` (an optional parameter returns
+/// `string | undefined` under both policies, where TypeScript 7.0.2 prints
+/// `string` when it is off), a signature renders without its parameter
+/// types, and a type-position utility stays an unreduced carrier. A parent
+/// holding a stale pre-change answer would therefore be indistinguishable
+/// from a correct one, and asserting that answers FOLLOW the policy would
+/// pass vacuously.
+///
+/// The body drives every axis that is expressible today, and pins the
+/// known state: the answers do not move. When the observation lane starts
+/// honouring the policy, that assertion fails — the un-ignore signal —
+/// and the row's own claim becomes checkable.
 #[test]
-#[ignore = "no public surface mutates effective semantic policy on a live host, so changing \
-            an option with resident parent caches cannot be driven until effective options \
-            and their parent-cache invalidation are reachable"]
+#[ignore = "no public answer on the flow-return observation lane depends on the semantic \
+            policy: strictNullChecks leaves an optional parameter's answer unchanged, so a \
+            resident parent kept on the old policy is indistinguishable from a correct one"]
 fn det_09_policy_change_with_resident_parents() {
     match matrix_row("DET-09").driver {
         Driver::Ignored { .. } => {}
         Driver::Ready { test } => panic!("DET-09 is registered ready ({test}) — update this row"),
     }
-    const POLICY_BASE_TS: &str = "export function witness(v: number | string) { return v; }";
-    const POLICY_FORMATTED_TS: &str =
-        "export function witness(v: number | string) {\n    return v;\n}\n";
-    let host = build_host(&[("/det/policy.ts", POLICY_BASE_TS)]);
-    let before = observe(&host, "/det/policy.ts", "witness");
-    upsert(&host, "/det/policy.ts", POLICY_FORMATTED_TS);
-    let after = observe(&host, "/det/policy.ts", "witness");
+    const LEAF_TS: &str = "export function leaf(v?: string) { return v; }";
+    const LEAF_FORMATTED_TS: &str = "export function leaf(v?: string) {\n    return v;\n}\n";
+    const PARENT_TS: &str =
+        "import { leaf } from \"./leaf\";\nexport function parent(v?: string) { return leaf(v); }";
+    const LOOSE: &str = r#"{ "compilerOptions": { "strictNullChecks": false } }"#;
+    const STRICT: &str = r#"{ "compilerOptions": { "strictNullChecks": true } }"#;
+
+    let policy_host = || {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = Arc::new(VerterHost::new(
+            HostConfig {
+                audit_enabled: true,
+                ..HostConfig::default()
+            },
+            workspace.clone(),
+        ));
+        (host, workspace)
+    };
+    let apply_policy = |host: &VerterHost,
+                        workspace: &verter_workspace::MemoryWorkspace,
+                        tsconfig: &str,
+                        strict: bool| {
+        det_apply_tsconfig(host, workspace, tsconfig);
+        assert_eq!(
+            host.semantic_compiler_options_for("/det/leaf.ts")
+                .strict_null_checks,
+            strict,
+            "DET-09: the policy change never reached the file's project"
+        );
+    };
+    let observe_both = |host: &VerterHost| {
+        (
+            observe(host, "/det/leaf.ts", "leaf"),
+            observe(host, "/det/parent.ts", "parent"),
+        )
+    };
+
+    let (live, live_ws) = policy_host();
+    apply_policy(&live, &live_ws, LOOSE, false);
+    upsert(&live, "/det/leaf.ts", LEAF_TS);
+    upsert(&live, "/det/parent.ts", PARENT_TS);
+    let loose = observe_both(&live);
+    // Both answers are now resident under the loose policy.
+    apply_policy(&live, &live_ws, STRICT, true);
+    let strict = observe_both(&live);
+
+    // Drivable today: after the change, the LIVE host answers exactly what a
+    // host that never saw the old policy answers, on both bases.
+    let (fresh, fresh_ws) = policy_host();
+    apply_policy(&fresh, &fresh_ws, STRICT, true);
+    upsert(&fresh, "/det/leaf.ts", LEAF_TS);
+    upsert(&fresh, "/det/parent.ts", PARENT_TS);
     assert_eq!(
-        before, after,
-        "DET-09: a formatting-only edit moved the resolution-visible observation — a \
-         change that must not rebuild resolution changed the answer"
+        strict,
+        observe_both(&fresh),
+        "DET-09: after the policy change the live host disagrees with a fresh host under the \
+         same policy — a resident answer outlived the change"
+    );
+    assert_eq!(
+        generated_bytes(&live),
+        generated_bytes(&fresh),
+        "DET-09: after the policy change the live host's generated bytes differ from a fresh \
+         host's under the same policy"
+    );
+
+    // The known state, and the un-ignore signal.
+    assert_eq!(
+        loose, strict,
+        "DET-09: the answers now FOLLOW the policy (`{}` → `{}`) — the observation lane \
+         models it; un-ignore this row and assert that resident parents follow too",
+        loose.0, strict.0
+    );
+
+    apply_policy(&live, &live_ws, LOOSE, false);
+    assert_eq!(
+        observe_both(&live),
+        loose,
+        "DET-09: restoring the policy did not restore the original observations"
+    );
+    upsert(&live, "/det/leaf.ts", LEAF_FORMATTED_TS);
+    assert_eq!(
+        observe(&live, "/det/leaf.ts", "leaf"),
+        loose.0,
+        "DET-09: a formatting-only edit moved the resolution-visible observation — a change \
+         that must not rebuild resolution changed the answer"
     );
 }
 
