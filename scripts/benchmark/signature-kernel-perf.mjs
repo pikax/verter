@@ -293,9 +293,33 @@ function addWorktree(repo, dir, rev) {
   });
 }
 
-/** A tree kept by an earlier `--keep` run at exactly `rev` — reused, never rebuilt. */
-function keptTreeAt(dir, rev) {
-  return fs.existsSync(dir) && tryRun("git", ["-C", dir, "rev-parse", "HEAD"]) === rev;
+/** Whether `dir` is itself the top of a git worktree (not merely inside some repository). */
+function isOwnWorktree(dir) {
+  const top = fs.existsSync(dir)
+    ? tryRun("git", ["-C", dir, "rev-parse", "--show-toplevel"])
+    : null;
+  // Real paths: git reports a resolved top (macOS temp dirs sit behind /var → /private/var).
+  return top !== null && fs.realpathSync(top) === fs.realpathSync(dir);
+}
+
+/**
+ * Make `dir` a worktree at `rev`. A tree kept by an earlier `--keep` run is reused
+ * as is when it is already at `rev` (its build is then a no-op), and moved to `rev`
+ * in place otherwise (the build recompiles only what changed).
+ */
+function prepareTree(repo, dir, rev, arm) {
+  if (!isOwnWorktree(dir)) {
+    addWorktree(repo, dir, rev);
+    return;
+  }
+  if (tryRun("git", ["-C", dir, "rev-parse", "HEAD"]) === rev) {
+    log(`reusing the kept ${arm} tree`);
+    return;
+  }
+  log(`moving the kept ${arm} tree to ${rev.slice(0, 12)}`);
+  run("git", ["-C", dir, "checkout", "--detach", "--force", rev], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function removeWorktree(repo, dir) {
@@ -366,8 +390,7 @@ function main() {
   let controlBinary = null;
   try {
     for (const arm of ["baseline", "candidate"]) {
-      if (keptTreeAt(trees[arm], revs[arm])) log(`reusing the kept ${arm} tree`);
-      else addWorktree(repo, trees[arm], revs[arm]);
+      prepareTree(repo, trees[arm], revs[arm], arm);
       const harnessPath = path.join(trees[arm], HARNESS_REL);
       fs.mkdirSync(path.dirname(harnessPath), { recursive: true });
       // Rewriting identical bytes would touch the mtime and relink the harness.
