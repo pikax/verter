@@ -6,6 +6,7 @@
 //! child of `sync_coordinator`, so `use super::*` resolves to its items.
 
 use super::*;
+use crate::provider_sync::close_stale_provider_paths;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::ProjectSyncMode;
 use futures_util::{FutureExt, StreamExt};

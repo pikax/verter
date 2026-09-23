@@ -32,10 +32,11 @@ use verter_session::FileLanguage;
 
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    close_stale_provider_paths, commit_sync_transition, genuinely_stale_after_sync,
+    close_stale_provider_paths_with, commit_sync_transition, genuinely_stale_after_sync,
     non_decl_close_targets, prepare_sync_transition, revert_unsynced_kinds, ProviderPathKind,
     ProviderSyncState,
 };
+use crate::sync_coordinator::ProjectSyncRedelivery;
 use crate::type_provider::project_sync::ProjectSync;
 
 /// Handle for communicating with the background workspace scanner.
@@ -837,11 +838,12 @@ async fn sync_non_carrier_file_to_provider(
         crate::provider_sync::non_carrier_sync_state_for_source(&snapshot.resolver, canonical_id);
     if let Some(next) = next_state {
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &non_decl_close_targets(&transition.stale_paths),
             "workspace_scanner(non_carrier)",
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
         let mut committed = transition.next;
@@ -1224,11 +1226,12 @@ pub(crate) async fn sync_file_to_provider(
                         requeue.insert(canonical_id.to_string());
                     }
                 } else {
-                    close_stale_provider_paths(
+                    close_stale_provider_paths_with(
                         sync,
                         provider_surfaces,
                         &non_decl_close_targets(&genuinely_stale),
                         "workspace_scanner(carrier)",
+                        Some(&ProjectSyncRedelivery::new(sync)),
                     )
                     .await;
                 }
@@ -1256,11 +1259,12 @@ pub(crate) async fn sync_file_to_provider(
                     // The declaration overlay (`Decl`), if any, is released by
                     // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
                     if let Some(sync) = sync {
-                        close_stale_provider_paths(
+                        close_stale_provider_paths_with(
                             sync,
                             provider_surfaces,
                             &state.active_non_decl_paths(),
                             "workspace_scanner(owner_loss)",
+                            Some(&ProjectSyncRedelivery::new(sync)),
                         )
                         .await;
                     }

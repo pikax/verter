@@ -17,7 +17,7 @@ use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
 use crate::provider_sync::{
-    close_stale_provider_path, commit_sync_transition, prepare_sync_transition,
+    close_stale_provider_path_with, commit_sync_transition, prepare_sync_transition,
     NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::type_provider::merge;
@@ -1225,12 +1225,13 @@ impl VerterLanguageServer {
             let Some(non_decl) = NonDeclProviderPathKind::from_provider_path_kind(*kind) else {
                 unreachable!("Decl is delegated to the guarded close");
             };
-            close_stale_provider_path(
+            close_stale_provider_path_with(
                 sync,
                 self.documents.provider_surfaces(),
                 non_decl,
                 path,
                 "provider_state",
+                Some(&crate::sync_coordinator::ProjectSyncRedelivery::new(sync)),
             )
             .await;
         }

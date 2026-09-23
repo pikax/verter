@@ -17,7 +17,8 @@ use super::*;
 
 #[path = "background_drain_owner_loss.rs"]
 mod owner_loss;
-use crate::provider_sync::close_stale_provider_paths;
+use crate::provider_sync::close_stale_provider_paths_with;
+use crate::sync_coordinator::ProjectSyncRedelivery;
 use owner_loss::{reconcile_unowned_carrier_buffer, reconcile_unowned_carrier_provider_file};
 
 /// Outcome of a single pending-file provider-sync pass, used by the drain loop
@@ -929,11 +930,12 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     )
     .await;
     if let Some(stale) = commit.stale_ide_after_success.as_ref() {
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &non_decl_close_targets(std::slice::from_ref(stale)),
             "open_unresolved_ext_flip",
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
     }
@@ -955,11 +957,12 @@ async fn close_dropped_owner_api_path(
     context: &str,
 ) {
     if let Some(dropped) = dropped_api {
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &non_decl_close_targets(std::slice::from_ref(dropped)),
             context,
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
     }
@@ -1203,11 +1206,12 @@ async fn apply_owner_resolved_carrier_sync(
                     // Superseded mid-flight: treat as no progress (keep queued).
                     return CarrierApplyOutcome::Pending;
                 }
-                close_stale_provider_paths(
+                close_stale_provider_paths_with(
                     sync,
                     documents.provider_surfaces(),
                     &non_decl_close_targets(&genuinely_stale),
                     context,
+                    Some(&ProjectSyncRedelivery::new(sync)),
                 )
                 .await;
             }
@@ -1421,11 +1425,12 @@ pub(super) async fn sync_api_to_provider_background_task(
             pending_snapshot_provider_sync.insert(canonical_id.clone());
             return;
         }
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             &sync,
             &provider_surfaces,
             &non_decl_close_targets(&genuinely_stale),
             "sync_api(background)",
+            Some(&ProjectSyncRedelivery::new(&sync)),
         )
         .await;
     }
@@ -1480,11 +1485,12 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
     };
 
     let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
-    close_stale_provider_paths(
+    close_stale_provider_paths_with(
         sync,
         documents.provider_surfaces(),
         &non_decl_close_targets(&transition.stale_paths),
         "pending_snapshot",
+        Some(&ProjectSyncRedelivery::new(sync)),
     )
     .await;
 
@@ -1539,11 +1545,12 @@ async fn remove_provider_sync_state_and_close_paths(
         // lifecycle is owned by `DeclOverlayOwner` and released only when no open
         // carrier root still reaches it (via the `did_close` release). A background
         // state removal closes only the non-decl artifacts.
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &state.active_non_decl_paths(),
             context,
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
     }

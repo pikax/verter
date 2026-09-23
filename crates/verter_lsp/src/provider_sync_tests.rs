@@ -1379,6 +1379,14 @@ async fn a_failed_provider_close_leaves_the_surface_closing_not_finalized() {
 /// refused finalize is re-verified and the reopened generation's exact bytes are
 /// re-delivered AFTER the close landed, so the replay ends open on the reopened
 /// content while the store stays `Current` on that same content.
+///
+/// The re-delivery itself is the CALLER's (`provider_sync` may not push carrier
+/// companion content — the `sealed_carrier_store_mutators_allowlist` guard): the
+/// close hands the reopened snapshot to a [`RedeliverReopenedSurface`], which the
+/// carrier-sync surface implements with its own content verb. This test's hook
+/// stands in for that publisher (a `_tests.rs` file is outside the guard's scan)
+/// and also records the generation it was handed, so the test proves the close
+/// re-delivers exactly the store's reopened generation, not bytes of its own.
 #[tokio::test]
 async fn a_close_landing_after_a_reopen_redelivers_the_reopened_api_surface() {
     use crate::provider_surface_store::{ProviderSurfaceStore, RecordSurface};
@@ -1418,12 +1426,44 @@ async fn a_close_landing_after_a_reopen_redelivers_the_reopened_api_surface() {
     // closing task is parked inside `close_file`.
     let (close_arrived, close_release) = mock.block_close_file(api_path);
 
-    let close = close_stale_provider_path(
+    // The carrier-sync surface's re-delivery, as a test-local hook: deliver the
+    // snapshot's exact bytes through the API lane's own content verb and record
+    // the generation handed over.
+    struct ApiPublisher<'a> {
+        sync: &'a ProjectSync,
+        handed_generations: std::sync::Mutex<Vec<u64>>,
+    }
+    impl RedeliverReopenedSurface for ApiPublisher<'_> {
+        fn redeliver<'a>(
+            &'a self,
+            kind: NonDeclProviderPathKind,
+            path: &'a str,
+            snapshot: StdArc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+        ) -> RedeliveryFuture<'a> {
+            assert_eq!(kind, NonDeclProviderPathKind::Api);
+            self.handed_generations
+                .lock()
+                .unwrap()
+                .push(snapshot.stamp.generation);
+            Box::pin(async move {
+                self.sync
+                    .open_dts(path, &snapshot.payload.provider_content)
+                    .await
+            })
+        }
+    }
+    let publisher = ApiPublisher {
+        sync: &sync,
+        handed_generations: std::sync::Mutex::new(Vec::new()),
+    };
+
+    let close = close_stale_provider_path_with(
         &sync,
         &provider_surfaces,
         NonDeclProviderPathKind::Api,
         api_path,
         "reopen_race_test",
+        Some(&publisher),
     );
     let reopen_during_close = async {
         close_arrived.notified().await;
@@ -1449,7 +1489,8 @@ async fn a_close_landing_after_a_reopen_redelivers_the_reopened_api_surface() {
     };
     let ((), released_at) = tokio::join!(close, reopen_during_close);
 
-    // Store: the reopened generation is still the current one.
+    // Store: the reopened generation is still the current one, and it is the
+    // generation the close handed to the publisher for re-delivery.
     assert!(
         provider_surfaces.is_tracked(api_path),
         "the stale finalize must not erase the reopened surface"
@@ -1461,6 +1502,11 @@ async fn a_close_landing_after_a_reopen_redelivers_the_reopened_api_surface() {
         current.payload.provider_content.as_ref(),
         reopened_api,
         "the store's current surface is the reopened content"
+    );
+    assert_eq!(
+        *publisher.handed_generations.lock().unwrap(),
+        vec![current.stamp.generation],
+        "the close must hand the publisher exactly the store's reopened generation, once"
     );
 
     // Provider: replay the file-ops for the path into a document model, applying

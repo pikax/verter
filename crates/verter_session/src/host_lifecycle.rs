@@ -993,12 +993,24 @@ impl VerterHost {
         // the closed content is reachable again except through a stale
         // handle (which now reads as unresolved). This is NOT
         // `evict_canonical`: the file's artifacts stay for the reload.
-        let released = self.project_type_store.release_canonical(canonical_id);
-        tracing::debug!(
-            canonical_id,
-            ?released,
-            "evict released the document's semantic substrate"
-        );
+        //
+        // NOT for a synthesised typeinfo scratch (`verter://typeinfo/…`):
+        // `evaluate_type_expression` evicts its scratch at the end of every
+        // non-cacheable evaluation under the documented contract that the
+        // eviction reclaims compile / derived state but PRESERVES the
+        // scratch's semantic-graph memo — the node id it just returned to
+        // the caller, and the cross-mode materialized-point satisfaction a
+        // repeat request relies on. Releasing it would hand the caller a
+        // tombstoned id.
+        const TYPEINFO_SCRATCH_URI_PREFIX: &str = "verter://typeinfo/";
+        if !canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX) {
+            let released = self.project_type_store.release_canonical(canonical_id);
+            tracing::debug!(
+                canonical_id,
+                ?released,
+                "evict released the document's semantic substrate"
+            );
+        }
 
         // Capture pre-evict whole_hash from the scheduler so
         // `ensure_loaded` can detect no-op reloads (identical content)

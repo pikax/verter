@@ -21,13 +21,58 @@ use tower_lsp_server::Client;
 use crate::documents::line_index::LineIndex;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    close_stale_provider_paths, commit_sync_transition, genuinely_stale_after_sync,
+    close_stale_provider_paths_with, commit_sync_transition, genuinely_stale_after_sync,
     non_decl_close_targets, open_unresolved_carrier_commit, open_unresolved_carrier_state,
-    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
+    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
+    RedeliverReopenedSurface, RedeliveryFuture,
 };
 use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
+
+/// The carrier-sync surface's re-delivery of a provider surface that was REOPENED
+/// while its stale close was in flight, so the landed close is repaired with the
+/// reopened generation's exact bytes (see
+/// [`crate::provider_sync::close_stale_provider_path`]).
+///
+/// Defined here — on the bounded carrier-sync surface the
+/// `sealed_carrier_store_mutators_allowlist` guard permits to push carrier
+/// companion content — and shared by every stale-close site (the drain, the
+/// scanner, the server's provider-state close and this coordinator), so the
+/// re-delivery verbs exist in exactly one place. It carries no state beyond the
+/// `ProjectSync` handle and delivers exactly the snapshot it is handed.
+pub(crate) struct ProjectSyncRedelivery<'a> {
+    sync: &'a ProjectSync,
+}
+
+impl<'a> ProjectSyncRedelivery<'a> {
+    pub(crate) fn new(sync: &'a ProjectSync) -> Self {
+        Self { sync }
+    }
+}
+
+impl RedeliverReopenedSurface for ProjectSyncRedelivery<'_> {
+    fn redeliver<'a>(
+        &'a self,
+        kind: NonDeclProviderPathKind,
+        path: &'a str,
+        snapshot: Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+    ) -> RedeliveryFuture<'a> {
+        Box::pin(async move {
+            let content = &snapshot.payload.provider_content;
+            match kind {
+                // The API companion is re-established through the same content
+                // verb its publishers deliver it with (an upsert on every engine).
+                NonDeclProviderPathKind::Api => self.sync.open_dts(path, content).await,
+                // A shadow buffer is always delivered through `sync_file`.
+                NonDeclProviderPathKind::Shadow => self.sync.sync_file(path, content).await,
+                // Never handed over by the close (the IDE lane keeps its own
+                // log-only handling); nothing to deliver.
+                NonDeclProviderPathKind::Ide => Ok(()),
+            }
+        })
+    }
+}
 
 /// Per-canonical bookkeeping for changes the server has RECEIVED but has not
 /// finished processing.
@@ -1600,11 +1645,12 @@ async fn sync_file(
                         .insert(canonical_id.to_string());
                     return SyncFileOutcome::Retry;
                 } else {
-                    close_stale_provider_paths(
+                    close_stale_provider_paths_with(
                         project_sync,
                         deps.documents.provider_surfaces(),
                         &non_decl_close_targets(&genuinely_stale),
                         "sync_coordinator(carrier)",
+                        Some(&ProjectSyncRedelivery::new(project_sync)),
                     )
                     .await;
                 }
@@ -1740,20 +1786,22 @@ async fn preserve_open_unresolved_carrier(
     let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
     if let Some(dropped) = commit.dropped_api {
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&dropped)),
             "sync_coordinator(open_unresolved)",
+            Some(&ProjectSyncRedelivery::new(project_sync)),
         )
         .await;
     }
     if let Some(stale) = commit.stale_ide_after_success {
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&stale)),
             "sync_coordinator(open_unresolved_ext_flip)",
+            Some(&ProjectSyncRedelivery::new(project_sync)),
         )
         .await;
     }
@@ -1773,11 +1821,12 @@ async fn clear_provider_sync_state(
         // The declaration overlay (`Decl`), if any, is released by `DeclOverlayOwner`
         // via the `did_close` lifecycle, never closed here — the generic close
         // touches only non-decl artifacts.
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &state.active_non_decl_paths(),
             "sync_coordinator(clear_state)",
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
     }

@@ -104,24 +104,33 @@ pub fn non_decl_close_targets(
 /// - **A stale close that LANDED after a reopen is repaired, not ignored.** The
 ///   provider close is a path-only operation the store cannot fence: an API /
 ///   Shadow publisher can open and `record` the SAME path while the close is
-///   awaited (neither lane has a per-path serializer), and the old close then
-///   lands on the REOPENED provider document. The epoch-scoped finalize is
-///   correctly a no-op there — but a no-op alone leaves the store vouching a
-///   `Current` surface the provider has just closed (the wrong-handle outcome the
-///   charter rejects). So a refused finalize is re-verified: if the path is now
-///   `Current`, the reopened snapshot's exact provider bytes are re-delivered
-///   through the lane's own publish verb, until the delivered generation is the
-///   store's current one. A re-delivery that finds the path retired AGAIN closes
-///   it again (the re-delivery may itself have landed after that newer close); a
-///   re-delivery that FAILS retires the path (`Closing`, token dropped) rather
-///   than leave a closed document advertised as `Current`.
+///   awaited (neither lane has a per-path serializer — and the composite tsgo
+///   provider's close awaits its shared-overlay half AFTER the managed half,
+///   unserialized against a concurrent reopen), and the old close then lands on
+///   the REOPENED provider document. The epoch-scoped finalize is correctly a
+///   no-op there — but a no-op alone leaves the store vouching a `Current`
+///   surface the provider has just closed (the wrong-handle outcome the charter
+///   rejects). So a refused finalize is re-verified: if the path is now `Current`,
+///   the reopened snapshot's exact provider bytes are re-delivered until the
+///   delivered generation is the store's current one. A re-delivery that finds
+///   the path retired AGAIN closes it again (the re-delivery may itself have
+///   landed after that newer close); a re-delivery that FAILS retires the path
+///   (`Closing`, token dropped) rather than leave a closed document advertised as
+///   `Current`.
+/// - **Re-delivery is the CALLER's, never this module's.** Carrier-companion
+///   content (`open_dts` / `sync_dts` / `open_tsx` / …) may be pushed only from
+///   the bounded carrier-sync surface (the `sealed_carrier_store_mutators_allowlist`
+///   guard), and every caller of this close lives on that surface. So the repair
+///   is handed to a caller-supplied [`RedeliverReopenedSurface`] through
+///   [`close_stale_provider_path_with`]; this plain entry passes none, and then
+///   only the non-carrier `Shadow` lane (its `sync_file` is not a carrier verb)
+///   is re-delivered here. An `Api` / `Ide` reopen with no hook is LOGGED and the
+///   store is left `Current`: retiring it would destroy a perfectly good surface
+///   in the benign order (close landed first, reopen after — the common order
+///   under the managed provider's serialized close), while re-delivery is
+///   idempotent in that order.
 /// - **An error drops the token**, leaving the `Closing` state in place — fail
 ///   closed for a path whose provider surface may still be live.
-///
-/// The `Ide` lane is NOT re-delivered here: its writers already serialize on the
-/// `ProjectSync` per-path delivery lock, and its recorded bytes are the PREPARED
-/// (import-rewritten) surface, which must not be fed back through `open_tsx`'s
-/// preparation. A refused IDE finalize over a `Current` path is logged only.
 ///
 /// A declaration overlay (`Decl`) is unrepresentable in [`NonDeclProviderPathKind`]:
 /// its lifecycle is owned by `DeclOverlayOwner`, never this generic close.
@@ -134,6 +143,58 @@ pub async fn close_stale_provider_path(
     kind: NonDeclProviderPathKind,
     path: &str,
     context: &str,
+) {
+    close_stale_provider_path_with(sync, provider_surfaces, kind, path, context, None).await;
+}
+
+/// The future a [`RedeliverReopenedSurface`] returns.
+pub type RedeliveryFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<(), crate::type_provider::protocol::TypeProviderError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// A caller-supplied re-delivery of a REOPENED provider surface whose stale close
+/// landed after the reopen (see [`close_stale_provider_path`]).
+///
+/// Implemented ONLY on the bounded carrier-sync surface (the files the
+/// `sealed_carrier_store_mutators_allowlist` guard permits to push carrier
+/// companion content), which is where every caller of the stale close already
+/// lives. `snapshot` is the store's CURRENT generation for `path` — its
+/// `payload.provider_content` is the exact bytes the provider must hold again —
+/// and the implementation delivers it through the lane's own publish verb (an
+/// `Api` reopen through `open_dts`, a `Shadow` one through `sync_file`). The hook
+/// is NEVER invoked for the `Ide` lane: its snapshot carries the PREPARED
+/// (import-rewritten) surface, which must not be fed back through `open_tsx`'s
+/// preparation, so the close keeps the IDE lane's own (log-only) handling whether
+/// or not a hook is supplied.
+///
+/// The close loops the hook until the generation it delivered is the store's
+/// current one, so an implementation must deliver exactly the snapshot it is
+/// given (never a newer or older one of its own).
+pub trait RedeliverReopenedSurface: Sync {
+    fn redeliver<'a>(
+        &'a self,
+        kind: NonDeclProviderPathKind,
+        path: &'a str,
+        snapshot: std::sync::Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+    ) -> RedeliveryFuture<'a>;
+}
+
+/// [`close_stale_provider_path`] with a caller-supplied re-delivery for the
+/// reopened-during-close case. `None` re-delivers only the non-carrier `Shadow`
+/// lane here and logs an `Api` / `Ide` reopen (see the semantics on the plain
+/// entry).
+pub async fn close_stale_provider_path_with(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    kind: NonDeclProviderPathKind,
+    path: &str,
+    context: &str,
+    redeliver: Option<&dyn RedeliverReopenedSurface>,
 ) {
     let mut close_token = provider_surfaces.forget(path);
     loop {
@@ -157,8 +218,16 @@ pub async fn close_stale_provider_path(
         let Some(reopened) = provider_surfaces.current_snapshot(path) else {
             return;
         };
-        match redeliver_reopened_surface(sync, provider_surfaces, kind, path, context, reopened)
-            .await
+        match redeliver_reopened_surface(
+            sync,
+            provider_surfaces,
+            kind,
+            path,
+            context,
+            reopened,
+            redeliver,
+        )
+        .await
         {
             Redelivery::Settled => return,
             Redelivery::RetiredAgain => {
@@ -174,9 +243,9 @@ pub async fn close_stale_provider_path(
 
 /// The outcome of [`redeliver_reopened_surface`].
 enum Redelivery {
-    /// The provider holds the store's current generation (or the lane carries no
-    /// re-delivery and the mismatch was only logged, or the re-delivery failed and
-    /// the path was retired to `Closing`): nothing further to do.
+    /// The provider holds the store's current generation (or no re-delivery is
+    /// available for the lane and the mismatch was logged, or the re-delivery
+    /// failed and the path was retired to `Closing`): nothing further to do.
     Settled,
     /// The path was retired again while (or after) the re-delivery landed: the
     /// caller must close it again.
@@ -189,8 +258,9 @@ enum Redelivery {
 /// Loops until the generation delivered is the store's current one: a newer
 /// `record` observed after a delivery means a newer publisher's own delivery may
 /// have preceded ours, so its bytes are delivered again (idempotent when they
-/// already are the provider's). See [`close_stale_provider_path`] for why the
-/// `Ide` lane is not re-delivered.
+/// already are the provider's). The delivery itself is the caller's hook when
+/// one is given; without one only the non-carrier `Shadow` lane is delivered
+/// here — see [`close_stale_provider_path`] for why the carrier lanes are not.
 async fn redeliver_reopened_surface(
     sync: &crate::type_provider::project_sync::ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
@@ -198,22 +268,31 @@ async fn redeliver_reopened_surface(
     path: &str,
     context: &str,
     reopened: std::sync::Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+    redeliver: Option<&dyn RedeliverReopenedSurface>,
 ) -> Redelivery {
     let mut snapshot = reopened;
     loop {
         let delivered_generation = snapshot.stamp.generation;
-        let content = std::sync::Arc::clone(&snapshot.payload.provider_content);
-        let result = match kind {
-            NonDeclProviderPathKind::Ide => {
+        let result = match (kind, redeliver) {
+            // The IDE lane is never re-delivered (see the trait docs): log only,
+            // hook or not, so its behaviour is identical at every call site.
+            (NonDeclProviderPathKind::Ide, _) | (NonDeclProviderPathKind::Api, None) => {
                 tracing::warn!(
-                    "{context}: stale close of provider IDE path {path} was refused finalize \
-                     over a reopened surface (generation {delivered_generation}); IDE lane \
-                     is not re-delivered"
+                    "{context}: stale close of provider path {path} ({kind:?}) was refused \
+                     finalize over a reopened surface (generation {delivered_generation}) and \
+                     no re-delivery applies; the provider may hold no document for a surface \
+                     the store keeps Current until the next publication"
                 );
                 return Redelivery::Settled;
             }
-            NonDeclProviderPathKind::Api => sync.open_dts(path, &content).await,
-            NonDeclProviderPathKind::Shadow => sync.sync_file(path, &content).await,
+            (_, Some(hook)) => {
+                hook.redeliver(kind, path, std::sync::Arc::clone(&snapshot))
+                    .await
+            }
+            (NonDeclProviderPathKind::Shadow, None) => {
+                sync.sync_file(path, &snapshot.payload.provider_content)
+                    .await
+            }
         };
         if let Err(error) = result {
             tracing::warn!(
@@ -246,6 +325,21 @@ pub async fn close_stale_provider_paths(
 ) {
     for (kind, path) in stale_paths {
         close_stale_provider_path(sync, provider_surfaces, *kind, path, context).await;
+    }
+}
+
+/// [`close_stale_provider_paths`] with a caller-supplied re-delivery for any path
+/// reopened during its close (see [`close_stale_provider_path_with`]).
+pub async fn close_stale_provider_paths_with(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    stale_paths: &[(NonDeclProviderPathKind, String)],
+    context: &str,
+    redeliver: Option<&dyn RedeliverReopenedSurface>,
+) {
+    for (kind, path) in stale_paths {
+        close_stale_provider_path_with(sync, provider_surfaces, *kind, path, context, redeliver)
+            .await;
     }
 }
 
