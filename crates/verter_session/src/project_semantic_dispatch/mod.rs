@@ -683,8 +683,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 distributive: *distributive,
                 pending: pending.clone(),
             }),
-            // The normalize-query SUBJECT representation: the
-            // pre-normalization member list interned verbatim (the query's
+            // The reduce-query SUBJECT representation: the
+            // pre-reduction member list interned verbatim (the query's
             // subject must stay distinct from its canonical result).
             SemanticQueryKey::ReduceUnion { members } => {
                 graph.intern_node(SemanticNodeData::Union(
