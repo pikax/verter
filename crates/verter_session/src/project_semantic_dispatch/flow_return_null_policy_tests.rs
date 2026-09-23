@@ -1,11 +1,12 @@
 //! Flow-return inference under the function's OWN `strictNullChecks`.
 //!
 //! Every expected answer here was measured on the pinned TypeScript 7.0.2
-//! (`tsc --declaration --emitDeclarationOnly --strict`, once as is and once
-//! with `--strictNullChecks false`, reading the emitted `.d.ts`). The TS
-//! print of each row is quoted beside it; the table itself spells the
-//! answer in [`answer_text`]'s form, which sorts union members so the
-//! comparison is independent of union member order.
+//! checker (`tsc --noEmit --strict`, once as is and once with
+//! `--strictNullChecks false`), read from a TS2741 message quoting
+//! `ReturnType<typeof f>`; for the first table the emitted `.d.ts` agrees
+//! row for row. The checker's print of each row is quoted beside it; the
+//! table itself spells the answer in [`answer_text`]'s form, which sorts
+//! union members so the comparison is independent of union member order.
 
 use std::sync::Arc;
 
@@ -59,7 +60,10 @@ fn identity(canonical: &str, symbol: &str) -> verter_type_expr::facts::FlowFunct
 
 /// A node as TypeScript-like text: primitives and literals as TS prints
 /// them, union members SORTED and joined by ` | `, object members in
-/// declaration order, a signature as `(name?: type) => return`.
+/// declaration order (`readonly ` / `?` as TS marks them), an array as
+/// `T[]` (a union element parenthesised), a tuple as `[A, B]`, a
+/// signature as `(name?: type) => return`, a generic application as
+/// `Name<A, B>`.
 fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
     let graph = host.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
@@ -84,7 +88,8 @@ fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
                 .iter()
                 .map(|member| {
                     format!(
-                        "{}{}: {}",
+                        "{}{}{}: {}",
+                        if member.readonly { "readonly " } else { "" },
                         member.key.as_string().unwrap_or("<key>"),
                         if member.optional { "?" } else { "" },
                         answer_text(host, member.value)
@@ -114,6 +119,36 @@ fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
                 params.join(", "),
                 answer_text(host, *return_type)
             )
+        }
+        SemanticNodeData::Array { element, readonly } => {
+            let element_text = answer_text(host, *element);
+            let element_text = if matches!(
+                graph.node_data(*element).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            ) {
+                format!("({element_text})")
+            } else {
+                element_text
+            };
+            format!(
+                "{}{element_text}[]",
+                if *readonly { "readonly " } else { "" }
+            )
+        }
+        SemanticNodeData::Tuple { elements, readonly } => {
+            let elements: Vec<String> = elements
+                .iter()
+                .map(|element| answer_text(host, element.value))
+                .collect();
+            format!(
+                "{}[{}]",
+                if *readonly { "readonly " } else { "" },
+                elements.join(", ")
+            )
+        }
+        SemanticNodeData::InstantiationRef { base, args } => {
+            let args: Vec<String> = args.iter().map(|arg| answer_text(host, *arg)).collect();
+            format!("{}<{}>", base.decl_name, args.join(", "))
         }
         other => format!("<unrendered {other:?}>"),
     }
@@ -276,6 +311,311 @@ fn flow_returns_follow_their_own_projects_strict_null_checks() {
     );
     upsert_table_sources(&host);
     let mismatches = measured_table_mismatches(&host);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 table:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Every `(symbol, strict answer, strictNullChecks-off answer)` row of
+/// `table` for `file` upserted into both projects, as the mismatch list.
+fn table_mismatches(
+    host: &VerterHost,
+    file: &str,
+    source: &str,
+    table: &[(&str, &str, &str)],
+) -> Vec<String> {
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        upsert(host, &format!("{root}/{file}"), source);
+    }
+    let mut mismatches = Vec::new();
+    for (symbol, strict, loose) in table {
+        for (root, expected) in [(STRICT_ROOT, strict), (LOOSE_ROOT, loose)] {
+            let canonical = format!("{root}/{file}");
+            let observed = observe(host, &canonical, symbol);
+            if observed != *expected {
+                mismatches.push(format!(
+                    "{canonical} `{symbol}`: expected `{expected}`, observed `{observed}`"
+                ));
+            }
+        }
+    }
+    mismatches
+}
+
+/// Bare `null` / `undefined` / `void` values nested in object and array
+/// literals, locals initialised from them, and declared nullable unions
+/// nested in inline structures.
+const NESTED_SOURCE: &str = r#"
+export function objNull() { return { a: null }; }
+export function objUndef() { return { a: undefined }; }
+export function objVoid() { return { a: void 0 }; }
+export function objNested() { return { a: { b: null } }; }
+export function objTernary(c: boolean) { return { a: c ? null : undefined }; }
+export function objAsConst() { return { a: null } as const; }
+export function objSatisfies() { return { a: null } satisfies object; }
+export function objDeclNull(v: null) { return { a: v }; }
+export function objTernDecl(c: boolean, v: null) { return { a: c ? null : v }; }
+export function arrNull() { return [null]; }
+export function arrMixed() { return [null, 1]; }
+export function arrUndefNull() { return [null, undefined]; }
+export function arrObjNull() { return [{ a: null }]; }
+export function arrArrNull() { return [[null]]; }
+export function objArrUndef() { return { a: [undefined] }; }
+export function tupleNull() { return [null] as const; }
+export function letNull() { let x = null; return x; }
+export function letUndef() { let y = undefined; return y; }
+export function varNull() { var y = null; return y; }
+export function constNull() { const y = null; return y; }
+export function constUndef() { const y = undefined; return y; }
+export function constTernary(c: boolean) { const y = c ? null : undefined; return y; }
+export function constTernaryMixed(c: boolean) { const y = c ? null : 1; return y; }
+export function letTernary(c: boolean) { let x = c ? null : undefined; return x; }
+export function declLocalNull() { const y: null = null; return y; }
+export function declLocalUndef() { let y: undefined = undefined; return y; }
+export function letNullCond(c: boolean) { let x = null; if (c) x = "s"; return x; }
+export function letUndefCond(c: boolean) { let x = undefined; if (c) x = 1; return x; }
+export function letNullNull(c: boolean) { let x = null; if (c) x = null; return x; }
+export function letNullDecl(c: boolean, v: null) { let x = null; if (c) x = v; return x; }
+export function noInitNull() { let x; x = null; return x; }
+export function declInitNullWrite(c: boolean, v: null) { let x = v; if (c) x = null; return x; }
+export function constFromLet() { let x = null; const y = x; return y; }
+export function returnTernaryLocal(c: boolean) { let x = null; return c ? x : undefined; }
+export function letArr() { let a = [null]; return a; }
+export function letObjNull() { let o = { a: null }; return o; }
+export function constObjNull() { const o = { a: null }; return o; }
+export function objFromConst() { const n = null; return { a: n }; }
+export function objFromLet() { let n = null; return { a: n }; }
+export function nestedDecl(o: { a: string | null }) { return o; }
+export function arrDecl(v: (string | null)[]) { return v; }
+export function tupleDecl(t: [string | null]) { return t; }
+export function sigDecl(f: (x: string | null) => void) { return f; }
+"#;
+
+/// `(symbol, strict, off)` for [`NESTED_SOURCE`], each the checker's
+/// answer on TypeScript 7.0.2 — read from the checker (a TS2741 message
+/// quoting `ReturnType<typeof f>`), not from the emitted `.d.ts`, whose
+/// printer re-derives a nested literal's type from its initializer
+/// (`{ a: [undefined] }` prints `{ a: undefined[] }` there while the
+/// checker holds `{ a: any[] }`). The checker's print follows each row.
+const NESTED_TABLE: &[(&str, &str, &str)] = &[
+    // { a: null; } / { a: any; }
+    ("objNull", "{ a: null }", "{ a: any }"),
+    // { a: undefined; } / { a: any; }
+    ("objUndef", "{ a: undefined }", "{ a: any }"),
+    // { a: undefined; } / { a: any; }
+    ("objVoid", "{ a: undefined }", "{ a: any }"),
+    // { a: { b: null; }; } / { a: { b: any; }; }
+    ("objNested", "{ a: { b: null } }", "{ a: { b: any } }"),
+    // { a: null | undefined; } / { a: any; }
+    ("objTernary", "{ a: null | undefined }", "{ a: any }"),
+    // { readonly a: null; } / { readonly a: any; }
+    ("objAsConst", "{ readonly a: null }", "{ readonly a: any }"),
+    // { a: null; } / { a: any; }
+    ("objSatisfies", "{ a: null }", "{ a: any }"),
+    // { a: null; } / { a: null; } — a declared `null` never widens
+    ("objDeclNull", "{ a: null }", "{ a: null }"),
+    // { a: null; } / { a: null; } — the declared arm is non-widening
+    ("objTernDecl", "{ a: null }", "{ a: null }"),
+    // null[] / any[]
+    ("arrNull", "null[]", "any[]"),
+    // (number | null)[] / number[]
+    ("arrMixed", "(null | number)[]", "number[]"),
+    // (null | undefined)[] / any[]
+    ("arrUndefNull", "(null | undefined)[]", "any[]"),
+    // { a: null; }[] / { a: any; }[]
+    ("arrObjNull", "{ a: null }[]", "{ a: any }[]"),
+    // null[][] / any[][]
+    ("arrArrNull", "null[][]", "any[][]"),
+    // { a: undefined[]; } / { a: any[]; }
+    ("objArrUndef", "{ a: undefined[] }", "{ a: any[] }"),
+    // readonly [null] / readonly [any]
+    ("tupleNull", "readonly [null]", "readonly [any]"),
+    // null / any — the auto-typed `let` reads the widening `null`
+    ("letNull", "null", "any"),
+    // undefined / any
+    ("letUndef", "undefined", "any"),
+    // null / any
+    ("varNull", "null", "any"),
+    // null / any — a `const` is declared as the widened type
+    ("constNull", "null", "any"),
+    // undefined / any
+    ("constUndef", "undefined", "any"),
+    // null | undefined / any
+    ("constTernary", "null | undefined", "any"),
+    // 1 | null / number
+    ("constTernaryMixed", "1 | null", "number"),
+    // null | undefined / any
+    ("letTernary", "null | undefined", "any"),
+    // null / null — a declared local never widens
+    ("declLocalNull", "null", "null"),
+    // undefined / undefined
+    ("declLocalUndef", "undefined", "undefined"),
+    // string | null / string
+    ("letNullCond", "null | string", "string"),
+    // number | undefined / number
+    ("letUndefCond", "number | undefined", "number"),
+    // null / any — a widening write keeps the local widening
+    ("letNullNull", "null", "any"),
+    // null / null — a declared-`null` write ends it
+    ("letNullDecl", "null", "null"),
+    // null / any — an initializer-less `let` is auto-typed too
+    ("noInitNull", "null", "any"),
+    // null / null — a `let` initialised from a declared `null` is not
+    // auto-typed, so a later bare `null` write does not widen it
+    ("declInitNullWrite", "null", "null"),
+    // null / any
+    ("constFromLet", "null", "any"),
+    // null | undefined / any
+    ("returnTernaryLocal", "null | undefined", "any"),
+    // null[] / any[]
+    ("letArr", "null[]", "any[]"),
+    // { a: null; } / { a: any; }
+    ("letObjNull", "{ a: null }", "{ a: any }"),
+    // { a: null; } / { a: any; }
+    ("constObjNull", "{ a: null }", "{ a: any }"),
+    // { a: null; } / { a: any; }
+    ("objFromConst", "{ a: null }", "{ a: any }"),
+    // { a: null; } / { a: any; }
+    ("objFromLet", "{ a: null }", "{ a: any }"),
+    // { a: string | null; } / { a: string; }
+    ("nestedDecl", "{ a: null | string }", "{ a: string }"),
+    // (string | null)[] / string[]
+    ("arrDecl", "(null | string)[]", "string[]"),
+    // [string | null] / [string]
+    ("tupleDecl", "[null | string]", "[string]"),
+    // (x: string | null) => void / (x: string) => void
+    (
+        "sigDecl",
+        "(x: null | string) => void",
+        "(x: string) => void",
+    ),
+];
+
+/// With `strictNullChecks` off a bare `null` / `undefined` / `void` value
+/// is the checker's WIDENING nullable type: nested in an object or array
+/// literal it widens to `any` with the literal (`{ a: null }` is
+/// `{ a: any }`, `[null]` is `any[]`, `[null, 1]` is `number[]`), a
+/// `const` initialised to one is declared `any`, and an auto-typed `let` /
+/// `var` reads it until a later write retypes it. A declared `null` /
+/// `undefined` — a parameter, an annotated local, an assertion — never
+/// widens, and a declared union nested in an inline object, array, tuple
+/// or function type loses its nullable members. Each row matches its own
+/// project's TypeScript 7.0.2 answer.
+#[test]
+fn nested_and_local_nullish_values_widen_with_strict_null_checks_off() {
+    let host = two_policy_host();
+    let mismatches = table_mismatches(&host, "nested.ts", NESTED_SOURCE, NESTED_TABLE);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 table:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Generator yields and bare `undefined` / `void 0` returns. The lib
+/// generator surfaces this standalone host has no `lib*.d.ts` for are
+/// declared in the file: the wrap resolves `Generator` / `AsyncGenerator`
+/// through the ordinary bare-reference resolver.
+const YIELD_AND_UNDEFINED_SOURCE: &str = r#"
+interface Generator<T, TReturn, TNext> {}
+interface AsyncGenerator<T, TReturn, TNext> {}
+export function* genNull() { yield null; }
+export function* genUndef() { yield undefined; }
+export function* genVoid() { yield void 0; }
+export function* genBare() { yield; }
+export function* genNullStr() { yield null; yield "s"; }
+export function* genBareAndNum() { yield; yield 1; }
+export function* genDeclNull(v: null) { yield v; }
+export async function* agenNull() { yield null; }
+export async function* agenUndef() { yield undefined; }
+export function returnUndefined() { return undefined; }
+export function returnVoid0() { return void 0; }
+export function returnUndefinedAndNum(c: boolean) { if (c) return 1; return undefined; }
+"#;
+
+/// `(symbol, strict, off)` for [`YIELD_AND_UNDEFINED_SOURCE`], each the
+/// checker's answer on TypeScript 7.0.2 (the checker's print follows each
+/// row).
+const YIELD_AND_UNDEFINED_TABLE: &[(&str, &str, &str)] = &[
+    // Generator<null, void, unknown> / Generator<any, void, unknown>
+    (
+        "genNull",
+        "Generator<null, void, unknown>",
+        "Generator<any, void, unknown>",
+    ),
+    // Generator<undefined, void, unknown> / Generator<any, void, unknown>
+    (
+        "genUndef",
+        "Generator<undefined, void, unknown>",
+        "Generator<any, void, unknown>",
+    ),
+    // Generator<undefined, void, unknown> / Generator<any, void, unknown>
+    (
+        "genVoid",
+        "Generator<undefined, void, unknown>",
+        "Generator<any, void, unknown>",
+    ),
+    // Generator<undefined, void, unknown> / Generator<any, void, unknown>
+    (
+        "genBare",
+        "Generator<undefined, void, unknown>",
+        "Generator<any, void, unknown>",
+    ),
+    // Generator<"s" | null, void, unknown> / Generator<string, void, unknown>
+    (
+        "genNullStr",
+        "Generator<\"s\" | null, void, unknown>",
+        "Generator<string, void, unknown>",
+    ),
+    // Generator<1 | undefined, void, unknown> / Generator<number, void, unknown>
+    (
+        "genBareAndNum",
+        "Generator<1 | undefined, void, unknown>",
+        "Generator<number, void, unknown>",
+    ),
+    // Generator<null, void, unknown> / Generator<null, void, unknown>
+    (
+        "genDeclNull",
+        "Generator<null, void, unknown>",
+        "Generator<null, void, unknown>",
+    ),
+    // AsyncGenerator<null, void, unknown> / AsyncGenerator<any, void, unknown>
+    (
+        "agenNull",
+        "AsyncGenerator<null, void, unknown>",
+        "AsyncGenerator<any, void, unknown>",
+    ),
+    // AsyncGenerator<undefined, void, unknown> / AsyncGenerator<any, void, unknown>
+    (
+        "agenUndef",
+        "AsyncGenerator<undefined, void, unknown>",
+        "AsyncGenerator<any, void, unknown>",
+    ),
+    // undefined / any
+    ("returnUndefined", "undefined", "any"),
+    // undefined / any
+    ("returnVoid0", "undefined", "any"),
+    // 1 | undefined / number
+    ("returnUndefinedAndNum", "1 | undefined", "number"),
+];
+
+/// A generator's yield type is widened exactly as a return type is: with
+/// `strictNullChecks` off a yield of only bare `null` / `undefined` /
+/// `void` values is `any` (sync and async), and a nullable yield beside
+/// another vanishes before the lone-fresh-literal rule. A bare
+/// `undefined` or `void 0` return is `undefined` when strict and `any`
+/// when off.
+#[test]
+fn yields_and_bare_undefined_returns_follow_strict_null_checks() {
+    let host = two_policy_host();
+    let mismatches = table_mismatches(
+        &host,
+        "yields.ts",
+        YIELD_AND_UNDEFINED_SOURCE,
+        YIELD_AND_UNDEFINED_TABLE,
+    );
     assert!(
         mismatches.is_empty(),
         "flow-return answers differ from the measured TypeScript 7.0.2 table:\n{}",

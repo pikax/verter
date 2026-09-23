@@ -1688,6 +1688,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "7f27ccc7b5bbe32c1600e75488c6bd1d9ba20c285fe253808bc3ffbfd7514ff0",
     ),
     (
+        "X96_evolving_let_explicit_undefined_initializer",
+        "d9b0fe4086b5f843feae02f14f3bafd6778fc07268f7a4da0895193396903f95",
+    ),
+    (
         "X99_nested_try_finally_collects_every_return",
         "46933021df276dc95d823af15b07d58e2c20f7dc05ce61b5d55cc897b4703772",
     ),
@@ -2971,6 +2975,12 @@ mod corpus_suite {
                 "checker prints `{ v: \"p\" | 1; }`; the renderer spells the same \
                  node `{ v: Union(\"p\" | 1) }` — union spelling and member \
                  terminators differ",
+            ),
+            (
+                "X96_evolving_let_explicit_undefined_initializer",
+                "checker prints `{ v: \"t\" | undefined; }`; the renderer spells the \
+                 same node `{ v: Union(\"t\" | undefined) }` — union spelling and \
+                 member terminators differ",
             ),
             (
                 "N139_flow_callee_authored_fresh_arm_widens_at_member",
@@ -4819,11 +4829,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowTypeof,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
-    (
-        "X96_evolving_let_explicit_undefined_initializer",
-        Owner::U6ValueInference,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -4839,7 +4844,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// rejects), or a recorded CHECKER text the deep-pin comparer cannot yet
 /// parse. Each ledger entry records which class it is in.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 66;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 65;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4980,7 +4985,6 @@ const OPEN_DEBTS: &[&str] = &[
     // inside a narrowed arm.
     "X91_assert_never_default_arm_contributes_nothing",
     "X94_evolving_let_one_branch_keeps_undefined",
-    "X96_evolving_let_explicit_undefined_initializer",
     "X97_evolving_let_switch_without_default_keeps_undefined",
     "X101_optional_chain_nullish_coalesce",
     "X105_closure_captures_narrowed_binding_in_guarded_arm",
@@ -5019,8 +5023,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // return-position reunion greens eleven of those parked rows, and D13
     // moved X95 — the evolving-`let` both-branch join — to MatchesChecker
     // with the branch join over the shared product lattice, leaving this
-    // owner at 93 rows, 80 matching and 10 parked on the merged tree.
-    (Owner::U6ValueInference, 93, 80, 10),
+    // owner at 93 rows, 80 matching and 10 parked on the merged tree. A
+    // free `undefined` read as the `undefined` type moves X96 — the
+    // evolving `let` with an explicit `= undefined` initializer — to
+    // MatchesChecker: 81 matching, 9 parked.
+    (Owner::U6ValueInference, 93, 81, 9),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
