@@ -533,13 +533,18 @@ impl NodeArena {
     /// the canonical owns at least one node; an early return otherwise. A
     /// close is a user-driven, rare event, so the O(nodes) scan is paid
     /// there rather than as a per-intern reverse index.
-    pub(super) fn release_canonical(&self, canonical_id: &str) -> Vec<SemanticNodeId> {
+    pub(super) fn release_canonical(&self, canonical_id: &str, below: u64) -> Vec<SemanticNodeId> {
         let mut released: Vec<(SemanticNodeId, u64)> = Vec::new();
         {
             let inner = self.inner.read();
             let slot_count = inner.nodes.len();
             let mut dead: Vec<bool> = vec![false; slot_count];
+            // Only nodes interned before the close are the closed content's;
+            // a node at or past `below` belongs to what the reload interned.
             let is_root = |index: usize| -> bool {
+                if index as u64 >= below {
+                    return false;
+                }
                 match (&inner.nodes[index], &inner.scopes[index]) {
                     (None, _) => false,
                     (

@@ -104,7 +104,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
         });
     let decision =
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-            host: documents.host(),
+            host: &documents.host(),
             vfs: carrier_publish.map(|publish| publish.vfs.as_ref()),
             ownership_ready: carrier_publish.is_some_and(|publish| publish.ownership_ready),
             resolver: &snapshot.resolver,

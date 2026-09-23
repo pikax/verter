@@ -84,14 +84,28 @@ impl SemanticGraphStore {
     /// what deliberately stays. Idempotent: a second call for the same
     /// canonical finds nothing to release beyond the edit-path drain.
     pub fn release_canonical(&self, canonical_id: &str) -> SemanticReleaseReport {
-        let mut report = SemanticReleaseReport {
-            memo_entries_evicted: self.invalidate_canonical(canonical_id),
-            ..SemanticReleaseReport::default()
-        };
+        let drained = self.invalidate_canonical(canonical_id);
+        let mut report = self.release_canonical_payloads_below(canonical_id, u64::MAX);
+        report.memo_entries_evicted += drained;
+        report
+    }
+
+    /// The payload half of [`Self::release_canonical`]: everything after the
+    /// edit-path drain, releasing only the canonical's nodes with ids below
+    /// `below` (plus the cascade). The language server applies it through
+    /// [`crate::project_type_store::semantic_activity`] once no computation is in flight, with
+    /// `below` set to the arena size at the close, so nodes the reload
+    /// interned after the close stay.
+    pub fn release_canonical_payloads_below(
+        &self,
+        canonical_id: &str,
+        below: u64,
+    ) -> SemanticReleaseReport {
+        let mut report = SemanticReleaseReport::default();
         // Arm the warm-read liveness guard BEFORE any payload is dropped so
         // a warm hit racing the tombstone cannot serve a released node.
         self.released_any.store(true, Ordering::Release);
-        let released_ids = self.arena.release_canonical(canonical_id);
+        let released_ids = self.arena.release_canonical(canonical_id, below);
         report.nodes_released = released_ids.len();
         // Possibly empty: a document that interned no node can still be
         // what a consumer's candidate is bound to, so the memo sweep and

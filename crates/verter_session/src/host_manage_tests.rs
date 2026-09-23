@@ -19447,3 +19447,187 @@ function fireChurn() {{
         host.evict("/src/Churn.vue");
     }
 }
+
+/// Fixture for the activity-gate tests: a consumer whose props resolve
+/// through `/src/types/icon.ts`, resolved once so icon.ts has live nodes.
+#[cfg(not(target_arch = "wasm32"))]
+fn activity_gate_fixture() -> (Arc<CountingWorkspace>, VerterHost) {
+    const CONSUMER: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/Consumer.vue", CONSUMER);
+    ws.inject_file(
+        "/src/types/icon.ts",
+        "export interface IconProps { name: string; size: number }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta");
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "name"),
+        "fixture: the consumer's props resolve through icon.ts"
+    );
+    (ws, host)
+}
+
+/// Ids of the live nodes scoped to `canonical`.
+#[cfg(not(target_arch = "wasm32"))]
+fn live_node_ids_scoped_to(
+    host: &VerterHost,
+    canonical: &str,
+) -> Vec<crate::semantic_query::SemanticNodeId> {
+    use crate::semantic_query::SemanticNodeId;
+    let graph = host.project_type_store().semantic_graph();
+    (0..graph.node_slot_count() as u64)
+        .map(SemanticNodeId)
+        .filter(|id| {
+            graph.node_is_live(*id)
+                && graph
+                    .node_scope(*id)
+                    .and_then(|scope| scope.canonical_file())
+                    .is_some_and(|file| file.as_ref() == canonical)
+        })
+        .collect()
+}
+
+/// A close that lands while a computation is in flight must not change any
+/// node that computation can read: the release is queued, every node of the
+/// closed document keeps its payload (the SAME payload on every read), and
+/// the release is applied the moment the last computation ends.
+///
+/// Discriminating: with the release applied inline at `evict` (the previous
+/// design), the closed document's nodes read as the released placeholder
+/// while the guard is still held — the exact switch that made a carrier
+/// normaliser, midway through two reads of one node, panic on a worker
+/// thread and stall the scheduler in the WSP6 churn lane.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
+    let (_ws, host) = activity_gate_fixture();
+    let graph = host.project_type_store().semantic_graph();
+    let ids = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
+    assert!(!ids.is_empty(), "fixture: icon.ts has live nodes");
+    let before: Vec<_> = ids
+        .iter()
+        .map(|id| graph.node_data(*id).expect("live node"))
+        .collect();
+
+    let computation = host.semantic_activity();
+    host.evict("/src/types/icon.ts");
+
+    assert_eq!(
+        host.project_type_store().deferred_release_count(),
+        1,
+        "the close is queued while a computation is in flight"
+    );
+    for (id, payload) in ids.iter().zip(&before) {
+        assert!(
+            graph.node_is_live(*id),
+            "node {id:?} stays live until the computation ends"
+        );
+        let now = graph.node_data(*id).expect("still readable");
+        assert!(
+            Arc::ptr_eq(&now, payload),
+            "node {id:?} reads the same payload it read before the close"
+        );
+    }
+
+    drop(computation);
+
+    assert_eq!(
+        host.project_type_store().deferred_release_count(),
+        0,
+        "the last computation to end applies the queued release"
+    );
+    assert!(
+        live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty(),
+        "every node of the closed document is released once nothing is in flight"
+    );
+}
+
+/// With no computation in flight (a batch host, a test), the close applies
+/// the release inline, exactly as before.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_with_nothing_in_flight_releases_inline() {
+    let (_ws, host) = activity_gate_fixture();
+    assert!(!live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+    host.evict("/src/types/icon.ts");
+    assert_eq!(host.project_type_store().deferred_release_count(), 0);
+    assert!(live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+}
+
+/// The queued release takes only what the CLOSED content interned: nodes the
+/// reload interned for the same document while the release was waiting
+/// (ids at or past the watermark taken at the close) stay live, and the
+/// consumer still resolves through them.
+///
+/// Discriminating: a release that re-scanned by canonical at apply time (no
+/// watermark) would also take the reloaded document's fresh nodes, leaving
+/// the live consumer pointing at released ids.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_deferred_release_keeps_nodes_interned_after_the_close() {
+    const CONSUMER_V2: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+// edited after the dependency was closed
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+    let (_ws, host) = activity_gate_fixture();
+    let closed = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
+    assert!(!closed.is_empty());
+
+    let computation = host.semantic_activity();
+    host.evict("/src/types/icon.ts");
+    // The reload and a consumer edit re-lower icon.ts while the release waits.
+    assert!(host.ensure_loaded("/src/types/icon.ts"));
+    upsert_vue(&host, "/src/Consumer.vue", CONSUMER_V2);
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta after the reload");
+    assert!(meta.props.iter().any(|prop| prop.name == "name"));
+    let reloaded: Vec<_> = live_node_ids_scoped_to(&host, "/src/types/icon.ts")
+        .into_iter()
+        .filter(|id| !closed.contains(id))
+        .collect();
+    assert!(
+        !reloaded.is_empty(),
+        "fixture: the reload interned fresh icon.ts nodes while the release waited"
+    );
+
+    drop(computation);
+
+    let graph = host.project_type_store().semantic_graph();
+    for id in &closed {
+        assert!(
+            !graph.node_is_live(*id),
+            "closed-content node {id:?} is released"
+        );
+    }
+    for id in &reloaded {
+        assert!(
+            graph.node_is_live(*id),
+            "node {id:?} interned after the close survives the deferred release"
+        );
+    }
+}

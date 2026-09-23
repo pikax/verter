@@ -110,9 +110,11 @@ describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
     // WSP6-AC1 is a claim about the TRAJECTORY, not the destination: "1000
     // open/edit/close cycles show no unbounded retained-byte slope after
     // quiescence". The envelope above admits a constant per-cycle drip that
-    // happens to land inside `baseline * factor + floor`; the per-window slope
-    // does not, and it refuses to evaluate a run shorter than the criterion's
-    // own 1000 cycles (a shorter run is a smoke lane, never this proof).
+    // happens to land inside `baseline * factor + floor`; the slope over the
+    // run's second half (allocator settling has levelled off there, a retainer
+    // has not) does not, and it refuses to evaluate a run shorter than the
+    // criterion's own 1000 cycles (a shorter run is a smoke lane, never this
+    // proof).
     expect(
       result.slope.observable,
       `the retained-byte slope was NOT evaluated: ${result.slope.detail}`,

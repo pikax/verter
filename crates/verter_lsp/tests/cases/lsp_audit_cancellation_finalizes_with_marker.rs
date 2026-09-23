@@ -50,7 +50,7 @@ async fn audit_slo_does_not_cancel_a_slow_successful_request() {
     // Drive a body whose latency exceeds the hover audit SLO. The harness must
     // remain transparent and finalize the successful response normally.
     let result = audit_harness::run_with_audit::<u8, _, _>(
-        &host,
+        &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host)),
         LspMethodTag::Hover,
         verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical.clone()),
         Some(position),

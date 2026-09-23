@@ -1264,7 +1264,7 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
     let profile = deps.documents.tsx_profile.read().clone();
     let compiled = crate::server::block_in_place_guarded(|| {
         deps.documents
-            .host
+            .host()
             .ensure_ide_compiled(canonical_id, &profile)
     });
     if !compiled.unwrap_or(false) {
@@ -1393,11 +1393,11 @@ async fn sync_file(
     let profile = deps.documents.tsx_profile.read().clone();
     let _ = tokio::task::block_in_place(|| {
         deps.documents
-            .host
+            .host()
             .ensure_ide_compiled(canonical_id, &profile)
     });
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
-    let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
+    let ide = tokio::task::block_in_place(|| deps.documents.host().get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
     // TEST SEAM: a one-shot pause, keyed by canonical id, that fires HERE —
@@ -1440,7 +1440,7 @@ async fn sync_file(
     // closed one. The receipt gates every commit. Ownership resolves from the SAME
     // published `vfs` for both engines.
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-        host: deps.documents.host(),
+        host: &deps.documents.host(),
         vfs: vfs.as_deref(),
         ownership_ready: snapshot.ownership_ready,
         resolver: &snapshot.resolver,
@@ -1464,7 +1464,7 @@ async fn sync_file(
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
             if deps.carrier_transaction_coordinator.admit_owned(
-                deps.documents.host(),
+                &deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -1551,7 +1551,7 @@ async fn sync_file(
                                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
-                                    deps.documents.host(),
+                                    &deps.documents.host(),
                                     canonical_id,
                                     &ide_path,
                                     &delivered,
@@ -1569,7 +1569,7 @@ async fn sync_file(
             }
 
             let api = match tokio::task::block_in_place(|| {
-                deps.documents.host.get_public_api(canonical_id)
+                deps.documents.host().get_public_api(canonical_id)
             }) {
                 Ok(api) => api,
                 Err(error) => {
@@ -1601,7 +1601,7 @@ async fn sync_file(
                             crate::provider_surface_store::record_carrier_api_surface(
                                 deps.documents.provider_surfaces(),
                                 Some(&deps.documents),
-                                deps.documents.host(),
+                                &deps.documents.host(),
                                 canonical_id,
                                 &dts_path,
                                 api_code,
@@ -1634,7 +1634,7 @@ async fn sync_file(
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned(
-                    deps.documents.host(),
+                    &deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -1763,7 +1763,7 @@ async fn preserve_open_unresolved_carrier(
                     crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),
-                        deps.documents.host(),
+                        &deps.documents.host(),
                         canonical_id,
                         &ide_path,
                         &delivered,

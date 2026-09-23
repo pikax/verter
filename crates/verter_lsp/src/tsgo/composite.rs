@@ -852,6 +852,9 @@ impl SharedTsgoOverlay {
         // (1) Disk-occupancy at the EXACT injected path — the defense-in-depth gate that
         //     covers every companion type (IDE / declaration / API / testing / sidecar)
         //     uniformly at the injected path.
+        // Every host read runs under a semantic-activity guard (see
+        // `crate::documents::guarded_host`).
+        let _activity = self.inner.host.semantic_activity();
         let ws_read = self.inner.host.workspace_read();
         if real_file_occupies_injected_path(ws_read.as_ref(), companion_path) {
             return false;
@@ -1446,6 +1449,7 @@ impl TsgoCompositeProvider {
     /// fallback; only an observed configured project with checking disabled can
     /// suppress the wrong inferred-project semantic result.
     fn configured_project_check_js(&self, configured_project: &str) -> Option<bool> {
+        let _activity = self.host.semantic_activity();
         let workspace = self.host.workspace_read();
         let published = workspace.published_root()?;
         let configured_project = normalize_canonical_id(configured_project);

@@ -104,7 +104,7 @@ impl DocumentRegistry {
     fn refresh_superseded_diagnostics(&self, uri: &Uri, publication: &DiagnosticPublication) {
         if !self.snapshot_identity_is_current(uri, &publication.snapshot)
             || self
-                .host
+                .host()
                 .get_diagnostics_generation(&uri_to_canonical_id(uri))
                 == publication.generation
         {
@@ -265,7 +265,7 @@ impl DocumentRegistry {
         self.admit_diagnostics_publication(uri, || {
             Some((
                 self.snapshot_identity(uri)?,
-                self.host
+                self.host()
                     .get_diagnostics_generation(&uri_to_canonical_id(uri)),
             ))
         })
@@ -299,7 +299,7 @@ impl DocumentRegistry {
     ) -> bool {
         self.snapshot_identity_is_current(uri, &publication.snapshot)
             && self
-                .host
+                .host()
                 .get_diagnostics_generation(&uri_to_canonical_id(uri))
                 == publication.generation
             && self.diagnostics_state.lock().epochs.get(uri.as_str()) == Some(&publication.epoch)
@@ -334,7 +334,7 @@ impl DocumentRegistry {
             tracing::debug!(uri = uri.as_str(), epoch = publication.epoch,
                 current_epoch = ?self.diagnostics_state.lock().epochs.get(uri.as_str()),
                 generation = ?publication.generation,
-                current_generation = ?self.host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
+                current_generation = ?self.host().get_diagnostics_generation(&uri_to_canonical_id(uri)),
                 "diagnostics publication superseded");
             self.refresh_superseded_diagnostics(uri, publication);
             self.refresh_outdated_receipts();
@@ -610,7 +610,7 @@ mod tests {
             .admit_diagnostics_publication(&uri, || {
                 let snapshot = documents.snapshot_identity(&uri).unwrap();
                 let generation = documents
-                    .host
+                    .host()
                     .get_diagnostics_generation(&uri_to_canonical_id(&uri));
                 // Suspend the old capture while a later edit and publication own the file.
                 assert!(

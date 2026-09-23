@@ -86,6 +86,12 @@ pub struct DagCapacityReservation {
     pub(super) class_counter: Option<Arc<AtomicU64>>,
     /// Aggregate in-flight counter — always decremented on release.
     pub(super) counter: Option<Arc<AtomicU64>>,
+    /// The ledger's reset epoch and its value when this reservation was
+    /// taken. [`crate::dag::SchedulerDag::clear`] zeroes the counters and
+    /// bumps the epoch; a reservation from before the reset (still held by
+    /// a job queued or running in a pool) then gives nothing back, so it can
+    /// never drive a counter below the admissions made after the reset.
+    pub(super) epoch: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl DagCapacityReservation {
@@ -102,12 +108,33 @@ impl DagCapacityReservation {
     /// Release the held permits. Consumes the reservation; further
     /// release is statically impossible (the method takes `self`).
     pub fn release(mut self) {
+        self.give_back();
+    }
+
+    /// Return the permits to both counters exactly once (subsequent calls
+    /// find the counters taken), unless the ledger was reset since the
+    /// reservation was taken. Saturating, so a straggler can never wrap a
+    /// counter.
+    fn give_back(&mut self) {
         let permits = self.permits as u64;
+        let current = self
+            .epoch
+            .as_ref()
+            .is_none_or(|(epoch, taken_at)| epoch.load(Ordering::Acquire) == *taken_at);
+        let saturating_sub = |counter: &AtomicU64| {
+            let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some(value.saturating_sub(permits))
+            });
+        };
         if let Some(counter) = self.class_counter.take() {
-            counter.fetch_sub(permits, Ordering::AcqRel);
+            if current {
+                saturating_sub(&counter);
+            }
         }
         if let Some(counter) = self.counter.take() {
-            counter.fetch_sub(permits, Ordering::AcqRel);
+            if current {
+                saturating_sub(&counter);
+            }
         }
     }
 }
@@ -124,12 +151,6 @@ impl std::fmt::Debug for DagCapacityReservation {
 
 impl Drop for DagCapacityReservation {
     fn drop(&mut self) {
-        let permits = self.permits as u64;
-        if let Some(counter) = self.class_counter.take() {
-            counter.fetch_sub(permits, Ordering::AcqRel);
-        }
-        if let Some(counter) = self.counter.take() {
-            counter.fetch_sub(permits, Ordering::AcqRel);
-        }
+        self.give_back();
     }
 }

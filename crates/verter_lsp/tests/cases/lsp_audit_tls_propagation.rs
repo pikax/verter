@@ -70,7 +70,7 @@ fn run_with_audit_propagates_observer_into_handler_future() {
             .expect("must build single-threaded Tokio runtime");
         let result = runtime.block_on(async {
             audit_harness::run_with_audit::<u8, _, _>(
-                &host_clone,
+                &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host_clone)),
                 LspMethodTag::Hover,
                 verter_audit::RequestTargetIdentity::RegisteredCanonical(
                     "/lsp_tls_probe.vue".to_string(),
@@ -144,7 +144,7 @@ fn run_with_audit_short_circuits_when_audit_disabled() {
             .expect("must build single-threaded Tokio runtime");
         let result = runtime.block_on(async {
             audit_harness::run_with_audit::<u8, _, _>(
-                &host_clone,
+                &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host_clone)),
                 LspMethodTag::Hover,
                 verter_audit::RequestTargetIdentity::RegisteredCanonical(
                     "/lsp_tls_probe.vue".to_string(),

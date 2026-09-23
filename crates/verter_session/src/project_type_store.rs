@@ -38,6 +38,9 @@ use crate::resolver_core::route_db::RouteDb;
 use crate::semantic_query::DepVersion;
 use crate::semantic_query_memo::SemanticGraphStore;
 
+pub mod semantic_activity;
+pub use semantic_activity::SemanticActivityGuard;
+
 // ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary
 // ──────────────────────────────────────────────────────────────────────────
@@ -1038,6 +1041,9 @@ pub struct ProjectTypeStore {
     /// three. A test may inject a private account to drive pressure
     /// deterministically without perturbing concurrent tests.
     retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    /// Gate that defers close-time payload releases until no computation is
+    /// in flight (see [`semantic_activity`]).
+    activity_gate: semantic_activity::SemanticActivityGate,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1177,6 +1183,7 @@ impl ProjectTypeStore {
             )),
             retention_account,
             counters,
+            activity_gate: semantic_activity::SemanticActivityGate::default(),
         }
     }
 
@@ -1473,6 +1480,29 @@ impl ProjectTypeStore {
             .shape_cache_db
             .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
         report
+    }
+
+    /// The payload half of a close, applied by the activity gate once no
+    /// computation is in flight: release only nodes interned before the
+    /// close (ids below `below`), then the shape entries that named them.
+    /// The memo drain ran at the close itself.
+    pub(crate) fn release_canonical_below(
+        &self,
+        canonical_id: &str,
+        below: u64,
+    ) -> crate::semantic_query_memo::SemanticReleaseReport {
+        let mut report = self
+            .semantic_graph
+            .release_canonical_payloads_below(canonical_id, below);
+        report.shape_entries_released = self
+            .shape_cache_db
+            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report
+    }
+
+    /// The activity gate (see [`semantic_activity`]).
+    pub(crate) fn activity_gate(&self) -> &semantic_activity::SemanticActivityGate {
+        &self.activity_gate
     }
 
     /// Targeted invalidation on file content / routing change.

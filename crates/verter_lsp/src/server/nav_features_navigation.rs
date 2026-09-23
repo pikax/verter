@@ -45,7 +45,7 @@ fn host_export_location(
     canonical_id: &str,
     binding_name: &str,
 ) -> Option<Location> {
-    let host = &server.documents.host;
+    let host = &server.documents.host();
     let (resolved_id, start, end) = host
         .get_export_span_follow_reexports(canonical_id, binding_name)
         .or_else(|| {
@@ -314,9 +314,10 @@ pub(super) async fn handle_goto_definition(
         let analysis = native.analysis.as_ref();
         let blocks = project_carrier_blocks_for_document(doc);
         let canonical_id = doc.canonical_id.clone();
+        let host_guard = server.documents.host();
         let resolve_path = {
             let canonical_id = canonical_id.clone();
-            let host = &server.documents.host;
+            let host: &verter_session::VerterHost = &host_guard;
             move |specifier: &str| -> Option<String> {
                 host.resolve_import_transient(&canonical_id, specifier)
             }
@@ -326,7 +327,7 @@ pub(super) async fn handle_goto_definition(
             Some(&resolve_path as &dyn Fn(&str) -> Option<String>);
 
         let encoding = server.position_encoding.read().clone();
-        let host = &server.documents.host;
+        let host: &verter_session::VerterHost = &host_guard;
         let resolve_export = |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
             // Follow re-exports (cycle-detected) to find the actual definition
             let (resolved_id, start, end) = host

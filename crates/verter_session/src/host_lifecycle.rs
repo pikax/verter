@@ -826,6 +826,15 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
+    /// Register a computation that may read semantic nodes, for the whole
+    /// host call. Close-time payload releases wait until no guard is alive
+    /// (see [`crate::project_type_store::semantic_activity`]); a caller that reaches the host
+    /// from several threads concurrently (the language server) must hold one
+    /// per call.
+    pub fn semantic_activity(&self) -> crate::project_type_store::SemanticActivityGuard {
+        self.project_type_store.semantic_activity()
+    }
+
     /// What the host retains right now, as object counts and aggregate
     /// bytes ([`HostRetentionSnapshot`]).
     ///
@@ -880,6 +889,7 @@ impl VerterHost {
                 .project_type_store
                 .mapper_binder_registry()
                 .fingerprint_count(),
+            framework_surface_entries: self.framework_registry().surface_entry_count(),
             semantic_memo_families: self
                 .project_type_store
                 .semantic_graph()
@@ -1004,11 +1014,17 @@ impl VerterHost {
         // tombstoned id.
         const TYPEINFO_SCRATCH_URI_PREFIX: &str = "verter://typeinfo/";
         if !canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX) {
-            let released = self.project_type_store.release_canonical(canonical_id);
+            // Deferred: the payload switch runs only while no computation is
+            // in flight (see `crate::project_type_store::semantic_activity`) — a computation that
+            // read one of these nodes before the close must never see it turn
+            // into the released placeholder between two of its reads.
+            let applied = self
+                .project_type_store
+                .defer_release_canonical(canonical_id);
             tracing::debug!(
                 canonical_id,
-                ?released,
-                "evict released the document's semantic substrate"
+                applied,
+                "evict queued the document's semantic substrate release"
             );
         }
 

@@ -403,7 +403,7 @@ impl VerterLanguageServer {
         target_canonical_id: &str,
         binding_name: &str,
     ) -> Option<Location> {
-        let host = &self.documents.host;
+        let host = &self.documents.host();
         let (resolved_id, start, end) = host
             .get_export_span_follow_reexports(target_canonical_id, binding_name)
             .or_else(|| {
@@ -728,7 +728,7 @@ impl VerterLanguageServer {
         let offset = doc.line_index.position_to_offset(position)?;
 
         let encoding = self.position_encoding.read().clone();
-        let host = &self.documents.host;
+        let host = &self.documents.host();
         let canonical_id = uri_to_canonical_id(uri);
 
         for sig in analysis.export_signatures.iter() {
@@ -809,7 +809,7 @@ impl VerterLanguageServer {
         end: u32,
     ) -> Option<Location> {
         let canonical = Self::canonicalize_provider_path(path);
-        let host = &self.documents.host;
+        let host = &self.documents.host();
         let analysis = host.get_analysis(&canonical)?;
         let (sig, matched_local) = analysis.export_signatures.iter().find_map(|sig| {
             sig.reexport_source.as_ref()?;
@@ -857,7 +857,7 @@ impl VerterLanguageServer {
     ) -> Option<GotoDefinitionResponse> {
         let response = response?;
         let encoding = self.position_encoding.read().clone();
-        let host = &self.documents.host;
+        let host = &self.documents.host();
 
         let resolve_location = |loc: Location| -> Location {
             let canonical = uri_to_canonical_id(&loc.uri);
@@ -1096,7 +1096,7 @@ impl VerterLanguageServer {
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
         let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
-            self.documents.host(),
+            &self.documents.host(),
             &child_canonical_id,
         );
 

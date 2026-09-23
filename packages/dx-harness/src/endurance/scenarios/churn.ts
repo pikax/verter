@@ -313,6 +313,8 @@ export interface RetentionReading {
   readonly flowLoweredEntries: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly mapperFingerprints: number;
+  /** Cached framework-surface DTO entries (props/emits/slots per owner content version). */
+  readonly frameworkSurfaceEntries: number;
   /** Bytes charged as pinned against the aggregate semantic retention account. */
   readonly pinnedBytes: number;
   /** Bytes charged as retained (reusable) against the aggregate account. */
@@ -341,6 +343,7 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "flowHashEntries",
   "flowLoweredEntries",
   "mapperFingerprints",
+  "frameworkSurfaceEntries",
   "pinnedBytes",
   "retainedBytes",
   "refusalsPressure",
@@ -399,25 +402,58 @@ export interface ChurnSlopeSegment {
   readonly cycles: number;
   readonly growthBytes: number;
   readonly bytesPerCycle: number;
+  /**
+   * Whether this one window's rate is within the bound. Evidence, not the
+   * verdict: one short window is dominated by allocator and GC noise (see
+   * {@link decideChurnSlope}).
+   */
   readonly withinBound: boolean;
 }
 
-/** The multi-window retained-byte slope verdict. */
+/**
+ * The single largest increment the late-span verdict set aside as a one-time
+ * level shift, attributed to the tree member that grew most across it.
+ */
+export interface ChurnLevelShift {
+  readonly fromCycle: number;
+  readonly toCycle: number;
+  readonly growthBytes: number;
+  /** The member whose resident set grew most across the shift, if any grew. */
+  readonly member: {
+    readonly pid: number;
+    readonly image: string | null;
+    readonly growthBytes: number;
+  } | null;
+}
+
+/** The retained-byte slope verdict over the quiesced trajectory. */
 export interface ChurnSlopeCheck {
   readonly observable: boolean;
   readonly cyclesCompleted: number;
   readonly minimumCycles: number;
   readonly allowedBytesPerCycle: number;
+  /** Every consecutive window's rate: the trajectory, reported as evidence. */
   readonly segments: readonly ChurnSlopeSegment[];
-  /** The rate over the final window — the one a plateau must have driven to ~0. */
+  /** The rate over the final window. */
   readonly finalBytesPerCycle: number | null;
+  /** First cycle of the late span the verdict is read over (the run's second half). */
+  readonly lateFromCycle: number | null;
+  /** Least-squares retained-byte rate over the late span, as measured. */
+  readonly lateBytesPerCycle: number | null;
+  /** The late span's largest increment, set aside as a one-time level shift. */
+  readonly levelShift: ChurnLevelShift | null;
+  /** The late-span rate with that one level shift set aside: the verdict figure. */
+  readonly verdictBytesPerCycle: number | null;
   readonly pass: boolean;
   readonly detail: string;
 }
 
+/** Fewest quiesced readings the late span must hold for its slope to mean anything. */
+export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
+
 /**
- * Decide WSP6-AC1's actual claim: after quiescence, the retained-byte SLOPE is
- * bounded over a run of at least {@link CHURN_ACCEPTANCE_MIN_CYCLES} cycles.
+ * Decide WSP6-AC1's actual claim: after quiescence, 1000 open/edit/close cycles
+ * show no UNBOUNDED retained-byte slope.
  *
  * Two quiesced endpoints and a `final <= baseline * factor + floor` envelope
  * cannot express that claim. At a 75 MiB baseline a 1.25 factor plus a 64 MiB
@@ -426,15 +462,35 @@ export interface ChurnSlopeCheck {
  * inside the envelope and reads as a pass. An envelope describes a destination;
  * the criterion is about the trajectory.
  *
- * So the run is read as a series of quiesced windows, and each window's retained
- * bytes-per-cycle is required to be within bound. A bounded session's
- * post-warm-up windows sit at ~0 (allocator wobble either sign); a linear leak
- * shows the same positive rate in EVERY window, so no window can hide it.
+ * What separates bounded from unbounded is what the trajectory does LATE. The
+ * process tree has two bounded effects that make a rule over every window
+ * wrong:
+ *
+ *  - Allocator settling. With every retained-object counter flat and the
+ *    server's live heap flat (a heap profile over the whole run: ~40 MiB, first
+ *    and last quarters within 1 MiB), the server's committed memory still
+ *    climbs for several hundred cycles while the allocator reaches its
+ *    steady-state fragmentation, then levels off: ~15 MiB before the run's
+ *    midpoint, ~3 MiB after it, ~0 over the last 200 cycles. An early window of
+ *    that curve reads 60-90 KiB/cycle.
+ *  - One-time level shifts. The type-provider child (a Go runtime) sometimes
+ *    steps up once by ~26 MiB and stays flat after it (2 of 9 runs, anywhere
+ *    from cycle ~325 to ~775).
+ *
+ * A retainer, by contrast, keeps its rate to the end of the run. So the verdict
+ * is the least-squares rate over the LATE span (every reading from the run's
+ * midpoint on), with the span's single largest increment set aside as a
+ * possible one-time level shift. A linear retainer — one retained document
+ * version is hundreds of KiB per cycle — still breaches with one increment
+ * removed; two level shifts, or a slope that survives the removal, breach too.
+ * Every window's rate stays in the detail as evidence, and the envelope still
+ * bounds the total growth any shift can add.
  *
  * Refused outright — `observable: false, pass: false`, never a pass — when:
  *
  *  - the run was shorter than `minimumCycles` (the criterion's own run length);
  *  - fewer than two post-baseline windows exist, so there is no trajectory to read;
+ *  - the late span holds fewer than {@link CHURN_SLOPE_MIN_LATE_READINGS} readings;
  *  - any checkpoint was read without the host reaching quiescence, so the figure
  *    includes in-flight work rather than what the session retains;
  *  - any checkpoint is not a complete whole-tree observation;
@@ -456,6 +512,10 @@ export function decideChurnSlope(
     allowedBytesPerCycle,
     segments: [],
     finalBytesPerCycle: null,
+    lateFromCycle: null,
+    lateBytesPerCycle: null,
+    levelShift: null,
+    verdictBytesPerCycle: null,
     pass: false,
     detail,
   });
@@ -523,8 +583,49 @@ export function decideChurnSlope(
     });
   }
 
-  const breached = segments.filter((segment) => !segment.withinBound);
+  // The late span: every reading from the run's midpoint on.
+  const midpoint =
+    checkpoints[0].cyclesCompleted + (cyclesCompleted - checkpoints[0].cyclesCompleted) / 2;
+  const late = checkpoints.filter((checkpoint) => checkpoint.cyclesCompleted >= midpoint);
+  if (late.length < CHURN_SLOPE_MIN_LATE_READINGS) {
+    return unevaluated(
+      `the late span (cycle ${Math.ceil(midpoint)} on) holds ${late.length} quiesced ` +
+        `reading(s), below the ${CHURN_SLOPE_MIN_LATE_READINGS} its slope needs — raise ` +
+        "VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS; the slope was NOT evaluated",
+    );
+  }
+  const xs = late.map((checkpoint) => checkpoint.cyclesCompleted);
+  const ys = late.map((checkpoint) => checkpoint.sample.totalBytes as number);
+  const lateBytesPerCycle = leastSquaresSlope(xs, ys);
+
+  // Set aside the single largest positive increment as a possible one-time
+  // level shift: every reading after it is lowered by it, then the rate refit.
+  let shiftIndex = -1;
+  for (let index = 1; index < ys.length; index += 1) {
+    const growth = ys[index] - ys[index - 1];
+    if (growth > 0 && (shiftIndex < 0 || growth > ys[shiftIndex] - ys[shiftIndex - 1])) {
+      shiftIndex = index;
+    }
+  }
+  let levelShift: ChurnLevelShift | null = null;
+  let verdictBytesPerCycle = lateBytesPerCycle;
+  if (shiftIndex > 0) {
+    const shiftBytes = ys[shiftIndex] - ys[shiftIndex - 1];
+    const adjusted = ys.map((y, index) => (index >= shiftIndex ? y - shiftBytes : y));
+    verdictBytesPerCycle = leastSquaresSlope(xs, adjusted);
+    levelShift = {
+      fromCycle: xs[shiftIndex - 1],
+      toCycle: xs[shiftIndex],
+      growthBytes: shiftBytes,
+      member: largestMemberGrowth(late[shiftIndex - 1].sample, late[shiftIndex].sample),
+    };
+  }
+
+  const pass = verdictBytesPerCycle <= allowedBytesPerCycle;
   const finalBytesPerCycle = segments[segments.length - 1].bytesPerCycle;
+  const shiftDetail = levelShift
+    ? `, one level shift set aside: ${describeShift(levelShift)}`
+    : ", no level shift to set aside";
   return {
     observable: true,
     cyclesCompleted,
@@ -532,19 +633,64 @@ export function decideChurnSlope(
     allowedBytesPerCycle,
     segments,
     finalBytesPerCycle,
-    pass: breached.length === 0,
+    lateFromCycle: xs[0],
+    lateBytesPerCycle,
+    levelShift,
+    verdictBytesPerCycle,
+    pass,
     detail:
-      `${segments.length} quiesced window(s) over ${cyclesCompleted} cycles, ` +
-      `allowed <=${bytesPerCycleToKib(allowedBytesPerCycle)}/cycle: ` +
+      `late span [${xs[0]}..${cyclesCompleted}] over ${late.length} quiesced readings: ` +
+      `${bytesPerCycleToKib(verdictBytesPerCycle)}/cycle, allowed <=` +
+      `${bytesPerCycleToKib(allowedBytesPerCycle)}/cycle${pass ? "" : " BREACH"} ` +
+      `(measured ${bytesPerCycleToKib(lateBytesPerCycle)}/cycle${shiftDetail}); windows: ` +
       segments
         .map(
           (segment) =>
             `[${segment.fromCycle}..${segment.toCycle}] ` +
-            `${bytesPerCycleToKib(segment.bytesPerCycle)}/cycle` +
-            (segment.withinBound ? "" : " BREACH"),
+            `${bytesPerCycleToKib(segment.bytesPerCycle)}/cycle`,
         )
         .join(" "),
   };
+}
+
+/** Ordinary least-squares slope of `ys` over `xs` (bytes per cycle). */
+function leastSquaresSlope(xs: readonly number[], ys: readonly number[]): number {
+  const n = xs.length;
+  const meanX = xs.reduce((sum, x) => sum + x, 0) / n;
+  const meanY = ys.reduce((sum, y) => sum + y, 0) / n;
+  let covariance = 0;
+  let variance = 0;
+  for (let index = 0; index < n; index += 1) {
+    covariance += (xs[index] - meanX) * (ys[index] - meanY);
+    variance += (xs[index] - meanX) ** 2;
+  }
+  return variance === 0 ? 0 : covariance / variance;
+}
+
+/** The tree member whose resident set grew most between two readings. */
+function largestMemberGrowth(
+  from: ProcessTreeRssSample,
+  to: ProcessTreeRssSample,
+): ChurnLevelShift["member"] {
+  const before = new Map(from.members.map((member) => [member.pid, member.rssBytes]));
+  let best: ChurnLevelShift["member"] = null;
+  for (const member of to.members) {
+    const previous = before.get(member.pid);
+    if (previous === undefined || previous === null || member.rssBytes === null) continue;
+    const growthBytes = member.rssBytes - previous;
+    if (growthBytes > 0 && (best === null || growthBytes > best.growthBytes)) {
+      best = { pid: member.pid, image: member.image, growthBytes };
+    }
+  }
+  return best;
+}
+
+function describeShift(shift: ChurnLevelShift): string {
+  const mib = (bytes: number) => `${(bytes / 1024 ** 2).toFixed(1)}MiB`;
+  const who = shift.member
+    ? ` (${shift.member.image ?? "process"}#${shift.member.pid} ${mib(shift.member.growthBytes)})`
+    : "";
+  return `[${shift.fromCycle}..${shift.toCycle}] +${mib(shift.growthBytes)}${who}`;
 }
 
 function bytesPerCycleToKib(bytes: number): string {
@@ -569,6 +715,7 @@ export const CHURN_RETENTION_COUNTERS = [
   "flowHashEntries",
   "flowLoweredEntries",
   "mapperFingerprints",
+  "frameworkSurfaceEntries",
 ] as const satisfies readonly (keyof RetentionReading)[];
 
 export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
@@ -715,7 +862,7 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `candidates=${reading.carrierCandidates} lanes=${reading.publicationLanes} ` +
     `nodes=${reading.semanticNodes} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
     `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} shapes=${reading.shapeCacheEntries} ` +
-    `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} ` +
+    `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} surfaces=${reading.frameworkSurfaceEntries} ` +
     `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
     `pressureRefusals=${reading.refusalsPressure}` +
     (reading.semanticMemoFamilies

@@ -1024,36 +1024,54 @@ describe("churn retained-byte slope verdict", () => {
     flowHashEntries: 1,
     flowLoweredEntries: 1,
     mapperFingerprints: 1,
+    frameworkSurfaceEntries: 1,
     pinnedBytes: 1_000_000,
     retainedBytes: 500_000,
     refusalsPressure: 0,
   };
-  /** Baseline plus `windows` readings, each growing by `bytesPerCycle`. */
-  const run = (
-    bytesPerCycle: number,
-    { cycles = 1000, warmup = 100, windows = 4, quiesced = true } = {},
+  /**
+   * Baseline plus `windows` quiesced readings of a two-member tree (server,
+   * provider) whose resident sets follow `at(cyclesSinceWarmup)`.
+   */
+  const trajectory = (
+    at: (cyclesSinceWarmup: number) => { readonly server: number; readonly provider: number },
+    { cycles = 1000, warmup = 100, windows = 18, quiesced = true } = {},
   ): ChurnCheckpoint[] => {
-    const baselineBytes = 75 * MIB;
+    const reading = (cyclesCompleted: number): ChurnCheckpoint => {
+      const { server, provider } = at(cyclesCompleted - warmup);
+      return {
+        cyclesCompleted,
+        quiesced,
+        sample: {
+          observable: true as const,
+          totalBytes: server + provider,
+          members: [
+            { pid: 1, image: "verter-lsp", rssBytes: server },
+            { pid: 2, image: "tsgo", rssBytes: provider },
+          ],
+          unreadablePids: [] as number[],
+          unavailable: null,
+          atMs: 0,
+        },
+        retention: flatRetention,
+      };
+    };
     const measured = cycles - warmup;
-    const checkpoints: ChurnCheckpoint[] = [
-      {
-        cyclesCompleted: warmup,
-        quiesced,
-        sample: sample(baselineBytes),
-        retention: flatRetention,
-      },
-    ];
+    const checkpoints = [reading(warmup)];
     for (let window = 1; window <= windows; window += 1) {
-      const at = warmup + Math.round((measured * window) / windows);
-      checkpoints.push({
-        cyclesCompleted: at,
-        quiesced,
-        sample: sample(baselineBytes + (at - warmup) * bytesPerCycle),
-        retention: flatRetention,
-      });
+      checkpoints.push(reading(warmup + Math.round((measured * window) / windows)));
     }
     return checkpoints;
   };
+  /** Baseline plus `windows` readings, the server growing by `bytesPerCycle`. */
+  const run = (
+    bytesPerCycle: number,
+    runOptions: { cycles?: number; warmup?: number; windows?: number; quiesced?: boolean } = {},
+  ): ChurnCheckpoint[] =>
+    trajectory(
+      (cycles) => ({ server: 40 * MIB + cycles * bytesPerCycle, provider: 35 * MIB }),
+      runOptions,
+    );
   const options = { allowedBytesPerCycle: 16 * KIB, minimumCycles: CHURN_ACCEPTANCE_MIN_CYCLES };
 
   it("rejects a strictly LINEAR leak that the two-endpoint envelope admits", () => {
@@ -1076,7 +1094,17 @@ describe("churn retained-byte slope verdict", () => {
     expect(slope.observable).toBe(true);
     expect(slope.pass).toBe(false);
     expect(slope.segments.every((segment) => !segment.withinBound)).toBe(true);
+    expect(slope.verdictBytesPerCycle).toBeGreaterThan(64 * KIB);
     expect(slope.detail).toContain("BREACH");
+  });
+
+  it("keeps a retainer breaching when its largest increment is set aside", () => {
+    // Setting one increment aside as a level shift must not launder a slope:
+    // a 32 KiB/cycle retainer loses one window of growth and still breaches.
+    const slope = decideChurnSlope(run(32 * KIB), options);
+    expect(slope.levelShift).not.toBeNull();
+    expect(slope.verdictBytesPerCycle).toBeGreaterThan(16 * KIB);
+    expect(slope.pass).toBe(false);
   });
 
   it("passes a session that plateaus after the baseline", () => {
@@ -1084,6 +1112,70 @@ describe("churn retained-byte slope verdict", () => {
     expect(slope.observable).toBe(true);
     expect(slope.pass).toBe(true);
     expect(slope.finalBytesPerCycle).toBe(0);
+    expect(slope.verdictBytesPerCycle).toBe(0);
+    expect(slope.levelShift).toBeNull();
+  });
+
+  it("passes allocator settling that levels off before the run's second half", () => {
+    // The measured shape of the server with every retained-object counter and
+    // its live heap flat: ~20 MiB of committed memory approached with a
+    // ~200-cycle time constant. Its early windows read far above the bound —
+    // the per-window rule this verdict replaced failed exactly this run — but
+    // the late span has levelled off.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB + 20 * MIB * (1 - Math.exp(-cycles / 200)),
+        provider: 35 * MIB,
+      })),
+      options,
+    );
+    expect(slope.segments[0].withinBound, "an early window breaches on its own").toBe(false);
+    expect(slope.lateFromCycle).toBe(550);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("sets aside one late level shift and names the member that stepped", () => {
+    // The provider child steps up once by ~26 MiB and stays flat after it.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 600 ? 26 * MIB : 0),
+      })),
+      options,
+    );
+    expect(slope.lateBytesPerCycle, "the step alone reads as a late slope").toBeGreaterThan(
+      16 * KIB,
+    );
+    expect(slope.levelShift).toMatchObject({
+      fromCycle: 650,
+      toCycle: 700,
+      growthBytes: 26 * MIB,
+      member: { pid: 2, image: "tsgo", growthBytes: 26 * MIB },
+    });
+    expect(slope.verdictBytesPerCycle).toBe(0);
+    expect(slope.pass).toBe(true);
+    expect(slope.detail).toContain("[650..700] +26.0MiB (tsgo#2 26.0MiB)");
+  });
+
+  it("does not set aside a second level shift", () => {
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 600 ? 26 * MIB : 0) + (cycles >= 800 ? 26 * MIB : 0),
+      })),
+      options,
+    );
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("BREACH");
+  });
+
+  it("refuses a late span too thin to fit a slope", () => {
+    // Four windows leave three readings from the midpoint on.
+    const slope = decideChurnSlope(run(0, { windows: 4 }), options);
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("late span");
+    expect(slope.detail).toContain("NOT evaluated");
   });
 
   it("refuses to evaluate a run shorter than the criterion's 1000 cycles", () => {
@@ -1171,6 +1263,7 @@ describe("churn retained-object verdict", () => {
     flowHashEntries: 1,
     flowLoweredEntries: 1,
     mapperFingerprints: 1,
+    frameworkSurfaceEntries: 1,
     pinnedBytes: 1_000_000,
     retainedBytes: 500_000,
     refusalsPressure: 0,
@@ -1315,6 +1408,7 @@ describe("retention reading extraction", () => {
     flowHashEntries: 1,
     flowLoweredEntries: 1,
     mapperFingerprints: 1,
+    frameworkSurfaceEntries: 1,
     pinnedBytes: 1_000_000,
     retainedBytes: 500_000,
     refusalsPressure: 0,

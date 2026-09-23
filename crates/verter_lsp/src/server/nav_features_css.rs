@@ -38,7 +38,7 @@ pub(super) fn merge_global_class_definitions(
     };
     let cross = block_in_place_if_available(|| {
         crate::css::global_classes::collect_cross_file_global_class_locations(
-            server.documents.host(),
+            &server.documents.host(),
             origin_canonical.as_deref(),
             class_name,
             encoding,
@@ -67,7 +67,7 @@ pub(super) fn merge_global_class_references(
     let encoding = server.position_encoding.read().clone();
     let cross = block_in_place_if_available(|| {
         crate::css::global_classes::collect_cross_file_global_class_locations(
-            server.documents.host(),
+            &server.documents.host(),
             origin_canonical.as_deref(),
             class_name,
             encoding,

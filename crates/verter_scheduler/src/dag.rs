@@ -375,11 +375,16 @@ pub(in crate::dag) struct DagNode {
     /// Marker for nodes superseded by a higher generation. Excluded
     /// from `iter_ready`; pruned via cancel paths.
     pub(in crate::dag) cancelled: bool,
-    /// Capacity reservation acquired at dispatch time. Stored as
-    /// `Some` between `next_ready` and `complete` / `cancel`; the
-    /// type-level by-value release semantics ensure permits return
-    /// to the pool exactly once.
-    pub(in crate::dag) reservation: Option<DagCapacityReservation>,
+    /// Capacity reservation acquired at dispatch time, SHARED with the
+    /// dispatched [`ReadyJob`]. `complete` / `cancel` drop only the node's
+    /// share; the permit returns when the last share drops. A job that is
+    /// cancelled (superseded by a newer generation) while its closure is
+    /// still queued in a pool therefore keeps its permit until the pool
+    /// starts (or drops) that closure — so the work queued in a pool can
+    /// never exceed the permits the ledger has admitted, and the pool
+    /// transport (sized to dominate the budget) can never report `Full` at
+    /// dispatch.
+    pub(in crate::dag) reservation: Option<Arc<DagCapacityReservation>>,
 }
 
 /// Lightweight dependency key — the subset of [`WorkNodeIdentity`]
@@ -494,6 +499,12 @@ pub struct ReadyJob {
     /// `DependencyFailed` can carry it through (cf.
     /// [`crate::job::SchedulerError::DependencyFailed::cause`]).
     pub failed_blocker_deps: BTreeMap<DepKey, FailedDepRecord>,
+    /// This job's share of its admission permit (see the node's
+    /// `reservation`). It covers the job while it waits in a pool
+    /// transport; the pool closure drops it when it starts running (waking
+    /// the driver if that returned the permit), and an inline execute drops
+    /// it with the job.
+    pub capacity: Option<Arc<DagCapacityReservation>>,
 }
 
 /// Per-file aggregation of request groups, keyed by `(canonical, generation)`.
@@ -732,6 +743,9 @@ pub struct SchedulerDag {
     /// used for admission decisions (the typed counters below own
     /// that path).
     capacity_counter: Arc<AtomicU64>,
+    /// Bumped by [`Self::clear`]; reservations taken before a reset give
+    /// nothing back after it (see `DagCapacityReservation::epoch`).
+    reset_epoch: Arc<AtomicU64>,
     /// In-flight CPU-bound permits. Capped at `budget.cpu`.
     cpu_counter: Arc<AtomicU64>,
     /// In-flight I/O-bound permits. Capped at `budget.io`.
@@ -1001,6 +1015,7 @@ impl SchedulerDag {
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
             capacity_counter: Arc::new(AtomicU64::new(0)),
+            reset_epoch: Arc::new(AtomicU64::new(0)),
             cpu_counter: Arc::new(AtomicU64::new(0)),
             io_counter: Arc::new(AtomicU64::new(0)),
             budget,
@@ -1260,6 +1275,14 @@ impl SchedulerDag {
         })
     }
 
+    /// The current reset epoch, stamped on every reservation.
+    fn reservation_epoch(&self) -> (Arc<AtomicU64>, u64) {
+        (
+            Arc::clone(&self.reset_epoch),
+            self.reset_epoch.load(Ordering::Acquire),
+        )
+    }
+
     /// Reserve `permits` admission slots untyped (legacy / explicit
     /// callers). Increments only the aggregate counter and leaves the
     /// per-class counters untouched. Prefer
@@ -1275,6 +1298,7 @@ impl SchedulerDag {
             class: ResourceClass::Cpu, // untyped reservations carry no class; Cpu is the Debug-only default
             class_counter: None,
             counter: Some(Arc::clone(&self.capacity_counter)),
+            epoch: Some(self.reservation_epoch()),
         }
     }
 
@@ -1304,6 +1328,7 @@ impl SchedulerDag {
             class,
             class_counter: Some(Arc::clone(counter)),
             counter: Some(Arc::clone(&self.capacity_counter)),
+            epoch: Some(self.reservation_epoch()),
         })
     }
 
@@ -1341,6 +1366,7 @@ impl SchedulerDag {
             class,
             class_counter: Some(Arc::clone(counter)),
             counter: Some(Arc::clone(&self.capacity_counter)),
+            epoch: Some(self.reservation_epoch()),
         })
     }
 
@@ -1970,9 +1996,9 @@ impl SchedulerDag {
             // The by-value `release(self)` consume in
             // DagCapacityReservation makes a second release
             // statically impossible.
-            if let Some(reservation) = node.reservation.take() {
-                reservation.release();
-            }
+            // Drop the node's share of the capacity reservation; the
+            // permit returns once the dispatched job's share drops too.
+            let _ = node.reservation.take();
         }
 
         let dep_key = DepKey::from_identity(identity);
@@ -2041,9 +2067,9 @@ impl SchedulerDag {
         // returning the permit (by-value release on the parked
         // reservation).
         if let Some(mut node) = self.nodes.remove(&tok) {
-            if let Some(reservation) = node.reservation.take() {
-                reservation.release();
-            }
+            // Only the node's share: a dispatched job still queued or
+            // running in a pool holds the permit until it is dropped.
+            let _ = node.reservation.take();
         }
         stranded
     }
@@ -2322,9 +2348,10 @@ impl SchedulerDag {
                 }
             };
             node.dispatched = true;
-            // Park the reservation on the node so `complete` / `cancel`
-            // returns the permit exactly once.
-            node.reservation = Some(reservation);
+            // Share the reservation between the node and the dispatched
+            // job; the permit returns when both have dropped it.
+            let reservation = Arc::new(reservation);
+            node.reservation = Some(Arc::clone(&reservation));
             let priority = node.base_priority;
             // Drain the failed-blocker-deps marker into the ReadyJob so
             // the pre-dispatch short-circuit in
@@ -2344,6 +2371,7 @@ impl SchedulerDag {
                 request_context: node.request_context.clone(),
                 cancellation: node.cancellation.clone(),
                 failed_blocker_deps,
+                capacity: Some(reservation),
             });
         }
     }
@@ -2387,6 +2415,10 @@ impl SchedulerDag {
             }
         }
         self.credit = [0; PRIORITY_LANE_COUNT];
+        // Reservations still held outside the DAG (jobs queued or running
+        // in a pool) belong to the pre-reset ledger: bump the epoch first so
+        // they give nothing back against the zeroed counters.
+        self.reset_epoch.fetch_add(1, Ordering::AcqRel);
         self.capacity_counter.store(0, Ordering::Release);
         self.cpu_counter.store(0, Ordering::Release);
         self.io_counter.store(0, Ordering::Release);

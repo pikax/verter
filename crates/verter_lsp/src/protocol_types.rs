@@ -411,6 +411,7 @@ pub struct RetentionStatistics {
     pub flow_hash_entries: usize,
     pub flow_lowered_entries: usize,
     pub mapper_fingerprints: usize,
+    pub framework_surface_entries: usize,
     /// Populated semantic memo slots per family label.
     pub semantic_memo_families: std::collections::BTreeMap<String, usize>,
     pub active_bytes: usize,
@@ -441,6 +442,7 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             flow_hash_entries: snapshot.flow_hash_entries,
             flow_lowered_entries: snapshot.flow_lowered_entries,
             mapper_fingerprints: snapshot.mapper_fingerprints,
+            framework_surface_entries: snapshot.framework_surface_entries,
             semantic_memo_families: snapshot.semantic_memo_families.into_iter().collect(),
             active_bytes: snapshot.active_bytes,
             retained_bytes: snapshot.retained_bytes,

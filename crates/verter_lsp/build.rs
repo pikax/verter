@@ -21,6 +21,30 @@ fn main() {
 
     let date_str = format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02} UTC");
     println!("cargo:rustc-env=VERTER_BUILD_DATE={date_str}");
+
+    embed_windows_manifest();
+}
+
+/// Embed `verter-lsp.manifest` into the server executable on MSVC targets,
+/// opting the process into the Windows segment heap (see the manifest for
+/// why). The target, not the host, decides: a cross build for a non-MSVC
+/// target skips it. No `rerun-if-changed` is emitted on purpose: that would
+/// stop this script re-running on other package changes and freeze
+/// `VERTER_BUILD_DATE`; the manifest lives in the package, so editing it
+/// already re-runs the script.
+fn embed_windows_manifest() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os != "windows" || target_env != "msvc" {
+        return;
+    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let manifest = std::path::Path::new(&manifest_dir).join("verter-lsp.manifest");
+    println!("cargo:rustc-link-arg-bin=verter-lsp=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=verter-lsp=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
 }
 
 fn days_to_date(days: u64) -> (u64, u64, u64) {

@@ -1,11 +1,13 @@
 mod analysis;
 mod diagnostics;
+mod guarded_host;
 pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub(crate) use diagnostics::DiagnosticPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
+pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;
 pub mod position_map;
@@ -35,7 +37,10 @@ use provider_projection::{
 
 /// Manages open documents and their relationship to verter_session.
 pub struct DocumentRegistry {
-    pub(crate) host: Arc<VerterHost>,
+    /// The session host. Private and non-dereferencing on purpose: every
+    /// access goes through [`Self::host`], which holds a semantic-activity
+    /// guard for the call (see [`guarded_host`]).
+    host: SharedHost,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
@@ -518,7 +523,7 @@ impl DocumentRegistry {
         let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
         let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
-            host,
+            host: SharedHost::new(host),
             documents: DashMap::new(),
             diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
             diagnostics_refresh_tx,
@@ -749,7 +754,7 @@ impl DocumentRegistry {
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
         verter_session::LanguageRegistry::global()
             .carrier_for_editor_language_id(language_id)
-            .unwrap_or_else(|| self.host.language_classifier().classify(canonical_id))
+            .unwrap_or_else(|| self.host().language_classifier().classify(canonical_id))
     }
 
     /// Re-establish the host/VFS overlay for `canonical_id` from the OPEN
@@ -785,7 +790,7 @@ impl DocumentRegistry {
         let source = Arc::clone(&document.source);
         let file_language = self.document_file_language(&document.language_id, canonical_id);
         drop(document);
-        let _ = self.host.upsert(UpsertRequest {
+        let _ = self.host().upsert(UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: source.clone(),
@@ -793,7 +798,7 @@ impl DocumentRegistry {
             aliases: vec![],
         });
         #[cfg(not(target_arch = "wasm32"))]
-        self.host.notify_upsert(canonical_id, source);
+        self.host().notify_upsert(canonical_id, source);
         true
     }
 
@@ -830,7 +835,7 @@ impl DocumentRegistry {
         // source map — the compile + position-mapper paths are carrier-general.
         let is_carrier = file_language.is_framework_carrier();
 
-        let result = self.host.upsert(UpsertRequest {
+        let result = self.host().upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
             source: submitted_source.clone(),
@@ -842,7 +847,7 @@ impl DocumentRegistry {
         // its version. Restore the VFS overlay membership removed by did_close so
         // an interactive repair cannot reload the retired incarnation from disk.
         #[cfg(not(target_arch = "wasm32"))]
-        self.host
+        self.host()
             .notify_upsert(&canonical_id, Arc::clone(&submitted_source));
 
         // Trigger compilation to populate the TSX cache (upsert only parses).
@@ -851,12 +856,15 @@ impl DocumentRegistry {
         // all; `ensure_ide_compiled` is the route that serves what is read.
         // `get_ide` below then reads the source map.
         let carrier_compile = is_carrier.then(|| {
-            self.host
+            self.host()
                 .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read())
         });
 
         let registered = is_carrier
-            .then(|| self.host.registered_file_structure_snapshot(&canonical_id))
+            .then(|| {
+                self.host()
+                    .registered_file_structure_snapshot(&canonical_id)
+            })
             .flatten();
         let source = registered
             .as_ref()
@@ -876,7 +884,7 @@ impl DocumentRegistry {
         //    ownership is ready). Plain scripts carry a zero-line prelude —
         //    their provider buffer is the source verbatim.
         let carrier_ide_read = if is_carrier {
-            self.host.get_ide(&canonical_id, &self.tsx_profile.read())
+            self.host().get_ide(&canonical_id, &self.tsx_profile.read())
         } else {
             None
         };
@@ -965,7 +973,7 @@ impl DocumentRegistry {
             let source = Arc::clone(&document.source);
             let carried = document.progressive_analysis.clone();
             drop(document);
-            let fresh_svelte_evidence = self.host.resolve_svelte_script_facts(&canonical_id);
+            let fresh_svelte_evidence = self.host().resolve_svelte_script_facts(&canonical_id);
             let fresh = self.get_analysis(uri);
             match fresh {
                 Some(mut fresh) => {
@@ -1018,7 +1026,7 @@ impl DocumentRegistry {
         let is_carrier = file_language.is_framework_carrier();
 
         let upsert_start = std::time::Instant::now();
-        let result = self.host.upsert(UpsertRequest {
+        let result = self.host().upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
             source: submitted_source.clone(),
@@ -1035,7 +1043,7 @@ impl DocumentRegistry {
         // §6b.D2b — route through `host.notify_upsert` so the route-only
         // shallow cache is evicted alongside the workspace overlay write.
         #[cfg(not(target_arch = "wasm32"))]
-        self.host
+        self.host()
             .notify_upsert(&canonical_id, submitted_source.clone());
 
         // A document commit owes the document's TEXT. It does not owe the IDE
@@ -1078,7 +1086,10 @@ impl DocumentRegistry {
         // one compile. A genuinely later request retries, which is required
         // for scheduler cancellation and other transient failures to recover.
         let registered = is_carrier
-            .then(|| self.host.registered_file_structure_snapshot(&canonical_id))
+            .then(|| {
+                self.host()
+                    .registered_file_structure_snapshot(&canonical_id)
+            })
             .flatten();
         let source = registered
             .as_ref()
@@ -1225,7 +1236,7 @@ impl DocumentRegistry {
         // route through `host.notify_close`
         // so the route-only shallow cache is evicted alongside the
         // workspace overlay clear.
-        self.host.notify_close(&canonical_id);
+        self.host().notify_close(&canonical_id);
 
         self.documents.remove(uri.as_str());
         self.semantic_snapshots.remove(&canonical_id);
@@ -1360,7 +1371,7 @@ impl DocumentRegistry {
             return;
         };
         let Some(mapper) = self
-            .host
+            .host()
             .get_ide(canonical_id, &self.tsx_profile.read())
             .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
         else {
@@ -1436,7 +1447,7 @@ impl DocumentRegistry {
         let fast_path_attempted = self.snapshot_identity(uri)?;
 
         // Fast path: cache hit
-        if let Some(resp) = self.host.get_ide(&canonical_id, &profile) {
+        if let Some(resp) = self.host().get_ide(&canonical_id, &profile) {
             #[cfg(test)]
             self.run_before_projection_install_hook(uri);
             // Lazily rebuild position mapper if it was None (startup race:
@@ -1507,13 +1518,13 @@ impl DocumentRegistry {
         // `ensure_ide_compiled` resolves through the `Ide` demand; `Ok(false)`
         // (a genuine no-IDE surface) skips, `Ok(true)` proceeds to `get_ide`.
         if !self
-            .host
+            .host()
             .ensure_ide_compiled(&canonical_id, &profile)
             .ok()?
         {
             return None;
         }
-        let resp = self.host.get_ide(&canonical_id, &profile)?;
+        let resp = self.host().get_ide(&canonical_id, &profile)?;
         #[cfg(test)]
         self.run_after_compile_hook(uri);
         // A `didChange` that committed while the compile ran makes this
@@ -1583,13 +1594,13 @@ impl DocumentRegistry {
         // fast path is a cached-source check — so the repair lane's own
         // `ensure_loaded` is not duplicated work of any consequence, and the
         // close/reopen caller gains the same guarantee.
-        self.host.ensure_loaded(&canonical_id);
+        self.host().ensure_loaded(&canonical_id);
         // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
         // Main-less carrier (Svelte) refreshes its mapper. `Ok(false)` (no IDE
         // surface) and `Err` yield no response; `Ok(true)` proceeds to `get_ide`.
-        let ensured = self.host.ensure_ide_compiled(&canonical_id, &profile);
+        let ensured = self.host().ensure_ide_compiled(&canonical_id, &profile);
         let resp = match &ensured {
-            Ok(true) => self.host.get_ide(&canonical_id, &profile),
+            Ok(true) => self.host().get_ide(&canonical_id, &profile),
             _ => None,
         };
         #[cfg(test)]
@@ -1685,10 +1696,10 @@ impl DocumentRegistry {
     /// `.tsx` → `.jsx` companion flip tsserver's output-file check rejects).
     pub fn is_jsx_for_canonical(&self, canonical_id: &str) -> bool {
         let profile = self.tsx_profile.read().clone();
-        if let Some(ide) = self.host.get_ide(canonical_id, &profile) {
+        if let Some(ide) = self.host().get_ide(canonical_id, &profile) {
             return ide.is_jsx;
         }
-        self.host
+        self.host()
             .get_analysis(canonical_id)
             .map(|analysis| !analysis.is_typescript)
             .unwrap_or(false)
@@ -1697,7 +1708,7 @@ impl DocumentRegistry {
     /// Get the diagnostics for a document.
     pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_session::DiagnosticsSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
-        self.host
+        self.host()
             .get_diagnostics(&canonical_id, &self.tsx_profile.read())
     }
 
@@ -1718,9 +1729,9 @@ impl DocumentRegistry {
         // report the surface missing. An `Err` (a genuine compile failure) leaves
         // `ide` `None` exactly as before.
         let profile = self.tsx_profile.read().clone();
-        let _ = self.host.ensure_ide_compiled(&canonical_id, &profile);
+        let _ = self.host().ensure_ide_compiled(&canonical_id, &profile);
         let ide = self
-            .host
+            .host()
             .get_ide(&canonical_id, &profile)
             .map(|t| CodeBlock {
                 code: t.code.to_string(),
@@ -1732,14 +1743,17 @@ impl DocumentRegistry {
         // pane presents the PROVIDER-facing API surface — the same bytes the
         // `.verter.ts` companion publishes — so it takes the TS-labeled
         // rendering and is never JavaScript, whatever the SFC's dialect.
-        let api = self.host.get_public_api(&canonical_id)?.map(|t| CodeBlock {
-            code: t.ts_labeled_code().to_string(),
-            source_map: t.source_map.map(|m| m.to_string()),
-            is_js: false,
-        });
+        let api = self
+            .host()
+            .get_public_api(&canonical_id)?
+            .map(|t| CodeBlock {
+                code: t.ts_labeled_code().to_string(),
+                source_map: t.source_map.map(|m| m.to_string()),
+                is_js: false,
+            });
 
         // Get all virtual node kinds
-        let node_kinds = self.host.list_virtual_nodes(&canonical_id);
+        let node_kinds = self.host().list_virtual_nodes(&canonical_id);
 
         // Fetch each virtual file
         let mut virtual_files = Vec::with_capacity(node_kinds.len());
@@ -1752,7 +1766,7 @@ impl DocumentRegistry {
                 VirtualNodeKind::Custom { index } => format!("custom:{index}"),
             };
 
-            let vf = self.host.get_virtual_file(VirtualQuery {
+            let vf = self.host().get_virtual_file(VirtualQuery {
                 raw_id: None,
                 canonical_id: Some(canonical_id.clone()),
                 node_kind: Some(kind.clone()),
@@ -1816,14 +1830,16 @@ impl DocumentRegistry {
         self.documents.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Get the underlying verter_session reference.
-    pub fn host(&self) -> &VerterHost {
-        &self.host
+    /// Borrow the session host for one call under a semantic-activity guard
+    /// (see [`guarded_host`]).
+    pub fn host(&self) -> HostRef<'_> {
+        self.host.host()
     }
 
-    /// Get a shared reference to the host (for MCP embedding).
-    pub fn host_arc(&self) -> Arc<VerterHost> {
-        Arc::clone(&self.host)
+    /// A shareable host handle for work that outlives this borrow (a blocking
+    /// task, a background loop); every access through it is guarded.
+    pub fn host_arc(&self) -> SharedHost {
+        self.host.clone()
     }
 }
 

@@ -4953,6 +4953,9 @@ pub struct HostRetentionSnapshot {
     pub flow_lowered_entries: usize,
     /// Mapper binder fingerprints across every canonical.
     pub mapper_fingerprints: usize,
+    /// Cached framework-surface DTO entries (props/emits/slots per owner
+    /// content version) across every adapter.
+    pub framework_surface_entries: usize,
     /// Populated semantic memo slots per family (family label, count), so a
     /// growing memo can be attributed to the family that grows.
     pub semantic_memo_families: Vec<(String, usize)>,

@@ -144,7 +144,7 @@ impl DocumentRegistry {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.invalidate_semantic_publications();
         let projection_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.clone();
-        self.host.set_workspace(projection_workspace);
+        self.host().set_workspace(projection_workspace);
         *self.semantic_workspace.write() = Some(Arc::clone(&workspace));
         if let Some(host) = self.semantic_host.read().clone() {
             let semantic_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
@@ -209,7 +209,7 @@ impl DocumentRegistry {
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
         let registered_structure = is_framework_carrier
-            .then(|| self.host.registered_file_structure(&canonical_id))
+            .then(|| self.host().registered_file_structure(&canonical_id))
             .flatten();
         if !self.semantic_generation_is_current(semantic_generation) {
             return None;
@@ -533,11 +533,11 @@ impl DocumentRegistry {
                 }
             }
         }
-        self.host
+        self.host()
             .config()
             .effective_scope()
             .contains(verter_semantic::analysis::AnalysisScope::BUILD)
-            .then(|| self.host.get_analysis(&canonical_id))
+            .then(|| self.host().get_analysis(&canonical_id))
             .flatten()
     }
 
@@ -585,12 +585,12 @@ impl DocumentRegistry {
     ) -> bool {
         match capture.expected_host_revision {
             Some(expected) => {
-                self.host
+                self.host()
                     .registered_source_revision_token(&capture.document.canonical_id)
                     == Some(expected)
             }
             None => self
-                .host
+                .host()
                 .get_source(&capture.document.canonical_id)
                 .is_some_and(|source| *source == *capture.document.source),
         }
@@ -615,12 +615,12 @@ impl DocumentRegistry {
                                         && feature.client_version == document.version
                                         && feature.projection_host_revision == expected
                                 }) && self
-                                    .host
+                                    .host()
                                     .registered_source_revision_token(&document.canonical_id)
                                     == Some(expected)
                             }
                             None => self
-                                .host
+                                .host()
                                 .get_source(&document.canonical_id)
                                 .is_some_and(|source| *source == *document.source),
                         }
@@ -653,11 +653,11 @@ impl DocumentRegistry {
                 }
             }
         }
-        self.host
+        self.host()
             .config()
             .effective_scope()
             .contains(verter_semantic::analysis::AnalysisScope::BUILD)
-            .then(|| self.host.get_analysis(&capture.document.canonical_id))
+            .then(|| self.host().get_analysis(&capture.document.canonical_id))
             .flatten()
     }
 
@@ -778,7 +778,7 @@ impl DocumentRegistry {
                 continue;
             }
             let evidence = self
-                .host
+                .host()
                 .resolve_svelte_script_facts(&capture.document.canonical_id);
             let analysis = self.source_feature_analysis_from_capture(&capture, &evidence);
             if self.source_feature_host_revision_is_current(&capture)

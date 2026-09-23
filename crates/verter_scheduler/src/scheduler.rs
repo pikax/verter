@@ -5418,6 +5418,8 @@ impl Scheduler {
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let mut job = job;
+                Self::release_started_job_capacity(&mut job, &inbox_for_cache);
                 let cancellation = job.cancellation.clone();
                 dispatch_ready_job_to_executor(
                     &job,
@@ -5667,6 +5669,8 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let mut job = job;
+                Self::release_started_job_capacity(&mut job, &inbox_sender);
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
@@ -5723,6 +5727,8 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let mut job = job;
+                Self::release_started_job_capacity(&mut job, &inbox_sender);
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
@@ -6409,6 +6415,31 @@ impl Scheduler {
         stranded: &[crate::dag::SubmissionToken],
     ) {
         if !stranded.is_empty() {
+            let _ = inbox_sender.send(Submission::Wake);
+        }
+    }
+
+    /// A pool closure has started running its job: drop the job's share of
+    /// its admission permit, waking the driver when that share was the last.
+    ///
+    /// The permit is shared between the DAG node and the dispatched job (see
+    /// the node's `reservation`) so that a closure still QUEUED in a pool
+    /// always holds one: queued closures can then never outnumber the
+    /// budget, and the transport (sized to dominate it) never reports `Full`.
+    /// Once the closure runs it occupies a pool thread, not a transport slot,
+    /// so the job's share has done its work. While the node is live its own
+    /// share keeps the permit until `complete` / `cancel`, exactly as before.
+    /// A superseded job's node share was dropped at `cancel`, so the job's
+    /// share is the last one and the permit returns HERE, outside any pump:
+    /// without a wake, the ready work it admits would wait for the driver's
+    /// idle re-pump.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn release_started_job_capacity(
+        job: &mut ReadyJob,
+        inbox_sender: &crossbeam_channel::Sender<Submission>,
+    ) {
+        if let Some(reservation) = job.capacity.take().and_then(Arc::into_inner) {
+            drop(reservation);
             let _ = inbox_sender.send(Submission::Wake);
         }
     }
@@ -21018,5 +21049,84 @@ mod tests {
                  {state_b:?}"
             );
         }
+    }
+}
+
+/// The permit share a dispatched job carries while it waits in a pool.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod started_job_capacity_tests {
+    use super::*;
+
+    fn dispatch_one_load(dag: &mut SchedulerDag) -> ReadyJob {
+        let _ = dag.submit_expect(
+            WorkNodeIdentity::FileStage {
+                canonical: Arc::from("/churn.vue"),
+                generation: 1,
+                stage: FileStageKey::Source,
+            },
+            WorkKind::Load,
+            Priority::Background,
+            Vec::new(),
+            None,
+        );
+        dag.next_ready().expect("the load dispatches")
+    }
+
+    /// A superseded job's node share was dropped at `cancel`; when its queued
+    /// closure finally starts, the job's share is the last one, so the permit
+    /// returns there — outside any pump — and the driver must be woken.
+    ///
+    /// Discriminating: without the wake, the freed permit sits unused until
+    /// the driver's idle re-pump (5 s). In the WSP6 churn lane (a document
+    /// closed and reopened in a loop) that put a 5 s stall under roughly one
+    /// request in five.
+    #[test]
+    fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
+        let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+        let mut job = dispatch_one_load(&mut dag);
+        let _ = dag.cancel(&job.identity);
+        assert_eq!(
+            dag.in_flight_io_permits(),
+            1,
+            "the superseded job still queued in the pool holds its permit"
+        );
+
+        let (inbox, wakes) = crossbeam_channel::unbounded();
+        Scheduler::release_started_job_capacity(&mut job, &inbox);
+
+        assert_eq!(
+            dag.in_flight_io_permits(),
+            0,
+            "the permit returns when the closure starts"
+        );
+        assert!(
+            matches!(wakes.try_recv(), Ok(Submission::Wake)),
+            "returning the permit outside a pump wakes the driver"
+        );
+    }
+
+    /// A live job's node keeps its share until `complete`, so starting the
+    /// closure neither returns the permit nor posts a wake: the completion
+    /// path returns it and pumps, exactly as before the share existed.
+    #[test]
+    fn a_started_live_job_leaves_the_permit_with_its_node() {
+        let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+        let mut job = dispatch_one_load(&mut dag);
+
+        let (inbox, wakes) = crossbeam_channel::unbounded();
+        Scheduler::release_started_job_capacity(&mut job, &inbox);
+
+        assert_eq!(
+            dag.in_flight_io_permits(),
+            1,
+            "the running job's node holds the permit"
+        );
+        assert!(
+            wakes.try_recv().is_err(),
+            "no wake while the node holds the permit"
+        );
+        let identity = job.identity.clone();
+        let _ = dag.complete(&identity);
+        assert_eq!(dag.in_flight_io_permits(), 0);
     }
 }

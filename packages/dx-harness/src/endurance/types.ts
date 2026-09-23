@@ -185,16 +185,19 @@ export interface EnduranceConfig {
   readonly churnQuiesceMs: number;
   /**
    * Quiesced process-tree readings taken AFTER the baseline
-   * (VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS, default 4, minimum 2). Two endpoints
-   * can only describe a destination; windows describe the trajectory, which is
-   * what "no unbounded retained-byte slope" is a claim about.
+   * (VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS, default 18, minimum 2: one every 50
+   * cycles of a 1000-cycle run). Two endpoints can only describe a destination;
+   * readings describe the trajectory, which is what "no unbounded retained-byte
+   * slope" is a claim about. The slope verdict reads the readings from the
+   * run's midpoint on and refuses fewer than five of them.
    */
   readonly churnSlopeWindows: number;
   /**
-   * Retained bytes per cycle each quiesced window must stay within
-   * (VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE, default 16 KiB). A bounded
-   * session sits at ~0 either side; one retained document version is hundreds of
-   * KiB, so a real per-cycle retainer breaches every window.
+   * Retained bytes per cycle the late span may show
+   * (VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE, default 16 KiB): the
+   * least-squares rate over the run's second half, one level shift set aside.
+   * A settled session sits at ~0 either side there; one retained document
+   * version is hundreds of KiB, so a real per-cycle retainer breaches it.
    */
   readonly churnSlopeBytesPerCycle: number;
   /**
