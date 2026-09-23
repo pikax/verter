@@ -871,6 +871,25 @@ describe("process-tree RSS sampling", () => {
     expect(sample.unavailable?.kind).toBe("topology-unavailable");
   });
 
+  it("drops a member that exited before it was read, and only that member", async () => {
+    // A short-lived child (a probe) is enumerated, then exits before its read:
+    // it retains nothing, so a fresh table that no longer has it drops it and
+    // the rest of the tree is a whole observation. Without the re-check the
+    // sample was UNAVAILABLE and a 1000-cycle run lost its slope verdict.
+    const PROBE = 4002;
+    const withProbe = [...table, { pid: PROBE, ppid: SERVER, image: "tsc" }];
+    let snapshots = 0;
+    const sample = await sampleProcessTreeRss(SERVER, {
+      snapshotProcessTable: async () => (snapshots++ === 0 ? withProbe : table),
+      readProcessRssBytes: async (pid: number) =>
+        (({ [SERVER]: 200, [PROVIDER]: 300 }) as Record<number, number>)[pid] ?? null,
+    });
+    expect(sample.observable).toBe(true);
+    expect(sample.totalBytes).toBe(500);
+    expect(sample.exitedPids).toEqual([PROBE]);
+    expect(sample.members.map((member) => member.pid).sort()).toEqual([SERVER, PROVIDER]);
+  });
+
   it("reports a discovered-but-unreadable provider child as UNAVAILABLE", async () => {
     // The member is KNOWN to be in the tree, so omitting its bytes is not a
     // narrower measurement — it is a wrong one.
@@ -1167,6 +1186,87 @@ describe("churn retained-byte slope verdict", () => {
     );
     expect(slope.pass).toBe(false);
     expect(slope.detail).toContain("BREACH");
+  });
+
+  it("holds the server to its own bound and a child to the wider one", () => {
+    // A child drifting at 40 KiB/cycle (garbage-collector slack) passes; the
+    // same drift in the server breaches the server's 16 KiB/cycle.
+    const childDrift = decideChurnSlope(
+      trajectory((cycles) => ({ server: 40 * MIB, provider: 35 * MIB + cycles * 40 * KIB })),
+      options,
+    );
+    expect(childDrift.members.map((member) => [member.role, member.withinBound])).toEqual([
+      ["root", true],
+      ["child", true],
+    ]);
+    expect(childDrift.pass).toBe(true);
+
+    const serverDrift = decideChurnSlope(
+      trajectory((cycles) => ({ server: 40 * MIB + cycles * 40 * KIB, provider: 35 * MIB })),
+      options,
+    );
+    expect(serverDrift.members.find((member) => member.role === "root")?.withinBound).toBe(false);
+    expect(serverDrift.pass).toBe(false);
+  });
+
+  it("still fails a provider child that leaks at the rate it did before the fix", () => {
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({ server: 40 * MIB, provider: 35 * MIB + cycles * 150 * KIB })),
+      options,
+    );
+    const child = slope.members.find((member) => member.role === "child");
+    expect(child?.verdictBytesPerCycle).toBeGreaterThan(64 * KIB);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("BREACH");
+  });
+
+  it("passes the recorded run whose provider moved plateaus late", () => {
+    // A real 1000-cycle run (Windows, merged candidate): the server settles to
+    // ~139 MiB; the tsgo child drifts, then steps from ~106 to ~125 MiB at
+    // cycle 850-900 and drifts again. The whole-tree rate with one shift set
+    // aside is 27.9 KiB/cycle — the rule that judged the tree as one process
+    // failed this run — while each process is within its own bound.
+    const recorded: readonly (readonly [number, number, number])[] = [
+      [100, 118.6, 96.1],
+      [150, 122.9, 94.7],
+      [200, 125.4, 97.7],
+      [250, 126.3, 95.5],
+      [300, 127.7, 97.1],
+      [350, 130.4, 98.8],
+      [400, 131.6, 98.9],
+      [450, 134.1, 97.4],
+      [500, 133.6, 98.9],
+      [550, 135.4, 100.8],
+      [600, 135.4, 101.1],
+      [650, 135.5, 101.2],
+      [700, 136.3, 100.1],
+      [750, 136.9, 102.7],
+      [800, 137.2, 103.6],
+      [850, 138.3, 106.1],
+      [900, 139.1, 125.5],
+      [950, 139.4, 124.0],
+      [1000, 139.4, 129.6],
+    ];
+    const byCycle = new Map(
+      recorded.map(([cycle, server, provider]) => [cycle, { server, provider }]),
+    );
+    const slope = decideChurnSlope(
+      trajectory((cycles) => {
+        const reading = byCycle.get(cycles + 100);
+        if (!reading) throw new Error(`no recorded reading at cycle ${cycles + 100}`);
+        return { server: reading.server * MIB, provider: reading.provider * MIB };
+      }),
+      options,
+    );
+    expect(slope.verdictBytesPerCycle, "the whole tree as one process breaches").toBeGreaterThan(
+      16 * KIB,
+    );
+    const server = slope.members.find((member) => member.role === "root");
+    const child = slope.members.find((member) => member.role === "child");
+    expect(server?.verdictBytesPerCycle).toBeLessThan(16 * KIB);
+    expect(child?.levelShift).toMatchObject({ fromCycle: 850, toCycle: 900 });
+    expect(child?.verdictBytesPerCycle).toBeLessThan(64 * KIB);
+    expect(slope.pass).toBe(true);
   });
 
   it("refuses a late span too thin to fit a slope", () => {

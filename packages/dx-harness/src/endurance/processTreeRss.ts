@@ -29,6 +29,13 @@
  *  - a member WAS discovered but its RSS could not be read, so a known member's
  *    bytes are missing from the sum (`"member-unreadable"`).
  *
+ * A member whose read fails because it EXITED between the enumeration and the
+ * read is not such a member: a process that is gone retains nothing. Each
+ * unreadable member is re-checked against a fresh process table, and only the
+ * ones that table no longer places in the tree are dropped (and listed in
+ * `exitedPids`). A member that is still there but unreadable keeps the sample
+ * UNAVAILABLE.
+ *
  * `totalBytes` is `null` in both cases and callers must report the metric
  * unavailable. Only a fully-observed tree yields a number, because only a fully
  * observed tree is the quantity the acceptance bound is written about.
@@ -84,6 +91,12 @@ export interface ProcessTreeRssSample {
   readonly members: readonly ProcessTreeRssMember[];
   /** Members discovered in the tree whose RSS could not be read in this pass. */
   readonly unreadablePids: readonly number[];
+  /**
+   * Members that were discovered but had exited by the time they were read
+   * (absent from a fresh process table): short-lived children such as a
+   * probe. They retain nothing and are not in `members`.
+   */
+  readonly exitedPids?: readonly number[];
   /** Null exactly when {@link observable} is true. */
   readonly unavailable: ProcessTreeRssUnavailable | null;
   readonly atMs: number;
@@ -132,9 +145,9 @@ export async function sampleProcessTreeRss(
     };
   }
 
-  const pids = [rootPid, ...descendantPids(rows, rootPid)];
-  const members: ProcessTreeRssMember[] = [];
-  const unreadablePids: number[] = [];
+  let pids = [rootPid, ...descendantPids(rows, rootPid)];
+  let members: ProcessTreeRssMember[] = [];
+  let unreadablePids: number[] = [];
   let total = 0;
   for (const pid of pids) {
     const rssBytes = await deps.readProcessRssBytes(pid);
@@ -145,12 +158,30 @@ export async function sampleProcessTreeRss(
     }
     total += rssBytes;
   }
+  // A member whose read failed because it EXITED retained nothing. Re-enumerate
+  // once and drop only the unreadable members the fresh table no longer places
+  // in the tree; one still present stays unreadable. The root is never dropped.
+  let exitedPids: number[] = [];
+  if (unreadablePids.length > 0) {
+    const fresh = await deps.snapshotProcessTable();
+    if (fresh !== null) {
+      const live = new Set([rootPid, ...descendantPids(fresh, rootPid)]);
+      exitedPids = unreadablePids.filter((pid) => !live.has(pid));
+      if (exitedPids.length > 0) {
+        const exited = new Set(exitedPids);
+        pids = pids.filter((pid) => !exited.has(pid));
+        members = members.filter((member) => !exited.has(member.pid));
+        unreadablePids = unreadablePids.filter((pid) => !exited.has(pid));
+      }
+    }
+  }
   if (unreadablePids.length > 0) {
     return {
       observable: false,
       totalBytes: null,
       members,
       unreadablePids,
+      exitedPids,
       unavailable: {
         kind: "member-unreadable",
         detail:
@@ -166,6 +197,7 @@ export async function sampleProcessTreeRss(
     totalBytes: total,
     members,
     unreadablePids,
+    exitedPids,
     unavailable: null,
     atMs,
   };
@@ -179,8 +211,8 @@ export function describeProcessTreeRss(sample: ProcessTreeRssSample): string {
     }`;
   }
   const parts = [...sample.members]
-    .filter((member): member is ProcessTreeRssMember & { rssBytes: number } =>
-      member.rssBytes !== null,
+    .filter(
+      (member): member is ProcessTreeRssMember & { rssBytes: number } => member.rssBytes !== null,
     )
     .sort((left, right) => right.rssBytes - left.rssBytes)
     .map((member) => `${member.image ?? "pid"}#${member.pid}=${mib(member.rssBytes)}`);

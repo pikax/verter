@@ -151,6 +151,7 @@ export {
 
 export {
   CHURN_ACCEPTANCE_MIN_CYCLES,
+  CHURN_CHILD_SLOPE_BYTES_PER_CYCLE,
   CHURN_RETENTION_COUNTERS,
   CHURN_SLOPE_MIN_LATE_READINGS,
   churnCarrierContent,
@@ -166,6 +167,7 @@ export {
   type ChurnFixture,
   type ChurnGrowthCheck,
   type ChurnLevelShift,
+  type ChurnMemberSlope,
   type ChurnRetentionCheck,
   type ChurnRetentionCounter,
   type ChurnRetentionTrend,

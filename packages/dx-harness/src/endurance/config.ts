@@ -36,7 +36,8 @@
  *  - VERTER_ENDURANCE_CHURN_GROWTH_FLOOR_BYTES absolute churn growth slack (default 64 MiB)
  *  - VERTER_ENDURANCE_CHURN_QUIESCE_MS    quiescence budget before each churn reading (default 60000)
  *  - VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS  quiesced readings after the baseline (default 18, min 2)
- *  - VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE late-span retained-byte rate bound (default 16 KiB)
+ *  - VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE late-span retained-byte rate bound for the server (default 16 KiB)
+ *  - VERTER_ENDURANCE_CHURN_SLOPE_CHILD_BYTES_PER_CYCLE late-span bound for a child process (default 64 KiB)
  *  - VERTER_ENDURANCE_CHURN_RETENTION_OBJECTS_PER_CYCLE retained-object growth bound per cycle (default 0.25)
  *  - VERTER_ENDURANCE_RECEIPT             receipt destination (a `.json` file, or a directory)
  */
@@ -143,6 +144,12 @@ export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): Endur
       env,
       "VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE",
       16 * 1024,
+      { min: 1 },
+    ),
+    churnSlopeChildBytesPerCycle: readInt(
+      env,
+      "VERTER_ENDURANCE_CHURN_SLOPE_CHILD_BYTES_PER_CYCLE",
+      64 * 1024,
       { min: 1 },
     ),
     churnRetentionObjectsPerCycle: readNumber(

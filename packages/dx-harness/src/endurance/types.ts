@@ -193,13 +193,22 @@ export interface EnduranceConfig {
    */
   readonly churnSlopeWindows: number;
   /**
-   * Retained bytes per cycle the late span may show
-   * (VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE, default 16 KiB): the
+   * Retained bytes per cycle the SERVER may show over the late span
+   * (VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE, default 16 KiB): its
    * least-squares rate over the run's second half, one level shift set aside.
    * A settled session sits at ~0 either side there; one retained document
    * version is hundreds of KiB, so a real per-cycle retainer breaches it.
    */
   readonly churnSlopeBytesPerCycle: number;
+  /**
+   * The late-span bound for a CHILD of the server — the type-provider engine
+   * (VERTER_ENDURANCE_CHURN_SLOPE_CHILD_BYTES_PER_CYCLE, default 64 KiB). The
+   * provider is a Go runtime whose resident set follows its collector's heap
+   * goal and moves between plateaus; the bound leaves room for that drift and
+   * stays below half the ~150 KiB/cycle it leaked before per-version documents
+   * were closed.
+   */
+  readonly churnSlopeChildBytesPerCycle: number;
   /**
    * Retained-object growth each lifetime counter may show per measured cycle
    * (VERTER_ENDURANCE_CHURN_RETENTION_OBJECTS_PER_CYCLE, default 0.25). A store

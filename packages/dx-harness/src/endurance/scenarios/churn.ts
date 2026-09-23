@@ -411,8 +411,9 @@ export interface ChurnSlopeSegment {
 }
 
 /**
- * The single largest increment the late-span verdict set aside as a one-time
- * level shift, attributed to the tree member that grew most across it.
+ * The single largest increment a late-span rate set aside as a one-time level
+ * shift. On the tree-level figure it is attributed to the member that grew
+ * most across it.
  */
 export interface ChurnLevelShift {
   readonly fromCycle: number;
@@ -426,24 +427,45 @@ export interface ChurnLevelShift {
   } | null;
 }
 
+/** One process-tree member's late-span verdict. */
+export interface ChurnMemberSlope {
+  readonly pid: number;
+  readonly image: string | null;
+  /** `root`: the spawned server. `child`: a descendant (the type-provider engine). */
+  readonly role: "root" | "child";
+  readonly allowedBytesPerCycle: number;
+  /** Least-squares rate over the late span, as measured. */
+  readonly lateBytesPerCycle: number;
+  /** This member's largest late increment, set aside as a one-time level shift. */
+  readonly levelShift: ChurnLevelShift | null;
+  /** The late-span rate with that level shift set aside: this member's verdict figure. */
+  readonly verdictBytesPerCycle: number;
+  readonly withinBound: boolean;
+}
+
 /** The retained-byte slope verdict over the quiesced trajectory. */
 export interface ChurnSlopeCheck {
   readonly observable: boolean;
   readonly cyclesCompleted: number;
   readonly minimumCycles: number;
+  /** The server's (tree root's) late-span bound. */
   readonly allowedBytesPerCycle: number;
-  /** Every consecutive window's rate: the trajectory, reported as evidence. */
+  /** The bound for every descendant (the type-provider engine). */
+  readonly allowedChildBytesPerCycle: number;
+  /** Every consecutive window's whole-tree rate: the trajectory, reported as evidence. */
   readonly segments: readonly ChurnSlopeSegment[];
-  /** The rate over the final window. */
+  /** The whole-tree rate over the final window. */
   readonly finalBytesPerCycle: number | null;
   /** First cycle of the late span the verdict is read over (the run's second half). */
   readonly lateFromCycle: number | null;
-  /** Least-squares retained-byte rate over the late span, as measured. */
+  /** Whole-tree least-squares rate over the late span, as measured (evidence). */
   readonly lateBytesPerCycle: number | null;
-  /** The late span's largest increment, set aside as a one-time level shift. */
+  /** The whole tree's largest late increment, set aside (evidence). */
   readonly levelShift: ChurnLevelShift | null;
-  /** The late-span rate with that one level shift set aside: the verdict figure. */
+  /** The whole-tree late-span rate with that level shift set aside (evidence). */
   readonly verdictBytesPerCycle: number | null;
+  /** The verdict: every member's late-span rate against its own bound. */
+  readonly members: readonly ChurnMemberSlope[];
   readonly pass: boolean;
   readonly detail: string;
 }
@@ -462,35 +484,42 @@ export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
  * inside the envelope and reads as a pass. An envelope describes a destination;
  * the criterion is about the trajectory.
  *
- * What separates bounded from unbounded is what the trajectory does LATE. The
- * process tree has two bounded effects that make a rule over every window
- * wrong:
+ * What separates bounded from unbounded is what the trajectory does LATE, and
+ * each process in the tree has its own bounded dynamics:
  *
- *  - Allocator settling. With every retained-object counter flat and the
- *    server's live heap flat (a heap profile over the whole run: ~40 MiB, first
- *    and last quarters within 1 MiB), the server's committed memory still
- *    climbs for several hundred cycles while the allocator reaches its
- *    steady-state fragmentation, then levels off: ~15 MiB before the run's
- *    midpoint, ~3 MiB after it, ~0 over the last 200 cycles. An early window of
- *    that curve reads 60-90 KiB/cycle.
- *  - One-time level shifts. The type-provider child (a Go runtime) sometimes
- *    steps up once by ~26 MiB and stays flat after it (2 of 9 runs, anywhere
- *    from cycle ~325 to ~775).
+ *  - The server settles. With every retained-object counter flat and its live
+ *    heap flat (a heap profile over the whole run: ~40 MiB, first and last
+ *    quarters within 1 MiB), its committed memory still climbs for several
+ *    hundred cycles while the allocator reaches steady-state fragmentation,
+ *    then levels off: ~15 MiB before the run's midpoint, a few MiB after it.
+ *    An early window of that curve reads 60-90 KiB/cycle.
+ *  - The type-provider child is a Go runtime whose resident set follows its
+ *    garbage collector's heap goal, not its live objects. It sits in one of two
+ *    plateaus (~95-100 MiB, ~124-129 MiB) and moves up once, at a random cycle,
+ *    by 20-29 MiB, sometimes with a few MiB of drift around the move (4 of 11
+ *    runs, anywhere from cycle ~150 to ~900), then holds for hundreds of
+ *    cycles.
  *
- * A retainer, by contrast, keeps its rate to the end of the run. So the verdict
- * is the least-squares rate over the LATE span (every reading from the run's
- * midpoint on), with the span's single largest increment set aside as a
- * possible one-time level shift. A linear retainer — one retained document
- * version is hundreds of KiB per cycle — still breaches with one increment
- * removed; two level shifts, or a slope that survives the removal, breach too.
- * Every window's rate stays in the detail as evidence, and the envelope still
- * bounds the total growth any shift can add.
+ * A retainer, by contrast, keeps its rate to the end of the run. So each member
+ * is judged on its own least-squares rate over the LATE span (every reading
+ * from the run's midpoint on), with that member's single largest late
+ * increment set aside as a possible one-time level shift, against its own
+ * bound: the server against `allowedBytesPerCycle`, a child against
+ * `allowedChildBytesPerCycle`, which leaves room for garbage-collector drift
+ * and still sits below half of the ~150 KiB/cycle the provider child leaked
+ * before this node closed its per-version documents. A linear retainer in
+ * either process — one retained document version is hundreds of KiB — still
+ * breaches with one increment removed; two level shifts in one member, or a
+ * slope that survives the removal, breach too. The whole-tree late rate and
+ * every window's whole-tree rate stay in the detail as evidence, and the
+ * envelope still bounds the total growth any shift can add.
  *
  * Refused outright — `observable: false, pass: false`, never a pass — when:
  *
  *  - the run was shorter than `minimumCycles` (the criterion's own run length);
  *  - fewer than two post-baseline windows exist, so there is no trajectory to read;
- *  - the late span holds fewer than {@link CHURN_SLOPE_MIN_LATE_READINGS} readings;
+ *  - the late span holds fewer than {@link CHURN_SLOPE_MIN_LATE_READINGS}
+ *    readings, or a member appears in fewer of them than that;
  *  - any checkpoint was read without the host reaching quiescence, so the figure
  *    includes in-flight work rather than what the session retains;
  *  - any checkpoint is not a complete whole-tree observation;
@@ -500,9 +529,15 @@ export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
  */
 export function decideChurnSlope(
   checkpoints: readonly ChurnCheckpoint[],
-  options: { readonly allowedBytesPerCycle: number; readonly minimumCycles: number },
+  options: {
+    readonly allowedBytesPerCycle: number;
+    readonly minimumCycles: number;
+    readonly allowedChildBytesPerCycle?: number;
+  },
 ): ChurnSlopeCheck {
   const { allowedBytesPerCycle, minimumCycles } = options;
+  const allowedChildBytesPerCycle =
+    options.allowedChildBytesPerCycle ?? CHURN_CHILD_SLOPE_BYTES_PER_CYCLE;
   const cyclesCompleted =
     checkpoints.length > 0 ? checkpoints[checkpoints.length - 1].cyclesCompleted : 0;
   const unevaluated = (detail: string): ChurnSlopeCheck => ({
@@ -510,12 +545,14 @@ export function decideChurnSlope(
     cyclesCompleted,
     minimumCycles,
     allowedBytesPerCycle,
+    allowedChildBytesPerCycle,
     segments: [],
     finalBytesPerCycle: null,
     lateFromCycle: null,
     lateBytesPerCycle: null,
     levelShift: null,
     verdictBytesPerCycle: null,
+    members: [],
     pass: false,
     detail,
   });
@@ -595,54 +632,109 @@ export function decideChurnSlope(
     );
   }
   const xs = late.map((checkpoint) => checkpoint.cyclesCompleted);
-  const ys = late.map((checkpoint) => checkpoint.sample.totalBytes as number);
-  const lateBytesPerCycle = leastSquaresSlope(xs, ys);
 
-  // Set aside the single largest positive increment as a possible one-time
-  // level shift: every reading after it is lowered by it, then the rate refit.
-  let shiftIndex = -1;
-  for (let index = 1; index < ys.length; index += 1) {
-    const growth = ys[index] - ys[index - 1];
-    if (growth > 0 && (shiftIndex < 0 || growth > ys[shiftIndex] - ys[shiftIndex - 1])) {
-      shiftIndex = index;
+  // Whole-tree evidence.
+  const tree = slopeWithOneShiftSetAside(
+    xs,
+    late.map((checkpoint) => checkpoint.sample.totalBytes as number),
+  );
+  const treeShift: ChurnLevelShift | null =
+    tree.shiftIndex > 0
+      ? {
+          fromCycle: xs[tree.shiftIndex - 1],
+          toCycle: xs[tree.shiftIndex],
+          growthBytes: tree.shiftBytes,
+          member: largestMemberGrowth(
+            late[tree.shiftIndex - 1].sample,
+            late[tree.shiftIndex].sample,
+          ),
+        }
+      : null;
+
+  // The verdict: every member against its own bound.
+  const rootPid = checkpoints[0].sample.members[0]?.pid;
+  const memberPids = [
+    ...new Set(late.flatMap((checkpoint) => checkpoint.sample.members.map((m) => m.pid))),
+  ];
+  const members: ChurnMemberSlope[] = [];
+  for (const pid of memberPids) {
+    const readings = late.flatMap((checkpoint) => {
+      const member = checkpoint.sample.members.find((m) => m.pid === pid);
+      return member && member.rssBytes !== null
+        ? [{ cycle: checkpoint.cyclesCompleted, bytes: member.rssBytes, image: member.image }]
+        : [];
+    });
+    if (readings.length < CHURN_SLOPE_MIN_LATE_READINGS) {
+      return unevaluated(
+        `process ${pid} appears in ${readings.length} late reading(s), below the ` +
+          `${CHURN_SLOPE_MIN_LATE_READINGS} a slope needs — the slope was NOT evaluated`,
+      );
     }
-  }
-  let levelShift: ChurnLevelShift | null = null;
-  let verdictBytesPerCycle = lateBytesPerCycle;
-  if (shiftIndex > 0) {
-    const shiftBytes = ys[shiftIndex] - ys[shiftIndex - 1];
-    const adjusted = ys.map((y, index) => (index >= shiftIndex ? y - shiftBytes : y));
-    verdictBytesPerCycle = leastSquaresSlope(xs, adjusted);
-    levelShift = {
-      fromCycle: xs[shiftIndex - 1],
-      toCycle: xs[shiftIndex],
-      growthBytes: shiftBytes,
-      member: largestMemberGrowth(late[shiftIndex - 1].sample, late[shiftIndex].sample),
-    };
+    const memberXs = readings.map((reading) => reading.cycle);
+    const fit = slopeWithOneShiftSetAside(
+      memberXs,
+      readings.map((reading) => reading.bytes),
+    );
+    const role = pid === rootPid ? "root" : "child";
+    const allowed = role === "root" ? allowedBytesPerCycle : allowedChildBytesPerCycle;
+    members.push({
+      pid,
+      image: readings[0].image,
+      role,
+      allowedBytesPerCycle: allowed,
+      lateBytesPerCycle: fit.measured,
+      levelShift:
+        fit.shiftIndex > 0
+          ? {
+              fromCycle: memberXs[fit.shiftIndex - 1],
+              toCycle: memberXs[fit.shiftIndex],
+              growthBytes: fit.shiftBytes,
+              member: null,
+            }
+          : null,
+      verdictBytesPerCycle: fit.verdict,
+      withinBound: fit.verdict <= allowed,
+    });
   }
 
-  const pass = verdictBytesPerCycle <= allowedBytesPerCycle;
+  const pass = members.every((member) => member.withinBound);
   const finalBytesPerCycle = segments[segments.length - 1].bytesPerCycle;
-  const shiftDetail = levelShift
-    ? `, one level shift set aside: ${describeShift(levelShift)}`
-    : ", no level shift to set aside";
+  const mib = (bytes: number) => `${(bytes / 1024 ** 2).toFixed(1)}MiB`;
+  const memberDetail = members
+    .map(
+      (member) =>
+        `${member.image ?? "process"}#${member.pid} (${member.role === "root" ? "server" : "child"}) ` +
+        `${bytesPerCycleToKib(member.verdictBytesPerCycle)}/cycle, allowed <=` +
+        `${bytesPerCycleToKib(member.allowedBytesPerCycle)}/cycle` +
+        (member.withinBound ? "" : " BREACH") +
+        (member.levelShift
+          ? ` (measured ${bytesPerCycleToKib(member.lateBytesPerCycle)}/cycle, level shift ` +
+            `[${member.levelShift.fromCycle}..${member.levelShift.toCycle}] ` +
+            `+${mib(member.levelShift.growthBytes)} set aside)`
+          : ""),
+    )
+    .join("; ");
   return {
     observable: true,
     cyclesCompleted,
     minimumCycles,
     allowedBytesPerCycle,
+    allowedChildBytesPerCycle,
     segments,
     finalBytesPerCycle,
     lateFromCycle: xs[0],
-    lateBytesPerCycle,
-    levelShift,
-    verdictBytesPerCycle,
+    lateBytesPerCycle: tree.measured,
+    levelShift: treeShift,
+    verdictBytesPerCycle: tree.verdict,
+    members,
     pass,
     detail:
       `late span [${xs[0]}..${cyclesCompleted}] over ${late.length} quiesced readings: ` +
-      `${bytesPerCycleToKib(verdictBytesPerCycle)}/cycle, allowed <=` +
-      `${bytesPerCycleToKib(allowedBytesPerCycle)}/cycle${pass ? "" : " BREACH"} ` +
-      `(measured ${bytesPerCycleToKib(lateBytesPerCycle)}/cycle${shiftDetail}); windows: ` +
+      `${memberDetail}; whole tree ${bytesPerCycleToKib(tree.measured)}/cycle` +
+      (treeShift
+        ? ` (${bytesPerCycleToKib(tree.verdict)}/cycle with ${describeShift(treeShift)} set aside)`
+        : "") +
+      "; windows: " +
       segments
         .map(
           (segment) =>
@@ -651,6 +743,35 @@ export function decideChurnSlope(
         )
         .join(" "),
   };
+}
+
+/**
+ * Default late-span bound for a descendant process (the type-provider engine):
+ * room for its garbage collector's drift, below half the ~150 KiB/cycle the
+ * provider leaked before per-version documents were closed.
+ */
+export const CHURN_CHILD_SLOPE_BYTES_PER_CYCLE = 64 * 1024;
+
+/**
+ * Least-squares rate of `ys` over `xs`, as measured and with the single
+ * largest positive increment set aside (every reading after it lowered by it).
+ */
+function slopeWithOneShiftSetAside(
+  xs: readonly number[],
+  ys: readonly number[],
+): { measured: number; verdict: number; shiftIndex: number; shiftBytes: number } {
+  const measured = leastSquaresSlope(xs, ys);
+  let shiftIndex = -1;
+  for (let index = 1; index < ys.length; index += 1) {
+    const growth = ys[index] - ys[index - 1];
+    if (growth > 0 && (shiftIndex < 0 || growth > ys[shiftIndex] - ys[shiftIndex - 1])) {
+      shiftIndex = index;
+    }
+  }
+  if (shiftIndex < 0) return { measured, verdict: measured, shiftIndex, shiftBytes: 0 };
+  const shiftBytes = ys[shiftIndex] - ys[shiftIndex - 1];
+  const adjusted = ys.map((y, index) => (index >= shiftIndex ? y - shiftBytes : y));
+  return { measured, verdict: leastSquaresSlope(xs, adjusted), shiftIndex, shiftBytes };
 }
 
 /** Ordinary least-squares slope of `ys` over `xs` (bytes per cycle). */
@@ -1072,6 +1193,7 @@ export async function runChurnScenario(
     );
     const slope = decideChurnSlope(checkpoints, {
       allowedBytesPerCycle: context.config.churnSlopeBytesPerCycle,
+      allowedChildBytesPerCycle: context.config.churnSlopeChildBytesPerCycle,
       minimumCycles: options.minimumCycles ?? CHURN_ACCEPTANCE_MIN_CYCLES,
     });
     const retention = decideChurnRetention(checkpoints, {
