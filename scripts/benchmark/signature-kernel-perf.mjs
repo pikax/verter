@@ -12,6 +12,11 @@
 // and digests of the raw logs. Raw machine-bound logs stay under --out, never in the
 // tracked tree.
 //
+// A workload gets a ratio only when both arms answer every witness it queries with
+// the same outcome (the harness's untimed per-witness fingerprints). Lock evidence
+// also requires the machine, toolchains and power state to be the runner class
+// performance-gates.toml locks.
+//
 // Inside the same control bracket it also runs the candidate's cancellation probe
 // (crates/verter_session/examples/signature_kernel_cancel_probe.rs) once per candidate
 // invocation. The baseline has no caller-cancellable entry, so the probe's
@@ -24,8 +29,9 @@
 //   --candidate <rev>      candidate revision (default: HEAD)
 //   --invocations <n>      invocations per arm, ABBA-interleaved (default: 4, the policy minimum)
 //   --modules/--depth/--samples/--cold-samples/--soak <n>   forwarded to the harness
-//   --exclude <Kind,Kind>  witness kinds NOT queried (forwarded); exclude the kinds the census
-//                          shows the arms answer differently, so every ratio is a matched workload
+//   --exclude <Kind,Kind>  witness kinds NOT queried (forwarded); a workload whose witnesses the
+//                          arms answer differently gets no ratio, so exclude the kinds the
+//                          matched-work section names to compare the rest
 //   --settle <s>           open the session no sooner than this long after the builds (default 180)
 //   --cooldown <s>         pause this long before each control and each invocation, so every
 //                          measurement opens from the same thermal state (default 0; a fanless
@@ -45,22 +51,66 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { readGatesToml } from "../validate-performance-gates.mjs";
 
 const HARNESS_REL = "crates/verter_session/examples/signature_kernel_bench.rs";
 const CANCEL_PROBE_REL = "crates/verter_session/examples/signature_kernel_cancel_probe.rs";
 // The harness arguments the cancellation probe shares.
 const CANCEL_PROBE_ARGS = ["--modules", "--depth", "--cold-samples"];
 const BASELINE_TITLE = "resolve effective tsconfig semantic options into the type environment";
+
+// The locked runner class and statistics are READ from the gate file, never restated
+// here, so this runner cannot drift from what the lock records.
+const GATES = readGatesToml(
+  fs.readFileSync(new URL("../../performance-gates.toml", import.meta.url), "utf8"),
+).root;
+const LOCKED_RUNNER = lockedTable("runner", [
+  "class",
+  "os",
+  "cpu",
+  "logical_cpus",
+  "memory_bytes",
+  "rust_toolchain",
+  "node_runtime",
+  "power_policy",
+  "max_control_drift_percent",
+]);
+const LOCKED_STATISTICS = lockedTable("statistics", [
+  "confidence",
+  "bootstrap_resamples",
+  "noise_multiplier",
+  "interleave_policy",
+]);
+
+function lockedTable(name, keys) {
+  const table = GATES[name];
+  const missing = keys.filter((key) => table?.[key] === undefined);
+  if (missing.length > 0)
+    throw new Error(`performance-gates.toml [${name}] lacks ${missing.join(", ")}`);
+  return table;
+}
+
+/** `interleave_policy`'s "at least N invocations per arm", as a number. */
+function minInvocationsOf(policy) {
+  const words = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+  const count = policy.match(/at least (\w+) invocations per arm/)?.[1];
+  const value = words[count] ?? Number(count);
+  if (!Number.isInteger(value))
+    throw new Error("performance-gates.toml interleave_policy names no invocation minimum");
+  return value;
+}
+
 const POLICY = {
-  // performance-gates.toml [statistics] + the charter's 5% investigation gate.
+  // The charter's 5% investigation gate (§12); the gate file locks no signature-kernel cell.
   investigationFloorPercent: 5,
-  // performance-gates.toml interleave_policy: "at least four invocations per arm".
-  // Fewer cannot measure between-invocation noise (one invocation reads as zero).
-  minInvocationsPerArm: 4,
-  noiseMultiplier: 2,
-  confidence: 0.95,
-  bootstrapResamples: 10000,
-  maxControlDriftPercent: 3,
+  // Fewer invocations cannot measure between-invocation noise (one reads as zero).
+  minInvocationsPerArm: minInvocationsOf(LOCKED_STATISTICS.interleave_policy),
+  noiseMultiplier: LOCKED_STATISTICS.noise_multiplier,
+  confidence: LOCKED_STATISTICS.confidence,
+  bootstrapResamples: LOCKED_STATISTICS.bootstrap_resamples,
+  maxControlDriftPercent: LOCKED_RUNNER.max_control_drift_percent,
   // A soak whose late live heap exceeds its early live heap by more than this is
   // reported as growth rather than a plateau.
   soakPlateauTolerancePercent: 10,
@@ -414,6 +464,127 @@ function machineFacts() {
   return facts;
 }
 
+/**
+ * This machine, both trees' toolchains and the power state against the LOCKED runner
+ * class of performance-gates.toml. Every mismatch refuses lock evidence: a session on
+ * another class is a measurement, never lock evidence.
+ */
+function checkLockedRunner(trees) {
+  const observed = {
+    os: tryRun("uname", ["-srm"]) ?? `${os.type()} ${os.release()} ${process.arch}`,
+    cpu: (os.cpus()[0]?.model ?? "unknown").trim(),
+    logical_cpus: os.cpus().length,
+    memory_bytes: os.totalmem(),
+    node_runtime: process.version,
+    // Each tree resolves its own pinned toolchain.
+    rust_toolchain: Object.fromEntries(
+      Object.entries(trees).map(([arm, tree]) => [
+        arm,
+        tryRun("rustc", ["-V"], { cwd: tree })?.replace(/^rustc /, "") ?? "unknown",
+      ]),
+    ),
+    platform: process.platform,
+  };
+  if (process.platform === "darwin") {
+    observed.power_source = (tryRun("pmset", ["-g", "batt"]) ?? "").split("\n")[0] || "unknown";
+    observed.low_power_mode =
+      tryRun("pmset", ["-g"])?.match(/lowpowermode\s+(\d)/)?.[1] ?? "unknown";
+  }
+  return {
+    class: LOCKED_RUNNER.class,
+    expected: {
+      os: LOCKED_RUNNER.os,
+      cpu: LOCKED_RUNNER.cpu,
+      logical_cpus: LOCKED_RUNNER.logical_cpus,
+      memory_bytes: LOCKED_RUNNER.memory_bytes,
+      rust_toolchain: LOCKED_RUNNER.rust_toolchain,
+      node_runtime: LOCKED_RUNNER.node_runtime,
+      power_policy: LOCKED_RUNNER.power_policy,
+    },
+    observed,
+    mismatches: runnerMismatches(LOCKED_RUNNER, observed),
+  };
+}
+
+/** Every way `observed` falls outside the locked runner class `expected`. */
+function runnerMismatches(expected, observed) {
+  const mismatches = [];
+  for (const key of ["os", "cpu", "logical_cpus", "memory_bytes", "node_runtime"]) {
+    if (observed[key] !== expected[key])
+      mismatches.push(`${key} is ${observed[key]}, locked ${expected[key]}`);
+  }
+  for (const [arm, toolchain] of Object.entries(observed.rust_toolchain)) {
+    if (toolchain !== expected.rust_toolchain)
+      mismatches.push(`${arm} toolchain is ${toolchain}, locked ${expected.rust_toolchain}`);
+  }
+  // The power policy is prose; the machine-checkable clauses it states are enforced.
+  const wantsAc = /AC power/i.test(expected.power_policy);
+  const wantsLowPowerOff = /lowpowermode 0/i.test(expected.power_policy);
+  if (wantsAc || wantsLowPowerOff) {
+    if (observed.platform !== "darwin") {
+      mismatches.push(`power state cannot be verified on ${observed.platform}`);
+    } else {
+      if (wantsAc && !/'AC Power'/.test(observed.power_source ?? ""))
+        mismatches.push(`power source is "${observed.power_source}", locked AC power`);
+      if (wantsLowPowerOff && observed.low_power_mode !== "0")
+        mismatches.push(`low-power mode is ${observed.low_power_mode}, locked 0`);
+    }
+  }
+  return mismatches;
+}
+
+/** The edit workloads, each timed over the original state and its own edited state. */
+const EDIT_WORKLOADS = ["local_edit", "declaration_edit", "augmentation_edit"];
+
+/**
+ * Matched work: every arm's per-witness OUTCOMES (completion, typed degradation or
+ * refusal, and the answered type) compared witness by witness in every state. An
+ * arm whose invocations disagree with each other is nondeterministic and matches
+ * nothing.
+ */
+function compareOutcomes(runs) {
+  const perArm = {};
+  const nondeterministic = [];
+  for (const arm of ["baseline", "candidate"]) {
+    const documents = runs[arm].map((r) => r.document.outcomes);
+    if (documents.some((d) => d === undefined))
+      throw new Error(`the ${arm} harness recorded no outcomes`);
+    const first = JSON.stringify(documents[0]);
+    if (documents.some((d) => JSON.stringify(d) !== first)) nondeterministic.push(arm);
+    perArm[arm] = documents[0];
+  }
+  const states = {};
+  const names = new Set([...Object.keys(perArm.baseline), ...Object.keys(perArm.candidate)]);
+  for (const state of [...names].sort()) {
+    const base = perArm.baseline[state] ?? {};
+    const cand = perArm.candidate[state] ?? {};
+    const witnesses = [...new Set([...Object.keys(base), ...Object.keys(cand)])].sort();
+    states[state] = {
+      witnesses,
+      mismatches: witnesses
+        .filter((w) => base[w] !== cand[w])
+        .map((w) => ({ witness: w, baseline: base[w] ?? null, candidate: cand[w] ?? null })),
+    };
+  }
+  return { states, nondeterministic };
+}
+
+/**
+ * Whether a workload times the same work in both arms: every witness it queries
+ * has one outcome in both, in every state it reaches (the original corpus, and for
+ * an edit workload its edited state, over the witnesses that edit re-queries).
+ */
+function workloadIsMatched(outcomes, name) {
+  if (outcomes.nondeterministic.length > 0) return false;
+  const original = outcomes.states.original;
+  if (!original) return false;
+  if (!EDIT_WORKLOADS.includes(name)) return original.mismatches.length === 0;
+  const edited = outcomes.states[name];
+  if (!edited || edited.mismatches.length > 0) return false;
+  const queried = new Set(edited.witnesses);
+  return !original.mismatches.some((m) => queried.has(m.witness));
+}
+
 // ── main ─────────────────────────────────────────────────────────────────
 
 function main() {
@@ -604,6 +775,7 @@ function main() {
     const sessionVoid =
       (controlDrift !== null && controlDrift > POLICY.maxControlDriftPercent) || !idle.satisfied;
 
+    const runnerCheck = checkLockedRunner(trees);
     const summary = summarize({
       opts,
       revs,
@@ -617,6 +789,7 @@ function main() {
       sessionVoid,
       cancelProbe,
       cancelRuns,
+      runnerCheck,
     });
     fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
     fs.writeFileSync(path.join(out, "summary.md"), renderMarkdown(summary));
@@ -642,8 +815,10 @@ function summarize({
   sessionVoid,
   cancelProbe,
   cancelRuns,
+  runnerCheck,
 }) {
   const first = runs.baseline[0].document;
+  const outcomes = compareOutcomes(runs);
   const workloadNames = Object.keys(first.workloads);
   const pooled = (arm, name) => runs[arm].flatMap((r) => r.document.workloads[name].samples_ns);
   const clustered = (arm, name) => runs[arm].map((r) => r.document.workloads[name].samples_ns);
@@ -670,19 +845,25 @@ function summarize({
     // Between-invocation noise of the baseline arm, relative to its median.
     const noisePercent =
       ((Math.max(...baseMedians) - Math.min(...baseMedians)) / median(baseMedians)) * 100;
-    const threshold = Math.max(
-      POLICY.investigationFloorPercent,
-      POLICY.noiseMultiplier * noisePercent,
-    );
-    const ratio = median(cand) / median(base);
-    const ci = bootstrapRatio(
-      clustered("baseline", name),
-      clustered("candidate", name),
-      POLICY.bootstrapResamples,
-      POLICY.confidence,
-      0x5eed + index,
-    );
-    const verdict = verdictFor(ci, threshold);
+    // A ratio across different answers is not a speedup or a regression: an unmatched
+    // workload reports its distributions and no ratio, interval, gate or verdict.
+    const matched = workloadIsMatched(outcomes, name);
+    const threshold = matched
+      ? Math.max(POLICY.investigationFloorPercent, POLICY.noiseMultiplier * noisePercent)
+      : null;
+    const ratio = matched ? median(cand) / median(base) : null;
+    const ci = matched
+      ? bootstrapRatio(
+          clustered("baseline", name),
+          clustered("candidate", name),
+          POLICY.bootstrapResamples,
+          POLICY.confidence,
+          0x5eed + index,
+        )
+      : null;
+    const verdict = matched
+      ? verdictFor(ci, threshold)
+      : "not comparable — the arms answer differently";
     const stats = (xs) => ({
       p50: quantile(xs, 0.5),
       p95: quantile(xs, 0.95),
@@ -695,6 +876,7 @@ function summarize({
     workloads[name] = {
       baseline_ns: stats(base),
       candidate_ns: stats(cand),
+      matched,
       median_ratio: ratio,
       ratio_ci: ci,
       baseline_noise_percent: noisePercent,
@@ -740,12 +922,25 @@ function summarize({
       `too few invocations (${opts.invocations} per arm, policy minimum ${POLICY.minInvocationsPerArm})`,
     );
   }
+  if (runnerCheck.mismatches.length > 0) {
+    lockRefusals.push(
+      `not the locked runner class ${runnerCheck.class}: ${runnerCheck.mismatches.join("; ")}`,
+    );
+  }
+  if (outcomes.nondeterministic.length > 0) {
+    lockRefusals.push(
+      `outcomes differ between invocations of the ${outcomes.nondeterministic.join(" and ")} arm`,
+    );
+  }
+  const unmatched = workloadNames.filter((name) => !workloads[name].matched);
+  if (unmatched.length > 0) lockRefusals.push(`unmatched work in ${unmatched.join(", ")}`);
 
   return {
     schema: 1,
     lock_evidence: lockRefusals.length === 0,
     lock_evidence_refusals: lockRefusals,
     revisions: { baseline: revs.baseline, candidate: revs.candidate },
+    runner_check: runnerCheck,
     harness: { path: HARNESS_REL, sha256: harnessDigest, args: opts.forwarded },
     machine: machineFacts(),
     policy: POLICY,
@@ -768,6 +963,7 @@ function summarize({
       matches: censusMatches,
       by_witness: censusByWitness,
     },
+    outcomes,
     workloads,
     throughput,
     soak,
@@ -808,6 +1004,13 @@ function summarizeCancellation(probe, runs) {
   };
 }
 
+/** A workload's ratio and interval, or `n/a` when its work is not matched. */
+function ratioCell(w) {
+  return w.matched
+    ? `${w.median_ratio.toFixed(3)} (${w.ratio_ci.lower.toFixed(3)}–${w.ratio_ci.upper.toFixed(3)})`
+    : "n/a";
+}
+
 function renderMarkdown(s) {
   // Four significant figures: a per-query warm read is hundredths of a millisecond.
   const ms = (ns) => String(Number((ns / 1e6).toPrecision(4)));
@@ -845,6 +1048,10 @@ function renderMarkdown(s) {
   lines.push(
     `- Idle: load average at start ${idle.at_start.load_average_1m === null ? "n/a on this platform" : idle.at_start.load_average_1m.toFixed(2)} after ${idle.at_start.waited_seconds}s; foreign build processes at start ${idle.at_start.foreign_processes.join(", ") || "none"}, during the session ${idle.foreign_processes_during_session.join(", ") || "none"}`,
   );
+  const runner = s.runner_check;
+  lines.push(
+    `- Locked runner class \`${runner.class}\`: ${runner.mismatches.length === 0 ? "this machine, toolchain and power state match" : `**does not match** (${runner.mismatches.join("; ")})`}`,
+  );
   lines.push(
     `- Lock evidence: **${s.lock_evidence ? "yes" : "no"}**${s.lock_evidence ? "" : ` (${s.lock_evidence_refusals.join("; ")})`}`,
   );
@@ -859,13 +1066,7 @@ function renderMarkdown(s) {
     const c = s.census[arm];
     lines.push(`| ${arm} | ${c.complete} | ${c.degraded} | ${c.refused} |`);
   }
-  lines.push(
-    "",
-    s.census.matches
-      ? "Both arms answer the same witnesses the same way, so every timing below is a matched workload."
-      : "**The arms answer differently.** Timings below compare different amounts of completed work: per the regression policy a difference in what is answered is reported separately and a ratio across it is not a speedup or a regression by itself.",
-    "",
-  );
+  lines.push("");
   const kinds = Object.entries(s.census.by_witness ?? {});
   if (kinds.length > 0) {
     const cell = (c) => `${c.complete} / ${c.degraded} / ${c.refused}`;
@@ -880,6 +1081,40 @@ function renderMarkdown(s) {
     lines.push("");
   }
 
+  lines.push("## Matched work", "");
+  lines.push(
+    "Every witness's outcome — completion, the typed degradation or refusal, and the",
+    "answered type rendered structurally — in the original corpus and in each edited",
+    "state. A workload gets a ratio only when both arms have the same outcome on every",
+    "witness it queries; otherwise it is reported as not comparable.",
+    "",
+  );
+  const nondeterministic = s.outcomes.nondeterministic;
+  if (nondeterministic.length > 0) {
+    lines.push(
+      `**Outcomes differ between invocations of the ${nondeterministic.join(" and ")} arm**; no workload is matched.`,
+      "",
+    );
+  }
+  lines.push("| State | witnesses | differing |", "|---|---|---|");
+  for (const [state, o] of Object.entries(s.outcomes.states)) {
+    lines.push(`| ${state} | ${o.witnesses.length} | ${o.mismatches.length} |`);
+  }
+  const differing = Object.entries(s.outcomes.states).flatMap(([state, o]) =>
+    o.mismatches.map((m) => ({ state, ...m })),
+  );
+  if (differing.length > 0) {
+    const clip = (text) =>
+      text === null ? "(absent)" : text.length > 160 ? `${text.slice(0, 160)}…` : text;
+    lines.push("", "First differing witnesses:", "");
+    for (const m of differing.slice(0, 10)) {
+      lines.push(
+        `- \`${m.state}\` \`${m.witness}\`: baseline \`${clip(m.baseline)}\`; candidate \`${clip(m.candidate)}\``,
+      );
+    }
+  }
+  lines.push("");
+
   lines.push("## Latency (ms)", "");
   lines.push(
     "| Workload | baseline p50 / p95 / p99 | candidate p50 / p95 / p99 | ratio (95% CI) | gate | verdict |",
@@ -888,7 +1123,7 @@ function renderMarkdown(s) {
   for (const [name, w] of Object.entries(s.workloads)) {
     if (name.startsWith("throughput_")) continue;
     lines.push(
-      `| ${name} | ${ms(w.baseline_ns.p50)} / ${ms(w.baseline_ns.p95)} / ${ms(w.baseline_ns.p99)} | ${ms(w.candidate_ns.p50)} / ${ms(w.candidate_ns.p95)} / ${ms(w.candidate_ns.p99)} | ${w.median_ratio.toFixed(3)} (${w.ratio_ci.lower.toFixed(3)}–${w.ratio_ci.upper.toFixed(3)}) | ±${w.gate_threshold_percent.toFixed(1)}% | ${w.verdict} |`,
+      `| ${name} | ${ms(w.baseline_ns.p50)} / ${ms(w.baseline_ns.p95)} / ${ms(w.baseline_ns.p99)} | ${ms(w.candidate_ns.p50)} / ${ms(w.candidate_ns.p95)} / ${ms(w.candidate_ns.p99)} | ${ratioCell(w)} | ${w.matched ? `±${w.gate_threshold_percent.toFixed(1)}%` : "n/a"} | ${w.verdict} |`,
     );
   }
   lines.push(
@@ -923,9 +1158,7 @@ function renderMarkdown(s) {
   for (const [key, t] of Object.entries(s.throughput)) {
     // The throughput workload's own time samples carry the interval and verdict.
     const w = s.workloads[key];
-    const timed = w
-      ? `${w.median_ratio.toFixed(3)} (${w.ratio_ci.lower.toFixed(3)}–${w.ratio_ci.upper.toFixed(3)}) | ${w.verdict}`
-      : "n/a | n/a";
+    const timed = w ? `${ratioCell(w)} | ${w.verdict}` : "n/a | n/a";
     lines.push(
       `| ${key.replace("throughput_w", "")} | ${t.baseline_qps} | ${t.candidate_qps} | ${timed} |`,
     );
@@ -977,9 +1210,23 @@ function renderMarkdown(s) {
   return lines.join("\n");
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`[sk-perf] ${error.message}\n`);
-  process.exit(1);
+export {
+  LOCKED_RUNNER,
+  compareOutcomes,
+  minInvocationsOf,
+  renderMarkdown,
+  runnerMismatches,
+  summarize,
+  workloadIsMatched,
+};
+
+// Run only as a script: importing the module (its summary and rendering helpers)
+// must never start a session.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`[sk-perf] ${error.message}\n`);
+    process.exit(1);
+  }
 }

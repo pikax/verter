@@ -61,40 +61,31 @@ baseline — the first parent of the landing "resolve effective tsconfig
 semantic options into the type environment" — under the lock's statistics and
 idle-machine policy. Raw logs and run reports stay out of the tree; a
 distribution is published here only from a session that reports **lock
-evidence** on the locked runner class.
+evidence**.
 
-**Session of 2026-09-23** on `apple-silicon-laptop-8core-24gib` (Apple M3,
-8 CPUs, 24 GiB, AC power, low-power mode off): 4 invocations per arm, ABBA; a
-180 s settle after the builds and a 120 s cool-down before each control and
-invocation; control drift 0.5% (gate 3%); load average 1.22 at start, no
-foreign build process at any point. Corpus: 24 modules, chain depth 8. The
-`Call` witness was excluded because only the candidate completes it (newly
-supported work, reported separately below), so the census matched and every
-ratio compares the same completed work.
+Lock evidence requires, beyond an idle machine and a control drift inside the
+gate:
 
-| Workload | Baseline p50 | Candidate p50 | Ratio (95% CI) | Gate | Verdict |
-|---|---|---|---|---|---|
-| cold load | 205.8 ms | 112.4 ms | 0.546 (0.544–0.547) | ±5.0% | improvement |
-| restart | 208.1 ms | 114.9 ms | 0.552 (0.551–0.553) | ±5.0% | improvement |
-| local edit | 58.2 ms | 3.93 ms | 0.068 (0.067–0.068) | ±5.0% | improvement |
-| declaration edit | 5.49 ms | 5.62 ms | 1.024 (1.019–1.029) | ±5.0% | within noise |
-| augmentation edit | 3.18 ms | 3.34 ms | 1.053 (1.042–1.061) | ±7.8% | within noise |
-| warm query | 0.011 ms | 0.011 ms | 1.015 (1.004–1.029) | ±60.7% | within noise |
+* **The locked runner class.** The machine, both trees' Rust toolchains, the
+  Node runtime and the power state must be the `[runner]` of
+  `performance-gates.toml`, read from that file at run time (never restated in
+  the runner): OS, CPU, logical CPUs, memory, toolchain, runtime, AC power and
+  low-power mode off. Any mismatch is a refusal, whatever the control says.
+* **Matched work.** The harness records, untimed, every witness's outcome —
+  completion, the typed degradation or refusal, and the answered type rendered
+  structurally (union members order-insensitive) — in the original corpus and
+  in each edited state an edit workload reaches. A workload gets a ratio,
+  interval and verdict only when both arms have the same outcome on every
+  witness it queries, and each arm's invocations agree with each other;
+  otherwise it is reported as not comparable. Aggregate completion counts are
+  no longer the matching criterion.
 
-The gate is max(5%, 2 × the baseline's between-invocation noise). Throughput
-at 1/2/4/8 workers is within 3% of the baseline at every count. Allocation per
-pass falls 42% on cold load and 94% on local edit. The edit/revert soak
-plateaus in both arms (−0.8% / −0.7% from the second to the last quarter).
-
-Two matched workloads are slower without crossing the gate:
-**augmentation edit** by 5.3% (its CI excludes zero, and it sits above the 5%
-floor but inside the measured-noise threshold) and **declaration edit** by
-2.4%. Neither is a gate failure under the policy above; both are recorded here
-rather than left inside the verdict column.
-
-**Newly supported work.** The `Call` witness (a call over an intersection
-whose signatures differ only in their result) completes on the candidate and
-is degraded on the baseline. Its cost is not folded into any ratio above.
+**The receipt is pending.** No locked session has run the current harness and
+runner on the current head. The session of 2026-09-23 (Apple M3) ran an
+earlier harness with a pooled bootstrap, unbatched warm queries and the
+earlier verdict wording; its ratios are historical evidence only and are not
+this node's performance receipt. The receipt is the next locked session on the
+current head.
 
 ## Unmeasured surfaces
 
