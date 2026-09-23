@@ -1,0 +1,72 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP16",
+  "kind": "implementation",
+  "products": [
+    "VuePublicConstructorContract",
+    "PublicInstanceProjection",
+    "ConstructorCompatibilityReceipt"
+  ],
+  "mandatoryCases": [
+    "STP16-required-api",
+    "STP16-public-members",
+    "STP16-private-leak",
+    "STP16-generic-constraint",
+    "STP16-public-callable",
+    "STP16-type-precision",
+    "STP16-public-specialization"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP16/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP16/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP16/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP16/probes/tsconfig.json",
+    "hoverNeedle": "stp16HoverTarget",
+    "definitionNeedle": "stp16DefinitionTarget",
+    "expectedNegativeCode": 2339,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "__VerterPublicInstance<string | number>"
+  },
+  "cases": [
+    {
+      "id": "STP16-required-api",
+      "disposition": "accept",
+      "twins": ["instancetype-template-ref", "required-prop-required-argument"]
+    },
+    {
+      "id": "STP16-public-members",
+      "disposition": "accept",
+      "twins": ["typed-props-emit-slots-and-exposed-members"]
+    },
+    {
+      "id": "STP16-private-leak",
+      "disposition": "reject",
+      "twins": ["setup-private-binding-is-not-an-instance-member"]
+    },
+    {
+      "id": "STP16-generic-constraint",
+      "disposition": "reject",
+      "twins": ["invalid-explicit-argument-errors-without-overload-fallback"]
+    },
+    {
+      "id": "STP16-public-callable",
+      "disposition": "reject",
+      "twins": ["default-export-has-no-call-signature"]
+    },
+    {
+      "id": "STP16-type-precision",
+      "disposition": "reject",
+      "twins": ["authored-field-types-without-any-unknown-or-never"]
+    },
+    {
+      "id": "STP16-public-specialization",
+      "disposition": "accept",
+      "twins": ["explicit-comp-number", "props-inferred-new-comp"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP16 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::public_constructor",
+  "runtimeCorrectness": true,
+  "notes": "Vue public constructor and instance contract. The contract is derived from the authored script blocks by syntax only and renders one generic construct signature over the authored binder (constraints, defaults, const), props/instance aliases specialized by the same binder, Vue's ComponentPublicInstance base with typed $props/$emit/$slots, and exposed members through the checking body's expose provider; setup-private bindings stay off the instance. Vue IDE routing stays on project_ide and its public carrier; this node exposes the dormant VueProjectionBackend::public_constructor as the backend's PublicApi. STP58 owns Vue atomic activation and the retirement of the tsc/script public carrier."
+}

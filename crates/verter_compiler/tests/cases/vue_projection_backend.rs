@@ -1232,3 +1232,77 @@ fn attribute_operations_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// The production public-constructor path runs on real Vue SFC carrier
+/// bytes and is the backend's `PublicApi`: one generic construct signature
+/// over the authored binder, exposed members only on the instance, and the
+/// rendered declaration the public-constructor tsc probes check through both
+/// engines.
+#[test]
+fn public_constructor_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        ConstructorSource, PropsRequirement, PublicSurface, VuePublicConstructorContract,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const FIXTURE: &str =
+        include_str!("../../../../tests/sfc-projection/STP16/probes/components/Picker.vue.d.ts");
+    const SFC: &str = concat!(
+        "<template>\n",
+        "<slot :item=\"props.test\" />\n",
+        "</template>\n",
+        "<script setup lang=\"ts\" generic=\"const T extends string | number = string\">\n",
+        "import { ref, type VNode } from \"vue\";\n",
+        "const props = defineProps<{ test: T; label?: string }>();\n",
+        "const emit = defineEmits<{ change: [value: T]; close: [] }>();\n",
+        "defineSlots<{ default(props: { item: T }): VNode[] }>();\n",
+        "const open = defineModel<boolean>(\"open\");\n",
+        "const secret = ref(0);\n",
+        "const current = ref<T>();\n",
+        "function reset(): void { secret.value = 0; }\n",
+        "defineExpose({ reset, current });\n",
+        "defineOptions({ name: \"Picker\", inheritAttrs: false });\n",
+        "</script>\n",
+    );
+    fn public_api(
+        contract: <VueProjectionBackend as ProjectionBackend>::PublicApi,
+    ) -> VuePublicConstructorContract {
+        contract
+    }
+
+    let artifact = registered_artifact("file:///Picker.vue", SFC);
+    let contract = public_api(
+        VueProjectionBackend
+            .public_constructor(SFC, &artifact)
+            .expect("projects"),
+    );
+    assert_eq!(contract.source, ConstructorSource::ScriptSetup);
+    assert_eq!(contract.props_requirement, PropsRequirement::Required);
+    assert!(!contract.instance.publishes("secret"));
+    assert!(contract.instance.publishes("reset") && contract.instance.publishes("current"));
+    let receipt = contract.receipt();
+    assert_eq!(
+        (receipt.construct_signatures, receipt.call_signatures),
+        (1, 0)
+    );
+    assert_eq!(
+        receipt.binder_dependent_surfaces,
+        vec![
+            PublicSurface::Props,
+            PublicSurface::Events,
+            PublicSurface::Slots,
+            PublicSurface::Expose,
+        ]
+    );
+    let rendered = contract.declaration().expect("rendered");
+    assert!(
+        FIXTURE.replace("\r\n", "\n").ends_with(&rendered),
+        "the probe fixture must end with the carrier's rendered declaration:\n{rendered}"
+    );
+    assert_eq!(
+        VueProjectionBackend
+            .public_constructor("<script></script>", &artifact)
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
