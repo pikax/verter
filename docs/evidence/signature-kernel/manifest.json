@@ -5,7 +5,7 @@
   "contract": {
     "path": "docs/arch/signature-kernel.md",
     "revision": "4.1",
-    "sha256": "d53307cac5bdedae3342cafdc6dab98223b613c3168c8484ee8e2d6434625564"
+    "sha256": "c9846ada05acf608af22234ce3faec4266add1ede1be413ead3b92a90c16cf46"
   },
   "oracle": {
     "typescript": "7.0.2",

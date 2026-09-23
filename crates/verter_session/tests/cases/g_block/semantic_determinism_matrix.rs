@@ -568,90 +568,107 @@ fn stable_key_table_enumerates_every_semantic_node_data_category() {
 // §5.9 — the determinism perturbation matrix
 // ─────────────────────────────────────────────────────────────────────────
 
-/// One §5.9 perturbation row.
+/// One §5.9 perturbation row. Every row is Ready: its driver replays every
+/// axis the product has a surface for.
 struct MatrixRow {
     id: &'static str,
     /// The §5.9 first-column text (abbreviated to its stable prefix).
     perturbation: &'static str,
-    /// The executable driver test for a row replayable today, else the
-    /// `#[ignore]` reason naming the MISSING PUBLIC SURFACE that keeps the
-    /// row undrivable (or the fail-closed condition it hits) — never a
-    /// coordination identifier, which tells a reader nothing about what
-    /// has to be built. Enforced below.
-    driver: Driver,
+    /// The executable driver test.
+    driver: &'static str,
+    /// Axes the contract makes CONDITIONAL on a product surface that does not
+    /// exist yet. A dormant axis is not a skipped requirement: it has no
+    /// subject until its surface exists, the contract names it, and a
+    /// tripwire test fails the day the surface appears. Enforced below.
+    dormant: &'static [DormantAxis],
 }
 
-enum Driver {
-    Ready { test: &'static str },
-    Ignored { reason: &'static str },
+/// A conditional §5.9 axis with no subject in the product today.
+struct DormantAxis {
+    /// The axis, as the contract's conditional-axis note names it.
+    axis: &'static str,
+    /// The product surface whose existence activates the axis.
+    applies_when: &'static str,
 }
+
+/// DET-05's conditional axis (contract §5.9, conditional axis).
+const PERSISTED_CACHE_AXIS: &str = "persisted-cache axis";
 
 const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         id: "DET-01",
         perturbation: "Same files arrive in forward/reverse/random order",
-        driver: Driver::Ready { test: "det_01_forward_reverse_random_arrival" },
+        driver: "det_01_forward_reverse_random_arrival",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-02",
         perturbation: "Lazy load versus eager preload; queried in different orders",
-        driver: Driver::Ready { test: "det_02_lazy_vs_eager_query_order" },
+        driver: "det_02_lazy_vs_eager_query_order",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-03",
         perturbation: "An unrelated type/literal is interned or queried first",
-        driver: Driver::Ready { test: "det_03_unrelated_interning_first" },
+        driver: "det_03_unrelated_interning_first",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-04",
         perturbation: "Worker counts 1/2/4/8, randomized delays/work stealing, duplicate publishers",
-        driver: Driver::Ready { test: "det_04_worker_counts_1_2_4_8" },
+        driver: "det_04_worker_counts_1_2_4_8",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-05",
-        perturbation: "Cold, warm, partial persisted cache, edit/revert, cancelled/retried work, epoch rebuild",
-        driver: Driver::Ignored {
-            reason: "the cross-process persisted-cache axis has no public drivable surface: \
-                     nothing persists a semantic cache across a process; a partial resident \
-                     cache is driven by family eviction, and the cold, warm, edit-revert, \
-                     cancelled/retried and epoch-rebuild axes are asserted in the ignored \
-                     body and by the drivable subset",
-        },
+        perturbation: "Cold, warm, partial resident cache, edit/revert, cancelled/retried work, epoch rebuild",
+        driver: "det_05_cache_lifecycle",
+        dormant: &[DormantAxis {
+            axis: PERSISTED_CACHE_AXIS,
+            applies_when: "the product persists a semantic cache across processes",
+        }],
     },
     MatrixRow {
         id: "DET-06",
         perturbation: "Hash seed changes, equal prefixes, forced full stable-fingerprint collisions",
-        driver: Driver::Ready { test: "det_06_hash_seed_and_forced_collisions" },
+        driver: "det_06_hash_seed_and_forced_collisions",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-07",
         perturbation: "Duplicate shapes with distinct authored/synthetic origins, anonymous/virtual units, recursive binders",
-        driver: Driver::Ready { test: "det_07_duplicate_origins_and_anonymous_units" },
+        driver: "det_07_duplicate_origins_and_anonymous_units",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-08",
         perturbation: "Contextual body demands with the same descriptor/type arguments",
-        driver: Driver::Ready { test: "det_08_contextual_body_demands" },
+        driver: "det_08_contextual_body_demands",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-09",
         perturbation: "Policy changes with resident parent caches",
-        driver: Driver::Ready { test: "det_09_policy_change_with_resident_parents" },
+        driver: "det_09_policy_change_with_resident_parents",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-10",
         perturbation: "Logical checkout relocation with fixed mappings and equivalent resolver facts",
-        driver: Driver::Ready { test: "det_10_relocation" },
+        driver: "det_10_relocation",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-11",
         perturbation: "Authored overload/intersection order is deliberately changed",
-        driver: Driver::Ready { test: "det_11_authored_reorder_detected" },
+        driver: "det_11_authored_reorder_detected",
+        dormant: &[],
     },
     MatrixRow {
         id: "DET-12",
         perturbation: "Same output requested with different preceding unrelated outputs",
-        driver: Driver::Ready { test: "det_12_unrelated_preceding_outputs" },
+        driver: "det_12_unrelated_preceding_outputs",
+        dormant: &[],
     },
 ];
 
@@ -684,23 +701,40 @@ fn matrix_row(id: &str) -> &'static MatrixRow {
 /// Ready, and names THIS test — a renamed test or a re-pointed row
 /// fails here instead of silently orphaning the perturbation.
 fn assert_ready(id: &str, test: &str) {
-    match matrix_row(id).driver {
-        Driver::Ready { test: named } => assert_eq!(
-            named, test,
-            "{id}: the registration names driver `{named}`, this test is `{test}` — keep them              pointed at each other"
-        ),
-        Driver::Ignored { reason } => panic!(
-            "{id}: this replay driver exists but the row is registered ignored ({reason})"
-        ),
-    }
+    let named = matrix_row(id).driver;
+    assert_eq!(
+        named, test,
+        "{id}: the registration names driver `{named}`, this test is `{test}` — keep them \
+         pointed at each other"
+    );
+}
+
+/// The contract's §5.9 conditional-axis note: the paragraph that makes an
+/// axis conditional on a product surface.
+fn contract_5_9_conditional_note() -> String {
+    let contract = read_repo_file("docs/arch/signature-kernel.md");
+    let section = contract
+        .split("### 5.9 Mandatory determinism matrix")
+        .nth(1)
+        .expect("the contract's §5.9 section");
+    let section = section.split("## 6.").next().expect("§6 follows §5.9");
+    section
+        .split("**Conditional axis.**")
+        .nth(1)
+        .expect("the contract's §5.9 conditional-axis note")
+        .split("\n\n")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Perturbation registration: the matrix enumerates EVERY §5.9 perturbation
-/// exactly once, each with a non-empty driver or a block-named ignore
-/// reason, and the driver names are unique.
+/// exactly once, each with a non-empty driver; the driver names are unique;
+/// and every dormant axis is one the contract itself makes conditional.
 #[test]
 fn determinism_matrix_enumerates_every_5_9_row() {
     let contract = contract_5_9_perturbations();
+    let conditional = contract_5_9_conditional_note();
     assert_eq!(
         contract.len(),
         MATRIX.len(),
@@ -721,36 +755,30 @@ fn determinism_matrix_enumerates_every_5_9_row() {
             row.perturbation,
             contract_text
         );
-        match row.driver {
-            Driver::Ready { test } => {
-                assert!(
-                    !test.is_empty(),
-                    "{}: a ready row names its driver test",
-                    row.id
-                );
-                drivers.push(test);
-            }
-            Driver::Ignored { reason } => {
-                assert!(
-                    reason.contains("no public") || reason.contains("fails closed"),
-                    "{}: the ignore reason names the MISSING PUBLIC SURFACE that keeps the \
-                     row undrivable — never a coordination identifier, which tells a reader \
-                     nothing about what has to be built",
-                    row.id
-                );
-            }
+        assert!(
+            !row.driver.is_empty(),
+            "{}: a row names its driver test",
+            row.id
+        );
+        drivers.push(row.driver);
+        for dormant in row.dormant {
+            assert!(
+                conditional.contains(dormant.axis),
+                "{}: the dormant `{}` is not an axis the contract's §5.9 conditional-axis \
+                 note makes conditional — a requirement is never parked by registration alone",
+                row.id,
+                dormant.axis
+            );
+            assert!(
+                !dormant.applies_when.is_empty(),
+                "{}: a dormant axis names the product surface that activates it",
+                row.id
+            );
         }
     }
     drivers.sort_unstable();
     drivers.dedup();
-    assert_eq!(
-        drivers.len(),
-        MATRIX
-            .iter()
-            .filter(|row| matches!(row.driver, Driver::Ready { .. }))
-            .count(),
-        "driver test names are unique"
-    );
+    assert_eq!(drivers.len(), MATRIX.len(), "driver test names are unique");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -927,25 +955,65 @@ fn det_04_worker_counts_1_2_4_8() {
     }
 }
 
-/// DET-05 (ignored) — the cold / warm / edit-revert / CANCELLED-RETRIED /
-/// EPOCH-REBUILD axes ARE driven below (cold equals warm on both bases; an
-/// authored edit changes both; the revert restores the original
-/// observation; a caller-cancelled request answers complete-and-cold-equal
-/// or `Cancelled`, and its retry equals a cold host; the public
-/// `clear_compile_cache` advances the store-view epoch and the same logical
-/// snapshot then gives the same observation and bytes). A PARTIAL resident
-/// cache is driven by `det_05_partial_resident_cache_after_family_eviction`.
-/// One axis has no drivable surface: a cache PERSISTED across processes —
-/// the product persists no semantic cache at all. The row stays ignored
-/// naming it; the driven axes stay asserted so the un-ignoring change
-/// inherits a real body, not a stub.
+/// DET-05 — every axis of the cache lifecycle the product has is driven:
+/// cold equals warm on both bases; an authored edit changes both and the
+/// revert restores the original observation; a caller-cancelled request
+/// answers complete-and-cold-equal or `Cancelled`, and its retry equals a
+/// cold host; the public `clear_compile_cache` advances the store-view epoch
+/// and the same logical snapshot then gives the same observation and bytes;
+/// and a PARTIAL resident cache — the family memo past its retention bound —
+/// re-answers an evicted witness exactly as a cold host does. The
+/// cross-process persisted-cache axis is registered DORMANT: the contract
+/// makes it conditional on the product persisting a semantic cache, which it
+/// does not (see `det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes`).
 #[test]
-#[ignore = "the cross-process persisted-cache axis has no public drivable surface: nothing \
-            persists a semantic cache across a process; the cold, warm, edit-revert, \
-            cancelled/retried, epoch-rebuild and partial resident-cache axes are driven"]
-fn det_05_cold_warm_edit_revert() {
-    assert_registered_ignored("DET-05");
+fn det_05_cache_lifecycle() {
+    assert_ready("DET-05", "det_05_cache_lifecycle");
     drive_det_05_subset();
+    drive_det_05_partial_resident_cache();
+}
+
+/// DET-05's dormant axis stays auditable: it may stay dormant only while no
+/// semantic cache can leave the process. The semantic memo and the signature
+/// kernel are the product's semantic caches; the day either becomes
+/// serializable, this fails, and the change that made it so must activate the
+/// persisted-cache axis — a driver that persists from one process, loads a
+/// partial cache in another and replays the same logical snapshot — before it
+/// lands (contract §5.9, conditional axis).
+#[test]
+fn det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes() {
+    let row = matrix_row("DET-05");
+    assert!(
+        row.dormant
+            .iter()
+            .any(|axis| axis.axis == PERSISTED_CACHE_AXIS),
+        "DET-05: the persisted-cache axis is no longer registered dormant — its driver must \
+         exist and run"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for cache in ["semantic_query_memo", "signature_kernel"] {
+        let mut stack = vec![root.join(cache)];
+        // bounded-loop: the two cache module trees.
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the cache module tree") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("a cache source file");
+                for marker in ["serde", "Serialize", "Deserialize", "bincode", "rkyv"] {
+                    assert!(
+                        !source.contains(marker),
+                        "{}: `{marker}` — a semantic cache can now be serialized, so DET-05's \
+                         persisted-cache axis is no longer dormant: add and pass its driver \
+                         before landing (contract §5.9, conditional axis)",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// More distinct answered questions than the family memo retains: the
@@ -958,12 +1026,8 @@ const FAMILY_EVICTION_FLOOD: usize = 4200;
 /// bound holds a PARTIAL cache: its oldest answers evicted, the rest
 /// resident. The witness answered first is evicted by the flood — re-asked,
 /// its record is cold while a question answered last is still served warm —
-/// and its answer equals a cold host's on both bases. Run by default; the
-/// PERSISTED form of the axis (a cache carried across processes) has no
-/// product surface and stays with the ignored row.
-#[test]
-fn det_05_partial_resident_cache_after_family_eviction() {
-    assert_registered_ignored("DET-05");
+/// and its answer equals a cold host's on both bases.
+fn drive_det_05_partial_resident_cache() {
     let canonical = "/det/edit.ts";
     let cold_host = build_host(&[(canonical, EDIT_ORIGINAL_TS)]);
     let cold = observe(&cold_host, canonical, "witness");
@@ -1014,23 +1078,6 @@ fn det_05_partial_resident_cache_after_family_eviction() {
         witness_row(&cold_host),
         "DET-05: the witness's generated bytes changed under a partial cache"
     );
-}
-
-/// DET-05's drivable subset, run by default: an ignored test runs in no CI
-/// lane, so leaving the driven axes only inside the ignored row would let
-/// them rot unobserved.
-#[test]
-fn det_05_drivable_subset() {
-    assert_registered_ignored("DET-05");
-    drive_det_05_subset();
-}
-
-/// An ignored row's body opens by checking the registration still says so:
-/// a row re-registered Ready must move to its own driver.
-fn assert_registered_ignored(id: &str) {
-    if let Driver::Ready { test } = matrix_row(id).driver {
-        panic!("{id} is registered ready ({test}) — update this row");
-    }
 }
 
 /// A witness with enough connected work that a concurrent cancellation can
