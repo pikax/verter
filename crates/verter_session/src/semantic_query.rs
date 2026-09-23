@@ -1463,16 +1463,73 @@ impl CanonicalTypeSubstitution {
     }
 }
 
-/// The behavioral policy axes of a `FlowReturn` query. EMPTY today — the
-/// whole-return producer has no policy fork; the struct exists so a later
-/// policy axis lands as key data, never as an implicit global.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct FlowReturnPolicy {}
+/// The `null` / `undefined` algebra one union is constructed under —
+/// TypeScript's `strictNullChecks`, carried as a construction input
+/// rather than read from an ambient setting.
+///
+/// With `strictNullChecks` off, `null` and `undefined` inhabit every type,
+/// so the checker's `getUnionType` never adds a nullable member to a
+/// union's type set: `string | null` IS `string`, and a union made only of
+/// nullable members is `null` when it names `null`, else `undefined`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NullabilityPolicy {
+    /// `strictNullChecks` on (TypeScript's default): `null` and
+    /// `undefined` are ordinary union members.
+    Strict,
+    /// `strictNullChecks` off: a union erases its `null` / `undefined`
+    /// members whenever any other member remains.
+    Erased,
+}
+
+impl NullabilityPolicy {
+    /// The policy a project's effective `strictNullChecks` selects.
+    #[must_use]
+    pub fn from_strict_null_checks(strict_null_checks: bool) -> Self {
+        if strict_null_checks {
+            Self::Strict
+        } else {
+            Self::Erased
+        }
+    }
+
+    /// Whether `null` / `undefined` are their own types (`strictNullChecks`
+    /// on).
+    #[must_use]
+    pub fn is_strict(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+}
+
+/// The behavioral policy axes of a `FlowReturn` query: the options of the
+/// function's OWN project that change what its body infers. The values are
+/// also folded into the context's `type_env_hash`; stating them here is
+/// what makes the key say which semantics it hashes, and it is the one
+/// place the evaluator reads them from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlowReturnPolicy {
+    /// `strictNullChecks` of the project owning the function: whether
+    /// an optional parameter, an optional member read, an optional chain
+    /// or a fall-through adds `undefined`, and which union algebra every
+    /// join of the body runs.
+    pub nullability: NullabilityPolicy,
+}
+
+impl FlowReturnPolicy {
+    /// The flow policy one project's effective compiler options select.
+    #[must_use]
+    pub fn from_compiler_options(
+        options: &verter_semantic::resolver_core::SemanticCompilerOptions,
+    ) -> Self {
+        Self {
+            nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
+        }
+    }
+}
 
 /// Env a [`SemanticQueryKey::FlowReturn`] value depends on: the full
 /// `P R T L J` set (whole-function program analysis is the widest-env
 /// operation in the key surface), the TYPE-ONLY substitution axis, and the
-/// (empty) policy axis.
+/// policy axis of the function's own project.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowReturnContext {
     /// Parse-env dimension (`P`) — the value is a function of the parsed
@@ -1492,7 +1549,7 @@ pub struct FlowReturnContext {
     /// The active TYPE-ONLY substitution environment (type-parameter →
     /// node). Value bindings, locals, and `this` never enter it.
     pub type_substitution: CanonicalTypeSubstitution,
-    /// The policy axis (no forks today).
+    /// The policy axis: the function's own project's null semantics.
     pub policy: FlowReturnPolicy,
 }
 
@@ -7629,8 +7686,13 @@ pub enum SemanticQueryKey {
         path: Arc<[Arc<str>]>,
         context: TypeOfContext,
     },
+    /// Canonical union construction over `members` under `nullability` —
+    /// the `null` / `undefined` algebra is part of the identity, so a
+    /// reduction answered for one `strictNullChecks` setting never serves
+    /// the other.
     ReduceUnion {
         members: Arc<[SemanticNodeId]>,
+        nullability: NullabilityPolicy,
     },
     /// Ordered intersection reduction over an explicit construction input.
     /// Binary inputs allocate no recipe. Grouping is the input recipe.

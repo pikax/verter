@@ -14,9 +14,9 @@ use rustc_hash::FxHashMap;
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
-    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
-    QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceEntry, SurfaceMember,
+    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, NullabilityPolicy, OptionalityMod,
+    PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
+    SignatureKind, SurfaceEntry, SurfaceMember,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::CompilerIntrinsicTypeOp;
@@ -263,7 +263,8 @@ fn primitive_subtag(kind: PrimitiveKind) -> u8 {
 
 fn origin_tag(category: CompositeOriginCategory) -> u8 {
     match category {
-        CompositeOriginCategory::Canonical => 1,
+        CompositeOriginCategory::Canonical(NullabilityPolicy::Strict) => 1,
+        CompositeOriginCategory::Canonical(NullabilityPolicy::Erased) => 8,
         CompositeOriginCategory::CanonicalUnproven => 2,
         CompositeOriginCategory::AuthoredShell => 3,
         CompositeOriginCategory::OrderedCarrier => 4,

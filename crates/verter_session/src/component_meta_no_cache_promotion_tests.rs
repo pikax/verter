@@ -465,6 +465,7 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     let single_member: Arc<[SemanticNodeId]> = Arc::from(vec![base_a].into_boxed_slice());
     let normalize_key = SemanticQueryKey::ReduceUnion {
         members: single_member,
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
     };
     let normalize_result = dispatch.execute_read(normalize_key);
     assert!(

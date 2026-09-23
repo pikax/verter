@@ -51,7 +51,7 @@ Union and intersection construction is closed over **exactly two** query keys
 and **exactly two** crate-private builders:
 
 ```text
-SemanticQueryKey::ReduceUnion { members }                   → build_reduce_union
+SemanticQueryKey::ReduceUnion { members, nullability }      → build_reduce_union
 SemanticQueryKey::ReduceIntersection { input, purpose, ctx } → build_reduce_intersection
         ↓                                                           ↓
 canonical_algebra::intern_ordered_union          canonical_algebra::intern_ordered_intersection
@@ -64,9 +64,21 @@ an undecided relation is never guessed. Both thread `CanonicalEvidence` to
 `deposit_canonical_evidence`; an incomplete comparison sets `cache_suppress`
 (`ReturnOnly`, never a warm canonical result).
 
+A union is built under an explicit `NullabilityPolicy` — `strictNullChecks`
+as construction input. `Erased` (the option off) drops `null` / `undefined`
+beside any other member, as the checker's `getUnionType` does, and a
+nullable-only list becomes `null` if it names `null`, else `undefined`. The
+policy is family identity on `ReduceUnion` and is recorded on the canonical
+stamp (`CompositeOriginCategory::Canonical(NullabilityPolicy)`), so the two
+settings never share a memo entry, a node, or the pre-seal skip.
+Intersections run the strict algebra.
+
 `ProjectSemanticDispatch::intern_normalized_union_or_intersection` is the
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
-through. Two composite constructions are deliberately outside it, both
+through; its unions run the strict algebra. The flow-return evaluator, which
+answers under its function's own project policy, constructs through
+`intern_normalized_union` with the frame's policy instead. Two composite
+constructions are deliberately outside the funnel, both
 `CompositeList::ordered_carrier` mints, and both for the same reason — an
 ordered carrier is an authored sequence, not a commutative intersection, and
 routing it through the reducer would change the origin category and therefore

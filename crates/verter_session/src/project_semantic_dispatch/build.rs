@@ -7240,6 +7240,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
             members: Arc::from(projected.into_boxed_slice()),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         });
         match norm.value {
             QueryResult::Value(id) => {
@@ -9261,7 +9262,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   distributive: false })` for every member, then combines the
     ///   per-member results through
     ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
-    ///   members: per_member_results })`. Termination is guaranteed by
+    ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
     ///   the `distributive: false` flag on each sub-query (no re-
     ///   distribution), the family memo's per-member dedup, and the
     ///   dispatch layer's same-path recursion sentinel. Dispatch owns
@@ -9500,6 +9501,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let normalized = self.conditional_query_output(SemanticQueryKey::ReduceUnion {
             members: Arc::from(per_member),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         });
         output.cache_suppress |= normalized.cache_suppress;
         output.result_is_partial |= normalized.result_is_partial;
@@ -10027,9 +10029,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn build_reduce_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute!(ReduceUnion);
-        self.build_normalize_composite(members, /* is_union */ true)
+        self.build_normalize_composite(
+            members,
+            super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability),
+        )
     }
 
     /// Ordered intersection reduction — the `ReduceIntersection` query
@@ -10070,24 +10076,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
-            self.build_normalize_composite(&members, /* is_union */ false)
+            self.build_normalize_composite(
+                &members,
+                super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
+            )
         } else {
             let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
-            self.build_normalize_composite(&members, /* is_union */ false)
+            self.build_normalize_composite(
+                &members,
+                super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
+            )
         }
     }
 
-    /// Shared body of the two normalization builders.
+    /// Shared body of the two normalization builders: records the origin
+    /// edges and the evidence of the canonical `composite` built over
+    /// `members`.
     fn build_normalize_composite(
         &self,
         members: &Arc<[SemanticNodeId]>,
-        is_union: bool,
+        composite: super::canonical_algebra::CanonicalComposite,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let composite = if is_union {
-            super::canonical_algebra::intern_ordered_union(self.graph(), members)
-        } else {
-            super::canonical_algebra::intern_ordered_intersection(self.graph(), members)
-        };
         let node = composite.node;
         let fence = self.project_generation_signature();
         if members.len() > 1 {
@@ -10167,6 +10176,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect();
                 let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(mapped.into_boxed_slice()),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
@@ -11419,6 +11429,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect();
                 let read = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(members.into_boxed_slice()),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 });
                 match read.value {
                     QueryResult::Value(id) => id,
@@ -11785,15 +11796,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// (discarded duplicates included) reach the enclosing build's memo
     /// entry, and an `Incomplete` comparison folds `cache_suppress`
     /// (ReturnOnly — never a warm canonical result).
+    ///
+    /// A union built here runs the strict-null algebra: the type-level
+    /// operations and projections that construct through this funnel are
+    /// shared across projects and do not model `strictNullChecks`. A
+    /// producer that answers under one project's policy — the flow-return
+    /// evaluator — constructs through [`Self::intern_normalized_union`]
+    /// with that policy instead.
     pub(crate) fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
         if is_union {
-            let composite = super::canonical_algebra::intern_ordered_union(self.graph(), members);
-            self.deposit_canonical_evidence(composite.evidence);
-            composite.node
+            self.intern_normalized_union(members, crate::semantic_query::NullabilityPolicy::Strict)
         } else {
             match self
                 .execute_read(
@@ -11815,6 +11831,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+    }
+
+    /// The canonical union of `members` under `nullability` — the union
+    /// half of [`Self::intern_normalized_union_or_intersection`] with the
+    /// `null` / `undefined` algebra stated by the caller. Under
+    /// [`NullabilityPolicy::Erased`](crate::semantic_query::NullabilityPolicy::Erased)
+    /// the result carries no `null` / `undefined` member beside any other
+    /// member, and its canonical stamp records the erased algebra.
+    pub(super) fn intern_normalized_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        let composite =
+            super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+        self.deposit_canonical_evidence(composite.evidence);
+        composite.node
     }
 
     /// Whether a member-wise composite REBUILD may re-decide its arm list
@@ -11852,7 +11885,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> bool {
         use crate::semantic_query::composite::CompositeOriginCategory as C;
         let derived = match category {
-            C::Canonical | C::CanonicalUnproven | C::AuthoredShell => true,
+            C::Canonical(_) | C::CanonicalUnproven | C::AuthoredShell => true,
             C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
             #[cfg(any(test, feature = "test-support"))]
             C::TestFixture => false,

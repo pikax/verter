@@ -34,8 +34,8 @@ mod tests {
     use super::*;
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, PrimitiveKind, ResolvedDeclSlotIdentity,
-        ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
+        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, PrimitiveKind,
+        ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
     };
     use std::sync::Arc;
     use verter_semantic::analysis::flow::flow_graph::FlowNodeKind;
@@ -100,7 +100,9 @@ mod tests {
                     project_identity: [0; 16],
                     result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                     type_substitution: CanonicalTypeSubstitution::empty(),
-                    policy: FlowReturnPolicy {},
+                    policy: FlowReturnPolicy {
+                        nullability: NullabilityPolicy::Strict,
+                    },
                 },
                 demand: ReturnProjectionDemand::whole_return(),
                 input: FlowInputContext::empty(),

@@ -97,8 +97,13 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
     let index = memo.function_program_index();
     let entry = entry_of(&index, name);
     let (selection, skeleton) = selection_for(&memo, entry, path);
-    memo.flow_slice_content(entry, selection, &skeleton)
-        .expect("slice content must build for an indexed function")
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .expect("slice content must build for an indexed function")
 }
 
 fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
@@ -221,6 +226,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
                 None,
                 &changed_bound,
                 Some(Arc::clone(context)),
+                crate::semantic_query::NullabilityPolicy::Strict
             )
             .is_none(),
         "signature-only lowering must reject an older linked lexical gate too"
@@ -293,7 +299,14 @@ fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
         let entry = entry_of(&index, "f");
         let (selection, bound) = selection_for(&memo, entry, &[]);
         memo.capture_lookup_work.store(0, Ordering::Relaxed);
-        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        let content = memo
+            .flow_slice_content(
+                entry,
+                selection,
+                &bound,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            )
+            .unwrap();
         assert!(matches!(
             content.body.statements.last(),
             Some(SliceStatement::Return {
@@ -1376,6 +1389,7 @@ fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> 
         Some(selection),
         &skeleton,
         Some(Arc::clone(context)),
+        crate::semantic_query::NullabilityPolicy::Strict,
     )
     .expect("selected child content")
 }
@@ -3153,7 +3167,12 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
     let entry = member_entry_of(&index, "C", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let brand = memo
-        .flow_slice_content(entry, selection, &skeleton)
+        .flow_slice_content(
+            entry,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .expect("the class member slice content must build");
     assert_eq!(
         guard_gap_count(&brand),
@@ -3822,7 +3841,12 @@ fn symbolic_and_unrepresentable_calls() {
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection, &skeleton)
+        .flow_slice_content(
+            entry,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
@@ -3868,7 +3892,12 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection, &skeleton)
+        .flow_slice_content(
+            entry,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
@@ -4167,8 +4196,13 @@ fn locator_miss_is_typed_none() {
     let mut missing_contributor = entry.clone();
     missing_contributor.locator.contributor.contributor_index = 9999;
     assert!(
-        memo.flow_slice_content(&missing_contributor, selection.clone(), &skeleton)
-            .is_none(),
+        memo.flow_slice_content(
+            &missing_contributor,
+            selection.clone(),
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict
+        )
+        .is_none(),
         "an out-of-range contributor is a typed miss"
     );
 
@@ -4177,8 +4211,13 @@ fn locator_miss_is_typed_none() {
         declarator_ordinal: 99,
     }]);
     assert!(
-        memo.flow_slice_content(&bad_descent, selection, &skeleton)
-            .is_none(),
+        memo.flow_slice_content(
+            &bad_descent,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict
+        )
+        .is_none(),
         "a mismatched descent is a typed miss"
     );
 }
@@ -5195,7 +5234,14 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
         let (mut selection, bound) = selection_for(&memo, entry, &[]);
         let work = Arc::new(AtomicUsize::new(0));
         selection.assignment_lookup_work = Some(Arc::clone(&work));
-        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        let content = memo
+            .flow_slice_content(
+                entry,
+                selection,
+                &bound,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            )
+            .unwrap();
         let definitions: Vec<_> = content
             .body
             .statements
@@ -5265,7 +5311,12 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     expressions.push(original.clone());
     ir.exprs = expressions.clone().into();
     let content = memo
-        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .flow_slice_content(
+            entry,
+            FlowSliceSelection::from_slice_ir(&ir),
+            &bound,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .unwrap();
     assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
     expressions.push(verter_semantic::analysis::flow::flow_ir::FlowExpr {
@@ -5274,7 +5325,12 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     });
     ir.exprs = expressions.into();
     let content = memo
-        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .flow_slice_content(
+            entry,
+            FlowSliceSelection::from_slice_ir(&ir),
+            &bound,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .unwrap();
     assert!(
         !content

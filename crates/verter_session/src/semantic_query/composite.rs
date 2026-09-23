@@ -81,6 +81,10 @@
 //! instead of re-proving a no-op, while an unproven top pays the full
 //! re-close and its evidence re-deposit on every resurfacing —
 //! budget-degraded results are never skip-classified canonical form.
+//! `Canonical` records the `null` / `undefined` algebra it was proven
+//! under ([`super::NullabilityPolicy`]), and the skip accepts only its own
+//! algebra: a list canonical with `strictNullChecks` on can still carry
+//! the nullable members the erased algebra removes.
 //!
 //! **Identity discipline.** The category is EXCLUDED from `Eq` / `Hash`:
 //! arena identity stays `(members, kind, sidecar scope)` exactly as
@@ -315,7 +319,7 @@ impl<K: CompositeKind> CompositeList<K> {
             // `CanonicalUnproven` — same value, no canonical-form claim.
             CompositeCarrierCategory::Canonical(witness) => {
                 if witness.certifies_canonical_form() {
-                    CompositeOriginCategory::Canonical
+                    CompositeOriginCategory::Canonical(witness.nullability())
                 } else {
                     CompositeOriginCategory::CanonicalUnproven
                 }
@@ -406,9 +410,14 @@ impl<K: CompositeKind> std::ops::Deref for CompositeList<K> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CompositeOriginCategory {
     /// Minted by a COMPLETE canonicalization: the list is PROVEN canonical
-    /// form. This is the sole tag the pre-seal closure's O(1) skip
-    /// accepts.
-    Canonical,
+    /// form under the recorded `null` / `undefined` algebra. This is the
+    /// sole tag the pre-seal closure's O(1) skip accepts, and only for a
+    /// closure running that same algebra: a strict-null canonical list
+    /// may still carry the nullable members an erased closure removes, so
+    /// two `strictNullChecks` settings never share the skip. The algebra
+    /// is part of the payload's identity, so the same member list minted
+    /// under both settings interns as two nodes.
+    Canonical(super::NullabilityPolicy),
     /// Minted by the canonical algebra from an INCOMPLETE canonicalization
     /// (over-cap arm set, exhausted compare budget, dangling arm,
     /// undecided bounded peek): the value is the deterministic budgeted

@@ -949,27 +949,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key
     }
 
-    /// The relation environment of this dispatch — the `R/T/L/J` env and
-    /// the effective strict-family configuration of the project owning the
-    /// request's canonical, resolved ONCE per dispatch from the published
-    /// project tables (the same tables the env hashes were composed from).
+    /// The relation environment a judgement opened at this point is
+    /// decided under — the `R/T/L/J` env and the effective strict-family
+    /// configuration of the project owning the file whose answer is being
+    /// decided.
     ///
-    /// The request canonical comes from the installed request context; a
+    /// Inside a flow-return frame that file is the frame's function's own
+    /// file (the innermost [`Self::relation_env_scope`] entry), so an
+    /// inferred return is decided under its own project's options whichever
+    /// request demanded it. Outside every frame it is the request's
+    /// canonical, resolved ONCE per dispatch from the published project
+    /// tables (the same tables the env hashes were composed from); a
     /// dispatch running outside any request (a bare test dispatch, a direct
-    /// non-audited caller) runs the workspace default — TypeScript's default
-    /// options under the workspace-default env — never a project it was
-    /// not asked for.
+    /// non-audited caller) runs the workspace default — TypeScript's
+    /// default options under the workspace-default env — never a project it
+    /// was not asked for.
     pub(crate) fn relation_environment(&self) -> RelationEnvironment {
+        if let Some(scoped) = self.relation_env_scope.borrow().last() {
+            return *scoped;
+        }
         *self.relation_env.get_or_init(|| {
             let host = self.ctx.host_for_fact_tracer_install();
             match crate::request_context::current_request_canonical() {
-                Some(canonical) => RelationEnvironment {
-                    env: host.host_view_env_hashes_for(&canonical),
-                    project_identity: host.host_view_project_identity_for(&canonical).0,
-                    strict: StrictFamilyConfig::from_options(
-                        &host.semantic_compiler_options_for(&canonical),
-                    ),
-                },
+                Some(canonical) => self.relation_environment_for(&canonical),
                 None => RelationEnvironment {
                     env: host.host_view_env_hashes(),
                     project_identity: host.host_view_project_identity().0,
@@ -977,6 +979,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
             }
         })
+    }
+
+    /// The relation environment of the project owning `canonical`: its
+    /// published `R/T/L/J` env and its effective strict-family options.
+    pub(super) fn relation_environment_for(&self, canonical: &str) -> RelationEnvironment {
+        let host = self.ctx.host_for_fact_tracer_install();
+        RelationEnvironment {
+            env: host.host_view_env_hashes_for(canonical),
+            project_identity: host.host_view_project_identity_for(canonical).0,
+            strict: StrictFamilyConfig::from_options(
+                &host.semantic_compiler_options_for(canonical),
+            ),
+        }
+    }
+
+    /// Decide every relation opened inside `scope` under the environment of
+    /// the project owning `canonical` — the file whose answer the enclosed
+    /// work decides.
+    ///
+    /// A relation root snapshots the strict-family configuration its
+    /// reducer branches on, and a relation opened while an outer root is
+    /// in flight reads that snapshot. The scope therefore also installs
+    /// its own configuration as the snapshot for its length and restores
+    /// the outer one after, so a judgement nested under an outer root is
+    /// still decided under the options its key was built from.
+    pub(super) fn with_relation_environment_of<T>(
+        &self,
+        canonical: &str,
+        scope: impl FnOnce() -> T,
+    ) -> T {
+        let environment = self.relation_environment_for(canonical);
+        let _environment =
+            super::RelationEnvironmentScope::push(&self.relation_env_scope, environment);
+        let outer = self
+            .dispatch_txn
+            .borrow_mut()
+            .relation
+            .strict
+            .replace(environment.strict);
+        let result = scope();
+        self.dispatch_txn.borrow_mut().relation.strict = outer;
+        result
     }
 
     /// The strict-family configuration in force for this dispatch — the
@@ -2166,6 +2210,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     FlowReturnPendingOutcome::EvaluatedValue(self.materialize_flow_return_wrap(
                         self.close_flow_result_pre_seal(
                             self.apply_frame_key_substitution(&member.key, result),
+                            member.key.context.policy.nullability,
                         ),
                     ))
                 }

@@ -189,8 +189,12 @@ fn canonicalise_for_digest(
             path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
-        SemanticQueryKey::ReduceUnion { members } => SemanticQueryKey::ReduceUnion {
+        SemanticQueryKey::ReduceUnion {
+            members,
+            nullability,
+        } => SemanticQueryKey::ReduceUnion {
             members: Arc::clone(members),
+            nullability: *nullability,
         },
         SemanticQueryKey::ReduceIntersection {
             input,

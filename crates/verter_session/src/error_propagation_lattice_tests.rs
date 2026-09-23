@@ -174,21 +174,36 @@ fn error_any_never_propagation_lattice() {
     // not via retired per-reducer hooks.
     use crate::project_semantic_dispatch::canonical_algebra;
     // union: X | never = X (the `never` arm is dropped, singleton folds).
-    let u = canonical_algebra::intern_ordered_union(graph, &[string, never]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, never],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
         "X | never = X"
     );
     // union: X | any = any.
-    let u = canonical_algebra::intern_ordered_union(graph, &[string, any]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, any],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),
         "X | any = any"
     );
     // union: X | unknown = unknown.
-    let u = canonical_algebra::intern_ordered_union(graph, &[string, unknown]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, unknown],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert_eq!(
         kind(u),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
@@ -196,7 +211,12 @@ fn error_any_never_propagation_lattice() {
     );
     // union: NO absorption for a plain union of ordinary types — the
     // canonical form keeps both arms.
-    let u = canonical_algebra::intern_ordered_union(graph, &[string, number]).node;
+    let u = canonical_algebra::intern_ordered_union(
+        graph,
+        &[string, number],
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .node;
     assert!(
         matches!(kind(u), Some(SemanticNodeData::Union(members)) if members.len() == 2),
         "string | number must stay a two-arm union"

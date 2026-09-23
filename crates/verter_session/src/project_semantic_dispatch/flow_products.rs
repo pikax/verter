@@ -1048,9 +1048,10 @@ pub use super::canonical_algebra::{LiteralFreshness, LiteralProvenance, LiteralP
 
 /// The canonical semantic-type algebra a product join constructs every
 /// semantic composite through. This substrate never assembles a union or
-/// an intersection itself; the sole production implementor forwards to the
-/// dispatch's canonical union authority, which deposits the construction's
-/// evidence on the dispatch's own rails.
+/// an intersection itself; the sole production implementor
+/// ([`DispatchFlowAlgebra`]) forwards to the dispatch's canonical union
+/// authority under the frame's own null algebra, which deposits the
+/// construction's evidence on the dispatch's own rails.
 pub trait FlowSemanticAlgebra {
     /// The canonical union of `members`.
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite;
@@ -1062,16 +1063,31 @@ pub trait FlowSemanticAlgebra {
     ) -> Result<LiteralProvenanceResult, FlowGap>;
 }
 
-impl FlowSemanticAlgebra for super::ProjectSemanticDispatch<'_> {
+/// The production [`FlowSemanticAlgebra`]: the dispatch's canonical union
+/// authority under the `null` / `undefined` algebra of the frame whose
+/// products join — a branch merge in a function whose project runs with
+/// `strictNullChecks` off erases the nullable arms like every other union
+/// of that function.
+pub struct DispatchFlowAlgebra<'a, 'd> {
+    /// The dispatch whose canonical authority constructs the union.
+    pub dispatch: &'a super::ProjectSemanticDispatch<'d>,
+    /// The joining frame's null algebra.
+    pub nullability: crate::semantic_query::NullabilityPolicy,
+}
+
+impl FlowSemanticAlgebra for DispatchFlowAlgebra<'_, '_> {
     fn literal_provenance(
         &self,
         inputs: &[LiteralProvenance<'_>],
         result: SemanticNodeId,
     ) -> Result<LiteralProvenanceResult, FlowGap> {
-        let (membership, evidence) =
-            super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
+        let (membership, evidence) = super::canonical_algebra::inspect_literal_provenance(
+            self.dispatch.graph(),
+            inputs,
+            result,
+        );
         let incomplete = evidence.incomplete;
-        self.deposit_canonical_evidence(evidence);
+        self.dispatch.deposit_canonical_evidence(evidence);
         if incomplete {
             Err(FlowGap::UnmodeledExpression)
         } else {
@@ -1079,9 +1095,13 @@ impl FlowSemanticAlgebra for super::ProjectSemanticDispatch<'_> {
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
-        let composite = super::canonical_algebra::intern_ordered_union(self.graph(), members);
+        let composite = super::canonical_algebra::intern_ordered_union(
+            self.dispatch.graph(),
+            members,
+            self.nullability,
+        );
         let incomplete = composite.evidence.incomplete;
-        self.deposit_canonical_evidence(composite.evidence);
+        self.dispatch.deposit_canonical_evidence(composite.evidence);
         FlowAlgebraComposite {
             node: composite.node,
             incomplete,
@@ -1112,7 +1132,11 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
         }
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
-        let composite = super::canonical_algebra::intern_ordered_union(self.0, members);
+        let composite = super::canonical_algebra::intern_ordered_union(
+            self.0,
+            members,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
         FlowAlgebraComposite {
             node: composite.node,
             incomplete: composite.evidence.incomplete,

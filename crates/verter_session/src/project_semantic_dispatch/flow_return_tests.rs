@@ -5938,6 +5938,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
                 ));
         let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         });
 
         // The pending typed-gap roots: a typed refusal, never a graph or

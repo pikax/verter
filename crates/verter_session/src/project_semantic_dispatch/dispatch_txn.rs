@@ -154,18 +154,19 @@ impl StrictFamilyConfig {
     }
 }
 
-/// The environment one dispatch runs its relation judgements under: the
-/// `R/T/L/J` dimensions and the strict-family configuration of the project
-/// owning the REQUEST's canonical (the program doing the checking, as in
-/// TypeScript, where strictness is a program-wide option — never the file a
-/// related node happens to be declared in).
+/// The environment a relation judgement runs under: the `R/T/L/J`
+/// dimensions and the strict-family configuration of the project doing the
+/// checking (as in TypeScript, where strictness is a program-wide option —
+/// never the file a related node happens to be declared in). That project
+/// owns the file whose answer is being decided: a flow-return frame's own
+/// function file while the frame evaluates, the REQUEST's canonical
+/// otherwise ([`super::ProjectSemanticDispatch::relation_environment`]).
 ///
-/// Derived once per dispatch ([`super::ProjectSemanticDispatch::relation_environment`])
-/// from the same published project tables the env hashes were composed
-/// from, so the key's `T` and the reducer's branch are two projections of
-/// ONE option set. A dispatch running outside any request context (no
-/// canonical to own it) runs the workspace default: TypeScript's default
-/// options under the workspace-default env.
+/// Derived from the same published project tables the env hashes were
+/// composed from, so the key's `T` and the reducer's branch are two
+/// projections of ONE option set. A dispatch running outside any request
+/// context and any flow frame (no canonical to own it) runs the workspace
+/// default: TypeScript's default options under the workspace-default env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RelationEnvironment {
     pub(crate) env: crate::session_view::EnvHashes,
