@@ -5741,6 +5741,9 @@ fn expression_write_tree(
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
             }
+            SliceExpr::Call(SliceCall::Construct(constructor), _) => {
+                walk(constructor, out);
+            }
             _ => {}
         }
     }
@@ -15019,11 +15022,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             })
     }
 
-    /// The call-executor route of one authored call: overload selection
-    /// and argument-driven clause inference are the executor's
-    /// applicability machinery, so this rail re-reads the authored call
-    /// from the retained snapshot (argument expressions and explicit type
-    /// arguments are parse facts, never re-derived), mints the
+    /// The call-executor route of one authored call or `new` expression:
+    /// overload selection and argument-driven clause inference are the
+    /// executor's applicability machinery, so this rail re-reads the
+    /// authored call from the retained snapshot (argument expressions,
+    /// explicit type arguments and the call/construct form are parse
+    /// facts, never re-derived), mints the
     /// content-free key, and folds the typed outcome back into the
     /// frame's vocabulary — a completed, already-instantiated return
     /// through the callee gate's named no-transfer constructor, an
@@ -15116,7 +15120,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 offset: call.point,
             },
             callee,
-            kind: crate::semantic_query::CallKind::Call,
+            kind: match call.kind {
+                verter_type_expr::IndexedValueCallKind::Call => {
+                    crate::semantic_query::CallKind::Call
+                }
+                verter_type_expr::IndexedValueCallKind::Construct => {
+                    crate::semantic_query::CallKind::Construct
+                }
+            },
             receiver,
             args: Arc::from(args.into_boxed_slice()),
             explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
@@ -15766,6 +15777,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
                 self.call_return_of_callee_node(callee_node, site)
+            }
+            crate::flow_slice_content::SliceCall::Construct(constructor) => {
+                // `new C(…)` — the checker's `resolveNewExpression`: the
+                // constructor's construct signatures, from the shared
+                // signature list, resolved by the call executor exactly as
+                // a call resolves over its call signatures (overload
+                // choice, argument inference and explicit type arguments
+                // included). There is no lone-signature read to fall back
+                // to, so an undecided executor degrades the position.
+                let constructor = match self.eval_expr(constructor) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                self.eval_call_via_resolve_call(constructor, site)
+                    .unwrap_or_else(|| self.degraded_unrepresentable_callee())
             }
         }
     }

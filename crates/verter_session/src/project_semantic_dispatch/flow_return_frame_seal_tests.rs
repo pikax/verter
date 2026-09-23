@@ -22,12 +22,14 @@ const SEAL_CANONICAL: &str = "/ws/flow-frame-seal.ts";
 
 const SEAL_FIXTURE: &str = r#"
 export class Box { readonly tag = "box"; }
+// A tagged template is a call form the substrate has no arm for.
+export declare function box(strings: TemplateStringsArray): Box;
 
 // ── the callee rail: a marker in a callee's RETURN position ──────────
 //
 // tsgo: `{ label: string; made: Box }`
 export function q1LocalHelperBare() {
-  const f = () => new Box();
+  const f = () => box`b`;
   return { label: "x", made: f() };
 }
 
@@ -208,7 +210,7 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 ///
 /// | program | TypeScript 7.0.2 `tsc` |
 /// |---|---|
-/// | `const f = () => new Box(); return { label: "x", made: f() }` | `{ label: string; made: Box }` |
+/// | `` const f = () => box`b`; return { label: "x", made: f() } `` | `{ label: string; made: Box }` |
 /// | `const f = () => ["s", new Box()]; return { label: "x", made: f() }` | `{ label: string; made: (string \| Box)[] }` |
 /// | `return { label: "x", made: (() => ["s", new Box()])() }` | same |
 ///

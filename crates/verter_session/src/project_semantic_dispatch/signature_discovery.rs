@@ -486,6 +486,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             type_arguments,
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded),
             request_canonical.as_deref().unwrap_or(""),
+            None,
         ) else {
             return Ok(Vec::new());
         };

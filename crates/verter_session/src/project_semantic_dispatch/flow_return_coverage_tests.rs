@@ -2493,52 +2493,26 @@ fn generic_overload_group_callee_resolves_by_arity_and_inference() {
     );
 }
 
-/// CANARY — a `new` expression's return is the constructed instance type.
+/// CANARY (landed) — a `new` expression's return is the constructed
+/// instance type.
 ///
 /// Oracle: `ReturnType<typeof callNew>` is `CtorC`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callNew
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the CONSTRUCT-CALL capability — there is no arm that
-/// resolves a class's construct signature to its instance type. The
-/// ADMISSION half is settled: `NewExpression` is a
-/// `ValueDescent::UnmodeledCall`, so it fails closed rather than
-/// publishing the shallow pass's `any` warm (see
-/// `an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered`).
+/// The construction rides the one call carrier to the class's construct
+/// signatures (`SliceCall::Construct`), so the value is the instance,
+/// clean and warm.
 #[test]
-#[ignore = "NewExpression has no construct-call arm: it fails closed as an unmodeled call position instead of resolving the instance type"]
 fn construct_expression_return_is_the_instance_type() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callNew", type_ref("CtorC"));
 }
 
-/// CANARY — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where `ctorSig`
-/// is a value carrying a `new (…)` signature) returns the signature's
-/// instance type.
+/// CANARY (landed) — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where
+/// `ctorSig` is a value carrying a `new (…)` signature) returns the
+/// signature's instance type.
 ///
 /// Oracle: `ReturnType<typeof callCtorSigNew>` is `{ q: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// expected an object answer, got Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: same as the `new` row above — the construct-signature
-/// group is never consulted. It now FAILS CLOSED rather than publishing
-/// `any` warm, so the canary asserts the value it should produce.
 #[test]
-#[ignore = "construct signatures are never consulted: `new ctorSig(1)` fails closed as an unmodeled call position"]
 fn construct_signature_call_return_is_the_signature_instance_type() {
     let host = ts_host();
     let value = value_of(&host, CALLS, "callCtorSigNew");
@@ -4226,8 +4200,6 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// produce, every one of them different from `any`:
 ///
 /// ```text
-/// callNew         new CtorC(1)                    CtorC
-/// callCtorSigNew  new ctorSig(1)                  { q: string; }
 /// callOptional    maybeFn?.()                     number | undefined
 /// callTagged      tag`a${1}b`                     boolean
 /// ```
@@ -4235,19 +4207,20 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
-/// `awaited_call_return_is_the_awaited_value_wrapped_again`).
+/// `awaited_call_return_is_the_awaited_value_wrapped_again`). Neither is
+/// `new`: a construction rides the call carrier to the construct
+/// signatures (see `construct_expression_return_is_the_instance_type`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
-/// exactly the matching rows — `NewExpression` /
-/// `TaggedTemplateExpression` to `false` flips `callNew` /
-/// `callCtorSigNew` / `callTagged` back to a warm `any`, and
+/// exactly the matching rows — `TaggedTemplateExpression` to `false`
+/// flips `callTagged` back to a warm `any`, and
 /// `ChainElement::CallExpression` to `false` flips `callOptional`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in ["callNew", "callCtorSigNew", "callOptional", "callTagged"] {
+    for name in ["callOptional", "callTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -4258,11 +4231,13 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// The sequence's value is its last operand, so a call there lowers
 /// through the SAME structural call rails its bare spelling takes:
 /// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
-/// exactly like the bare `callRest` twin — the sequence context never
-/// converts a resolved call into a fail-closed marker.
+/// exactly like the bare `callRest` twin, and `(0, new CtorC(1))`
+/// surfaces the constructed `CtorC` exactly like the bare `callNew` —
+/// the sequence context never converts a resolved call into a
+/// fail-closed marker.
 ///
 /// The discriminator runs the other way with the same fixture: every
-/// call form with NO structural arm (`new`, an optional call, a tagged
+/// call form with NO structural arm (an optional call, a tagged
 /// template) keeps the fail-closed verdict when a sequence wraps it —
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
@@ -4272,25 +4247,26 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// the sequence exactly as the resolved bare call's is.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed rows decline to
-/// produce:
+/// --ignoreConfig`):
 ///
 /// ```text
-/// callSeqNew       CtorC
-/// callSeqOptional  number | undefined
-/// callSeqTagged    boolean
+/// callSeqNew       CtorC                (published)
+/// callSeqOptional  number | undefined   (declined — fails closed)
+/// callSeqTagged    boolean              (declined — fails closed)
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest` and `callSeqAwait` to the
-/// fail-closed marker; widening the delegation past the
-/// paren-transparent `CallExpression` form (a `New` / chain / tagged
-/// last operand) flips the three negative rows to a published value.
+/// half's sequence arm flips `callSeqRest`, `callSeqNew` and
+/// `callSeqAwait` to the fail-closed marker; widening the delegation past
+/// the paren-transparent `CallExpression` / `NewExpression` forms (a chain
+/// / tagged last operand) flips the two negative rows to a published
+/// value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
+    assert_clean_warm(&host, CALLS, "callSeqNew", type_ref("CtorC"));
     // An awaited call keeps its own modelled verdict through the
     // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
     assert_clean_warm(
@@ -4303,7 +4279,7 @@ fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
         },
     );
     // Every form with no structural arm keeps failing closed.
-    for name in ["callSeqNew", "callSeqOptional", "callSeqTagged"] {
+    for name in ["callSeqOptional", "callSeqTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }

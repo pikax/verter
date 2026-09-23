@@ -94,6 +94,52 @@ pub(crate) struct IndexedFlowCallExpression {
         Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
 }
 
+/// Lower one call (or `new`) through `lower` while collecting the read root
+/// of each of its `argument_count` arguments and of its receiver.
+///
+/// Absence of an observer result stays distinct from an explicit
+/// `NonBinding` disposition: an argument or receiver the lowering did not
+/// report exactly once is an invalid observation, and the whole call is
+/// then unavailable — no missing address may fall back to the file's
+/// same-spelled value.
+fn observed_indexed_call(
+    argument_count: usize,
+    lower: impl FnOnce(
+        &mut dyn FnMut(
+            verter_semantic::analysis::type_eval_build::IndexedCallReadSite,
+            verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
+        ),
+    ) -> verter_type_expr::IndexedValueCall,
+) -> Option<IndexedFlowCallExpression> {
+    use verter_semantic::analysis::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    let mut roots: Vec<Option<IndexedValueReadRoot>> = (0..argument_count).map(|_| None).collect();
+    let mut receiver_root = None;
+    let mut invalid_observation = false;
+    let call = lower(&mut |site, root| match site {
+        IndexedCallReadSite::Argument(ordinal) => match roots.get_mut(ordinal) {
+            Some(slot) => invalid_observation |= slot.replace(root).is_some(),
+            None => invalid_observation = true,
+        },
+        IndexedCallReadSite::Receiver => {
+            invalid_observation |= receiver_root.replace(root).is_some();
+        }
+    });
+    if invalid_observation {
+        return None;
+    }
+    let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
+    let receiver_root = match (call.receiver.is_some(), receiver_root) {
+        (true, Some(root)) => Some(root),
+        (false, None) => None,
+        _ => return None,
+    };
+    Some(IndexedFlowCallExpression {
+        call,
+        argument_roots,
+        receiver_root,
+    })
+}
+
 /// The committed value of one per-symbol demand cell.
 ///
 /// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
@@ -1435,63 +1481,37 @@ impl DeclBodyMemo {
         Some(Arc::new(node))
     }
 
-    /// Transient typed IR for one authored call expression, re-read from
-    /// the retained snapshot at `span`. The call's served-function entry
-    /// is found through the program index (a flow-selected call is inside
-    /// a served function by construction); no body `TypeExpr` is
-    /// memo-owned.
+    /// Transient typed IR for one authored call or `new` expression,
+    /// re-read from the retained snapshot at `span`. The call's
+    /// served-function entry is found through the program index (a
+    /// flow-selected call is inside a served function by construction); no
+    /// body `TypeExpr` is memo-owned. The lowered call's `kind` says which
+    /// form the span addressed.
     pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
+        use verter_semantic::analysis::type_eval_build::{
+            lower_indexed_call_expression_with_read_roots,
+            lower_indexed_new_expression_with_read_roots,
+        };
         let service = self.service.as_ref()?;
         self.ensure_lease();
         let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
+                let source = parsed.source_str();
                 parsed
                     .with_indexed_call(span, |call| {
-                        use verter_semantic::analysis::type_eval_build::{
-                            lower_indexed_call_expression_with_read_roots, IndexedCallReadSite,
-                            IndexedValueReadRoot,
-                        };
-                        // Keep absence of an observer result distinct from an
-                        // explicit NonBinding disposition. No missing address may
-                        // fall back to the file's same-spelled value.
-                        let mut roots: Vec<Option<IndexedValueReadRoot>> =
-                            (0..call.arguments.len()).map(|_| None).collect();
-                        let mut receiver_root = None;
-                        let mut invalid_observation = false;
-                        let call = lower_indexed_call_expression_with_read_roots(
-                            call,
-                            parsed.source_str(),
-                            &mut |site, root| match site {
-                                IndexedCallReadSite::Argument(ordinal) => {
-                                    match roots.get_mut(ordinal) {
-                                        Some(slot) => {
-                                            invalid_observation |= slot.replace(root).is_some()
-                                        }
-                                        None => invalid_observation = true,
-                                    }
-                                }
-                                IndexedCallReadSite::Receiver => {
-                                    invalid_observation |= receiver_root.replace(root).is_some();
-                                }
-                            },
-                        );
-                        if invalid_observation {
-                            return None;
-                        }
-                        let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
-                        let receiver_root = match (call.receiver.is_some(), receiver_root) {
-                            (true, Some(root)) => Some(root),
-                            (false, None) => None,
-                            _ => return None,
-                        };
-                        Some(IndexedFlowCallExpression {
-                            call,
-                            argument_roots,
-                            receiver_root,
+                        observed_indexed_call(call.arguments.len(), |observe| {
+                            lower_indexed_call_expression_with_read_roots(call, source, observe)
+                        })
+                    })
+                    .or_else(|| {
+                        parsed.with_indexed_construct(span, |call| {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_new_expression_with_read_roots(call, source, observe)
+                            })
                         })
                     })
                     .flatten()

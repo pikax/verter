@@ -1069,6 +1069,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CallCandidates::Candidates(visible) => visible,
             failed => return CandidateVerdict::Degraded(self.candidate_failure(callee, failed)),
         };
+        // `resolveNewExpression` refuses an abstract class before resolving
+        // anything: a `new` over a class's own construct signatures is an
+        // error ("cannot create an instance of an abstract class") whose
+        // answer is the error type, never the instance.
+        if bucket == SignatureKind::Construct
+            && visible
+                .iter()
+                .any(|candidate| self.is_abstract_class_construct_signature(candidate.node))
+        {
+            return CandidateVerdict::Degraded(ResolveCallFailure::NotCallable);
+        }
         let raw = if key.explicit_type_args.is_empty() {
             Arc::clone(&visible)
         } else {
@@ -1356,6 +1367,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         false
+    }
+
+    /// Whether `signature` is an abstract class's OWN construct signature —
+    /// the checker's abstract signature flag. A class's construct signature
+    /// is the only construct signature with no authored return annotation
+    /// whose return is a class instance (the class's constructor, declared
+    /// or synthesized, returns the class it belongs to); a `new () =>
+    /// Base` type authors its return, so a factory typed over an abstract
+    /// class stays constructible.
+    fn is_abstract_class_construct_signature(&self, signature: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let instance = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                kind: SignatureKind::Construct,
+                return_type_span: None,
+                return_type,
+                ..
+            }) => *return_type,
+            _ => return false,
+        };
+        let class = match graph.node_data(instance).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+            _ => return false,
+        };
+        self.ctx
+            .ensure_indexed_ready_serve(class.canonical_id.as_ref())
+            .is_some_and(|serve| {
+                serve
+                    .indexed
+                    .shallow_state
+                    .decl_bodies()
+                    .header_index()
+                    .abstract_classes
+                    .contains(&verter_type_expr::DeclBindingKey::new(
+                        class.owner,
+                        class.decl_name.as_ref(),
+                    ))
+            })
     }
 
     fn call_callee_is_dynamic_any(&self, mut node: SemanticNodeId) -> bool {

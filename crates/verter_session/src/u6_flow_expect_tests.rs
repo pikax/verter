@@ -3400,10 +3400,12 @@ mod expectation_controls {
     }
 
     /// The degraded (`ReturnOnly`, cold-replay) control program — the
-    /// D01 shape. Shared by every control that needs a REAL degraded
-    /// trace.
-    const DEGRADED_SCRIPT: &str = "class Box { readonly tag = \"box\" }\nfunction makeProps() { \
-                                   const f = () => new Box(); return { label: \"x\", made: f() } \
+    /// D12_helper_tagged shape. Shared by every control that needs a REAL
+    /// degraded trace.
+    const DEGRADED_SCRIPT: &str = "class Box { readonly tag = \"box\" }\n\
+                                   declare function box(strings: TemplateStringsArray): Box\n\
+                                   function makeProps() { \
+                                   const f = () => box`b`; return { label: \"x\", made: f() } \
                                    }";
 
     /// CONTROL — exact literal values, BOTH live variants: `"a"` accepts
@@ -4681,7 +4683,7 @@ mod expectation_controls {
             "a wrong degradation pin must fail EXACTLY the typed-degradation clause: {fails:?}"
         );
 
-        // Degraded program (the D01 shape): ReturnOnly, never warm.
+        // Degraded program (the D12_helper_tagged shape): ReturnOnly, never warm.
         let degraded =
             drive_expect_boundary("", "ctl_degraded", DEGRADED_SCRIPT, "makeProps", None);
         let degraded_json = degraded
@@ -5126,7 +5128,7 @@ mod expectation_controls {
         );
     }
 
-    /// CONTROL — the typed unmodelled-position marker: the D01 shape's
+    /// CONTROL — the typed unmodelled-position marker: the D12_helper_tagged shape's
     /// `made` member measures `Opaque(UnmodeledPosition)`; the pin matches
     /// it there and REJECTS a modelled member, so the variant is
     /// exercised and discriminating, not a dead vocabulary row.
@@ -5142,7 +5144,7 @@ mod expectation_controls {
                     &ExpectedNode::Object(&[("label", STR), ("made", OPAQUE)])
                 )
                 .is_empty(),
-                "the D01 shape must pin its unmodelled member with the TYPED marker \
+                "the D12_helper_tagged shape must pin its unmodelled member with the TYPED marker \
                      (measured {})",
                 render_node(dispatch, node, 0)
             );
