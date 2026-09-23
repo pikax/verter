@@ -235,8 +235,9 @@ describe.sequential(`endurance: close cost on the WSP equal-work slice [${config
     const files = [...byFile.keys()].slice(0, FILE_BUDGET);
     expect(files.length, "the slice must yield hoverable corpus documents").toBeGreaterThan(0);
 
-    const serverPid = rig.handle.client.process.pid;
-    expect(serverPid, "the spawned server must expose a pid").toBeDefined();
+    const spawnedPid = rig.handle.client.process.pid;
+    expect(spawnedPid, "the spawned server must expose a pid").toBeDefined();
+    const serverPid = spawnedPid!;
     const samples: CloseCostSample[] = [];
     const failures: string[] = [];
     let cycle = 0;
