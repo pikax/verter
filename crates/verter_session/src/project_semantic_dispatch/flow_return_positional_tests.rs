@@ -63,12 +63,9 @@ export function objectWithUnmodeledBinding() {
 
 // ── B-F2: an array element at a call position ────────────────────────
 //
-// The composite that survives here is the OBJECT, not the array: `made`
-// collapses to ONE marker rather than `Array<string | MARKER>`, losing
-// the modelled `"s"` element (tsgo: `{ label: string; made: (string |
-// Box)[] }`). That collapse is a KNOWN OWED granularity gap, NOT the
-// rule this file states — characterized, with its owner, by
-// `flow_return_frame_seal_tests::an_unmodeled_array_element_collapses_the_array_and_is_owed`.
+// Both composites survive: the OBJECT and the array inside it, whose
+// `new Box()` element alone carries the marker beside the modelled
+// `"s"` one (tsgo: `{ label: string; made: (string | Box)[] }`).
 export function arrayWithUnmodeledCall() {
   return { label: "x", made: ["s", new Box()] };
 }
@@ -285,10 +282,6 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             FlowReturnDegradation::UnmodeledPosition,
         ),
         (
-            "arrayWithUnmodeledCall",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
-        ),
-        (
             "computedMemberOffCall",
             FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
         ),
@@ -331,6 +324,36 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "{name} degraded success is ReturnOnly — nothing warms"
         );
     }
+
+    // `arrayWithUnmodeledCall` — the ARRAY survives too: its element is
+    // `string | MARKER`, the modelled `"s"` element kept beside the marked
+    // `new Box()` one.
+    let outcome = evaluate(&host, POS_CANONICAL, "arrayWithUnmodeledCall")
+        .expect("arrayWithUnmodeledCall must produce a value");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        let element = match dispatch.graph().node_data(made).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => *element,
+            other => panic!("arrayWithUnmodeledCall: the array survives, got {other:?}"),
+        };
+        let members = match dispatch.graph().node_data(element).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.to_vec(),
+            other => panic!("arrayWithUnmodeledCall: a two-element union, got {other:?}"),
+        };
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert!(members
+            .iter()
+            .any(|member| is_unresolved_marker(dispatch, *member)));
+        assert!(members.iter().any(|member| matches!(
+            dispatch.graph().node_data(*member).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        )));
+    });
+    assert_eq!(
+        outcome.degradation,
+        Some(FlowReturnDegradation::UnmodeledPosition)
+    );
+    assert_eq!(outcome.candidates, 0);
 
     // `assignmentCallPosition` — `(z = fs())` is a whole-binding write in
     // expression position whose right-hand side is a resolved call: the

@@ -1716,6 +1716,7 @@ fn for_each_call_expression_root<'a>(
                         oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                             walk_expr(&spread.argument, fire);
                         }
+                        oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
                         other => walk_expr(other.to_expression(), fire),
                     }
                 }

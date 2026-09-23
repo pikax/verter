@@ -563,15 +563,22 @@ fn optional_chain_with_nested_syntactic_effect_lowers_to_gap() {
         "function* makeProps(a: any) { return a?.b(yield 1) }",
     ] {
         let node = content_for(source, "makeProps");
+        // A nested `yield` also puts the body's unmodelled-yield gap ahead
+        // of the return; the return's own argument is what this pins.
+        let returned = node
+            .body
+            .statements
+            .iter()
+            .find(|statement| matches!(statement, SliceStatement::Return { .. }));
         assert!(
             matches!(
-                &node.body.statements[0],
-                SliceStatement::Return {
+                returned,
+                Some(SliceStatement::Return {
                     argument: Some(SliceExpr::Gap(
                         crate::semantic_query::FlowGap::UnmodeledExpression
                     )),
                     ..
-                }
+                })
             ),
             "discarding a nested assignment/update/delete/await/yield must fail closed: {source}"
         );
@@ -1927,9 +1934,9 @@ fn class_heritage_sequence_calls_are_never_blanket_certified() {
 /// control position: the checker binds a predicate call in a ternary test
 /// or a `&&` / `||` left operand into the branch narrowing even when the
 /// WHOLE form folds into one shallow-pass leaf answer (`[isString(x) ? x
-/// : false]` is `(string | boolean)[]` in the checker). Blanket-certifying
-/// that call decided-above dropped the narrowing while the unnarrowed
-/// superset completed clean. A call inside a leaf takes the SAME
+/// : false] as unknown`: a non-const `as` carrier lowers as one leaf).
+/// Blanket-certifying that call decided-above dropped the narrowing while
+/// the unnarrowed superset completed clean. A call inside a leaf takes the SAME
 /// per-callee certification the statement-level control arm applies:
 /// certified only when the callee provably establishes no narrowing,
 /// otherwise the enclosing statement takes the typed gap.
@@ -1939,7 +1946,7 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "a closed same-file predicate in a ternary test",
             "export {};\nfunction isString(x: unknown): x is string { return typeof x === \"string\" }\n\
-             function f(x: string | number) { return [isString(x) ? x : false] }",
+             function f(x: string | number) { return [isString(x) ? x : false] as unknown }",
         ),
         (
             "a closed same-file predicate in a `&&` left operand folded by a carrier",
@@ -1949,12 +1956,12 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "an imported callee in a ternary test",
             "import { isString } from \"./is\";\n\
-             function f(x: string | number) { return [isString(x) ? x : false] }",
+             function f(x: string | number) { return [isString(x) ? x : false] as unknown }",
         ),
         (
             "a closed UNANNOTATED same-file callee in a ternary test",
             "export {};\nfunction check(x: string | number) { return true }\n\
-             function f(x: string | number) { return [check(x) ? x : false] }",
+             function f(x: string | number) { return [check(x) ? x : false] as unknown }",
         ),
     ];
     for (case, source) in refused {
@@ -1974,7 +1981,7 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "a closed non-predicate-annotated callee in a ternary test",
             "export {};\nfunction check(x: string | number): boolean { return true }\n\
-             function f(x: string | number) { return [check(x) ? x : false] }",
+             function f(x: string | number) { return [check(x) ? x : false] as unknown }",
         ),
         (
             "a closed non-predicate-annotated callee in a `&&` left operand folded by a carrier",
@@ -3755,12 +3762,14 @@ fn local_reaching_definition_is_binding_and_local() {
         init,
         declared,
         freshness,
+        auto_typed_form,
     } = &node.body.statements[0]
     else {
         panic!("the first statement must be the const binding");
     };
     assert_eq!(name.as_ref(), "x");
     assert_eq!(*kind, SliceBindingKind::Const);
+    assert!(!auto_typed_form, "a `const` is never auto-typed");
     assert!(
         declared.is_none(),
         "an unannotated declarator carries no declared type"
@@ -4225,7 +4234,7 @@ fn locator_miss_is_typed_none() {
 /// The expression-statement fallthrough — every shape that is neither a
 /// modeled whole-binding write nor a bare assertion call — still EXECUTES
 /// at the statement: a discarded sequence operand (`(assertString(x),
-/// 0);`), a `void` operand, a template interpolation, a call's ARGUMENT
+/// 0);`), a comma operand inside a `void`, a template interpolation, a call's ARGUMENT
 /// (`touch((assertString(x), 0));`), and an assignment the modeled arm
 /// refused (a member target, or a right-hand side the slice did not
 /// select) can all carry an `asserts` narrowing of a frame-owned binding,
@@ -4233,7 +4242,11 @@ fn locator_miss_is_typed_none() {
 /// takes the fail-closed scan: an effect that could narrow a frame binding
 /// flags the typed `GuardNarrowing` gap. Ordinary value-neutral statements
 /// — a call whose callee is PROVEN and whose arguments carry no effect, a
-/// visible write the unapplied-write ledger already covers — stay silent.
+/// visible write the unapplied-write ledger already covers — stay silent,
+/// and so does a call that IS a `void` operand: the checker enters only a
+/// statement's own call or a comma operand into control flow, so it
+/// narrows nothing (TypeScript 7.0.2: `void assertString(x); return x` is
+/// `string | number`).
 #[test]
 fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     let gapped = [
@@ -4243,9 +4256,9 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { (assertString(x), 0); return x }",
         ),
         (
-            "a `void` operand",
+            "a comma operand inside a `void` operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { void assertString(x); return x }",
+             function f(x: string | number) { void (assertString(x), 0); return x }",
         ),
         (
             "a template interpolation",
@@ -4330,6 +4343,11 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
         (
             "a compound write the ledger already covers",
             "export {};\nfunction f(x: number) { x += 1; return x }",
+        ),
+        (
+            "an assertion call that is a `void` operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { void assertString(x); return x }",
         ),
     ];
     for (case, source) in silent {

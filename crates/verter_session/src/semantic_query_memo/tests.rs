@@ -11115,6 +11115,7 @@ mod prepared_identity_bijection {
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
                 policy: crate::semantic_query::FlowReturnPolicy {
                     nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    no_implicit_any: true,
                 },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),

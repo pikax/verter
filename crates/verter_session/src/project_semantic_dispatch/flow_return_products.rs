@@ -102,6 +102,7 @@ mod tests {
                     type_substitution: CanonicalTypeSubstitution::empty(),
                     policy: FlowReturnPolicy {
                         nullability: NullabilityPolicy::Strict,
+                        no_implicit_any: true,
                     },
                 },
                 demand: ReturnProjectionDemand::whole_return(),
@@ -635,6 +636,9 @@ impl FlowFrameProducts {
             if assignment == assignment.with_state(state) {
                 e.field_u32(9, tag as u32);
             }
+        }
+        if reaching.is_some_and(ReachingTypeProduct::widening_nullish) {
+            e.field_bool(10, true);
         }
         e.finish()
     }

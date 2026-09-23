@@ -509,6 +509,13 @@ pub enum SliceStatement {
         /// `null` / `undefined` / `void` value, which carries its
         /// [`SliceFreshness::WideningNullish`] shape.
         freshness: SliceFreshness,
+        /// Whether the declaration has the checker's AUTO-TYPED form: an
+        /// unannotated `let` / `var` with no initializer or with a bare
+        /// `null` / free `undefined` one (`isNullOrUndefined`; `void 0`
+        /// and a conditional do not qualify). Under `noImplicitAny` such a
+        /// variable's type follows its assignments; without it the
+        /// variable is declared as its initializer's widened type.
+        auto_typed_form: bool,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -963,6 +970,19 @@ pub enum SliceExpr {
         /// The entries in source order — construction order is meaning
         /// (a later entry overrides what an earlier one provisioned).
         entries: Arc<[SliceObjectEntry]>,
+    },
+    /// An array literal evaluated STRUCTURALLY: every element is a flow
+    /// expression (parameter / local references substitute). Without a
+    /// const assertion the value is `E[]`, `E` the subtype-reduced union
+    /// of the element values (a fresh literal widened, a spread
+    /// contributing its source's element type); under `as const` it is
+    /// the readonly tuple of the element values, a spread splicing its
+    /// source in.
+    Array {
+        /// The elements in source order.
+        elements: Arc<[SliceArrayElement]>,
+        /// Whether an enclosing `as const` pins the literal.
+        const_asserted: bool,
     },
     /// A nested function VALUE (a function / arrow expression or an
     /// object-literal method in any expression position): its parameters
@@ -1515,6 +1535,25 @@ pub enum SliceObjectEntry {
     },
 }
 
+/// One element of a structurally lowered array literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceArrayElement {
+    /// An element value with its freshness mirror.
+    Value {
+        /// The lowered element value.
+        value: SliceExpr,
+        /// The element expression's top-level freshness shape.
+        freshness: SliceFreshness,
+    },
+    /// A spread (`...source`): the source's elements enter here.
+    Spread {
+        /// The spread source's lowered value.
+        source: SliceExpr,
+    },
+    /// A hole (`[a, , b]`).
+    Elision,
+}
+
 /// How one structurally lowered object-literal member NAMES its key.
 ///
 /// A key spelling whose property name is not the authored text —
@@ -1665,6 +1704,11 @@ pub struct SliceObjectMember {
     /// view to select declared union constituents; ordinary object evaluation
     /// continues to use `value`.
     pub assignment_value: Option<SliceExpr>,
+    /// The value a bare `null` / `undefined` / `void` member holds before
+    /// the literal's widening turns it into `any` (`strictNullChecks`
+    /// off): a join of several values compares them unwidened, as the
+    /// checker's subtype reduction runs before its widening.
+    pub unwidened: Option<SliceExpr>,
     /// The authored method / accessor kind (`None` for a plain property).
     pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
     /// Whether the member is `readonly` — true exactly under an enclosing
@@ -2145,7 +2189,25 @@ pub(crate) fn build_flow_slice_content(
             }
         }
     } else {
-        lowerer.lower_region(&body.statements).region
+        let region = lowerer.lower_region(&body.statements).region;
+        // Only a statement-position `yield x` / `yield;` contributes to
+        // the yield join. A yield anywhere else (`const r = yield x`,
+        // `f(yield x)`, a delegating `yield*`) still yields, so a body
+        // holding one has no complete yield type: the region carries the
+        // typed gap ahead of its statements.
+        if body_has_unmodeled_yield(&body.statements) {
+            let mut statements = Vec::with_capacity(region.statements.len() + 1);
+            statements.push(SliceStatement::Gap(
+                crate::semantic_query::FlowGap::UnmodeledExpression,
+            ));
+            statements.extend(region.statements.iter().cloned());
+            SliceRegion {
+                statements: Arc::from(statements.into_boxed_slice()),
+                can_fall_through: region.can_fall_through,
+            }
+        } else {
+            region
+        }
     };
     let budget_failure = lowerer.budget_failure;
     let inert_write_spans = lowerer.inert_write_spans;
@@ -2719,6 +2781,53 @@ fn pure_optional_member_root_identifier<'a>(
     }
 }
 
+/// Widen the fresh literals of a value stored into a MUTABLE slot (an
+/// object member, an array element): tsc's literal widening at a mutable
+/// location. The widening reaches INTO a branch join — a ternary's fresh
+/// literal arm is the slot's fresh literal — but a narrowed reference arm
+/// is NOT fresh (the checker's own early-return-guard shapes keep their
+/// literal unions), so only leaf arms widen.
+fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
+    match value {
+        SliceExpr::Type(leaf) => SliceExpr::Type(
+            leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
+        ),
+        SliceExpr::Union { arms, guard } => SliceExpr::Union {
+            arms: Arc::from(
+                arms.iter()
+                    .map(|arm| match arm {
+                        SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
+                            verter_semantic::analysis::type_eval_build::widen_shallow_literal,
+                        )),
+                        other => other.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            guard,
+        },
+        value => value,
+    }
+}
+
+/// The type of a bare `null` / `undefined` / `void` value
+/// ([`expr_is_widening_nullish`]): `null`, `undefined`, or the union of a
+/// conditional's two arms.
+fn widening_nullish_type(expression: &Expression<'_>) -> TypeExpr {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => widening_nullish_type(&paren.expression),
+        Expression::TSSatisfiesExpression(satisfies) => {
+            widening_nullish_type(&satisfies.expression)
+        }
+        Expression::ConditionalExpression(conditional) => TypeExpr::Union(Arc::from(vec![
+            widening_nullish_type(&conditional.consequent),
+            widening_nullish_type(&conditional.alternate),
+        ])),
+        Expression::NullLiteral(_) => TypeExpr::Primitive(PrimitiveName::Null),
+        _ => TypeExpr::Primitive(PrimitiveName::Undefined),
+    }
+}
+
 /// Whether an initializer is a BARE literal expression — a fresh
 /// (widening) literal source: a string / numeric / boolean literal or a
 /// substitution-free template, seen through the freshness-transparent
@@ -2794,6 +2903,18 @@ impl SliceFreshness {
     #[must_use]
     pub fn is_mixed(&self) -> bool {
         self.any_fresh() && !self.all_fresh()
+    }
+
+    /// Whether EVERY leaf of the tree is a bare `null` / `undefined` /
+    /// `void` value (and the tree is non-empty) — an initializer whose
+    /// value is only nullable, whatever the null algebra.
+    #[must_use]
+    pub fn all_widening_nullish(&self) -> bool {
+        match self {
+            Self::WideningNullish => true,
+            Self::Fresh | Self::Pinned => false,
+            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_widening_nullish),
+        }
     }
 }
 
@@ -5302,6 +5423,12 @@ impl Lowerer<'_> {
                             }
                             _ => SliceFreshness::Pinned,
                         };
+                        let auto_typed_form = declared.is_none()
+                            && kind != SliceBindingKind::Const
+                            && declarator
+                                .init
+                                .as_ref()
+                                .is_none_or(|init| self.is_null_or_undefined_keyword(init));
                         out.push(SliceStatement::Binding {
                             binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
                                 Some(binding) => binding,
@@ -5317,6 +5444,7 @@ impl Lowerer<'_> {
                             init,
                             declared,
                             freshness,
+                            auto_typed_form,
                         });
                     }
                 }
@@ -5394,6 +5522,7 @@ impl Lowerer<'_> {
                     // flow. Every shape takes the existing typed loop
                     // refusal.
                     if self.control_has_return(statement)
+                        || statement_yields_in_own_frame(statement)
                         || declares_var(statement)
                         || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
@@ -7109,6 +7238,25 @@ impl Lowerer<'_> {
     /// ledger.
     fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
         match unwrap_parenthesized(expression) {
+            // `void x = v;` retypes `x` exactly as the bare write statement
+            // does; every other `void` statement's operand only RUNS, and
+            // its calls are never entered into control flow (the leaf
+            // scanner's `void` rule).
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
+                if let Expression::AssignmentExpression(assignment) =
+                    unwrap_parenthesized(&unary.argument)
+                {
+                    if matches!(
+                        assignment.operator,
+                        oxc_ast::ast::AssignmentOperator::Assign
+                    ) {
+                        if let Some(statement) = self.modeled_assignment_statement(assignment) {
+                            return Some(statement);
+                        }
+                    }
+                }
+                self.scan_unmodeled_statement_effects(expression)
+            }
             Expression::AssignmentExpression(assignment)
                 if matches!(
                     assignment.operator,
@@ -7647,11 +7795,18 @@ impl Lowerer<'_> {
                     // and every other carrier keeps the whole-carrier leaf
                     // lowering (its type is genuinely the carrier's, not its
                     // operand's).
+                    //
+                    // An ARRAY literal lowers structurally under the same
+                    // policy: its const tuple under `as const`, its
+                    // literals kept under `satisfies`.
                     ValueDescent::TypeCarrier(inner) => {
                         match member_literal_policy(other, self.source) {
                             Some(policy) => match value_descent(inner) {
                                 ValueDescent::Object(object) => self
                                     .lower_object_literal_with_policy(object, other, mode, policy),
+                                ValueDescent::Array(array) => {
+                                    self.lower_array_literal(array, policy)
+                                }
                                 _ => self.lower_leaf(other, mode),
                             },
                             None => self.lower_leaf(other, mode),
@@ -7663,6 +7818,9 @@ impl Lowerer<'_> {
                         mode,
                         ObjectMemberPolicy::Widen,
                     ),
+                    ValueDescent::Array(array) => {
+                        self.lower_array_literal(array, ObjectMemberPolicy::Widen)
+                    }
                     // A CONDITIONAL's value is the union of its branch
                     // values, and each branch is lowered as a flow
                     // expression — so a call in a branch rides
@@ -7787,6 +7945,107 @@ impl Lowerer<'_> {
                 }),
                 None,
             )),
+        }
+    }
+
+    /// Lower an array literal to [`SliceExpr::Array`] under an object
+    /// literal's member policy. Every element is its own evaluated
+    /// position — the planner opened each one (a spread's argument for a
+    /// spread) as a child site of the array — so an element outside the
+    /// demand selection rides the typed `Elided` carrier, exactly as an
+    /// object member value does. A fresh element literal widens (the
+    /// element slot is mutable) unless the policy keeps literals or a
+    /// const assertion pins that element; under `as const` a nested
+    /// object or array literal is in the const context too.
+    fn lower_array_literal(
+        &mut self,
+        array: &oxc_ast::ast::ArrayExpression<'_>,
+        policy: ObjectMemberPolicy,
+    ) -> SliceExpr {
+        let const_asserted = policy == ObjectMemberPolicy::ConstAssert;
+        let mode = ExprMode::BindingInit {
+            preserve_literal: true,
+        };
+        let mut elements = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let (expression, spread) = match element {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                    (&spread.argument, true)
+                }
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                    elements.push(SliceArrayElement::Elision);
+                    continue;
+                }
+                other => match other.as_expression() {
+                    Some(expression) => (expression, false),
+                    None => continue,
+                },
+            };
+            let value = if !self.value_span_selected(expression.span()) {
+                // The elided element still RUNS at the literal's
+                // evaluation: its effects take the fail-closed scan.
+                self.scan_unmodeled_position_effects(expression);
+                SliceExpr::Elided
+            } else if const_asserted {
+                self.lower_in_const_context(expression, mode)
+            } else {
+                self.lower_expr(expression, mode)
+            };
+            if spread {
+                elements.push(SliceArrayElement::Spread { source: value });
+                continue;
+            }
+            let pinned = !policy.widens_member_literals()
+                || verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                    expression,
+                    self.source,
+                );
+            elements.push(SliceArrayElement::Value {
+                value: if pinned {
+                    value
+                } else {
+                    widen_mutable_slot_literals(value)
+                },
+                freshness: expression_freshness(expression),
+            });
+        }
+        SliceExpr::Array {
+            elements: Arc::from(elements.into_boxed_slice()),
+            const_asserted,
+        }
+    }
+
+    /// Whether an initializer is a bare `null` or a FREE `undefined`,
+    /// through parentheses — the checker's `isNullOrUndefined`, which
+    /// resolves the name, so a local `undefined` does not qualify.
+    fn is_null_or_undefined_keyword(&self, expression: &Expression<'_>) -> bool {
+        match unwrap_parenthesized(expression) {
+            Expression::NullLiteral(_) => true,
+            Expression::Identifier(identifier) => {
+                identifier.name.as_str() == "undefined"
+                    && matches!(self.classify_occurrence(identifier.span), NameBinding::Free)
+            }
+            _ => false,
+        }
+    }
+
+    /// Lower a value sitting DIRECTLY in a const context — a member value
+    /// or element of a const-asserted literal, through parentheses: a
+    /// nested object or array literal inherits the const assertion
+    /// (TypeScript's `isConstContext`), and every other form lowers as it
+    /// would anywhere else.
+    fn lower_in_const_context(&mut self, expression: &Expression<'_>, mode: ExprMode) -> SliceExpr {
+        match value_descent(unwrap_parenthesized(expression)) {
+            ValueDescent::Object(object) => self.lower_object_literal_with_policy(
+                object,
+                expression,
+                mode,
+                ObjectMemberPolicy::ConstAssert,
+            ),
+            ValueDescent::Array(array) => {
+                self.lower_array_literal(array, ObjectMemberPolicy::ConstAssert)
+            }
+            _ => self.lower_expr(expression, mode),
         }
     }
 
@@ -7997,6 +8256,7 @@ impl Lowerer<'_> {
                     key,
                     value: SliceExpr::Elided,
                     assignment_value: None,
+                    unwidened: None,
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
@@ -8024,6 +8284,7 @@ impl Lowerer<'_> {
                     key,
                     value,
                     assignment_value: None,
+                    unwidened: None,
                     method_kind,
                     // A method / accessor member is never `readonly`,
                     // under `as const` or otherwise: the modifier applies
@@ -8045,6 +8306,10 @@ impl Lowerer<'_> {
                     key,
                     value: SliceExpr::SemanticAny,
                     assignment_value: None,
+                    unwidened: Some(SliceExpr::Type(GatedLeaf(
+                        widening_nullish_type(value_expression),
+                        None,
+                    ))),
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
@@ -8063,40 +8328,23 @@ impl Lowerer<'_> {
                     value_expression,
                     self.source,
                 );
-            let value = self.lower_expr(value_expression, mode);
+            let value = if policy == ObjectMemberPolicy::ConstAssert {
+                self.lower_in_const_context(value_expression, mode)
+            } else {
+                self.lower_expr(value_expression, mode)
+            };
             let assignment_value = value.clone();
-            let value = match (widen_member, value) {
-                (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
-                    leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
-                ),
-                // The member slot's widening reaches INTO a branch join:
-                // a ternary member's fresh literal arm is the member's
-                // fresh literal, and tsc widens it at the property
-                // exactly like a direct literal member. A narrowed
-                // reference arm is NOT fresh (the checker's own
-                // early-return-guard shapes keep their literal unions),
-                // so only leaf arms widen here.
-                (true, SliceExpr::Union { arms, guard }) => SliceExpr::Union {
-                    arms: Arc::from(
-                        arms.iter()
-                            .map(|arm| match arm {
-                                SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
-                                    verter_semantic::analysis::type_eval_build::widen_shallow_literal,
-                                )),
-                                other => other.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
-                    guard,
-                },
-                (_, value) => value,
+            let value = if widen_member {
+                widen_mutable_slot_literals(value)
+            } else {
+                value
             };
             let assignment_value = (assignment_value != value).then_some(assignment_value);
             entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                 key,
                 value,
                 assignment_value,
+                unwidened: None,
                 method_kind,
                 readonly: policy.readonly(),
                 spans,
@@ -8821,6 +9069,7 @@ impl Lowerer<'_> {
         mode: CertificationMode,
         write_policy: WritePolicy,
     ) -> bool {
+        self.decided_above_call_spans.extend(scanner.unentered);
         let control_unprovable = self.certify_result_independent_calls(
             scanner.control,
             ResultIndependentPosition::ControlTest,
@@ -9246,6 +9495,83 @@ impl<'a> Visit<'a> for OwnFrameReturnFinder {
     }
 }
 
+/// Whether a statement contains a `yield` of ITS OWN frame. A generator's
+/// yield type joins every yield it evaluates, so a loop whose body yields
+/// contributes to the answer exactly as one whose body returns does and
+/// can never be skipped as transparent.
+fn statement_yields_in_own_frame(statement: &Statement<'_>) -> bool {
+    let mut finder = OwnFrameYieldFinder::default();
+    finder.visit_statement(statement);
+    finder.found
+}
+
+/// Whether a body holds a `yield` of its own frame the yield join does not
+/// model: one nested inside another expression, a statement-position
+/// `yield*` delegation, or a yield inside a statement-position yield's
+/// own argument.
+fn body_has_unmodeled_yield(statements: &[Statement<'_>]) -> bool {
+    let mut finder = OwnFrameYieldFinder {
+        statement_yields_modeled: true,
+        ..OwnFrameYieldFinder::default()
+    };
+    for statement in statements {
+        finder.visit_statement(statement);
+    }
+    finder.found
+}
+
+/// The `yield` twin of [`OwnFrameReturnFinder`]. With
+/// `statement_yields_modeled` set it skips the yield of a statement-position
+/// `yield x` / `yield;` (its argument is still searched) and finds only
+/// the other yields.
+#[derive(Default)]
+struct OwnFrameYieldFinder {
+    nested_frame_nesting: u32,
+    statement_yields_modeled: bool,
+    found: bool,
+}
+
+impl<'a> Visit<'a> for OwnFrameYieldFinder {
+    fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        if self.statement_yields_modeled {
+            if let Expression::YieldExpression(yield_expr) = unwrap_parenthesized(&it.expression) {
+                if !yield_expr.delegate {
+                    if let Some(argument) = &yield_expr.argument {
+                        self.visit_expression(argument);
+                    }
+                    return;
+                }
+            }
+        }
+        walk::walk_expression_statement(self, it);
+    }
+    fn visit_yield_expression(&mut self, it: &oxc_ast::ast::YieldExpression<'a>) {
+        if self.nested_frame_nesting == 0 {
+            self.found = true;
+        }
+        walk::walk_yield_expression(self, it);
+    }
+    fn visit_function(
+        &mut self,
+        it: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        self.nested_frame_nesting += 1;
+        walk::walk_function(self, it, flags);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_class(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+}
+
 /// A position whose calls never feed the demanded value, with the rule
 /// under which a PROVABLY CLOSED same-file callee's authored return
 /// annotation certifies a call there as establishing no narrowing.
@@ -9415,9 +9741,29 @@ impl ControlCall {
 /// retypes the binding itself), and the drain resolves each against this
 /// frame's lexical authority: a target the frame OWNS flags the enclosing
 /// statement's typed `GuardNarrowing` gap, a FREE target stays silent.
+///
+/// A `void` operand's value is discarded, and the checker enters a call
+/// into control flow — where an `asserts` callee narrows what follows and
+/// a never-returning one ends the path — only when the call is an
+/// expression statement's own expression or a comma operator's left
+/// operand (the binder's `maybeBindExpressionFlowIfCall`). So a
+/// same-frame call inside a `void` operand that is no comma's left
+/// operand and sits in no control position narrows nothing and is
+/// `unentered`: decided above with no certification (TypeScript 7.0.2:
+/// `void assertString(x); return x` keeps `x` unnarrowed). A
+/// skeleton-visible write there is not collected either: the operand's
+/// value cannot depend on it, and a read after it rides the slice's
+/// unapplied-write ledger like any statement write's.
 #[derive(Default)]
 struct LeafCallScanner<'a> {
     decided: Vec<verter_span::Span>,
+    /// Same-frame calls / constructs the checker never enters into
+    /// control flow — see the `void` rule above.
+    unentered: Vec<verter_span::Span>,
+    /// `void` operand nesting.
+    void_nesting: usize,
+    /// The spans of calls that are a comma operator's left operand.
+    comma_operand_calls: FxHashSet<oxc_span::Span>,
     discarded: Vec<ControlCall>,
     control: Vec<ControlCall>,
     /// Same-frame whole-binding write targets: `(name, identifier span,
@@ -9452,6 +9798,9 @@ impl<'a> LeafCallScanner<'a> {
     /// subtree, so a write under `class_nesting` is invisible to the
     /// slice's effect ledger).
     fn push_write(&mut self, name: &'a str, span: oxc_span::Span) {
+        if self.void_nesting > 0 && self.class_nesting == 0 {
+            return;
+        }
         self.writes.push((name, span, self.class_nesting > 0));
     }
 
@@ -9717,6 +10066,8 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.decided.push(call.span.into());
         } else if self.control_nesting > 0 {
             self.control.push(ControlCall::of_call(call));
+        } else if self.void_nesting > 0 && !self.comma_operand_calls.contains(&call.span) {
+            self.unentered.push(call.span.into());
         } else {
             self.discarded.push(ControlCall::of_call(call));
         }
@@ -9727,10 +10078,28 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.decided.push(new.span.into());
         } else if self.control_nesting > 0 {
             self.control.push(ControlCall::Construct(new.span.into()));
+        } else if self.void_nesting > 0 {
+            self.unentered.push(new.span.into());
         } else {
             self.discarded.push(ControlCall::Construct(new.span.into()));
         }
         walk::walk_new_expression(self, new);
+    }
+    fn visit_unary_expression(&mut self, it: &oxc_ast::ast::UnaryExpression<'a>) {
+        let void = it.operator == UnaryOperator::Void;
+        self.void_nesting += usize::from(void);
+        walk::walk_unary_expression(self, it);
+        self.void_nesting -= usize::from(void);
+    }
+    fn visit_sequence_expression(&mut self, it: &oxc_ast::ast::SequenceExpression<'a>) {
+        if let Some((_, operands)) = it.expressions.split_last() {
+            for operand in operands {
+                if let Expression::CallExpression(call) = operand {
+                    self.comma_operand_calls.insert(call.span);
+                }
+            }
+        }
+        walk::walk_sequence_expression(self, it);
     }
     // Nested function / arrow / class bodies are their own frames.
     fn visit_function(

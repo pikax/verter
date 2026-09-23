@@ -1555,6 +1555,12 @@ pub struct FlowReturnPolicy {
     /// or a fall-through adds `undefined`, and which union algebra every
     /// join of the body runs.
     pub nullability: NullabilityPolicy,
+    /// `noImplicitAny` of the project owning the function: whether an
+    /// unannotated `let` / `var` with no initializer or a bare `null` /
+    /// `undefined` one is the checker's AUTO-TYPED variable (its type
+    /// follows its assignments) or is declared as its initializer's
+    /// widened type (`any` with no initializer).
+    pub no_implicit_any: bool,
 }
 
 impl FlowReturnPolicy {
@@ -1565,6 +1571,7 @@ impl FlowReturnPolicy {
     ) -> Self {
         Self {
             nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
+            no_implicit_any: options.no_implicit_any,
         }
     }
 }
