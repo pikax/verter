@@ -586,8 +586,20 @@ fn find_matching(
     Ok(None)
 }
 
-/// Append `new` signatures to `existing`, skipping any signature-equivalent
+/// Append `new` signatures to `existing`, skipping any signature IDENTICAL
 /// to one already present (the first stays the representative).
+///
+/// Identity here INCLUDES the result: this is the checker's
+/// `appendSignatures`, which compares with `ignoreReturnTypes: false`. Two
+/// signatures that differ only in what they return are different overloads
+/// of the intersection and are both kept — `(() => A) & (() => B)` carries
+/// both, so conditional inference (`ReturnType`, `InstanceType`), which reads
+/// the LAST signature, answers `B`. Comparing parameters alone would collapse
+/// them onto the first and answer `A`. Signatures identical including the
+/// result still collapse.
+///
+/// Union synthesis is the opposite rule and deliberately does not use this:
+/// it matches arms by parameters and unions their results.
 pub fn append_signatures(
     store: &SignatureStore,
     types: &dyn DiscoveryTypes,
@@ -595,15 +607,7 @@ pub fn append_signatures(
     new: &[SignatureCandidate],
 ) -> Res<()> {
     for &sig in new {
-        if find_matching(
-            store,
-            types,
-            existing,
-            sig,
-            MatchOptions::EXACT_IGNORING_RETURNS,
-        )?
-        .is_none()
-        {
+        if find_matching(store, types, existing, sig, MatchOptions::EXACT)?.is_none() {
             existing.push(sig);
         }
     }
@@ -1126,8 +1130,10 @@ fn is_mixin_constructor(
 /// Intersection signatures for one kind. `members` are the per-member
 /// candidate lists in authored order.
 ///
-/// Call signatures concatenate with signature-equivalence dedup. Construct
-/// signatures do the same, except that when any member is a mixin
+/// Call signatures concatenate, dropping only a signature IDENTICAL to one
+/// already present — result included ([`append_signatures`]); signatures
+/// that differ only in their result are distinct overloads and both stay.
+/// Construct signatures do the same, except that when any member is a mixin
 /// constructor (`new (...args: any[]) => X`) every other member's construct
 /// signature is composed with the mixin returns (`IntersectionConstruct`).
 pub fn intersection_signatures(
