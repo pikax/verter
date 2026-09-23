@@ -1011,44 +1011,52 @@ impl CarrierPublicationStore {
         }
         if let Some(candidate) = self.units.retained(artifact_id, accepted) {
             match self.adopt_retained(candidate, accepted, request, artifact_id) {
-                // An adopted envelope is served under the SAME publish fence
-                // as a freshly published one. `publish_shared` retains the
-                // parse product regardless of currency and then fences the
-                // ENVELOPE on it ("Only the envelope below stays fenced on
-                // currency"); adoption serves an envelope too, so a lane whose
-                // generation lost currency while it was adopting must be
-                // superseded rather than serve a stale snapshot. Without this
-                // the invariant held only on whichever path the lane happened
-                // to take: the same losing generation published `Superseded`
-                // when it ran the parse and `Adopted` when it adopted another
-                // lane's retained unit.
                 StableAdoption::Adopted(outcome) => {
-                    if self
-                        .grammar_authority
-                        .validate_accepted_current(&self.source_authority, accepted)
-                        .is_err()
-                    {
-                        self.audit.push(
-                            request,
-                            artifact_id,
-                            PublicationAuditKind::PublishFenceRejected,
-                        );
-                        return PublicationOutcome::Superseded(CurrentSourceEvidence {
-                            current_source: None,
-                        });
-                    }
-                    self.audit.push(
-                        request,
-                        artifact_id,
-                        PublicationAuditKind::PublishFencePassed,
-                    );
-                    return outcome;
+                    return self.fence_adopted(outcome, accepted, request, artifact_id);
                 }
                 StableAdoption::Discarded => {}
             }
         }
 
         self.produce_fresh(accepted, request, artifact_id)
+    }
+
+    /// An adopted envelope is served under the SAME publish fence as a
+    /// freshly published one. `publish_shared` retains the parse product
+    /// regardless of currency and then fences the ENVELOPE on it; adoption
+    /// serves an envelope too, so a lane whose generation lost currency
+    /// while it was adopting must be superseded rather than serve a stale
+    /// snapshot. Every adoption site — the initial retained read and the
+    /// stable leader's double-checked read — routes through here, so the
+    /// same losing generation never publishes `Superseded` on one path and
+    /// `Adopted` on another.
+    fn fence_adopted(
+        &self,
+        outcome: PublicationOutcome,
+        accepted: &AcceptedRegisteredCarrierSource,
+        request: &PublicationRequestContext,
+        artifact_id: &FrameworkArtifactId,
+    ) -> PublicationOutcome {
+        if self
+            .grammar_authority
+            .validate_accepted_current(&self.source_authority, accepted)
+            .is_err()
+        {
+            self.audit.push(
+                request,
+                artifact_id,
+                PublicationAuditKind::PublishFenceRejected,
+            );
+            return PublicationOutcome::Superseded(CurrentSourceEvidence {
+                current_source: None,
+            });
+        }
+        self.audit.push(
+            request,
+            artifact_id,
+            PublicationAuditKind::PublishFencePassed,
+        );
+        outcome
     }
 
     /// Adopt a retained stable unit for this lane's own snapshot: the
@@ -1195,7 +1203,14 @@ impl CarrierPublicationStore {
                 } else {
                     self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
                 }
-                return StableShared::Done(outcome);
+                // The retained product is currency-independent and still
+                // serves joiners above; only this lane's envelope is fenced.
+                return StableShared::Done(self.fence_adopted(
+                    outcome,
+                    accepted,
+                    request,
+                    artifact_id,
+                ));
             }
             Ok(Some(StableAdoption::Discarded)) | Ok(None) => {}
             Err(_) => {
