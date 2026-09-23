@@ -629,13 +629,7 @@ const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         id: "DET-09",
         perturbation: "Policy changes with resident parent caches",
-        driver: Driver::Ignored {
-            reason: "no public answer on the flow-return observation lane depends on the \
-                     semantic policy — the policy change itself is drivable (an edited \
-                     tsconfig through configure_projects), but strictNullChecks leaves an \
-                     optional parameter's answer unchanged, so a resident parent kept on the \
-                     old policy is indistinguishable from a correct one",
-        },
+        driver: Driver::Ready { test: "det_09_policy_change_with_resident_parents" },
     },
     MatrixRow {
         id: "DET-10",
@@ -1435,49 +1429,26 @@ fn det_apply_tsconfig(
     host.configure_projects(vec![project]);
 }
 
-/// DET-09 (ignored) — policy changes with resident parent caches: parents
-/// and leaves must use the new policy, and a formatting-only change must
-/// not rebuild resolution.
+/// DET-09 — policy changes with resident parent caches: parents and leaves
+/// must use the new policy, and a formatting-only change must not rebuild
+/// resolution.
 ///
-/// The policy change IS drivable: an edited tsconfig reaches a live host
-/// through [`det_apply_tsconfig`], and the effective option reads back from
-/// the file's own project. What is not drivable is the row's claim, because
-/// NO answer on this observation lane depends on the semantic policy. A
-/// value answer ignores `strictNullChecks` (an optional parameter returns
-/// `string | undefined` under both policies, where TypeScript 7.0.2 prints
-/// `string` when it is off), a signature renders without its parameter
-/// types, and a type-position utility stays an unreduced carrier. A parent
-/// holding a stale pre-change answer would therefore be indistinguishable
-/// from a correct one, and asserting that answers FOLLOW the policy would
-/// pass vacuously.
-///
-/// The body drives every axis that is expressible today, and pins the
-/// known state: the answers do not move. When the observation lane starts
-/// honouring the policy, that assertion fails — the un-ignore signal —
-/// and the row's own claim becomes checkable.
+/// The policy change is an edited tsconfig reaching a live host through
+/// [`det_apply_tsconfig`]; the effective option reads back from the file's
+/// own project. The witness returns a nullish arm whose presence depends on
+/// `strictNullChecks` — kept under strict, erased when the option is off —
+/// so a leaf or a parent still holding the old policy's answer is
+/// observable: both must MOVE with the policy, and after each change the
+/// live host must answer exactly what a fresh host under that policy
+/// answers, on both comparison bases.
 #[test]
-#[ignore = "no public answer on the flow-return observation lane depends on the semantic \
-            policy: strictNullChecks leaves an optional parameter's answer unchanged, so a \
-            resident parent kept on the old policy is indistinguishable from a correct one"]
 fn det_09_policy_change_with_resident_parents() {
-    assert_registered_ignored("DET-09");
-    drive_det_09_subset();
-}
-
-/// DET-09's drivable subset, run by default — so the "answers do not move"
-/// pin fails in CI the day the lane honours the policy, rather than inside
-/// an ignored test nobody runs.
-#[test]
-fn det_09_drivable_subset() {
-    assert_registered_ignored("DET-09");
-    drive_det_09_subset();
-}
-
-fn drive_det_09_subset() {
-    const LEAF_TS: &str = "export function leaf(v?: string) { return v; }";
-    const LEAF_FORMATTED_TS: &str = "export function leaf(v?: string) {\n    return v;\n}\n";
+    assert_ready("DET-09", "det_09_policy_change_with_resident_parents");
+    const LEAF_TS: &str = "export function leaf(c: boolean) { if (c) return \"a\"; return null; }";
+    const LEAF_FORMATTED_TS: &str =
+        "export function leaf(c: boolean) {\n    if (c) return \"a\";\n    return null;\n}\n";
     const PARENT_TS: &str =
-        "import { leaf } from \"./leaf\";\nexport function parent(v?: string) { return leaf(v); }";
+        "import { leaf } from \"./leaf\";\nexport function parent(c: boolean) { return leaf(c); }";
     const LOOSE: &str = r#"{ "compilerOptions": { "strictNullChecks": false } }"#;
     const STRICT: &str = r#"{ "compilerOptions": { "strictNullChecks": true } }"#;
 
@@ -1512,6 +1483,14 @@ fn drive_det_09_subset() {
             observe(host, "/det/parent.ts", "parent"),
         )
     };
+    // A host that never saw any other policy.
+    let fresh_under = |tsconfig: &str, strict: bool| {
+        let (fresh, fresh_ws) = policy_host();
+        apply_policy(&fresh, &fresh_ws, tsconfig, strict);
+        upsert(&fresh, "/det/leaf.ts", LEAF_TS);
+        upsert(&fresh, "/det/parent.ts", PARENT_TS);
+        (observe_both(&fresh), generated_bytes(&fresh))
+    };
 
     let (live, live_ws) = policy_host();
     apply_policy(&live, &live_ws, LOOSE, false);
@@ -1522,39 +1501,46 @@ fn drive_det_09_subset() {
     apply_policy(&live, &live_ws, STRICT, true);
     let strict = observe_both(&live);
 
-    // Drivable today: after the change, the LIVE host answers exactly what a
-    // host that never saw the old policy answers, on both bases.
-    let (fresh, fresh_ws) = policy_host();
-    apply_policy(&fresh, &fresh_ws, STRICT, true);
-    upsert(&fresh, "/det/leaf.ts", LEAF_TS);
-    upsert(&fresh, "/det/parent.ts", PARENT_TS);
+    assert_ne!(
+        loose.0, strict.0,
+        "DET-09: the leaf's answer did not move with the policy — the witness no longer \
+         observes it"
+    );
+    assert_ne!(
+        loose.1, strict.1,
+        "DET-09: the parent kept its answer across the policy change — a resident parent \
+         outlived it"
+    );
+    let (fresh_strict, fresh_strict_bytes) = fresh_under(STRICT, true);
     assert_eq!(
-        strict,
-        observe_both(&fresh),
-        "DET-09: after the policy change the live host disagrees with a fresh host under the \
-         same policy — a resident answer outlived the change"
+        strict, fresh_strict,
+        "DET-09: after the change to strict the live host disagrees with a fresh strict host"
     );
     assert_eq!(
         generated_bytes(&live),
-        generated_bytes(&fresh),
-        "DET-09: after the policy change the live host's generated bytes differ from a fresh \
-         host's under the same policy"
-    );
-
-    // The known state, and the un-ignore signal.
-    assert_eq!(
-        loose, strict,
-        "DET-09: the answers now FOLLOW the policy (`{}` → `{}`) — the observation lane \
-         models it; un-ignore this row and assert that resident parents follow too",
-        loose.0, strict.0
+        fresh_strict_bytes,
+        "DET-09: after the change to strict the live host's generated bytes differ from a \
+         fresh strict host's"
     );
 
     apply_policy(&live, &live_ws, LOOSE, false);
+    let (fresh_loose, fresh_loose_bytes) = fresh_under(LOOSE, false);
     assert_eq!(
         observe_both(&live),
         loose,
         "DET-09: restoring the policy did not restore the original observations"
     );
+    assert_eq!(
+        loose, fresh_loose,
+        "DET-09: after the change back to loose the live host disagrees with a fresh loose host"
+    );
+    assert_eq!(
+        generated_bytes(&live),
+        fresh_loose_bytes,
+        "DET-09: after the change back to loose the live host's generated bytes differ from a \
+         fresh loose host's"
+    );
+
     upsert(&live, "/det/leaf.ts", LEAF_FORMATTED_TS);
     assert_eq!(
         observe(&live, "/det/leaf.ts", "leaf"),
