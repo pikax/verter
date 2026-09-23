@@ -1040,6 +1040,17 @@ describe("churn retained-byte plateau verdict", () => {
     relationProofs: 1,
     relateKeys: 1,
     unionViews: 1,
+    deferredReleases: 0,
+    resolvedImportFacts: 0,
+    componentMetaStates: 0,
+    registeredSources: 0,
+    signatureRecords: 0,
+    releasesApplied: 0,
+    releaseWaitMaxMicros: 0,
+    releaseElapsedMaxMicros: 0,
+    releaseDrains: 0,
+    releaseDrainWaitMaxMicros: 0,
+    lastRelease: null,
     shapeCacheEntries: 1,
     flowGraphs: 1,
     flowHashEntries: 1,
@@ -1414,6 +1425,17 @@ describe("churn retained-object verdict", () => {
     relationProofs: 1,
     relateKeys: 1,
     unionViews: 1,
+    deferredReleases: 0,
+    resolvedImportFacts: 0,
+    componentMetaStates: 0,
+    registeredSources: 0,
+    signatureRecords: 0,
+    releasesApplied: 0,
+    releaseWaitMaxMicros: 0,
+    releaseElapsedMaxMicros: 0,
+    releaseDrains: 0,
+    releaseDrainWaitMaxMicros: 0,
+    lastRelease: null,
     shapeCacheEntries: 1,
     flowGraphs: 1,
     flowHashEntries: 1,
@@ -1466,6 +1488,46 @@ describe("churn retained-object verdict", () => {
       true,
     );
     expect(verdict.detail).not.toContain("BREACH");
+  });
+
+  it("passes a counter that alternates between two flat levels", () => {
+    // The stacked tree's run: the memo holds the hover's classification
+    // entries only when the semantic path answered before the provider did.
+    // A linear fit reads this order as a rising trend (three standard errors);
+    // judged as the two plateaus it is, it passes.
+    const recorded = [
+      161, 161, 161, 157, 161, 0, 18, 18, 161, 18, 18, 20, 18, 18, 20, 161, 20, 157, 161,
+    ];
+    const verdict = decideChurnRetention(
+      run((_sinceBaseline, window) => ({
+        ...baselineReading,
+        semanticMemoEntries: recorded[window % recorded.length],
+      })),
+      options,
+    );
+    const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
+    expect(memo?.late.levels, "the series is judged as two levels").toBeDefined();
+    expect(memo?.withinBound).toBe(true);
+    expect(verdict.pass).toBe(true);
+    expect(verdict.detail).toContain("two levels");
+  });
+
+  it("fails a drift that rides on two alternating levels", () => {
+    // The same alternation with a tenth of an object retained per cycle on
+    // both levels: each level's own fit rises, so the split does not excuse it.
+    const recorded = [
+      161, 161, 161, 157, 161, 0, 18, 18, 161, 18, 18, 20, 18, 18, 20, 161, 20, 157, 161,
+    ];
+    const verdict = decideChurnRetention(
+      run((sinceBaseline, window) => ({
+        ...baselineReading,
+        semanticMemoEntries: recorded[window % recorded.length] + Math.round(0.1 * sinceBaseline),
+      })),
+      options,
+    );
+    const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
+    expect(memo?.withinBound).toBe(false);
+    expect(verdict.pass).toBe(false);
   });
 
   it("fails a retainer that keeps one object per document version", () => {
@@ -1595,6 +1657,17 @@ describe("retention reading extraction", () => {
     relationProofs: 1,
     relateKeys: 1,
     unionViews: 1,
+    deferredReleases: 0,
+    resolvedImportFacts: 0,
+    componentMetaStates: 0,
+    registeredSources: 0,
+    signatureRecords: 0,
+    releasesApplied: 0,
+    releaseWaitMaxMicros: 0,
+    releaseElapsedMaxMicros: 0,
+    releaseDrains: 0,
+    releaseDrainWaitMaxMicros: 0,
+    lastRelease: null,
     shapeCacheEntries: 1,
     flowGraphs: 1,
     flowHashEntries: 1,

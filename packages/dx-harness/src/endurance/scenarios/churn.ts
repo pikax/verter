@@ -38,6 +38,7 @@
  * real provider-backed request, and the lane ends with a strict convergence
  * probe proving the session still answers correctly after the churn.
  */
+import { writeFileSync } from "node:fs";
 import { createWarnLineDrainer, GET_STATISTICS_METHOD } from "../../core/startupGate.js";
 import {
   extractQuiescenceCounters,
@@ -307,6 +308,28 @@ export interface RetentionReading {
   readonly relateKeys: number;
   /** Resident union member views, released with their union's document. */
   readonly unionViews: number;
+  /** Close-time semantic releases queued behind in-flight computations, not yet applied. */
+  readonly deferredReleases: number;
+  /** Resolved-import fact entries (one key per document content hash). */
+  readonly resolvedImportFacts: number;
+  /** Resolver component-meta states (one key per document, mode and view fingerprint). */
+  readonly componentMetaStates: number;
+  /** Registered source snapshots (base plus current overlay per document). */
+  readonly registeredSources: number;
+  /** Records interned in the signature kernel's current epoch (reported, not bounded). */
+  readonly signatureRecords: number;
+  /** Queued releases applied so far (monotonic by design, so not a retention counter). */
+  readonly releasesApplied: number;
+  /** The longest a queued release waited for a zero-reader instant, in microseconds. */
+  readonly releaseWaitMaxMicros: number;
+  /** The slowest single close-time release, in microseconds. */
+  readonly releaseElapsedMaxMicros: number;
+  /** Times the gate paused admission to drain readers for a starving release. */
+  readonly releaseDrains: number;
+  /** The longest an arriving computation waited for such a drain, in microseconds. */
+  readonly releaseDrainWaitMaxMicros: number;
+  /** The last close-time release applied, or null before the first. */
+  readonly lastRelease: LastReleaseReading | null;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly shapeCacheEntries: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
@@ -335,6 +358,39 @@ export interface RetentionReading {
   readonly semanticMemoFamilies?: Readonly<Record<string, number>>;
 }
 
+/** One applied close-time release (`retention.lastRelease`). */
+export interface LastReleaseReading {
+  readonly waitMicros: number;
+  readonly elapsedMicros: number;
+  readonly nodesScanned: number;
+  readonly nodesReleased: number;
+  readonly storageSlotsBefore: number;
+  readonly storageSlotsAfter: number;
+  readonly memoEntriesEvicted: number;
+}
+
+const LAST_RELEASE_KEYS: readonly (keyof LastReleaseReading)[] = [
+  "waitMicros",
+  "elapsedMicros",
+  "nodesScanned",
+  "nodesReleased",
+  "storageSlotsBefore",
+  "storageSlotsAfter",
+  "memoEntriesEvicted",
+];
+
+function readLastRelease(value: unknown): LastReleaseReading | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const reading: Partial<Record<keyof LastReleaseReading, number>> = {};
+  for (const key of LAST_RELEASE_KEYS) {
+    const field = record[key];
+    if (typeof field !== "number" || !Number.isFinite(field)) return null;
+    reading[key] = field;
+  }
+  return reading as LastReleaseReading;
+}
+
 /** The `retention` object keys the host emits, exactly as serialized. */
 const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "liveArtifacts",
@@ -359,6 +415,16 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "pinnedBytes",
   "retainedBytes",
   "refusalsPressure",
+  "deferredReleases",
+  "resolvedImportFacts",
+  "componentMetaStates",
+  "registeredSources",
+  "signatureRecords",
+  "releasesApplied",
+  "releaseWaitMaxMicros",
+  "releaseElapsedMaxMicros",
+  "releaseDrains",
+  "releaseDrainWaitMaxMicros",
 ];
 
 /**
@@ -371,7 +437,7 @@ export function extractRetentionReading(snapshot: unknown): RetentionReading | n
   const retention = (snapshot as { retention?: unknown } | null | undefined)?.retention;
   if (!retention || typeof retention !== "object") return null;
   const record = retention as Record<string, unknown>;
-  const reading: Partial<Record<keyof RetentionReading, number>> = {};
+  const reading: Partial<Record<keyof RetentionReading, unknown>> = {};
   for (const key of RETENTION_KEYS) {
     const value = record[key];
     if (typeof value !== "number" || !Number.isFinite(value)) return null;
@@ -380,6 +446,9 @@ export function extractRetentionReading(snapshot: unknown): RetentionReading | n
   const heap = record.heapInUseBytes;
   (reading as { heapInUseBytes?: number | null }).heapInUseBytes =
     typeof heap === "number" && Number.isFinite(heap) ? heap : null;
+  (reading as { lastRelease?: LastReleaseReading | null }).lastRelease = readLastRelease(
+    record.lastRelease,
+  );
   const families = record.semanticMemoFamilies;
   if (families && typeof families === "object") {
     const byFamily: Record<string, number> = {};
@@ -470,6 +539,16 @@ export interface PlateauCheck {
   readonly withinBand: boolean;
   /** `perCycle - 2.5 * standardError > 0`: a trend the noise cannot explain. */
   readonly significantlyRising: boolean;
+  /**
+   * Set when the series was judged as two flat levels (see
+   * `twoLevelPlateau`): the levels and how many readings sat on each.
+   */
+  readonly levels?: {
+    readonly low: number;
+    readonly high: number;
+    readonly lowReadings: number;
+    readonly highReadings: number;
+  };
   /** Within the band and not significantly rising. */
   readonly plateau: boolean;
 }
@@ -883,6 +962,69 @@ export function plateau(
   };
 }
 
+/**
+ * A retained-object counter can alternate between two flat levels from one
+ * checkpoint to the next without retaining anything: the semantic memo holds
+ * a cycle's classification entries only when the semantic path answered the
+ * hover before the provider did, and the close releases them either way. A
+ * linear fit over such a series reads the ORDER of high and low readings as
+ * a trend. So a series that splits, at its largest gap wider than the band,
+ * into two groups of at least three readings is judged as the two plateaus
+ * it is: each group must be flat on its own, and a drift riding on either
+ * level still breaches. A drift alone never splits that way (its readings
+ * climb in steps no wider than the band, or its largest gap isolates one
+ * reading), so it is judged whole. Returns null when no such split exists.
+ */
+export function twoLevelPlateau(
+  xs: readonly number[],
+  ys: readonly number[],
+  band: number,
+): PlateauCheck | null {
+  if (xs.length < 6) return null;
+  const order = ys.map((_, index) => index).sort((a, b) => ys[a] - ys[b]);
+  let cut = -1;
+  let widest = band;
+  for (let position = 1; position < order.length; position += 1) {
+    const gap = ys[order[position]] - ys[order[position - 1]];
+    if (gap > widest) {
+      widest = gap;
+      cut = position;
+    }
+  }
+  if (cut < 3 || order.length - cut < 3) return null;
+  const lowIndexes = order.slice(0, cut).sort((a, b) => a - b);
+  const highIndexes = order.slice(cut).sort((a, b) => a - b);
+  const fitOf = (indexes: readonly number[]) =>
+    plateau(
+      indexes.map((index) => xs[index]),
+      indexes.map((index) => ys[index]),
+      band,
+      true,
+    );
+  const low = fitOf(lowIndexes);
+  const high = fitOf(highIndexes);
+  if (!low.plateau || !high.plateau) return null;
+  const steeper = low.perCycle >= high.perCycle ? low : high;
+  return {
+    fromCycle: xs[0],
+    toCycle: xs[xs.length - 1],
+    readings: xs.length,
+    perCycle: steeper.perCycle,
+    standardError: steeper.standardError,
+    riseOverSpan: steeper.riseOverSpan,
+    band,
+    withinBand: true,
+    significantlyRising: false,
+    plateau: true,
+    levels: {
+      low: ys[order[cut - 1]],
+      high: ys[order[cut]],
+      lowReadings: lowIndexes.length,
+      highReadings: highIndexes.length,
+    },
+  };
+}
+
 /** Index of the largest positive increment in `ys` (0 when none is positive). */
 function largestIncrement(ys: readonly number[]): number {
   let index = 0;
@@ -920,6 +1062,10 @@ export const CHURN_RETENTION_COUNTERS = [
   "flowLoweredEntries",
   "mapperFingerprints",
   "frameworkSurfaceEntries",
+  "deferredReleases",
+  "resolvedImportFacts",
+  "componentMetaStates",
+  "registeredSources",
 ] as const satisfies readonly (keyof RetentionReading)[];
 
 export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
@@ -1033,12 +1179,9 @@ export function decideChurnRetention(
     const baseline = readings[0][counter];
     const final = readings[readings.length - 1][counter];
     const peak = Math.max(...readings.map((reading) => reading[counter]));
-    const fit = plateau(
-      lateXs,
-      late.map((checkpoint) => (checkpoint.retention as RetentionReading)[counter]),
-      plateauObjects,
-      true,
-    );
+    const lateYs = late.map((checkpoint) => (checkpoint.retention as RetentionReading)[counter]);
+    const whole = plateau(lateXs, lateYs, plateauObjects, true);
+    const fit = whole.plateau ? whole : (twoLevelPlateau(lateXs, lateYs, plateauObjects) ?? whole);
     return {
       counter,
       baseline,
@@ -1066,7 +1209,11 @@ export function decideChurnRetention(
           (trend) =>
             `${trend.counter} ${trend.baseline}→${trend.final} (peak ${trend.peak}, late ` +
             `${trend.late.perCycle.toFixed(3)}±${trend.late.standardError.toFixed(3)}/cycle, ` +
-            `rise ${trend.late.riseOverSpan.toFixed(1)})${trend.withinBound ? "" : " BREACH"}`,
+            `rise ${trend.late.riseOverSpan.toFixed(1)}` +
+            (trend.late.levels
+              ? `, two levels ${trend.late.levels.low}×${trend.late.levels.lowReadings}/${trend.late.levels.high}×${trend.late.levels.highReadings}`
+              : "") +
+            `)${trend.withinBound ? "" : " BREACH"}`,
         )
         .join("; ") +
       `; pressure refusals=${pressureRefusals}${pressureRefusals === 0 ? "" : " BREACH"}`,
@@ -1082,6 +1229,10 @@ export function describeWireBytes(
 }
 
 /** Render one retention reading for a receipt line. */
+function formatMicros(micros: number): string {
+  return micros >= 1000 ? `${(micros / 1000).toFixed(1)}ms` : `${micros}us`;
+}
+
 export function describeRetentionReading(reading: RetentionReading | null): string {
   if (reading === null) return "retention: UNAVAILABLE (server reported none)";
   return (
@@ -1093,6 +1244,16 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} surfaces=${reading.frameworkSurfaceEntries} ` +
     `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
     `pressureRefusals=${reading.refusalsPressure} ` +
+    `importFacts=${reading.resolvedImportFacts} metaStates=${reading.componentMetaStates} ` +
+    `registeredSources=${reading.registeredSources} signatureRecords=${reading.signatureRecords} ` +
+    `deferred=${reading.deferredReleases} releases=${reading.releasesApplied} ` +
+    `releaseWaitMax=${formatMicros(reading.releaseWaitMaxMicros)} releaseMax=${formatMicros(reading.releaseElapsedMaxMicros)} ` +
+    `drains=${reading.releaseDrains}/${formatMicros(reading.releaseDrainWaitMaxMicros)} ` +
+    (reading.lastRelease
+      ? `lastRelease={wait=${formatMicros(reading.lastRelease.waitMicros)} took=${formatMicros(reading.lastRelease.elapsedMicros)} ` +
+        `scanned=${reading.lastRelease.nodesScanned} released=${reading.lastRelease.nodesReleased} ` +
+        `slots=${reading.lastRelease.storageSlotsBefore}>${reading.lastRelease.storageSlotsAfter} memo=${reading.lastRelease.memoEntriesEvicted}} `
+      : "lastRelease=none ") +
     `heapInUse=${reading.heapInUseBytes === null ? "n/a" : bytesToMib(reading.heapInUseBytes)}` +
     (reading.semanticMemoFamilies
       ? ` memoFamilies={${Object.entries(reading.semanticMemoFamilies)
@@ -1253,6 +1414,13 @@ export async function runChurnScenario(
         wireBytes: context.session.client.wireBytes,
       };
       checkpoints.push(checkpoint);
+      const hook = context.config.churnCheckpointHook;
+      if (hook !== null && hook.cycle === cyclesCompleted) {
+        // A profiler flush at a quiesced checkpoint: the profile then
+        // describes the reading just taken, not a cycle in flight.
+        writeFileSync(hook.path, `${cyclesCompleted}\n`);
+        await new Promise((resolve) => setTimeout(resolve, hook.settleMs));
+      }
       return checkpoint;
     };
 

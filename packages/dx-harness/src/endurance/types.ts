@@ -219,6 +219,17 @@ export interface EnduranceConfig {
    * (VERTER_ENDURANCE_CHURN_RETENTION_PLATEAU_OBJECTS, default 4).
    */
   readonly churnRetentionPlateauObjects: number;
+  /**
+   * Profiler hook: at the quiesced checkpoint of this cycle the scenario
+   * writes `path` (a heap profiler's flush trigger) and pauses `settleMs` so
+   * the profile describes exactly the reading taken there, not a cycle in
+   * flight. `VERTER_ENDURANCE_CHURN_CHECKPOINT_HOOK=<cycle>:<path>[:<settleMs>]`.
+   */
+  readonly churnCheckpointHook: {
+    readonly cycle: number;
+    readonly path: string;
+    readonly settleMs: number;
+  } | null;
   /** Receipt destination (file path or directory), if set. */
   readonly receiptPath: string | null;
 }
