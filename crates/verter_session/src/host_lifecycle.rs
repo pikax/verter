@@ -27,7 +27,9 @@ use std::sync::Arc;
 use crate::id::canonicalize_id;
 use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
-use crate::types::{HostMetricsSnapshot, MetaProvenance, MetaProvenanceSnapshot};
+use crate::types::{
+    HostMetricsSnapshot, HostRetentionSnapshot, MetaProvenance, MetaProvenanceSnapshot,
+};
 use crate::VerterHost;
 
 impl VerterHost {
@@ -824,6 +826,98 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
+    /// What the host retains right now, as object counts and aggregate
+    /// bytes ([`HostRetentionSnapshot`]).
+    ///
+    /// Read live from the owning structures — the indexed artifact store
+    /// (live versions, retired-but-retained versions, captured roots), the
+    /// decl-lowering service (parse-snapshot leases) and the aggregate
+    /// semantic retention account (charged bytes and refusals). This is
+    /// the object-lifetime instrument a long editing session is measured
+    /// with: a session whose retained set is bounded shows every figure
+    /// returning to a plateau after quiescence, while a leak shows one of
+    /// them climbing with the number of document versions ever published.
+    pub fn retention_snapshot(&self) -> HostRetentionSnapshot {
+        let indexed = self.project_type_store.indexed();
+        let account = self.project_type_store.retention_account().snapshot();
+        HostRetentionSnapshot {
+            live_artifacts: indexed.live_artifact_count(),
+            retained_retired_versions: indexed.retained_retired_version_count(),
+            live_roots: indexed.live_root_count(),
+            snapshot_leases: self.decl_lowering.live_lease_count(),
+            carrier_candidates: self
+                .carrier_publication
+                .publication_store
+                .retained_candidate_count(),
+            publication_lanes: self
+                .carrier_publication
+                .publication_store
+                .retained_lane_count(),
+            semantic_nodes: self.project_type_store.semantic_graph().node_count(),
+            semantic_memo_entries: self.project_type_store.semantic_graph().memo_entry_count(),
+            unresolved_reach: self
+                .project_type_store
+                .semantic_graph()
+                .unresolved_reach_count(),
+            relation_proofs: self
+                .project_type_store
+                .semantic_graph()
+                .relation_proof_count(),
+            relate_keys: self.project_type_store.semantic_graph().relate_key_count(),
+            shape_cache_entries: self.project_type_store.shape_cache_db().live_count(),
+            flow_graphs: self.project_type_store.flow_slice().graphs_entry_count(),
+            flow_hash_entries: self
+                .project_type_store
+                .flow_slice()
+                .hash_node()
+                .entry_count(),
+            flow_lowered_entries: self
+                .project_type_store
+                .flow_slice()
+                .lowered_node()
+                .entry_count(),
+            mapper_fingerprints: self
+                .project_type_store
+                .mapper_binder_registry()
+                .fingerprint_count(),
+            semantic_memo_families: self
+                .project_type_store
+                .semantic_graph()
+                .memo_entry_counts_by_family()
+                .into_iter()
+                .map(|(family, count)| (family.to_string(), count))
+                .collect(),
+            active_bytes: account.active_bytes,
+            retained_bytes: account.retained_bytes,
+            pinned_bytes: account.pinned_bytes,
+            peak_total_bytes: account.peak_total_bytes,
+            refusals_pressure: account.refusals_pressure,
+            refusals_oversized: account.refusals_oversized,
+            refusals_active: account.refusals_active,
+        }
+    }
+
+    /// Ask the indexed artifact store to physically reclaim every retired
+    /// version no live root can still reach, and return how many it freed.
+    ///
+    /// Retirement is logical: a superseded artifact version leaves the
+    /// current membership but keeps its payload — and with it the parse
+    /// snapshot lease and the decl memo the payload owns — until a sweep
+    /// finds no captured root that still addresses it. The store runs that
+    /// sweep on its own amortised schedule (every few dozen retirements),
+    /// which bounds a pure edit loop but lets a document LIFECYCLE hold
+    /// dozens of dead versions between sweeps: an open → edit → close cycle
+    /// retires two versions of the document (the on-disk one when the edit
+    /// publishes, the edited one when the reload republishes disk), and
+    /// nothing about a close asks for the sweep. A document close is the
+    /// moment its edited versions become unreachable, so the close
+    /// lifecycle requests the sweep here. The request carries no
+    /// reachability judgement — the store keeps every version a live root
+    /// still sees.
+    pub fn reclaim_retired_artifacts(&self) -> usize {
+        self.project_type_store.indexed().reclaim_retired_versions()
+    }
+
     /// Snapshot of host-level metrics counters.
     ///
     /// Every field reads zero unless `HostConfig::metrics_enabled` was
@@ -892,6 +986,19 @@ impl VerterHost {
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
         self.semantic_db().invalidate(canonical_id);
+        // Release what the semantic substrate retained for this document:
+        // its memo entries, node payloads, per-node sidecars, relation
+        // proofs and shape-cache entries. The editor buffer is gone and the
+        // next reader re-lowers the file from disk, so nothing interned for
+        // the closed content is reachable again except through a stale
+        // handle (which now reads as unresolved). This is NOT
+        // `evict_canonical`: the file's artifacts stay for the reload.
+        let released = self.project_type_store.release_canonical(canonical_id);
+        tracing::debug!(
+            canonical_id,
+            ?released,
+            "evict released the document's semantic substrate"
+        );
 
         // Capture pre-evict whole_hash from the scheduler so
         // `ensure_loaded` can detect no-op reloads (identical content)

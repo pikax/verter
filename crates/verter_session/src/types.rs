@@ -4904,6 +4904,80 @@ pub struct MetaProvenanceSnapshot {
 /// [`HostConfig::metrics_enabled`] is `true`; with it `false` (the
 /// default) every field reads zero. Obtained via
 /// [`VerterHost::metrics_snapshot`](crate::VerterHost::metrics_snapshot).
+/// Snapshot of what the host currently RETAINS, as object counts and
+/// aggregate bytes — the lifetime half of a long-session memory
+/// measurement (the process-tree RSS is the other half, and lives
+/// outside the host). Every figure is read live from the owning
+/// structure; nothing here is a counter that needs enabling.
+///
+/// Obtained via
+/// [`VerterHost::retention_snapshot`](crate::VerterHost::retention_snapshot).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HostRetentionSnapshot {
+    /// Live artifact versions in the project type store's indexed
+    /// membership: one per current `(canonical, content, …)` key.
+    pub live_artifacts: usize,
+    /// Retired-but-still-retained artifact, augmenter and index versions:
+    /// superseded versions kept only because a live captured root can
+    /// still address them, or because the store's amortised sweep has not
+    /// run since they were retired.
+    pub retained_retired_versions: usize,
+    /// Live captured store roots (each pins the membership it was captured
+    /// at).
+    pub live_roots: usize,
+    /// Live decl-lowering parse-snapshot leases: one per retained parse
+    /// pin, held by the artifacts that reuse the parse.
+    pub snapshot_leases: usize,
+    /// Complete carrier parses the publication store persists for adoption
+    /// by a later publication of the same content (bounded per file).
+    pub carrier_candidates: usize,
+    /// Publication lanes the carrier store retains (live and terminal).
+    pub publication_lanes: usize,
+    /// Interned semantic-graph nodes (the arena never shrinks on its own).
+    pub semantic_nodes: usize,
+    /// Populated semantic memo slots across every family.
+    pub semantic_memo_entries: usize,
+    /// Semantic-graph `unresolved_reach` entries.
+    pub unresolved_reach: usize,
+    /// Interned relation proofs.
+    pub relation_proofs: usize,
+    /// Interned co-discharged relate keys.
+    pub relate_keys: usize,
+    /// Live shape-cache entries.
+    pub shape_cache_entries: usize,
+    /// Flow-slice graph bundles.
+    pub flow_graphs: usize,
+    /// Flow-slice hash-node entries.
+    pub flow_hash_entries: usize,
+    /// Flow-slice lowered-body entries.
+    pub flow_lowered_entries: usize,
+    /// Mapper binder fingerprints across every canonical.
+    pub mapper_fingerprints: usize,
+    /// Populated semantic memo slots per family (family label, count), so a
+    /// growing memo can be attributed to the family that grows.
+    pub semantic_memo_families: Vec<(String, usize)>,
+    /// Bytes currently charged as ACTIVE against the aggregate semantic
+    /// retention account.
+    pub active_bytes: usize,
+    /// Bytes currently charged as RETAINED (reusable, evictable) against
+    /// the aggregate semantic retention account.
+    pub retained_bytes: usize,
+    /// Bytes currently charged as PINNED (held by a live lease or handle)
+    /// against the aggregate semantic retention account.
+    pub pinned_bytes: usize,
+    /// High-water mark of the aggregate account's charged bytes.
+    pub peak_total_bytes: usize,
+    /// Reservations the aggregate account refused for PRESSURE over its
+    /// lifetime. A pressure outcome is an explicit degradation the
+    /// admitted standard corpus must never produce.
+    pub refusals_pressure: u64,
+    /// Reservations refused as oversized (a single result larger than
+    /// the account admits).
+    pub refusals_oversized: u64,
+    /// Reservations refused because the active class was exhausted.
+    pub refusals_active: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct HostMetricsSnapshot {
     /// Total number of `upsert()` calls.

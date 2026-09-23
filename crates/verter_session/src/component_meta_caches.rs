@@ -2064,6 +2064,51 @@ impl ShapeCacheDb {
         self.entries.len()
     }
 
+    /// Document-close release. Drops every entry the closed `canonical_id`
+    /// retained: entries ROOTED in it (the [`Self::invalidate_canonical`]
+    /// set), entries whose member-value subject node the semantic graph has
+    /// released (`node_is_live` reports `false` — the key can never be
+    /// presented again, the id is never re-minted), and entries whose fact
+    /// signature DEPENDS on the canonical (a consumer's shape lowered
+    /// through the closed file's declarations: the next reader reloads
+    /// that file from disk and must not be served the pre-close shape).
+    /// Returns the number of entries dropped.
+    pub fn release_canonical(
+        &self,
+        canonical_id: &str,
+        node_is_live: &dyn Fn(crate::semantic_query::SemanticNodeId) -> bool,
+    ) -> usize {
+        let keys: Vec<ShapeCacheKey> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let key = entry.key();
+                let rooted_here = key.subject.scope_canonical().as_ref() == canonical_id;
+                let subject_released = match &key.subject {
+                    ShapeSubject::MemberValueNode { node, .. } => !node_is_live(node.0),
+                    ShapeSubject::SyntheticBinding { .. } => false,
+                };
+                let depends_here = || {
+                    entry
+                        .value()
+                        .signature
+                        .canonical_ids()
+                        .iter()
+                        .any(|canonical| canonical.as_ref() == canonical_id)
+                };
+                (rooted_here || subject_released || depends_here()).then(|| key.clone())
+            })
+            .collect();
+        let mut removed = 0usize;
+        for key in keys {
+            if self.entries.remove(&key).is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Test-only synthetic-entry inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
     /// schema-version eviction invariant.

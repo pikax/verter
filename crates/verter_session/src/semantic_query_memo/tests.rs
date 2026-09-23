@@ -11290,3 +11290,786 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     assert!(evidence.self_roots().is_empty());
     assert!(evidence.read_set().overflowed);
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Document-close release (`release_canonical`)
+// ──────────────────────────────────────────────────────────────────
+
+fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
+    NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    }
+}
+
+fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData {
+    SemanticNodeData::TypeParam {
+        decl: DeclIdentity {
+            canonical_id: Arc::from(canonical),
+            owner: TopLevelOwnerId::ordinary_file(),
+            whole_hash: [hash; 16],
+            decl_name: Arc::from(name),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from(name),
+    }
+}
+
+fn release_member(name: &str, value: SemanticNodeId) -> crate::semantic_query::SurfaceMember {
+    crate::semantic_query::SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        value,
+        optional: false,
+        readonly: false,
+        method_kind: None,
+        has_implementation_body: false,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        spans: Default::default(),
+        declaration_origin: None,
+    }
+}
+
+fn release_object_view(
+    members: Vec<crate::semantic_query::SurfaceMember>,
+) -> crate::semantic_query::SurfaceView {
+    crate::semantic_query::surface_view! {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(
+            Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()
+        ),
+        keyspace: None,
+        has_index_signature: false,
+    }
+}
+
+/// One closed document's substrate: a `File{canonical}` type-parameter
+/// node, an object surface over it (plus a shared Global primitive), and a
+/// Global alias shell over the object — the shape a consumer's rebuilt
+/// node takes. Returns `(param, object, alias, view)`.
+fn release_intern_document(
+    store: &SemanticGraphStore,
+    canonical: &str,
+    hash: u8,
+    shared: SemanticNodeId,
+) -> (
+    SemanticNodeId,
+    SemanticNodeId,
+    SemanticNodeId,
+    crate::semantic_query::SurfaceView,
+) {
+    let scope = release_file_scope(canonical, hash);
+    let param =
+        store.intern_node_with_scope(release_type_param(canonical, hash, "T"), scope.clone());
+    let view = release_object_view(vec![
+        release_member("own", param),
+        release_member("shared", shared),
+    ]);
+    let object = store.intern_node_with_scope(SemanticNodeData::Object(view.clone()), scope);
+    let alias = store.intern_node(SemanticNodeData::Alias(object));
+    (param, object, alias, view)
+}
+
+fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
+    SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope(canonical),
+        name: Arc::from(name),
+    })
+}
+
+/// A document close releases EVERYTHING the semantic substrate retained
+/// for the closed canonical — its memo entries (drained through the
+/// reverse index AND through the released-id key / result sweep), its
+/// node payloads plus the nodes embedding them (the cascade reaches a
+/// Global alias shell over the closed object), its `unresolved_reach`
+/// bits, its member-ordinal index, its origin edges, and the relation
+/// proofs / relate keys naming its nodes — while the neighbour document's
+/// entries, nodes, sidecars and proofs, and the shared Global primitive,
+/// stay intact and still dedup.
+///
+/// On the old code a close reached only `invalidate_canonical`: the
+/// three `/w/a.ts` nodes stayed live (`node_count` would read 7, not 4),
+/// `unresolved_reach` kept every bit (7, not 4), the member-ordinal index
+/// kept both entries, both relate keys and all four proofs stayed
+/// interned, and the two entries whose carriers name only `/w/b.ts` but
+/// whose key / result hold `/w/a.ts` nodes kept serving them.
+#[test]
+fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neighbours() {
+    use crate::semantic_query::{
+        BudgetExceededKind, OriginEdgeKind, OriginMeta, RecursionOrBudgetCap, RelateMemoKey,
+        RelationContext, RelationFailureCode, RelationProof, SubRelationPosition, SubRelationRef,
+    };
+
+    let store = SemanticGraphStore::new();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (a_param, a_obj, a_alias, a_view) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    let (b_param, b_obj, b_alias, b_view) = release_intern_document(&store, "/w/b.ts", 2, shared);
+    assert_eq!(store.node_count(), 7);
+    assert_eq!(store.node_slot_count(), 7);
+
+    // Memo entries. `key_a` / `key_b` are the ordinary self-rooted
+    // entries the reverse index drains. `key_b_holding_a` holds A's node
+    // as its RESULT and `key_path_on_a` embeds A's node in its KEY, yet
+    // both carriers name only `/w/b.ts` — the shapes only the released-id
+    // sweep can find.
+    let key_a = release_decl_key("/w/a.ts", "A");
+    let key_b = release_decl_key("/w/b.ts", "B");
+    let key_b_holding_a = release_decl_key("/w/b.ts", "ViaA");
+    let key_path_on_a = SemanticQueryKey::ProjectPath {
+        base: a_obj,
+        path: family_test_path(),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
+    };
+    let roots_a: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/a.ts")]);
+    let roots_b: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/b.ts")]);
+    store.publish_with_carrier_for_tests(
+        key_a.clone(),
+        QueryResult::Value(a_obj),
+        carrier_naming("/w/a.ts", 1),
+        Arc::clone(&roots_a),
+    );
+    store.publish_with_carrier_for_tests(
+        key_b.clone(),
+        QueryResult::Value(b_obj),
+        carrier_naming("/w/b.ts", 2),
+        Arc::clone(&roots_b),
+    );
+    store.publish_with_carrier_for_tests(
+        key_b_holding_a.clone(),
+        QueryResult::Value(a_obj),
+        carrier_naming("/w/b.ts", 2),
+        Arc::clone(&roots_b),
+    );
+    store.publish_with_carrier_for_tests(
+        key_path_on_a.clone(),
+        QueryResult::Value(shared),
+        carrier_naming("/w/b.ts", 2),
+        Arc::clone(&roots_b),
+    );
+    // Four publishes; the `Shallow` path publish also backfills its
+    // narrower sibling slot, so the populated-slot count is one higher.
+    let memo_entries_before = store.memo_entry_count();
+    assert_eq!(memo_entries_before, 5);
+
+    // Per-node sidecars.
+    assert!(!store.node_reaches_unresolved(a_alias));
+    assert!(!store.node_reaches_unresolved(b_alias));
+    assert_eq!(
+        store.unresolved_reach_count(),
+        7,
+        "alias + object + param per document, plus the shared primitive once"
+    );
+    let _ = store.member_ordinal_index(a_obj, &a_view);
+    let _ = store.member_ordinal_index(b_obj, &b_view);
+    store.record_origin_edge(
+        a_obj,
+        OriginEdgeKind::Instantiate,
+        Arc::from(vec![a_param].into_boxed_slice()),
+        OriginMeta::None,
+        dep_sig_for("/w/a.ts", 1),
+    );
+    store.record_origin_edge(
+        b_obj,
+        OriginEdgeKind::Instantiate,
+        Arc::from(vec![b_param].into_boxed_slice()),
+        OriginMeta::None,
+        dep_sig_for("/w/b.ts", 2),
+    );
+
+    // Relation tables: one relate key and one negative proof per
+    // document, a cycle proof over A's key, and a budget proof with no
+    // node at all.
+    let key_id_a = store.intern_relate_key(RelateMemoKey::assignable(
+        a_obj,
+        shared,
+        RelationContext::default(),
+    ));
+    let key_id_b = store.intern_relate_key(RelateMemoKey::assignable(
+        b_obj,
+        shared,
+        RelationContext::default(),
+    ));
+    let proof_a = store.intern_relation_proof(RelationProof::NotAssignable {
+        reason: RelationFailureCode::Structural,
+        failing_sub: SubRelationRef {
+            source: a_param,
+            target: shared,
+            position: SubRelationPosition::Root,
+        },
+    });
+    let proof_b = store.intern_relation_proof(RelationProof::NotAssignable {
+        reason: RelationFailureCode::Structural,
+        failing_sub: SubRelationRef {
+            source: b_param,
+            target: shared,
+            position: SubRelationPosition::Root,
+        },
+    });
+    let proof_cycle_a = store.intern_relation_proof(RelationProof::CoinductiveCycle {
+        keys: Arc::from(vec![key_id_a].into_boxed_slice()),
+    });
+    let proof_budget = store.intern_relation_proof(RelationProof::BudgetExceeded {
+        cap: RecursionOrBudgetCap {
+            kind: BudgetExceededKind::RelationBudget,
+            limit: 0,
+        },
+    });
+    assert_eq!(store.relate_key_count(), 2);
+    assert_eq!(store.relation_proof_count(), 4);
+
+    let report = store.release_canonical("/w/a.ts");
+
+    assert_eq!(
+        report.nodes_released, 3,
+        "A's param + object, plus the Global alias embedding the object: {report:?}"
+    );
+    for dead in [a_param, a_obj, a_alias] {
+        assert!(!store.node_is_live(dead), "{dead:?} must be released");
+        assert!(
+            matches!(
+                store.node_data(dead).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            ),
+            "a released id reads as the Opaque(Miss) placeholder"
+        );
+        assert_eq!(store.node_scope(dead), None);
+    }
+    for live in [b_param, b_obj, b_alias, shared] {
+        assert!(store.node_is_live(live), "{live:?} must stay live");
+    }
+    assert_eq!(store.node_count(), 4, "live nodes: B's three + shared");
+    assert_eq!(store.node_slot_count(), 7, "ids are never reused");
+
+    assert!(
+        store.get_unvalidated(&key_a).is_none(),
+        "A's own entry drained"
+    );
+    assert!(
+        store.get_unvalidated(&key_b_holding_a).is_none(),
+        "an entry whose RESULT is a released node is swept even though its carrier never named /w/a.ts"
+    );
+    assert!(
+        store.get_unvalidated(&key_path_on_a).is_none(),
+        "an entry whose KEY embeds a released node is swept even though its carrier never named /w/a.ts"
+    );
+    assert!(store.get_unvalidated(&key_b).is_some(), "B's entry intact");
+    assert_eq!(store.memo_entry_count(), 1);
+    assert_eq!(
+        report.memo_entries_evicted,
+        memo_entries_before - 1,
+        "every populated slot but B's own was evicted"
+    );
+    assert_eq!(store.canonical_to_entries_count("/w/a.ts"), 0);
+    assert_eq!(store.canonical_to_entries_count("/w/b.ts"), 1);
+    assert_eq!(
+        store.memo_family_count_for_test(),
+        store.memo_budget_tracked_len_for_test(),
+        "the family budget ledger tracks exactly the surviving families"
+    );
+
+    assert_eq!(store.unresolved_reach_count(), 4, "B's three bits + shared");
+    assert_eq!(report.unresolved_reach_dropped, 3);
+    assert_eq!(report.member_indexes_dropped, 1);
+    assert_eq!(report.derivation_buckets_dropped, 1);
+    assert!(store.origins(a_obj).is_empty(), "A's origin edges dropped");
+    assert_eq!(store.origins(b_obj).len(), 1, "B's origin edge kept");
+
+    assert_eq!(store.relate_key_count(), 1);
+    assert_eq!(store.relation_proof_count(), 2);
+    assert_eq!(report.relate_keys_released, 1);
+    assert_eq!(report.relation_proofs_released, 2);
+    assert!(store.relate_key_for_id(key_id_a).is_none());
+    assert!(store.relate_key_for_id(key_id_b).is_some());
+    assert!(store.relation_proof_for(proof_a).is_none());
+    assert!(store.relation_proof_for(proof_cycle_a).is_none());
+    assert!(store.relation_proof_for(proof_b).is_some());
+    assert!(store.relation_proof_for(proof_budget).is_some());
+
+    // Dedup: A's content mints fresh ids; B's and the shared primitive
+    // still dedup to their existing ids.
+    let a_param_again = store.intern_node_with_scope(
+        release_type_param("/w/a.ts", 1, "T"),
+        release_file_scope("/w/a.ts", 1),
+    );
+    assert_ne!(
+        a_param_again, a_param,
+        "a released id is never handed out again"
+    );
+    assert_eq!(
+        store.intern_node_with_scope(
+            release_type_param("/w/b.ts", 2, "T"),
+            release_file_scope("/w/b.ts", 2)
+        ),
+        b_param
+    );
+    assert_eq!(
+        store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+        shared
+    );
+}
+
+/// Twenty open / edit-to-identical-content / close cycles of one
+/// document keep the LIVE substrate flat: after the first cycle the live
+/// node count, memo entries, reach bits and member indexes at the "open"
+/// point are exactly the first cycle's, and every close returns them to
+/// the baseline. Only the append-only id space grows — by exactly the
+/// document's three nodes per cycle, because a released id is never
+/// reused.
+///
+/// On the old code the close path could only reach `invalidate_canonical`,
+/// which dropped the dedup entries but never a payload: `node_count`
+/// (then the slot count) grew by three every cycle — 4, 7, 10, … — so the
+/// flat assertion failed on cycle 1, and the reach bits / member indexes
+/// accumulated with it.
+#[test]
+fn release_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
+    let store = SemanticGraphStore::new();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let baseline_live = store.node_count();
+    let baseline_slots = store.node_slot_count();
+    let roots_a: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/a.ts")]);
+    let mut first_open: Option<(usize, usize, usize)> = None;
+
+    for cycle in 0..20usize {
+        let slots_before = store.node_slot_count();
+        let (a_param, a_obj, a_alias, a_view) =
+            release_intern_document(&store, "/w/a.ts", 1, shared);
+        store.publish_with_carrier_for_tests(
+            release_decl_key("/w/a.ts", "A"),
+            QueryResult::Value(a_obj),
+            carrier_naming("/w/a.ts", 1),
+            Arc::clone(&roots_a),
+        );
+        assert!(!store.node_reaches_unresolved(a_alias));
+        let _ = store.member_ordinal_index(a_obj, &a_view);
+        assert!(
+            a_param.0 as usize >= slots_before,
+            "cycle {cycle}: identical content must mint FRESH ids after a release, never a released one"
+        );
+
+        let open = (
+            store.node_count(),
+            store.memo_entry_count(),
+            store.unresolved_reach_count(),
+        );
+        assert_eq!(
+            open.0,
+            baseline_live + 3,
+            "cycle {cycle}: three live nodes per open"
+        );
+        match first_open {
+            None => first_open = Some(open),
+            Some(first) => assert_eq!(
+                open, first,
+                "cycle {cycle}: the live substrate at 'open' must equal the first cycle's"
+            ),
+        }
+
+        let report = store.release_canonical("/w/a.ts");
+        assert_eq!(report.nodes_released, 3, "cycle {cycle}: {report:?}");
+        assert_eq!(
+            store.node_count(),
+            baseline_live,
+            "cycle {cycle}: live nodes back to baseline"
+        );
+        assert_eq!(store.memo_entry_count(), 0, "cycle {cycle}");
+        assert_eq!(
+            store.unresolved_reach_count(),
+            1,
+            "cycle {cycle}: only the shared bit"
+        );
+        assert_eq!(
+            store.node_slot_count(),
+            baseline_slots + (cycle + 1) * 3,
+            "cycle {cycle}: the id space grows by exactly the released nodes"
+        );
+    }
+}
+
+/// The production warm read refuses a candidate whose result names a
+/// released node, even when the candidate's carrier validates — the
+/// read-side guarantee behind the release: whatever a racing publish
+/// lands after the tombstone, a released node is never SERVED from the
+/// warm memo. A candidate whose result is live is still served.
+///
+/// On the old code there was no liveness check on the warm read:
+/// `get_validated` returned the (vacuously valid) entry and handed the
+/// caller an id whose payload was gone — the first assertion after the
+/// publish failed.
+#[test]
+fn warm_read_refuses_a_candidate_whose_result_was_released() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (_, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    let report = store.release_canonical("/w/a.ts");
+    assert_eq!(report.nodes_released, 3);
+    assert!(!store.node_is_live(a_obj));
+
+    // A publish that raced the tombstone: its carrier is empty (validates
+    // vacuously), so only the liveness guard can refuse it.
+    let no_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
+    let stale_key = release_decl_key("/w/b.ts", "Stale");
+    store.publish_with_carrier_for_tests(
+        stale_key.clone(),
+        QueryResult::Value(a_obj),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::clone(&no_roots),
+    );
+    assert!(
+        store.get_unvalidated(&stale_key).is_some(),
+        "the unchecked probe still sees the raw slot (it is a test-only reader)"
+    );
+    assert!(
+        store.get_validated(&stale_key, &host).is_none(),
+        "the production warm read must refuse a result naming a released node"
+    );
+
+    let live_key = release_decl_key("/w/b.ts", "Live");
+    store.publish_with_carrier_for_tests(
+        live_key.clone(),
+        QueryResult::Value(shared),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        no_roots,
+    );
+    assert!(
+        store.get_validated(&live_key, &host).is_some(),
+        "a live result is still served through the same read"
+    );
+}
+
+/// A close leaves an UNRELATED in-flight build alone: only the targeted
+/// abort of the edit drain (the `(family, slot)` pairs the reverse index
+/// found under the closed canonical) runs, the flight table is otherwise
+/// untouched, and the build publishes its value normally once it lands.
+///
+/// This pins the withdrawal of "abort every flight on close": with it, every
+/// aborted requester re-ran cold and called `ensure_loaded` on the freshly
+/// evicted document, which submits `Scheduler::close_file` + a Load per
+/// requester per close (`host_lifecycle.rs` `ensure_loaded`,
+/// `scheduler.rs` `close_file`) — enough, over a long session, to overflow
+/// the scheduler pool transport and kill the scheduler thread. On that
+/// build this test's unrelated build was aborted (`inflight_aborted == 1`)
+/// and its publish refused, so the final `is_some` assertion failed.
+#[test]
+fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let store = Arc::new(SemanticGraphStore::new());
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (_, _a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    // An unrelated key over a Global node: nothing in its identity or
+    // carrier names /w/a.ts.
+    let key = family_test_key(shared, ProjectionMode::Identity);
+
+    let in_build = Arc::new(Barrier::new(2));
+    let released = Arc::new(Barrier::new(2));
+    let winner_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let winner = {
+        let store = Arc::clone(&store);
+        let in_build = Arc::clone(&in_build);
+        let released = Arc::clone(&released);
+        let key = key.clone();
+        thread::spawn(move || {
+            let host = ctx_host();
+            store.execute_cooperative(
+                &host,
+                key,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    in_build.wait();
+                    released.wait();
+                    (
+                        QueryResult::Value(winner_result),
+                        dep_sig_for("/w/unrelated.ts", 9),
+                    )
+                },
+            )
+        })
+    };
+    in_build.wait();
+
+    let flights_before = store.resident_flight_keys_for_tests().len();
+    let report = store.release_canonical("/w/a.ts");
+    assert_eq!(
+        report.nodes_released, 3,
+        "the close still releases A's nodes: {report:?}"
+    );
+    assert_eq!(
+        store.resident_flight_keys_for_tests().len(),
+        flights_before,
+        "a close must not touch an unrelated resident flight"
+    );
+
+    released.wait();
+    let read = join_within(winner, "winner");
+    assert!(
+        matches!(read.value, QueryResult::Value(id) if id == winner_result),
+        "the winner returns its own value to its caller"
+    );
+    assert!(
+        store.get_unvalidated(&key).is_some(),
+        "an unrelated build in flight at the close publishes normally afterwards"
+    );
+}
+
+/// The content-bound class a node-id / reverse-index drain cannot see:
+/// (a) nodes interned under the CONSUMER's scope whose payload carries the
+/// closed document's content identity (a `DeclRef` to one of its
+/// declarations, the `DeclPlaceholder` refusal for one) — no node id
+/// inside, consumer scope outside; (b) candidates whose carrier was
+/// COMPACTED to a domain aggregate, which `canonical_ids()` reports as
+/// naming no canonical, so the reverse index registers them nowhere and
+/// `invalidate_canonical` leaves them (the count assertion pins that
+/// under-approximation); (c) candidates whose FAMILY names the document
+/// through a content-free slot / scope. A close drops all three, and keeps
+/// a neighbour's precisely-registered candidate.
+///
+/// On the release before the content-bound drain, both consumer-scoped
+/// nodes stayed live (`nodes_released` was 0), the two aggregate-only
+/// candidates and the scope-keyed candidate survived, and
+/// `memo_entry_counts_by_family` reported `ResolveDecl` at 4 instead of 1.
+#[test]
+fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
+    use crate::resolver_core::FactVersionRef;
+    use verter_semantic::resolver_core::{ResolutionPopulation, ResolutionWorldId};
+    use verter_workspace::{
+        AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact,
+    };
+
+    let store = SemanticGraphStore::new();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let scope_c = release_file_scope("/w/consumer.vue", 9);
+    let decl_ref_in_consumer = store.intern_node_with_scope(
+        SemanticNodeData::DeclRef {
+            identity: DeclIdentity {
+                canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
+                whole_hash: [1u8; 16],
+                decl_name: Arc::from("T"),
+            },
+        },
+        scope_c.clone(),
+    );
+    let placeholder_in_consumer = store.intern_node_with_scope(
+        SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/w/a.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
+            name: Arc::from("T"),
+            whole_hash: [1u8; 16],
+        }),
+        scope_c,
+    );
+
+    let aggregate_only = || {
+        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+            FactVersionRef::DomainGeneration(DomainGenerationFact {
+                domain: CompactionDomain::Resolution,
+                population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
+                stamp: AggregateStamp::ResolutionRoots {
+                    base: ResolutionWorldId::from_raw(1),
+                    session: None,
+                },
+            }),
+        ]))
+    };
+    let no_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
+    let roots_b: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/b.ts")]);
+
+    // (b) compacted carriers: one keyed in A's scope, one in B's scope.
+    let key_a_compacted = release_decl_key("/w/a.ts", "T");
+    let key_b_compacted = release_decl_key("/w/b.ts", "ViaAggregate");
+    store.publish_with_carrier_for_tests(
+        key_a_compacted.clone(),
+        QueryResult::Value(shared),
+        aggregate_only(),
+        Arc::clone(&no_roots),
+    );
+    store.publish_with_carrier_for_tests(
+        key_b_compacted.clone(),
+        QueryResult::Value(shared),
+        aggregate_only(),
+        Arc::clone(&roots_b),
+    );
+    // (c) a family naming A through its lookup scope, with a carrier that
+    // names only B precisely.
+    let key_a_scoped = release_decl_key("/w/a.ts", "U");
+    store.publish_with_carrier_for_tests(
+        key_a_scoped.clone(),
+        QueryResult::Value(shared),
+        carrier_naming("/w/b.ts", 2),
+        Arc::clone(&roots_b),
+    );
+    // The neighbour's own, precisely registered candidate.
+    let key_b = release_decl_key("/w/b.ts", "B");
+    store.publish_with_carrier_for_tests(
+        key_b.clone(),
+        QueryResult::Value(shared),
+        carrier_naming("/w/b.ts", 2),
+        roots_b,
+    );
+    assert_eq!(
+        store.canonical_to_entries_count("/w/a.ts"),
+        0,
+        "an aggregate-only carrier names no canonical: the reverse index never registers it under A"
+    );
+    assert_eq!(
+        store.memo_entry_counts_by_family(),
+        vec![("ResolveDecl", 4)]
+    );
+
+    let report = store.release_canonical("/w/a.ts");
+
+    assert_eq!(
+        report.nodes_released, 2,
+        "the consumer-scoped DeclRef and DeclPlaceholder bind A's content: {report:?}"
+    );
+    assert!(!store.node_is_live(decl_ref_in_consumer));
+    assert!(!store.node_is_live(placeholder_in_consumer));
+    assert!(store.node_is_live(shared));
+    assert!(
+        store.get_unvalidated(&key_a_compacted).is_none(),
+        "a compacted candidate in A's scope is dropped"
+    );
+    assert!(
+        store.get_unvalidated(&key_b_compacted).is_none(),
+        "a compacted candidate is dropped on ANY close: the reload is movement in its domain"
+    );
+    assert!(
+        store.get_unvalidated(&key_a_scoped).is_none(),
+        "a family whose lookup scope names A is dropped even though its carrier names only B"
+    );
+    assert!(
+        store.get_unvalidated(&key_b).is_some(),
+        "B's own candidate stays"
+    );
+    assert_eq!(
+        store.memo_entry_counts_by_family(),
+        vec![("ResolveDecl", 1)]
+    );
+    assert_eq!(report.memo_entries_evicted, 3);
+    assert_eq!(
+        store.memo_family_count_for_test(),
+        store.memo_budget_tracked_len_for_test()
+    );
+}
+
+/// The `ProjectPath` growth of a close-heavy session: a consumer keeps a
+/// released ordinal (a published carrier's `value_node`, a retained
+/// surface) and, after the close, dispatches `ProjectPath { base: <dead> }`
+/// again. The cold build reads the placeholder and the entry is admitted
+/// with a carrier naming only the consumer — keyed on a node that was
+/// already dead before any later release, so no release's dead set ever
+/// contains it and it survives every close. Twenty open / query / close
+/// cycles, each followed by such a stale re-dispatch, must keep the
+/// `ProjectPath` family flat: the publish refuses a family keyed on a
+/// released node, and a close drops any family keyed on a non-live node.
+///
+/// On the previous release (dead set = this call's tombstones only, no
+/// admission check) the raw re-publish landed every cycle and the family
+/// grew by one per cycle — the flat assertion failed on cycle 2 with
+/// `ProjectPath` at 2.
+#[test]
+fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_bases() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let roots_a: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/a.ts")]);
+    let roots_c: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/consumer.vue")]);
+    let mut previous_base: Option<SemanticNodeId> = None;
+    let mut first_open: Option<Vec<(&'static str, usize)>> = None;
+
+    for cycle in 0..20usize {
+        // Open: A's version interns its object; the consumer resolves a
+        // path over it (the real cooperative path).
+        let (_, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", cycle as u8 + 1, shared);
+        let key = family_test_key(a_obj, ProjectionMode::Identity);
+        let read = store.execute_cooperative(
+            &host,
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(shared),
+                    dep_sig_for("/w/a.ts", cycle as u8 + 1),
+                )
+            },
+        );
+        assert!(matches!(read.value, QueryResult::Value(_)));
+        assert!(
+            store.get_unvalidated(&key).is_some(),
+            "cycle {cycle}: the live entry is warm"
+        );
+
+        // The stale holder: after the previous close, a consumer query
+        // re-dispatches a path over the PREVIOUS version's (dead) base.
+        if let Some(dead_base) = previous_base {
+            assert!(!store.node_is_live(dead_base));
+            let stale_key = family_test_key(dead_base, ProjectionMode::Identity);
+            let _ = store.execute_cooperative(
+                &host,
+                stale_key.clone(),
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    (
+                        QueryResult::Value(shared),
+                        dep_sig_for("/w/consumer.vue", 7),
+                    )
+                },
+            );
+            assert!(
+                store.get_unvalidated(&stale_key).is_none(),
+                "cycle {cycle}: a family keyed on a released node must not be admitted"
+            );
+            // And a candidate that DID land (the raw test publish bypasses the
+            // admission fence) is dropped by the next close of any document.
+            store.publish_with_carrier_for_tests(
+                stale_key.clone(),
+                QueryResult::Value(shared),
+                carrier_naming("/w/consumer.vue", 7),
+                Arc::clone(&roots_c),
+            );
+            assert!(store.get_unvalidated(&stale_key).is_some());
+        }
+
+        // Cycle 0 has no previous version to re-dispatch; from cycle 1 on
+        // the "open" point holds the live entry plus the raw stale one, and
+        // that is the steady state every later cycle must reproduce.
+        let open = store.memo_entry_counts_by_family();
+        match &first_open {
+            None => {
+                if cycle >= 1 {
+                    first_open = Some(open);
+                }
+            }
+            Some(first) => {
+                assert_eq!(
+                    &open, first,
+                    "cycle {cycle}: the ProjectPath family must stay flat"
+                );
+            }
+        }
+
+        // Close A. Its own entries drain by node id / carrier; the raw
+        // dead-based candidate drains because its key names a non-live node.
+        let _ = store.release_canonical("/w/a.ts");
+        assert_eq!(
+            store.memo_entry_count(),
+            0,
+            "cycle {cycle}: nothing keyed on a dead base survives a close"
+        );
+        previous_base = Some(a_obj);
+    }
+    let _ = roots_a;
+}

@@ -534,6 +534,7 @@ impl VerterLanguageServer {
             diagnostics,
             enabled: self.statistics.is_enabled(),
             session: StatisticsSession { by_type, by_file },
+            retention: self.documents.host.retention_snapshot().into(),
             interaction_trace,
         })
     }

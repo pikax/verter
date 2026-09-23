@@ -1,12 +1,14 @@
 //! Leader-private carrier persistence/adoption substrate.
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use verter_compiler::framework_common::FrameworkParseArtifact;
 use verter_language::carrier_grammar::AcceptedRegisteredCarrierSource;
-use verter_language::registered_source_authority::{RegisteredSourceSnapshotId, WholeSourceHash};
+use verter_language::registered_source_authority::{
+    CanonicalIdentityDigest, RegisteredSourceSnapshotId, WholeSourceHash,
+};
 use verter_language::FileLanguage;
 
 use crate::carrier_artifact_cohort::PersistedCarrierArtifactCohort;
@@ -130,23 +132,98 @@ pub(crate) trait CarrierPersistence: Send + Sync {
         artifact: &Arc<FrameworkParseArtifact>,
         cohort: PersistedCarrierArtifactCohort,
     );
+    /// Number of parse candidates currently retained. A persistence that
+    /// does not retain in memory reports zero.
+    fn retained_candidate_count(&self) -> usize {
+        0
+    }
+}
+
+/// How many persisted parse candidates ONE canonical file may keep.
+///
+/// A candidate is a complete carrier parse retained so that a later
+/// publication of the SAME content adopts it instead of parsing again. The
+/// contents worth adopting are the ones an editor comes back to — the version
+/// on disk after the buffer closes, the version an undo restores — and those
+/// are the newest one or two the file has published. Every version ever typed
+/// is not: keyed by content alone, an edit loop would persist one full parse
+/// (arena, geometry and all) per keystroke for the life of the session, since
+/// nothing but an adoption of that exact content ever takes an entry out.
+/// Retention is therefore per canonical file, newest first: publishing a new
+/// content drops the oldest candidate of the same file past this window.
+/// Other files' candidates are untouched — the bound is per file so a large
+/// workspace does not evict one file's disk version because another file was
+/// edited.
+const PERSISTED_CANDIDATES_PER_CANONICAL: usize = 2;
+
+#[derive(Default)]
+struct InMemoryCandidates {
+    by_key: HashMap<PersistentCarrierKey, PersistedCarrierCandidate>,
+    /// Every retained key per canonical file, oldest first, so the per-file
+    /// window can drop the oldest without scanning the whole map.
+    by_canonical: HashMap<CanonicalIdentityDigest, VecDeque<PersistentCarrierKey>>,
+}
+
+impl InMemoryCandidates {
+    fn take(
+        &mut self,
+        canonical: CanonicalIdentityDigest,
+        key: &PersistentCarrierKey,
+    ) -> Option<PersistedCarrierCandidate> {
+        let candidate = self.by_key.remove(key)?;
+        if let Some(keys) = self.by_canonical.get_mut(&canonical) {
+            keys.retain(|retained| retained != key);
+            if keys.is_empty() {
+                self.by_canonical.remove(&canonical);
+            }
+        }
+        Some(candidate)
+    }
+
+    fn store(
+        &mut self,
+        canonical: CanonicalIdentityDigest,
+        key: PersistentCarrierKey,
+        candidate: PersistedCarrierCandidate,
+    ) {
+        let keys = self.by_canonical.entry(canonical).or_default();
+        // Re-storing a content the file already holds refreshes its place in
+        // the window rather than counting it twice.
+        keys.retain(|retained| retained != &key);
+        keys.push_back(key.clone());
+        self.by_key.insert(key, candidate);
+        while keys.len() > PERSISTED_CANDIDATES_PER_CANONICAL {
+            if let Some(oldest) = keys.pop_front() {
+                self.by_key.remove(&oldest);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct InMemoryCarrierPersistence {
-    candidates: Mutex<HashMap<PersistentCarrierKey, PersistedCarrierCandidate>>,
+    candidates: Mutex<InMemoryCandidates>,
 }
 
 impl CarrierPersistence for InMemoryCarrierPersistence {
+    /// Across every canonical file: the object-count half of the store's
+    /// retention bound.
+    fn retained_candidate_count(&self) -> usize {
+        self.candidates
+            .lock()
+            .map(|candidates| candidates.by_key.len())
+            .unwrap_or(0)
+    }
+
     fn take_candidate(
         &self,
         id: &FrameworkArtifactId,
         accepted: &AcceptedRegisteredCarrierSource,
     ) -> Option<PersistedCarrierCandidate> {
-        self.candidates
-            .lock()
-            .ok()?
-            .remove(&PersistentCarrierKey::new(id, accepted))
+        self.candidates.lock().ok()?.take(
+            accepted.source().snapshot_id().canonical_digest(),
+            &PersistentCarrierKey::new(id, accepted),
+        )
     }
 
     fn store_success(
@@ -166,7 +243,11 @@ impl CarrierPersistence for InMemoryCarrierPersistence {
             checksum: candidate_checksum(artifact, cohort),
         };
         if let Ok(mut candidates) = self.candidates.lock() {
-            candidates.insert(PersistentCarrierKey::new(id, accepted), candidate);
+            candidates.store(
+                accepted.source().snapshot_id().canonical_digest(),
+                PersistentCarrierKey::new(id, accepted),
+                candidate,
+            );
         }
     }
 }
@@ -226,5 +307,123 @@ mod tests {
             persistent.grammar_fingerprint,
             accepted.grammar().fingerprint()
         );
+    }
+
+    /// Registers `bytes` as generation `generation` of `canonical` and
+    /// accepts it under `config`.
+    fn fixture_accepted(
+        source_authority: &RegisteredSourceAuthority,
+        grammar_authority: &CarrierGrammarAuthority,
+        config: &CarrierGrammarConfig,
+        canonical: &str,
+        generation: u64,
+        bytes: &str,
+    ) -> AcceptedRegisteredCarrierSource {
+        let source = source_authority
+            .register_source(
+                CanonicalFileId::new(canonical),
+                FileIncarnation::new(1),
+                SourceGeneration::new(generation),
+                FileLanguage::vue(),
+                Arc::from(bytes),
+            )
+            .unwrap();
+        grammar_authority
+            .accept_registered_source(source_authority, &source, config)
+            .unwrap()
+    }
+
+    /// Per-file candidate window: `store_success` keeps the newest
+    /// `PERSISTED_CANDIDATES_PER_CANONICAL` contents of ONE canonical file,
+    /// `take_candidate` un-indexes what it takes, another file's candidates
+    /// are unaffected, and re-storing a held content refreshes its place
+    /// rather than counting it twice.
+    ///
+    /// On the unbounded code (a plain content-keyed map) the count after
+    /// three stores is 3 and the oldest content is still there to take. With
+    /// a window whose `take` did NOT un-index, the store after the take would
+    /// evict the live `a2` (count 2, not 3, at that step).
+    #[test]
+    fn in_memory_candidates_keep_the_newest_two_per_canonical_file() {
+        let persistence = InMemoryCarrierPersistence::default();
+        let source_authority = RegisteredSourceAuthority::new().unwrap();
+        let grammar_authority = CarrierGrammarAuthority::new().unwrap();
+        let config = CarrierGrammarConfig::vue("{{", "}}", ["fixture-box"]).unwrap();
+        grammar_authority
+            .register_carrier_grammar(
+                FileLanguage::vue(),
+                FrameworkAdapterSemanticVersion::new(1).unwrap(),
+                CarrierParserGrammarVersion::new(1).unwrap(),
+                config.clone(),
+            )
+            .unwrap();
+        let cohort = crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort();
+        let accepted = |canonical: &str, generation: u64, bytes: &str| {
+            fixture_accepted(
+                &source_authority,
+                &grammar_authority,
+                &config,
+                canonical,
+                generation,
+                bytes,
+            )
+        };
+        let store = |accepted: &AcceptedRegisteredCarrierSource| {
+            let id = FrameworkArtifactId::derive(
+                accepted,
+                super::super::parse_key_for_accepted(accepted),
+            );
+            let artifact = Arc::new(
+                verter_compiler::framework_common::registered_carrier_projection::project_registered_accepted(
+                    accepted,
+                )
+                .expect("fixture parses")
+                .into_framework_parse_artifact(),
+            );
+            persistence.store_success(&id, accepted, &artifact, cohort);
+            id
+        };
+
+        let a1 = accepted("file:///A.vue", 1, "<template><p>a1</p></template>");
+        let a2 = accepted("file:///A.vue", 2, "<template><p>a2</p></template>");
+        let a3 = accepted("file:///A.vue", 3, "<template><p>a3</p></template>");
+        let a1_id = store(&a1);
+        let a2_id = store(&a2);
+        let a3_id = store(&a3);
+        assert_eq!(persistence.retained_candidate_count(), 2);
+        assert!(
+            persistence.take_candidate(&a1_id, &a1).is_none(),
+            "the oldest content of the file is past the window"
+        );
+        assert_eq!(persistence.retained_candidate_count(), 2);
+
+        let b1 = accepted("file:///B.vue", 1, "<template><p>b1</p></template>");
+        let b1_id = store(&b1);
+        assert_eq!(
+            persistence.retained_candidate_count(),
+            3,
+            "the window is per canonical file"
+        );
+
+        assert!(persistence.take_candidate(&a3_id, &a3).is_some());
+        assert_eq!(persistence.retained_candidate_count(), 2);
+        let a4 = accepted("file:///A.vue", 4, "<template><p>a4</p></template>");
+        let a4_id = store(&a4);
+        assert_eq!(
+            persistence.retained_candidate_count(),
+            3,
+            "taking a3 un-indexed it, so storing a4 keeps a2 (a2, a4, b1)"
+        );
+        assert!(persistence.take_candidate(&a2_id, &a2).is_some());
+        assert!(persistence.take_candidate(&a4_id, &a4).is_some());
+        assert!(persistence.take_candidate(&b1_id, &b1).is_some());
+        assert_eq!(persistence.retained_candidate_count(), 0);
+
+        // Re-storing a content the file already holds refreshes it in place.
+        store(&a4);
+        store(&a4);
+        assert_eq!(persistence.retained_candidate_count(), 1);
+        assert!(persistence.take_candidate(&a4_id, &a4).is_some());
+        assert!(persistence.take_candidate(&a4_id, &a4).is_none());
     }
 }

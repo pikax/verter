@@ -53,6 +53,21 @@
 //! to route per-base-scope lookups through the correct
 //! [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
 //! without threading scope through every call.
+//!
+//! **Release (document close).** The id space is append-only — a
+//! `SemanticNodeId` is a raw `u64` index with no generation tag, and ids are
+//! retained outside this arena (shape-cache keys, the member-ordinal sidecar,
+//! relation proofs, materialised provenance), so an id is NEVER reused. What
+//! a close reclaims is the PAYLOAD: [`NodeArena::release_canonical`]
+//! tombstones every node whose origin scope is the closed canonical, plus
+//! every node whose payload embeds a released id (children are interned
+//! before their parents, so a parent of a released node is dead too — no
+//! live node ever embeds a released id, except the sealed
+//! `DeferredCallable` carrier whose parts are unreadable here). A
+//! tombstoned slot drops its `Arc` payload and its scope, leaves the dedup
+//! index, and resolves through [`NodeArena::get`] to one shared
+//! `Opaque(Miss)` placeholder so a stale holder degrades to an unresolved
+//! value instead of an invalid-id fault.
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -111,12 +126,19 @@ impl ShardIndex {
 /// intern-miss path serializes on the writer.
 #[derive(Default)]
 pub(super) struct ArenaInner {
-    nodes: Vec<Arc<SemanticNodeData>>,
+    /// Dense payload storage indexed by `id.0`. `None` is a RELEASED slot:
+    /// the id was handed out, its payload was dropped by
+    /// [`NodeArena::release_canonical`], and the id is never reused.
+    nodes: Vec<Option<Arc<SemanticNodeData>>>,
     /// Origin-scope sidecar. Index-aligned with `nodes`.
     /// `Some(scope)` records the scope the node was first interned in
     /// (`Global` for scope-less structural nodes, `File { .. }` for
-    /// declaration-origin nodes).
+    /// declaration-origin nodes). `None` for a released slot.
     scopes: Vec<Option<NodeScopeId>>,
+    /// Number of `Some` payload slots — `nodes.len()` minus the released
+    /// slots. Maintained on every push and release so the live count is
+    /// O(1).
+    live: usize,
 }
 
 /// Process-global seed for structural fingerprints. A single
@@ -149,6 +171,126 @@ fn structural_fingerprint(data: &SemanticNodeData, scope: &NodeScopeId) -> u64 {
     hasher.finish()
 }
 
+/// Whether a payload binds `canonical_id`'s CONTENT identity regardless of
+/// the scope it was interned under: a `DeclRef` / `InstantiationRef` /
+/// `TypeParam` whose `DeclIdentity` (canonical + whole hash) names it, a
+/// `DeclPlaceholder` refusal for one of its declarations, a `typeof` root
+/// or nominal identity in it, a bare reference captured in its scope, a
+/// surface whose members / index signatures were DECLARED in it, a
+/// signature occurring in it, a sealed callable served from it, or a
+/// synthetic binding rooted in it.
+///
+/// A consumer re-lowering an import from the closed document interns
+/// such a node under the CONSUMER's scope, with the closed content's whole
+/// hash inside the identity; it embeds no node id, so neither the scope
+/// root rule nor the child cascade reaches it, yet it can never be reached
+/// again (the reload mints a new hash → a new identity → a new node). One
+/// such node per closed content version is exactly the per-cycle growth
+/// a close-heavy session shows. The match carries no wildcard: a new
+/// variant must be dispositioned here.
+fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool {
+    use crate::semantic_query::{ObjectConstructionEffect, QueryError, SignatureReturnCarrier};
+    use verter_type_expr::facts::FunctionReturnSource;
+
+    let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
+    let declared_in = |origin: &Option<Arc<str>>| origin.as_deref() == Some(canonical_id);
+    match data {
+        SemanticNodeData::DeclRef { identity } => names(&identity.canonical_id),
+        SemanticNodeData::InstantiationRef { base, .. } => names(&base.canonical_id),
+        SemanticNodeData::TypeParam { decl, .. } => names(&decl.canonical_id),
+        SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+            canonical_id: refused,
+            ..
+        }) => names(refused),
+        SemanticNodeData::Opaque(_) => false,
+        SemanticNodeData::Object(view) => {
+            view.positive_members()
+                .iter()
+                .any(|member| declared_in(&member.declaration_origin))
+                || view
+                    .index_signatures
+                    .iter()
+                    .any(|signature| declared_in(&signature.declaration_origin))
+        }
+        SemanticNodeData::ObjectSpreadProgram(program) => {
+            program.effects.iter().any(|effect| match effect {
+                ObjectConstructionEffect::DirectProperty(effect) => {
+                    declared_in(&effect.declaration_origin)
+                }
+                ObjectConstructionEffect::DirectMethod(effect) => {
+                    declared_in(&effect.declaration_origin)
+                }
+                ObjectConstructionEffect::DirectGet(effect)
+                | ObjectConstructionEffect::DirectSet(effect) => {
+                    declared_in(&effect.declaration_origin)
+                }
+                ObjectConstructionEffect::DirectIndex(effect) => {
+                    declared_in(&effect.declaration_origin)
+                }
+                ObjectConstructionEffect::DirectCall(_)
+                | ObjectConstructionEffect::DirectConstruct(_)
+                | ObjectConstructionEffect::Spread(_) => false,
+            })
+        }
+        SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
+            data.typeof_head()
+                .is_some_and(|(root, _)| names(&root.scope.canonical_id))
+                || data
+                    .typeof_nominal_identity()
+                    .is_some_and(|identity| names(&identity.canonical_id))
+        }
+        SemanticNodeData::BareRef(_) => data.bare_ref_head().is_some_and(|(_, scope)| {
+            scope
+                .canonical_file()
+                .is_some_and(|captured| names(&captured))
+        }),
+        SemanticNodeData::Signature {
+            occurrence,
+            return_carrier,
+            ..
+        } => {
+            occurrence
+                .as_ref()
+                .is_some_and(|occurrence| names(&occurrence.function.anchor.canonical_id))
+                || match return_carrier {
+                    SignatureReturnCarrier::Declared(_) => false,
+                    SignatureReturnCarrier::Function(source) => match source {
+                        FunctionReturnSource::Declared(locator) => {
+                            names(&locator.slot().anchor.canonical_id)
+                        }
+                        FunctionReturnSource::Flow(identity) => {
+                            names(&identity.anchor.canonical_id)
+                        }
+                        FunctionReturnSource::Absent => false,
+                    },
+                }
+        }
+        SemanticNodeData::DeferredCallable(callable) => names(callable.declaring_canonical()),
+        SemanticNodeData::SyntheticBinding { id, .. } => names(&id.scope_canonical_id),
+        // A module specifier is not a canonical; an infer binder's identity
+        // is private and scope-bound (its scope root rule applies); the
+        // rest hold no declaration identity at all.
+        SemanticNodeData::ImportType(_)
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. }
+        | SemanticNodeData::Alias(_)
+        | SemanticNodeData::Union(_)
+        | SemanticNodeData::Intersection(_)
+        | SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Array { .. }
+        | SemanticNodeData::Tuple { .. }
+        | SemanticNodeData::TemplateLiteral { .. }
+        | SemanticNodeData::KeyOf { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::MergedDecl { .. }
+        | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::IntrinsicApplication { .. } => false,
+    }
+}
+
 /// Deterministic shard routing for a `(data, scope)` pair — the low bits of
 /// its structural fingerprint. Test-only: production interning computes the
 /// fingerprint once in [`NodeArena::intern_with_fingerprint`] and derives
@@ -172,6 +314,12 @@ pub(super) struct NodeArena {
     /// data. `None` for test-default arenas constructed via
     /// `Default::default()`.
     pub(super) provenance: Option<Arc<crate::types::MetaProvenance>>,
+    /// The ONE payload every released slot resolves to through [`Self::get`]
+    /// — an `Opaque(Miss)` node ("this value's resolution answered
+    /// nothing"), never in the dedup index. Mirrors the
+    /// `SemanticGraphRead::node_data` fabrication for an unknown id, so a
+    /// consumer still holding a released id reads an unresolved value.
+    released_placeholder: Arc<SemanticNodeData>,
 }
 
 impl Default for NodeArena {
@@ -180,6 +328,9 @@ impl Default for NodeArena {
             inner: parking_lot::RwLock::new(ArenaInner::default()),
             shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
             provenance: None,
+            released_placeholder: Arc::new(SemanticNodeData::Opaque(
+                crate::semantic_query::QueryError::Miss,
+            )),
         }
     }
 }
@@ -288,8 +439,9 @@ impl NodeArena {
                     // dense arena storage and the dedup bucket — the payload
                     // is never deep-cloned into the index.
                     let payload = Arc::new(data);
-                    inner.nodes.push(Arc::clone(&payload));
+                    inner.nodes.push(Some(Arc::clone(&payload)));
                     inner.scopes.push(Some(scope.clone()));
+                    inner.live += 1;
                     drop(inner);
                     shard
                         .index
@@ -316,20 +468,188 @@ impl NodeArena {
         id
     }
 
+    /// Read the payload for `id`. `None` for an id this arena never handed
+    /// out; the shared `Opaque(Miss)` placeholder for a RELEASED id (see
+    /// [`Self::release_canonical`]); the interned payload otherwise.
     pub(super) fn get(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         let inner = self.inner.read();
-        inner.nodes.get(id.0 as usize).cloned()
+        match inner.nodes.get(id.0 as usize) {
+            Some(Some(payload)) => Some(Arc::clone(payload)),
+            Some(None) => Some(Arc::clone(&self.released_placeholder)),
+            None => None,
+        }
+    }
+
+    /// Whether `id` names a slot that still holds its interned payload —
+    /// `false` for an id never handed out and for a released slot.
+    pub(super) fn is_live(&self, id: SemanticNodeId) -> bool {
+        let inner = self.inner.read();
+        matches!(inner.nodes.get(id.0 as usize), Some(Some(_)))
     }
 
     /// Return the recorded origin scope for `id` — `None` for invalid
-    /// ids, `Some(scope)` for everything else.
+    /// ids and released slots, `Some(scope)` for everything else.
     pub(super) fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
         let inner = self.inner.read();
         inner.scopes.get(id.0 as usize).cloned().flatten()
     }
 
+    /// Number of id slots ever allocated — the append-only id space,
+    /// INCLUDING released slots. Equals [`Self::live_len`] until the first
+    /// release.
     pub(super) fn len(&self) -> usize {
         self.inner.read().nodes.len()
+    }
+
+    /// Number of slots that still hold a payload — the retained node set.
+    pub(super) fn live_len(&self) -> usize {
+        self.inner.read().live
+    }
+
+    /// Release every node the closed `canonical_id` retained: the nodes
+    /// whose origin scope is `File { canonical_id, .. }`, the sealed
+    /// `DeferredCallable` carriers whose served position is declared in
+    /// it, and — transitively — every node whose payload embeds a released
+    /// id (a parent of a dead node can never be reached again: its dedup
+    /// key names an id that is never re-minted, and the memo entries that
+    /// held it are drained by the caller). Global-scope nodes are released
+    /// ONLY through that cascade; a scope-less node that embeds no released
+    /// id (a primitive, a shared literal) stays.
+    ///
+    /// Each released slot drops its payload `Arc` and scope, leaves the
+    /// dedup index (so a re-intern of the same `(payload, scope)` mints a
+    /// fresh id), and keeps its id — see the module docs for why ids are
+    /// never reused. Returns the released ids in ascending order.
+    ///
+    /// **Lock order.** The dead set is computed under `inner.read()`, the
+    /// dedup entries are dropped shard by shard with NO `inner` lock held
+    /// (the intern-miss path holds a shard mutex and THEN takes
+    /// `inner.write()`, so this method never nests the two the other way),
+    /// and only then are the payloads dropped under `inner.write()`. That
+    /// order also means no dedup hit can ever hand out an id whose payload
+    /// is already gone.
+    ///
+    /// **Cost.** One pass over the live slots (plus a confirming pass) when
+    /// the canonical owns at least one node; an early return otherwise. A
+    /// close is a user-driven, rare event, so the O(nodes) scan is paid
+    /// there rather than as a per-intern reverse index.
+    pub(super) fn release_canonical(&self, canonical_id: &str) -> Vec<SemanticNodeId> {
+        let mut released: Vec<(SemanticNodeId, u64)> = Vec::new();
+        {
+            let inner = self.inner.read();
+            let slot_count = inner.nodes.len();
+            let mut dead: Vec<bool> = vec![false; slot_count];
+            let is_root = |index: usize| -> bool {
+                match (&inner.nodes[index], &inner.scopes[index]) {
+                    (None, _) => false,
+                    (
+                        Some(_),
+                        Some(NodeScopeId::File {
+                            canonical_id: c, ..
+                        }),
+                    ) if c.as_ref() == canonical_id => true,
+                    (Some(payload), _) => payload_binds_canonical(payload, canonical_id),
+                }
+            };
+            let mut any_root = false;
+            for (index, is_dead) in dead.iter_mut().enumerate().take(slot_count) {
+                if is_root(index) {
+                    *is_dead = true;
+                    any_root = true;
+                }
+            }
+            if !any_root {
+                return Vec::new();
+            }
+            // Cascade to every live node embedding a dead id. Children are
+            // interned before their parents, so one ascending pass settles
+            // the common case; the loop re-runs until a pass changes
+            // nothing, which also covers any parent interned out of order.
+            loop {
+                let mut changed = false;
+                for index in 0..slot_count {
+                    if dead[index] {
+                        continue;
+                    }
+                    let Some(payload) = inner.nodes[index].as_ref() else {
+                        continue;
+                    };
+                    let mut embeds_dead = false;
+                    let _walk = payload.for_each_child(|child| {
+                        if let Some(true) = dead.get(child.0 as usize) {
+                            embeds_dead = true;
+                        }
+                    });
+                    if embeds_dead {
+                        dead[index] = true;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            for (index, is_dead) in dead.iter().enumerate() {
+                if !*is_dead {
+                    continue;
+                }
+                let (Some(payload), Some(scope)) = (&inner.nodes[index], &inner.scopes[index])
+                else {
+                    continue;
+                };
+                released.push((
+                    SemanticNodeId(index as u64),
+                    structural_fingerprint(payload, scope),
+                ));
+            }
+        }
+        if released.is_empty() {
+            return Vec::new();
+        }
+        // Drop the dedup entries FIRST, shard by shard, so no intern can
+        // hit a released node once its payload is gone.
+        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let mut per_shard: Vec<Vec<(u64, SemanticNodeId)>> = vec![Vec::new(); NUM_SHARDS];
+        for (id, fingerprint) in &released {
+            per_shard[(fingerprint & SHARD_MASK) as usize].push((*fingerprint, *id));
+        }
+        for (shard_index, victims) in per_shard.into_iter().enumerate() {
+            if victims.is_empty() {
+                continue;
+            }
+            let lock_start = if timing_on {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let mut shard = self.shards[shard_index].lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
+            for (fingerprint, id) in victims {
+                let Some(bucket) = shard.index.get_mut(&fingerprint) else {
+                    continue;
+                };
+                bucket.retain(|(_, _, cand_id)| *cand_id != id);
+                if bucket.is_empty() {
+                    shard.index.remove(&fingerprint);
+                }
+            }
+        }
+        // Now drop the payloads. A slot already released by a concurrent
+        // call is skipped so `live` stays exact.
+        let mut inner = self.inner.write();
+        let mut ids: Vec<SemanticNodeId> = Vec::with_capacity(released.len());
+        for (id, _) in released {
+            let index = id.0 as usize;
+            if inner.nodes[index].take().is_some() {
+                inner.scopes[index] = None;
+                inner.live -= 1;
+                ids.push(id);
+            }
+        }
+        ids
     }
 
     /// Drop shard-dedup entries for the given canonical id.
@@ -386,9 +706,9 @@ impl NodeArena {
     /// index. Returns `false` if `id` has no dense slot or no bucket entry.
     #[cfg(test)]
     pub(super) fn debug_bucket_shares_arena_arc(&self, id: SemanticNodeId) -> bool {
-        let arena_arc = match self.get(id) {
-            Some(arc) => arc,
-            None => return false,
+        let arena_arc = match self.inner.read().nodes.get(id.0 as usize) {
+            Some(Some(arc)) => Arc::clone(arc),
+            _ => return false,
         };
         for shard in self.shards.iter() {
             let shard = shard.lock();

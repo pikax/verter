@@ -455,6 +455,12 @@ Publication admission reserves its epoch before capturing document/host snapshot
 
 Project routing preserves bulk carrier activation and change notifications: resolve each member's live ownership, group by the actual provider instance and preserve input order within each group. Scalar editor opens remain scalar. Splitting a bulk activation into scalar calls repeatedly rebuilds configured TypeScript projects while membership gates are held and can stall unrelated IDE requests.
 
+### Retention across a document lifecycle
+
+A document CLOSE is the moment its edited versions become unreachable, and the close lifecycle now releases what the session retained for them instead of leaving it to amortised sweeps: `handle_did_close` asks the indexed artifact store to reclaim retired versions no captured root still sees (`VerterHost::reclaim_retired_artifacts`), `VerterHost::evict` releases the closed document from the semantic substrate (`ProjectTypeStore::release_canonical`: the file's memo entries, shape-cache entries, relation proofs and arena nodes are dropped; ids are never reused, a released node reads as `Opaque(Miss)` and warm reads refuse a result that names one), and the artifact store sweeps as soon as one file holds more than two retired versions (`RECLAIM_TRIGGER_CHAIN_LENGTH`), not only every 64 retirements. The carrier publication store keeps at most two persisted parse candidates per file, prunes superseded lanes when a file publishes new content, and keeps exact audit counters over a bounded event window. Diagnostics publication no longer holds a mutex across the client enqueue: the send registers a cancellable slot under the diagnostics state lock, and a close CANCELS a suspended send instead of waiting for it.
+
+`$/verter/getStatistics` reports the host's retained object set under `retention` (live and retired artifact versions, captured roots, parse-snapshot leases, carrier candidates and lanes, semantic nodes, memo entries, shape entries, flow-slice entries, mapper fingerprints, charged bytes and pressure refusals), read live from the owning structures. The endurance churn lane (`pnpm --filter @verter/dx-harness test:endurance`, `test/endurance.churn.test.ts`) reads it at every quiesced checkpoint and fails when any counter grows per cycle, alongside the per-window process-tree RSS slope over the criterion's 1000 cycles and the pressure-refusal count.
+
 ### Freeze Prevention (Fast Typing)
 
 Three layers prevent tokio runtime starvation during rapid typing:

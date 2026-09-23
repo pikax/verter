@@ -39,7 +39,6 @@ pub struct DocumentRegistry {
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
-    diagnostics_publisher: tokio::sync::Mutex<()>,
     diagnostics_refresh_tx: tokio::sync::broadcast::Sender<DiagnosticsRefresh>,
     next_open_incarnation: std::sync::atomic::AtomicU64,
     /// Default compile profile for TSX generation (LSP mode).
@@ -522,7 +521,6 @@ impl DocumentRegistry {
             host,
             documents: DashMap::new(),
             diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
-            diagnostics_publisher: tokio::sync::Mutex::new(()),
             diagnostics_refresh_tx,
             next_open_incarnation: std::sync::atomic::AtomicU64::new(1),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
@@ -1204,32 +1202,18 @@ impl DocumentRegistry {
         self.did_change(uri, version, &text)
     }
 
-    /// Handle a document being closed, behind the diagnostics publication fence.
-    ///
-    /// This is the entry point the server's close lifecycle uses, and the reason
-    /// it exists is ORDERING, not bookkeeping: [`Self::publish_diagnostics`]
-    /// validates its publication and then AWAITS the outbound notification, so a
-    /// bare `did_close` landing inside that await window lets an
-    /// already-validated result reach the client for a document that is now
-    /// closed — a stale publication, suppressed only at the receipt commit,
-    /// which is too late. The publisher holds this same fence across its
-    /// validate-and-send, so the two are mutually exclusive: either the close
-    /// waits for a send that WAS current when it was validated, or the
-    /// publication reaches its fenced check after the close and drops.
-    ///
-    /// The fence covers only the bounded enqueue and the receipt commit —
-    /// provider computation never holds it — so a close never queues behind real
-    /// work.
-    pub async fn did_close_fenced(&self, uri: &Uri) {
-        let _fence = self.diagnostics_publication_fence().await;
-        self.did_close(uri);
-    }
-
     /// Handle a document being closed.
     ///
-    /// Prefer [`Self::did_close_fenced`] from any async context that can race a
-    /// diagnostics publication; this bare form leaves the publication ordering to
-    /// the caller.
+    /// SYNCHRONOUS on purpose, and it is the whole close path — there is no
+    /// awaited variant. `publish_diagnostics` validates its publication and then
+    /// awaits the outbound notification, so a close landing inside that window
+    /// would otherwise let an already-validated result reach a document the client
+    /// has closed. The close takes the URI's epoch slot and CANCELS whatever send
+    /// is suspended there, in one synchronous critical section: the payload is
+    /// abandoned rather than completed, and the close never waits on the client
+    /// channel. Waiting was the earlier design, and it meant a client that stopped
+    /// draining its notification channel could strand every close, open and change
+    /// behind one diagnostics send.
     pub fn did_close(&self, uri: &Uri) {
         // Fence any in-flight publication for this document, then drop the URI's
         // diagnostics bookkeeping outright — a closed document can have no

@@ -13,8 +13,10 @@
 //! interning behaviour are untouched. The sidecar keys on
 //! [`SemanticNodeId`] — valid forever within a store because the node
 //! arena is append-only (ids are never reused) and payloads are immutable,
-//! so entries never go stale and no invalidation hook is required (unlike
-//! the hash-cons memos, whose values depend on cross-file walks).
+//! so entries never go stale and no EDIT-time invalidation hook is required
+//! (unlike the hash-cons memos, whose values depend on cross-file walks).
+//! A document CLOSE (`release_canonical`) does drop the entries of the
+//! nodes it tombstones — pure retention once the payload is gone.
 //!
 //! **Collision-safe hashing.** Member names are authored strings, so the
 //! inner map uses the std `HashMap` default hasher (SipHash `RandomState`),

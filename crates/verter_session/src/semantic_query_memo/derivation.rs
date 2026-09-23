@@ -291,6 +291,38 @@ impl DerivationStore {
         self.total_edges = 0;
     }
 
+    /// Document-close release: drop every bucket keyed by a released
+    /// result node and every edge whose sources name a released node
+    /// (a bucket emptied that way is dropped too), keeping the retention
+    /// ledger and `total_edges` exact. Origin edges are best-effort
+    /// provenance, never an invalidation source, so dropping them
+    /// degrades only the audit trace of a document that is gone. Returns
+    /// the number of buckets dropped.
+    pub(super) fn release_nodes(&mut self, is_released: &dyn Fn(SemanticNodeId) -> bool) -> usize {
+        let mut victims: Vec<(SemanticNodeId, OriginEdgeKind)> = Vec::new();
+        let mut dropped_edges = 0usize;
+        for (key, bucket) in self.edges.iter_mut() {
+            if is_released(key.0) {
+                dropped_edges += bucket.len();
+                victims.push(*key);
+                continue;
+            }
+            let before = bucket.len();
+            bucket.retain(|edge| !edge.sources.iter().any(|source| is_released(*source)));
+            dropped_edges += before - bucket.len();
+            if bucket.is_empty() {
+                victims.push(*key);
+            }
+        }
+        for key in &victims {
+            self.edges.remove(key);
+            // Sound under the exclusive `&mut self` borrow — see `record`.
+            self.edge_budget.forget_key_under_exclusive_lock(key);
+        }
+        self.total_edges -= dropped_edges;
+        victims.len()
+    }
+
     /// Number of distinct `(result, kind)` edge buckets currently
     /// retained. The bounded-retention proof asserts on this.
     pub(super) fn bucket_count(&self) -> usize {

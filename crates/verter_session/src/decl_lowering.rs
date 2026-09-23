@@ -504,6 +504,13 @@ pub(crate) struct DeclLoweringService {
     /// a test may inject a private one so pin accounting is observable
     /// without racing another test's snapshots.
     account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    /// Number of [`SnapshotLease`]s currently alive across every shard —
+    /// the object-lifetime figure a retention measurement reads alongside
+    /// the byte account. A lease is counted when [`Self::acquire_lease`]
+    /// hands it out and uncounted when its `Drop` releases the key, so the
+    /// figure follows the lease objects themselves, not the shard entries
+    /// (several leases may share one retained snapshot).
+    live_leases: std::sync::atomic::AtomicUsize,
     // On `wasm32` the shard itself lives in the
     // `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
     // service stays `Send + Sync` without any `unsafe impl`; only the
@@ -573,6 +580,7 @@ impl DeclLoweringService {
             workers,
             profile: global_handoff_stats().cloned(),
             account,
+            live_leases: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -597,7 +605,10 @@ impl DeclLoweringService {
         _worker_count: usize,
         account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
     ) -> Self {
-        Self { account }
+        Self {
+            account,
+            live_leases: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// Test-only single-worker constructor: forces every key onto one
@@ -715,6 +726,8 @@ impl DeclLoweringService {
                 .acquire(&self.account, key, source, source_type)
         });
 
+        self.live_leases
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         LeaseOutcome {
             lease: SnapshotLease {
                 key: key.clone(),
@@ -724,10 +737,26 @@ impl DeclLoweringService {
         }
     }
 
+    /// Number of live [`SnapshotLease`]s: the retained-parse object count
+    /// a long-session retention measurement compares across quiesced
+    /// checkpoints. Every lease pins one retained snapshot for as long as
+    /// the artifact holding it lives, so a count that climbs with the
+    /// number of superseded document versions is the signature of
+    /// artifacts that outlive their reachability.
+    #[must_use]
+    pub(crate) fn live_lease_count(&self) -> usize {
+        self.live_leases.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Release one pin on `key`. Fire-and-forget: dropping a lease must
     /// not block, and a worker that has already shut down (service
     /// teardown) simply drops the release.
     fn release_key(&self, key: &SnapshotKey) {
+        // Uncounted at the lease drop, not at the shard's refcount decrement:
+        // the count follows lease OBJECTS, and the native release is a
+        // fire-and-forget worker job whose completion nobody observes.
+        self.live_leases
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
         {
             // A release only happens through a `SnapshotLease` drop, and a

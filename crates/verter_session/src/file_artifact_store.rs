@@ -690,6 +690,23 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
 /// GC request that may never arrive on a pure edit loop.
 const RECLAIM_TRIGGER_RETIREMENTS: u64 = 64;
 
+/// Retired versions ONE canonical file may hold, across all of its keys,
+/// before a mutation batch self-triggers a reclamation sweep.
+///
+/// The batch trigger above is aggregate: it counts retirements across
+/// every file, so an edit loop on ONE document — which retires a version
+/// per keystroke, each under a fresh content-hashed key — accumulates up
+/// to `RECLAIM_TRIGGER_RETIREMENTS` dead versions of that document, each
+/// still holding its index payload, its decl memo and its parse snapshot
+/// lease, before the sweep runs. That is bounded, but the bound is dozens
+/// of full copies of the document the user is typing in, and the resident
+/// set saws between them. A retired history that long for a single file
+/// is exactly the shape nobody can read any more (a root sees at most ONE
+/// version of a file's key set), so the store sweeps as soon as any file's
+/// retired versions exceed this; the sweep is root-gated, so a version a
+/// captured root still reaches stays regardless.
+const RECLAIM_TRIGGER_CHAIN_LENGTH: usize = 2;
+
 /// Visibility window of ONE version of one membership entry, expressed
 /// in [`FileArtifactStore`] membership epochs.
 ///
@@ -1579,9 +1596,29 @@ impl FileArtifactStore {
         let before = self
             .retirements_since_reclaim
             .fetch_add(count as u64, Ordering::Relaxed);
-        if before + count as u64 >= RECLAIM_TRIGGER_RETIREMENTS {
+        if before + count as u64 >= RECLAIM_TRIGGER_RETIREMENTS || self.some_chain_overflows() {
             let _ = self.reclaim_retired_versions();
         }
+    }
+
+    /// Whether any single canonical file's retired versions, summed over
+    /// every key it ever published under, exceed
+    /// [`RECLAIM_TRIGGER_CHAIN_LENGTH`] — the per-file half of the
+    /// self-trigger, read after the mutation's guards are released. The
+    /// walk is over the RETIRED set only, which a sweep keeps small.
+    fn some_chain_overflows(&self) -> bool {
+        let mut per_canonical: rustc_hash::FxHashMap<Arc<str>, usize> =
+            rustc_hash::FxHashMap::default();
+        for chain in self.retired_artifacts.iter() {
+            let count = per_canonical
+                .entry(Arc::clone(&chain.key().canonical))
+                .or_insert(0);
+            *count += chain.value().len();
+            if *count > RECLAIM_TRIGGER_CHAIN_LENGTH {
+                return true;
+            }
+        }
+        false
     }
 
     /// Number of retired-but-still-retained versions across all three
@@ -1618,6 +1655,16 @@ impl FileArtifactStore {
     #[must_use]
     pub fn live_root_count(&self) -> usize {
         self.live_roots.state.lock().roots.values().sum()
+    }
+
+    /// Number of LIVE artifact versions — the current membership, one
+    /// entry per `(canonical, content_hash, …)` key. Together with
+    /// [`Self::retained_retired_version_count`] this is the store's whole
+    /// retained object set: what the current root sees plus what only
+    /// captured roots still reach.
+    #[must_use]
+    pub fn live_artifact_count(&self) -> usize {
+        self.artifacts.len()
     }
 
     /// Seed the membership epoch. Test-only: the epoch line's terminal

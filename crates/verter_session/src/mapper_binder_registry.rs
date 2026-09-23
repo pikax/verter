@@ -684,6 +684,23 @@ impl MapperBinderRegistry {
     pub(crate) fn clear_for_canonical(&self, canonical_id: &str) {
         self.per_canonical.remove(canonical_id);
     }
+
+    /// Number of retained mapper fingerprints across every canonical
+    /// (retention observability).
+    pub(crate) fn fingerprint_count(&self) -> usize {
+        self.per_canonical
+            .iter()
+            .map(|entry| {
+                entry
+                    .value()
+                    .lock()
+                    .by_display_name
+                    .values()
+                    .map(Vec::len)
+                    .sum::<usize>()
+            })
+            .sum()
+    }
 }
 
 #[cfg(test)]

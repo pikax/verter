@@ -12,11 +12,15 @@
  * the framework × mode matrix here would multiply a multi-minute run without
  * discriminating anything the first lane does not.
  */
+import { writeFileSync } from "node:fs";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_ENDURANCE_LANE,
   describeProcessTreeRss,
+  describeRetentionReading,
+  describeWireBytes,
   loadEnduranceConfig,
   runChurnScenario,
   churnFixture,
@@ -42,6 +46,10 @@ describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
     rig = await materializeRig(fixture.files, config, lane);
   });
   afterAll(async () => {
+    // The server's stderr is the only record of what it was doing when a run
+    // hangs or fails; keep it when asked (VERTER_ENDURANCE_STDERR_FILE).
+    const stderrFile = process.env.VERTER_ENDURANCE_STDERR_FILE;
+    if (stderrFile) writeFileSync(stderrFile, rig.handle.client.stderr.text());
     await disposeRig(rig);
   });
 
@@ -54,16 +62,28 @@ describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
       { serverPid: serverPid!, fixture },
     );
 
+    // The evidence prints BEFORE any verdict is asserted, so a failing run still
+    // leaves its readings in the log for whoever has to explain it.
+    console.log(
+      `[endurance] churn ${result.cyclesCompleted} cycles\n` +
+        result.checkpoints
+          .map(
+            (checkpoint) =>
+              `  cycle ${checkpoint.cyclesCompleted}${checkpoint.quiesced ? "" : " (NOT quiesced)"}: ` +
+              `${describeProcessTreeRss(checkpoint.sample)}\n` +
+              `    ${describeRetentionReading(checkpoint.retention)}
+` +
+              `    ${describeWireBytes(checkpoint.wireBytes)}`,
+          )
+          .join("\n") +
+        `\n  envelope:  ${result.growth.detail}` +
+        `\n  slope:     ${result.slope.detail}` +
+        `\n  retention: ${result.retention.detail}`,
+    );
+
     attestReceipt(result.receipt, { requireFinalSanity: true });
     expectRssWithinCeiling(result.receipt, config);
     expect(result.receipt.editsSent).toBeGreaterThanOrEqual(result.cyclesCompleted);
-
-    console.log(
-      `[endurance] churn ${result.cyclesCompleted} cycles\n` +
-        `  baseline: ${describeProcessTreeRss(result.baseline)}\n` +
-        `  final:    ${describeProcessTreeRss(result.final)}\n` +
-        `  verdict:  ${result.growth.detail}`,
-    );
 
     // An UNAVAILABLE metric is a missing proof, not a pass. WSP6-AC1 is a claim
     // about the whole process tree after quiescence; a checkpoint that could not
@@ -79,12 +99,43 @@ describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
         `  baseline: ${describeProcessTreeRss(result.baseline)}\n` +
         `  final:    ${describeProcessTreeRss(result.final)}`,
     ).toBe(true);
-    expect(result.quiescedAtBothCheckpoints, "both readings must follow host quiescence").toBe(
+    expect(result.quiescedAtBothCheckpoints, "every reading must follow host quiescence").toBe(
       true,
     );
     expect(
       result.growth.pass,
       `process-tree memory grew across ${result.cyclesCompleted} open/edit/query/close cycles: ${result.growth.detail}`,
+    ).toBe(true);
+
+    // WSP6-AC1 is a claim about the TRAJECTORY, not the destination: "1000
+    // open/edit/close cycles show no unbounded retained-byte slope after
+    // quiescence". The envelope above admits a constant per-cycle drip that
+    // happens to land inside `baseline * factor + floor`; the per-window slope
+    // does not, and it refuses to evaluate a run shorter than the criterion's
+    // own 1000 cycles (a shorter run is a smoke lane, never this proof).
+    expect(
+      result.slope.observable,
+      `the retained-byte slope was NOT evaluated: ${result.slope.detail}`,
+    ).toBe(true);
+    expect(
+      result.slope.pass,
+      `retained bytes kept growing per cycle after quiescence: ${result.slope.detail}`,
+    ).toBe(true);
+
+    // WSP6.1 measures OBJECT LIFETIMES alongside bytes: the host reports its
+    // retained set (live/retired artifact versions, captured roots, parse
+    // leases) at every quiesced checkpoint, and none of those counters may
+    // grow with the number of cycles. WSP6.3: pressure outcomes must not occur
+    // on the standard corpus, so the aggregate account's pressure refusals
+    // must read zero. An unreported retention is an UNAVAILABLE metric — red,
+    // never a narrower pass.
+    expect(
+      result.retention.observable,
+      `the retained-object trend was NOT evaluated: ${result.retention.detail}`,
+    ).toBe(true);
+    expect(
+      result.retention.pass,
+      `retained objects accumulated across ${result.cyclesCompleted} cycles: ${result.retention.detail}`,
     ).toBe(true);
   }, 3_600_000);
 });

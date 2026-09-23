@@ -214,6 +214,29 @@ impl FallthroughResolverState {
         self.insert_admissible_node(key, result);
     }
 
+    /// The members and value-carried generation of the NEWEST warm intrinsic
+    /// surface under `key`, bypassing view validation — `None` when the slot
+    /// is empty or its newest candidate is not an intrinsic surface.
+    ///
+    /// Test-only: the intrinsic node carries an empty fact signature, so a
+    /// validated read cannot tell "retired" from "still warm but superseded",
+    /// and it returns the OLDEST valid candidate. Pair with
+    /// [`Self::cached_candidate_count`] to pin the exact slot contents.
+    #[cfg(test)]
+    pub(crate) fn warm_intrinsic_surface_for_test(
+        &self,
+        key: &FallthroughNodeKey,
+    ) -> Option<(Vec<crate::resolver_core::IntrinsicSurfaceMember>, u64)> {
+        self.cache
+            .peek_any_candidate(key)
+            .and_then(|node| match &node.value {
+                FallthroughNodeValue::IntrinsicSurface(surface) => {
+                    Some((surface.members.clone(), surface.cache_generation))
+                }
+                _ => None,
+            })
+    }
+
     /// Number of KEYS currently warm in the fallthrough node cache.
     ///
     /// The admission observable: a no-poison refusal is visible as a count that

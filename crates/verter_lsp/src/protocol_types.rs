@@ -382,12 +382,85 @@ pub struct StatisticsRequestParams {
     pub scope: Option<String>,
 }
 
+/// What the host RETAINS at the instant of a `$/verter/getStatistics`
+/// request: object counts and aggregate bytes, read live from the owning
+/// structures (never counters that need enabling).
+///
+/// This is the object-lifetime instrument of a long-session memory
+/// measurement. A resident-set figure says how much the process holds; these
+/// say WHICH retained set is growing, so a rising RSS can be attributed to
+/// superseded artifact versions, pinned parse snapshots or captured roots
+/// rather than guessed at. `refusalsPressure` is the explicit pressure
+/// outcome count: the admitted standard corpus must leave it at zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionStatistics {
+    pub live_artifacts: usize,
+    pub retained_retired_versions: usize,
+    pub live_roots: usize,
+    pub snapshot_leases: usize,
+    pub carrier_candidates: usize,
+    pub publication_lanes: usize,
+    pub semantic_nodes: usize,
+    pub semantic_memo_entries: usize,
+    pub unresolved_reach: usize,
+    pub relation_proofs: usize,
+    pub relate_keys: usize,
+    pub shape_cache_entries: usize,
+    pub flow_graphs: usize,
+    pub flow_hash_entries: usize,
+    pub flow_lowered_entries: usize,
+    pub mapper_fingerprints: usize,
+    /// Populated semantic memo slots per family label.
+    pub semantic_memo_families: std::collections::BTreeMap<String, usize>,
+    pub active_bytes: usize,
+    pub retained_bytes: usize,
+    pub pinned_bytes: usize,
+    pub peak_total_bytes: usize,
+    pub refusals_pressure: u64,
+    pub refusals_oversized: u64,
+    pub refusals_active: u64,
+}
+
+impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
+    fn from(snapshot: verter_session::HostRetentionSnapshot) -> Self {
+        Self {
+            live_artifacts: snapshot.live_artifacts,
+            retained_retired_versions: snapshot.retained_retired_versions,
+            live_roots: snapshot.live_roots,
+            snapshot_leases: snapshot.snapshot_leases,
+            carrier_candidates: snapshot.carrier_candidates,
+            publication_lanes: snapshot.publication_lanes,
+            semantic_nodes: snapshot.semantic_nodes,
+            semantic_memo_entries: snapshot.semantic_memo_entries,
+            unresolved_reach: snapshot.unresolved_reach,
+            relation_proofs: snapshot.relation_proofs,
+            relate_keys: snapshot.relate_keys,
+            shape_cache_entries: snapshot.shape_cache_entries,
+            flow_graphs: snapshot.flow_graphs,
+            flow_hash_entries: snapshot.flow_hash_entries,
+            flow_lowered_entries: snapshot.flow_lowered_entries,
+            mapper_fingerprints: snapshot.mapper_fingerprints,
+            semantic_memo_families: snapshot.semantic_memo_families.into_iter().collect(),
+            active_bytes: snapshot.active_bytes,
+            retained_bytes: snapshot.retained_bytes,
+            pinned_bytes: snapshot.pinned_bytes,
+            peak_total_bytes: snapshot.peak_total_bytes,
+            refusals_pressure: snapshot.refusals_pressure,
+            refusals_oversized: snapshot.refusals_oversized,
+            refusals_active: snapshot.refusals_active,
+        }
+    }
+}
+
 /// Response for `$/verter/getStatistics` request.
 #[derive(Debug, Serialize)]
 pub struct StatisticsSnapshot {
     pub enabled: bool,
     pub diagnostics: serde_json::Map<String, serde_json::Value>,
     pub session: StatisticsSession,
+    /// The host's retained object set and aggregate bytes at this instant.
+    pub retention: RetentionStatistics,
     /// Present only when `interactionTrace.enabled` was set at initialize.
     #[serde(rename = "interactionTrace", skip_serializing_if = "Option::is_none")]
     pub interaction_trace: Option<crate::interaction_trace::InteractionTraceSnapshot>,

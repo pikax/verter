@@ -150,14 +150,28 @@ export {
 } from "./scenarios/soak.js";
 
 export {
+  CHURN_ACCEPTANCE_MIN_CYCLES,
+  CHURN_RETENTION_COUNTERS,
   churnCarrierContent,
   churnFixture,
   decideChurnGrowth,
+  decideChurnRetention,
+  decideChurnSlope,
+  describeRetentionReading,
+  describeWireBytes,
+  extractRetentionReading,
   runChurnScenario,
+  type ChurnCheckpoint,
   type ChurnFixture,
   type ChurnGrowthCheck,
+  type ChurnRetentionCheck,
+  type ChurnRetentionCounter,
+  type ChurnRetentionTrend,
   type ChurnScenarioOptions,
   type ChurnScenarioResult,
+  type ChurnSlopeCheck,
+  type ChurnSlopeSegment,
+  type RetentionReading,
 } from "./scenarios/churn.js";
 
 export {

@@ -1448,6 +1448,33 @@ impl ProjectTypeStore {
         DepVersion::WholeHash(whole_hash)
     }
 
+    /// Document-close release of the semantic substrate for `canonical_id`:
+    /// the semantic graph's memo entries, node payloads, per-node sidecars
+    /// and relation proofs the closed document retained
+    /// ([`SemanticGraphStore::release_canonical`]), plus the shape-cache
+    /// entries rooted in it, keyed by one of its released nodes, or
+    /// depending on it ([`ShapeCacheDb::release_canonical`]).
+    ///
+    /// Deliberately NOT [`Self::evict_canonical`]: that cascade also drops
+    /// the file's `FileArtifactStore` artifacts and the other engine caches
+    /// keyed on the canonical, which a close keeps for the disk reload.
+    /// Called from the host's `evict` (the `did_close` path).
+    pub fn release_canonical(
+        &self,
+        canonical_id: &str,
+    ) -> crate::semantic_query_memo::SemanticReleaseReport {
+        // Only the semantic graph and the shape cache: both are pure map
+        // work. The route-mutation cascade is deliberately NOT run here —
+        // a close must not change what the scheduler sees (the other
+        // per-canonical caches stay fact-validated and recompute on the
+        // reload, exactly as after an edit).
+        let mut report = self.semantic_graph.release_canonical(canonical_id);
+        report.shape_entries_released = self
+            .shape_cache_db
+            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report
+    }
+
     /// Targeted invalidation on file content / routing change.
     ///
     /// Called from the host's `evict_canonical` flow. Removes or

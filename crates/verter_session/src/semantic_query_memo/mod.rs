@@ -25,6 +25,12 @@
 //! - Entries are immutable once stored. Node data never retains borrowed
 //!   OXC AST pointers — callers materialize semantic data before calling
 //!   [`SemanticGraphStore::intern_node`].
+//! - A document CLOSE releases what the closed canonical retained
+//!   ([`SemanticGraphStore::release_canonical`], see `release.rs`): its
+//!   memo entries, node PAYLOADS (ids stay unique and are never reused; a
+//!   released id reads as `Opaque(Miss)`), per-node sidecars and relation
+//!   proofs. An EDIT ([`SemanticGraphStore::invalidate_canonical`]) keeps
+//!   every payload.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -56,6 +62,7 @@ mod member_index;
 mod origin_edges;
 mod prepared;
 mod relation_memo;
+mod release;
 mod resolve_call_memo;
 mod retention;
 mod reverse_index;
@@ -65,6 +72,7 @@ mod scc_publish_tests;
 mod unresolved_reach;
 
 pub(crate) use inflight::InlineMemberFlight;
+pub use release::SemanticReleaseReport;
 pub(crate) use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };
@@ -230,6 +238,20 @@ impl Default for SemanticGraphIdentity {
     }
 }
 
+/// Interned relation proofs: append-only slots (`None` = released, id never
+/// reused) plus the dedup map over the live ones.
+type RelationProofTable = (
+    Vec<Option<crate::semantic_query::RelationProof>>,
+    FxHashMap<crate::semantic_query::RelationProof, crate::semantic_query::RelationProofId>,
+);
+
+/// Interned co-discharged relate keys, same slot discipline as
+/// [`RelationProofTable`].
+type RelateKeyTable = (
+    Vec<Option<crate::semantic_query::RelateMemoKey>>,
+    FxHashMap<crate::semantic_query::RelateMemoKey, crate::semantic_query::RelateKeyId>,
+);
+
 #[derive(Default)]
 pub struct SemanticGraphStore {
     /// Process-local identity used only to confine opaque runtime operands to
@@ -290,18 +312,18 @@ pub struct SemanticGraphStore {
     /// append-only and deduplicated by value. The proof is a descriptive
     /// witness, NEVER a validity oracle — it rides OFF the type-values
     /// surface.
-    relation_proof_table: Mutex<(
-        Vec<crate::semantic_query::RelationProof>,
-        FxHashMap<crate::semantic_query::RelationProof, crate::semantic_query::RelationProofId>,
-    )>,
+    ///
+    /// The id space is append-only (an id is the slot ordinal and is never
+    /// reused); a `None` slot is a proof [`Self::release_canonical`]
+    /// dropped because it named a released node. The dedup map holds
+    /// exactly the live proofs.
+    relation_proof_table: Mutex<RelationProofTable>,
     /// The co-discharged full `Relate` keys a `CoinductiveCycle` proof
     /// references by opaque [`crate::semantic_query::RelateKeyId`],
     /// interned append-only (content-free — never a session-bearing
-    /// identity).
-    relate_key_table: Mutex<(
-        Vec<crate::semantic_query::RelateMemoKey>,
-        FxHashMap<crate::semantic_query::RelateMemoKey, crate::semantic_query::RelateKeyId>,
-    )>,
+    /// identity). Same slot discipline as `relation_proof_table`: a
+    /// `None` slot is a released key whose id is never reused.
+    relate_key_table: Mutex<RelateKeyTable>,
     /// In-flight admission keyed by the prepared query token
     /// ([`PreparedKeyHandle`]) whose equality IS full
     /// [`SemanticQueryKey`] equality (bijection pinned by the
@@ -390,6 +412,12 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
+    /// Set (and never cleared) by the first [`Self::release_canonical`]
+    /// that tombstones a node. Until then every id ever handed out is
+    /// live, so the warm-read liveness check ([`Self::result_is_live`])
+    /// is a single relaxed load; afterwards a warm candidate whose result
+    /// names a released node is skipped as a miss instead of being served.
+    released_any: std::sync::atomic::AtomicBool,
     /// Per-store test-only injection point for the
     /// [`Self::invalidate_all`] post-`entries`-clear tail. When a test
     /// arms it (via [`Self::test_invalidate_all_post_entries_clear_gate`])
@@ -795,7 +823,8 @@ type RegisteredFacts = Arc<[crate::resolver_core::FactVersionRef]>;
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SemanticGraphStore")
-            .field("nodes", &self.arena.len())
+            .field("nodes", &self.arena.live_len())
+            .field("node_slots", &self.arena.len())
             .field("memo_entries", &self.memo_entry_count())
             .finish_non_exhaustive()
     }
@@ -1067,16 +1096,115 @@ impl SemanticGraphStore {
     }
 
     /// Read the resolved payload for a semantic node id. Returns `None` if
-    /// the id has not been interned.
+    /// the id has not been interned. An id whose payload a document close
+    /// released ([`Self::release_canonical`]) is still a known id: it reads
+    /// as the shared `Opaque(Miss)` placeholder (see
+    /// [`Self::node_is_live`]), so a stale holder sees an unresolved value
+    /// rather than an invalid-id fault.
     #[must_use]
     pub fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         self.arena.get(id)
     }
 
-    /// Number of interned semantic nodes. Useful for tests and counters.
+    /// Number of LIVE interned semantic nodes — the slots that still hold
+    /// a payload. A slot [`Self::release_canonical`] tombstoned is not
+    /// counted; [`Self::node_slot_count`] is the append-only id space.
+    /// Useful for tests and counters.
     #[must_use]
     pub fn node_count(&self) -> usize {
+        self.arena.live_len()
+    }
+
+    /// Number of node ids ever allocated — live slots PLUS released slots.
+    /// Grows monotonically (ids are never reused); the retained payload
+    /// set is [`Self::node_count`].
+    #[must_use]
+    pub fn node_slot_count(&self) -> usize {
         self.arena.len()
+    }
+
+    /// Whether `id` still resolves to its interned payload. `false` for an
+    /// id this store never handed out and for a slot
+    /// [`Self::release_canonical`] tombstoned (such an id reads the shared
+    /// `Opaque(Miss)` placeholder through [`Self::node_data`]).
+    #[must_use]
+    pub fn node_is_live(&self, id: SemanticNodeId) -> bool {
+        self.arena.is_live(id)
+    }
+
+    /// Number of `unresolved_reach` entries (retention observability).
+    #[must_use]
+    pub fn unresolved_reach_count(&self) -> usize {
+        self.unresolved_reach.lock().len()
+    }
+
+    /// Number of LIVE interned relation proofs (retention observability).
+    /// A proof [`Self::release_canonical`] dropped leaves an empty slot
+    /// that is not counted.
+    #[must_use]
+    pub fn relation_proof_count(&self) -> usize {
+        self.relation_proof_table.lock().1.len()
+    }
+
+    /// Number of LIVE interned co-discharged relate keys (retention
+    /// observability). Released slots are not counted.
+    #[must_use]
+    pub fn relate_key_count(&self) -> usize {
+        self.relate_key_table.lock().1.len()
+    }
+
+    /// Retention breakdown of [`Self::memo_entry_count`] by family name
+    /// (the `FamilyKey` variant label), sorted by name. Lets a churn
+    /// measurement name the family whose entries survive a release.
+    #[must_use]
+    pub fn memo_entry_counts_by_family(&self) -> Vec<(&'static str, usize)> {
+        let entries = self.entries.lock();
+        let mut counts: FxHashMap<&'static str, usize> = FxHashMap::default();
+        for (family, slots) in entries.iter() {
+            *counts.entry(family.variant_label()).or_default() += slots.populated_count();
+        }
+        drop(entries);
+        let mut out: Vec<(&'static str, usize)> = counts.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Diagnostics dump of every candidate in the families whose variant
+    /// label is `family_label` (see [`Self::memo_entry_counts_by_family`]):
+    /// one line per candidate with the family key, the slot, the result,
+    /// the carrier's canonicals and self-roots, and — for a family keyed by
+    /// a node — the origin scope of that node. Not on any hot path; a churn
+    /// measurement reads it to see what a growing family's keys carry.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn memo_family_dump_for_diagnostics(&self, family_label: &str) -> Vec<String> {
+        let entries = self.entries.lock();
+        let mut out: Vec<String> = Vec::new();
+        for (family, slots) in entries.iter() {
+            if family.variant_label() != family_label {
+                continue;
+            }
+            let mut key_nodes: Vec<String> = Vec::new();
+            family.for_each_node_id(|id| {
+                key_nodes.push(format!(
+                    "{id:?}@{:?}",
+                    self.arena.scope(id).map(|scope| scope.canonical_file())
+                ));
+            });
+            for (slot, entry) in slots.iter_populated_slots_all() {
+                out.push(format!(
+                    "{family:?} slot={slot:?} key_nodes={key_nodes:?} result={:?} \
+                     carrier_canonicals={:?} self_roots={:?} aggregated={:?}",
+                    entry.result,
+                    entry.read_set_signature.canonical_ids(),
+                    entry.self_root_canonicals,
+                    entry.read_set_signature.aggregated_domains(),
+                ));
+            }
+        }
+        drop(entries);
+        out.sort();
+        out
     }
 
     /// Number of warm memo entries — sums populated slots across every
@@ -2012,7 +2140,9 @@ impl SemanticGraphStore {
         // `FactVersionRef::ProjectGeneration` on the carrier.
         let validated = snapshot.and_then(|list| {
             list.into_iter().find(|entry| {
-                cached_satisfies(&entry.satisfied_projection, requested) && entry.validate(ctx)
+                cached_satisfies(&entry.satisfied_projection, requested)
+                    && self.result_is_live(&entry.result)
+                    && entry.validate(ctx)
             })
         });
         if let Some(entry) = &validated {
@@ -2059,6 +2189,47 @@ impl SemanticGraphStore {
             }
         }
         result
+    }
+
+    /// Whether a warm candidate's result still names a live node.
+    ///
+    /// Until the first [`Self::release_canonical`] every id is live and
+    /// this is one relaxed load. Afterwards a `TypeNode` / `Recursive`
+    /// result naming a tombstoned node is reported dead so the warm read
+    /// treats the candidate as a miss: the release drains every entry the
+    /// reverse index and the key / result sweep can find, but this is the
+    /// read-side guarantee that a released node is never SERVED from the
+    /// warm memo whatever drained it. Non-node value domains are not
+    /// inspected here (they carry no arena id at top level).
+    #[inline]
+    fn result_is_live(&self, result: &QueryResult<SemanticQueryValue>) -> bool {
+        if !self.released_any.load(Ordering::Relaxed) {
+            return true;
+        }
+        match result {
+            QueryResult::Value(SemanticQueryValue::TypeNode(id)) | QueryResult::Recursive(id) => {
+                self.arena.is_live(*id)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether a family identity names a node whose payload a document
+    /// close released. Such a family can never be looked up by a live
+    /// producer (the id is never re-minted): the only way to present it is
+    /// a stale holder re-dispatching a released ordinal after the close,
+    /// and admitting its result would leave a candidate no later release
+    /// can find — keyed on an id that is dead BEFORE that release runs, it
+    /// is never in the release's dead set. The publish paths refuse it and
+    /// the close sweep drops it. One relaxed load until the first release.
+    #[inline]
+    fn family_names_released_node(&self, family: &FamilyKey) -> bool {
+        if !self.released_any.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut released = false;
+        family.for_each_node_id(|id| released |= !self.arena.is_live(id));
+        released
     }
 
     /// Presence probe — true iff the warm map currently holds a
@@ -2388,9 +2559,11 @@ impl SemanticGraphStore {
         // skipped without bubbling. `validated_at_generation` is recency
         // metadata only.
         let requested = prepared.requested_point();
-        let entry: MemoEntry = snapshot?
-            .into_iter()
-            .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
+        let entry: MemoEntry = snapshot?.into_iter().find(|e| {
+            cached_satisfies(&e.satisfied_projection, requested)
+                && self.result_is_live(&e.result)
+                && e.validate(ctx)
+        })?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
@@ -3417,6 +3590,13 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
+        // A family keyed on a released node is a stale holder's re-dispatch:
+        // admitting it would strand a candidate no close can drain. The
+        // winner still returns its value; only the warm publish is refused
+        // (`Skipped`, not `Aborted` — the build's own id epoch is consistent).
+        if self.family_names_released_node(family) {
+            return WarmPublishOutcome::Skipped;
+        }
         // §3.4 soundness invariant (production publish ONLY): the recorded
         // terminal must be at-least the slot's mode — see
         // `family::slot_domain_siblings`. Test-only publishes bypass this.
@@ -3633,6 +3813,11 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
+        // Same admission fence as `warm_publish_one`: a backfill keyed on a
+        // released node is never admitted.
+        if self.family_names_released_node(family) {
+            return false;
+        }
         // §3.4 soundness invariant — same as `warm_publish_one` (a
         // prefix-backfill's `Navigate@prefix` hop is self-satisfying).
         verter_debug_assert!(

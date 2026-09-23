@@ -183,6 +183,28 @@ export interface EnduranceConfig {
   readonly churnGrowthFloorBytes: number;
   /** Budget (ms) for reaching host quiescence before each churn memory reading. */
   readonly churnQuiesceMs: number;
+  /**
+   * Quiesced process-tree readings taken AFTER the baseline
+   * (VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS, default 4, minimum 2). Two endpoints
+   * can only describe a destination; windows describe the trajectory, which is
+   * what "no unbounded retained-byte slope" is a claim about.
+   */
+  readonly churnSlopeWindows: number;
+  /**
+   * Retained bytes per cycle each quiesced window must stay within
+   * (VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE, default 16 KiB). A bounded
+   * session sits at ~0 either side; one retained document version is hundreds of
+   * KiB, so a real per-cycle retainer breaches every window.
+   */
+  readonly churnSlopeBytesPerCycle: number;
+  /**
+   * Retained-object growth each lifetime counter may show per measured cycle
+   * (VERTER_ENDURANCE_CHURN_RETENTION_OBJECTS_PER_CYCLE, default 0.25). A store
+   * that amortises its sweep leaves a few superseded versions behind between
+   * sweeps; a retainer that keeps one object per document version adds at
+   * least one per cycle and breaches at any run length.
+   */
+  readonly churnRetentionObjectsPerCycle: number;
   /** Receipt destination (file path or directory), if set. */
   readonly receiptPath: string | null;
 }

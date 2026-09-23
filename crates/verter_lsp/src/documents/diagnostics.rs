@@ -22,11 +22,58 @@ pub(crate) struct DiagnosticsRefresh {
     epoch: u64,
 }
 
+/// One registered outbound diagnostics send.
+///
+/// The publication that owns a URI's epoch registers this BEFORE it awaits the
+/// client enqueue, and drops it when the send settles. Dropping the sender — which
+/// is what removing the entry does — resolves the publisher's receiver, and the
+/// publisher abandons its enqueue instead of completing it.
+struct InFlightSend {
+    /// The epoch of the publication that owns this send, so a late publisher only
+    /// ever releases the slot it registered itself.
+    epoch: u64,
+    /// Held by the state map; dropped on cancellation. The publisher's receiver
+    /// resolving (by value or by sender drop) means CANCELLED.
+    _cancel: tokio::sync::oneshot::Sender<()>,
+}
+
 #[derive(Default)]
 pub(super) struct DiagnosticsState {
     next_epoch: u64,
     epochs: HashMap<String, u64>,
     receipts: HashMap<String, (DiagnosticPublication, Option<Arc<ProviderSurfaceSnapshot>>)>,
+    /// The outbound sends currently suspended on the client channel, one per URI.
+    in_flight: HashMap<String, InFlightSend>,
+}
+
+impl DiagnosticsState {
+    /// Take ownership of a URI's epoch slot: write `epoch` (or clear the slot when
+    /// `None`), drop its receipt, and CANCEL whatever outbound send the previous
+    /// owner still had suspended on the client channel.
+    ///
+    /// This is the publication fence. It is ONE synchronous critical section, so a
+    /// close or a supersession is ordered against the send without ever waiting for
+    /// it: the publisher registers its send under this same lock only after
+    /// confirming it still owns the epoch, so a taker either wins the race (the
+    /// publisher's later epoch check fails and nothing is sent) or finds the
+    /// registered send and cancels it before it can reach the client. A publication
+    /// that was already committed to the wire is simply not in the map any more.
+    ///
+    /// The previous design made the close AWAIT a global publisher mutex that the
+    /// send held across the client enqueue, so one stalled client consumer could
+    /// strand every close, open and change behind it.
+    fn take_uri(&mut self, uri: &str, epoch: Option<u64>) {
+        match epoch {
+            Some(epoch) => {
+                self.epochs.insert(uri.to_string(), epoch);
+            }
+            None => {
+                self.epochs.remove(uri);
+            }
+        }
+        self.receipts.remove(uri);
+        self.in_flight.remove(uri);
+    }
 }
 
 impl DocumentRegistry {
@@ -46,8 +93,7 @@ impl DocumentRegistry {
         }
         state.next_epoch += 1;
         let epoch = state.next_epoch;
-        state.epochs.insert(refresh.uri.to_string(), epoch);
-        state.receipts.remove(refresh.uri.as_str());
+        state.take_uri(refresh.uri.as_str(), Some(epoch));
         true
     }
 
@@ -70,8 +116,7 @@ impl DocumentRegistry {
         }
         state.next_epoch += 1;
         let epoch = state.next_epoch;
-        state.epochs.insert(uri.to_string(), epoch);
-        state.receipts.remove(uri.as_str());
+        state.take_uri(uri.as_str(), Some(epoch));
         let _ = self.diagnostics_refresh_tx.send(DiagnosticsRefresh {
             uri: uri.clone(),
             snapshot: publication.snapshot.clone(),
@@ -103,8 +148,7 @@ impl DocumentRegistry {
         let mut state = self.diagnostics_state.lock();
         state.next_epoch += 1;
         let epoch = state.next_epoch;
-        state.epochs.insert(uri.to_string(), epoch);
-        state.receipts.remove(uri);
+        state.take_uri(uri, Some(epoch));
         tracing::debug!(uri, epoch, "diagnostics invalidated");
         epoch
     }
@@ -127,9 +171,7 @@ impl DocumentRegistry {
     /// behind — a slow leak proportional to how long the editor stays open, in a
     /// map whose live size should track only the OPEN documents.
     pub(crate) fn release_diagnostics_state(&self, uri: &str) {
-        let mut state = self.diagnostics_state.lock();
-        state.epochs.remove(uri);
-        state.receipts.remove(uri);
+        self.diagnostics_state.lock().take_uri(uri, None);
     }
 
     /// Release a reservation whose publication will never run, but ONLY while
@@ -152,27 +194,62 @@ impl DocumentRegistry {
     fn rollback_unowned_reservation(&self, uri: &str, epoch: u64) {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri) == Some(&epoch) {
-            state.epochs.remove(uri);
-            state.receipts.remove(uri);
+            state.take_uri(uri, None);
         }
     }
 
-    /// The publication fence, held across a document CLOSE.
+    /// Claim the outbound send slot for `publication`, or refuse it.
     ///
-    /// A publication validates its epoch and then awaits the outbound
-    /// notification. A close landing inside that await window would otherwise let
-    /// the already-validated stale result reach the client, with only the receipt
-    /// commit suppressed — a stale publication, which the snapshot rules forbid
-    /// outright. Taking the same lock the publisher holds orders the two: either
-    /// the close waits for a publication that was current when it was validated,
-    /// or the publication finds the document closed at its (fenced) check and
-    /// drops. There is no window in between.
-    ///
-    /// The lock protects only the bounded enqueue and the receipt commit —
-    /// provider computation never holds it — so a close is never blocked behind
-    /// real work.
-    pub(crate) async fn diagnostics_publication_fence(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.diagnostics_publisher.lock().await
+    /// Returns the cancellation receiver the publisher must race its client
+    /// enqueue against. The epoch check and the registration happen in ONE
+    /// synchronous critical section against [`DiagnosticsState::take_uri`], which
+    /// is what makes the fence atomic: a close or supersession either lands first
+    /// (this claim finds a different epoch and refuses) or lands second (it finds
+    /// the registered send and cancels it before a byte reaches the client).
+    fn claim_outbound_send(
+        &self,
+        uri: &Uri,
+        publication: &DiagnosticPublication,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let mut state = self.diagnostics_state.lock();
+        if state.epochs.get(uri.as_str()) != Some(&publication.epoch) {
+            return None;
+        }
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        state.in_flight.insert(
+            uri.to_string(),
+            InFlightSend {
+                epoch: publication.epoch,
+                _cancel: cancel,
+            },
+        );
+        Some(cancelled)
+    }
+
+    /// Release the send slot this publication registered, iff it is still ours,
+    /// and report whether it was.
+    fn release_outbound_send(&self, uri: &Uri, epoch: u64) -> bool {
+        let mut state = self.diagnostics_state.lock();
+        if state
+            .in_flight
+            .get(uri.as_str())
+            .is_some_and(|send| send.epoch == epoch)
+        {
+            state.in_flight.remove(uri.as_str());
+            return true;
+        }
+        false
+    }
+
+    /// Whether any outbound diagnostics send is registered for `uri`. Tests only:
+    /// it is how a test observes that a publisher has reached its enqueue without
+    /// timing the observation.
+    #[cfg(test)]
+    pub(crate) fn outbound_send_in_flight(&self, uri: &Uri) -> bool {
+        self.diagnostics_state
+            .lock()
+            .in_flight
+            .contains_key(uri.as_str())
     }
 
     /// How many documents the diagnostics state is currently tracking. Tests only:
@@ -228,8 +305,16 @@ impl DocumentRegistry {
             && self.diagnostics_state.lock().epochs.get(uri.as_str()) == Some(&publication.epoch)
     }
 
-    /// All push writers share one send order. Provider computation never holds
-    /// this lock; only the bounded notification enqueue and receipt commit do.
+    /// Publish one result, racing the client enqueue against this URI's
+    /// cancellation.
+    ///
+    /// The enqueue is bounded by the client channel, and a client that stops
+    /// draining it suspends the send for as long as it likes. NOTHING the document
+    /// lifecycle needs is held across that await: the fence is the synchronous
+    /// claim/cancel slot, not a mutex the close has to wait on, so a close, open or
+    /// change never queues behind a stalled consumer. A close instead CANCELS the
+    /// suspended enqueue, and the abandoned payload never reaches the client — the
+    /// same stale-publication guarantee, without the stranding.
     pub(crate) async fn publish_diagnostics(
         &self,
         client: &Client,
@@ -239,8 +324,13 @@ impl DocumentRegistry {
         complete: bool,
         surface: Option<Arc<ProviderSurfaceSnapshot>>,
     ) {
-        let _publisher = self.diagnostics_publisher.lock().await;
-        if !self.diagnostic_publication_is_current(uri, publication) {
+        // Validity first (snapshot identity, compiler generation, epoch), then the
+        // atomic epoch-recheck-and-claim that fences the send itself.
+        let claimed = self
+            .diagnostic_publication_is_current(uri, publication)
+            .then(|| self.claim_outbound_send(uri, publication))
+            .flatten();
+        let Some(cancelled) = claimed else {
             tracing::debug!(uri = uri.as_str(), epoch = publication.epoch,
                 current_epoch = ?self.diagnostics_state.lock().epochs.get(uri.as_str()),
                 generation = ?publication.generation,
@@ -249,10 +339,32 @@ impl DocumentRegistry {
             self.refresh_superseded_diagnostics(uri, publication);
             self.refresh_outdated_receipts();
             return;
+        };
+
+        let sent = tokio::select! {
+            // Cancellation wins a tie: a close that has already taken the URI must
+            // never have its result committed as a receipt.
+            biased;
+            _ = cancelled => false,
+            () = client.publish_diagnostics(
+                uri.clone(),
+                diagnostics,
+                Some(publication.snapshot.version),
+            ) => true,
+        };
+        // Releasing our own slot is also how a cancelled publisher reports that the
+        // URI moved on: the slot it registered is gone.
+        let still_ours = self.release_outbound_send(uri, publication.epoch);
+        if !sent || !still_ours {
+            tracing::debug!(
+                uri = uri.as_str(),
+                epoch = publication.epoch,
+                "diagnostics send cancelled before it reached the client"
+            );
+            self.refresh_outdated_receipts();
+            return;
         }
-        client
-            .publish_diagnostics(uri.clone(), diagnostics, Some(publication.snapshot.version))
-            .await;
+
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) == Some(&publication.epoch) {
             if complete {
@@ -366,67 +478,120 @@ mod tests {
         );
     }
 
-    /// A close cannot slip between a publication's validity check and its send.
+    /// A close CANCELS a suspended outbound send; it never waits for one.
     ///
-    /// `publish_diagnostics` validates the epoch/document and then AWAITS the
-    /// outbound notification. Both halves run inside the publication fence, and
-    /// the close lifecycle takes that same fence, so the two are mutually
-    /// exclusive — the whole point of `did_close_fenced`.
+    /// `publish_diagnostics` awaits a BOUNDED client channel, and a consumer that
+    /// stops draining it suspends that enqueue for as long as it likes. Nothing the
+    /// document lifecycle needs may be held across that await. `did_close` is
+    /// therefore a plain synchronous call — the signature itself forbids it from
+    /// waiting on the client — and what it does instead is take the URI's epoch slot
+    /// and drop the registered send, which resolves the publisher's cancellation and
+    /// makes it abandon the enqueue rather than complete it.
     ///
-    /// Discriminating: with an unfenced close, the close below completes while
-    /// the simulated send is suspended, so the assertion that it is still pending
-    /// fails, and the publication's already-passed validity check would carry a
-    /// stale result to the client.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_close_cannot_land_inside_a_publications_send_window() {
-        let documents = Arc::new(registry());
+    /// The earlier design was the opposite: the close awaited a global publisher
+    /// mutex the send held across the client enqueue, so one stalled consumer could
+    /// strand every close, open and change in the session.
+    ///
+    /// Fully observed, never timed: the send slot is claimed exactly as
+    /// `publish_diagnostics` claims it, and cancellation is read off the channel
+    /// state rather than inferred from a sleep.
+    ///
+    /// Discriminating: with the `in_flight` drop removed from
+    /// [`DiagnosticsState::take_uri`], the registered send survives the close and
+    /// the receiver still reads `Empty` — the suspended payload would resume and
+    /// reach the client for a document that is no longer open.
+    #[test]
+    fn a_close_cancels_a_suspended_send_instead_of_waiting_for_it() {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let documents = registry();
         let uri: Uri = "file:///workspace/App.vue".parse().unwrap();
         open(&documents, &uri);
 
         let publication = documents
             .begin_diagnostics_publication(&uri)
             .expect("an open document admits a publication");
-
-        // Enter the fence exactly as `publish_diagnostics` does, validate, and
-        // then suspend where its outbound `.await` would be.
-        let fence = documents.diagnostics_publication_fence().await;
+        let mut cancelled = documents
+            .claim_outbound_send(&uri, &publication)
+            .expect("the current publication claims the send slot");
         assert!(
-            documents.diagnostic_publication_is_current(&uri, &publication),
-            "the pre-send check passes for a document that is still open"
-        );
-
-        let closing = tokio::spawn({
-            let documents = Arc::clone(&documents);
-            let uri = uri.clone();
-            async move { documents.did_close_fenced(&uri).await }
-        });
-
-        // The close must NOT be able to complete while the send window is open.
-        // An UNFENCED close completes as soon as its task is scheduled, so this
-        // window only has to be long enough for that to have happened.
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !closing.is_finished(),
-            "a close must not land between a publication's validity check and its send"
+            documents.outbound_send_in_flight(&uri),
+            "the claim registers the send before the client enqueue is awaited"
         );
         assert!(
-            documents.diagnostic_publication_is_current(&uri, &publication),
-            "the document the send was validated against is still the current one"
+            matches!(cancelled.try_recv(), Err(TryRecvError::Empty)),
+            "nothing has cancelled a send for a document that is still open"
         );
 
-        drop(fence);
-        closing
-            .await
-            .expect("the close completes once the fence clears");
+        documents.did_close(&uri);
 
+        assert!(
+            matches!(cancelled.try_recv(), Err(TryRecvError::Closed)),
+            "the close must cancel the suspended send rather than leave it armed"
+        );
+        assert!(
+            !documents.outbound_send_in_flight(&uri),
+            "the closed document keeps no send registration"
+        );
+        assert!(
+            !documents.release_outbound_send(&uri, publication.epoch),
+            "a cancelled publisher must observe that the slot is no longer its own"
+        );
         assert!(
             !documents.diagnostic_publication_is_current(&uri, &publication),
-            "after the close, the same publication is rejected at its fenced check"
+            "the closed document's publication is rejected"
         );
-        assert_eq!(documents.tracked_diagnostics_documents(), 0);
+        assert_eq!(
+            documents.tracked_diagnostics_documents(),
+            0,
+            "a cancelled send must not re-create the closed document's bookkeeping"
+        );
+    }
+
+    /// A publication superseded while its send is suspended is CANCELLED, not
+    /// merely denied its receipt.
+    ///
+    /// The epoch check and the send registration are one critical section against
+    /// the take, so a newer publication either loses the race — its epoch write is
+    /// not yet visible, and the owner that sends is the current one — or wins and
+    /// cancels the older send in place. Without the cancellation the older payload
+    /// resumes and reaches the client after the newer publication already owns the
+    /// document.
+    #[test]
+    fn a_superseding_publication_cancels_the_older_suspended_send() {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let documents = registry();
+        let uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+        open(&documents, &uri);
+
+        let older = documents
+            .begin_diagnostics_publication(&uri)
+            .expect("an open document admits a publication");
+        let mut cancelled = documents
+            .claim_outbound_send(&uri, &older)
+            .expect("the current publication claims the send slot");
+
+        let newer = documents
+            .begin_diagnostics_publication(&uri)
+            .expect("a newer publication takes the URI");
+
+        assert!(
+            matches!(cancelled.try_recv(), Err(TryRecvError::Closed)),
+            "taking the URI must cancel the older send that was still suspended"
+        );
+        assert!(
+            documents.claim_outbound_send(&uri, &older).is_none(),
+            "the superseded publication can no longer claim the send slot"
+        );
+        assert!(
+            documents.diagnostic_publication_is_current(&uri, &newer),
+            "the newer publication still owns the document"
+        );
+        assert!(
+            documents.claim_outbound_send(&uri, &newer).is_some(),
+            "the current publication may claim the slot it owns"
+        );
     }
 
     #[test]

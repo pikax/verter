@@ -38,21 +38,14 @@
  * real provider-backed request, and the lane ends with a strict convergence
  * probe proving the session still answers correctly after the churn.
  */
-import {
-  createWarnLineDrainer,
-  GET_STATISTICS_METHOD,
-} from "../../core/startupGate.js";
+import { createWarnLineDrainer, GET_STATISTICS_METHOD } from "../../core/startupGate.js";
 import {
   extractQuiescenceCounters,
   pollUntilQuiesced,
   type QuiescenceCounters,
 } from "../../core/quiescence.js";
 import { sampleProcessTreeRss, type ProcessTreeRssSample } from "../processTreeRss.js";
-import {
-  DEFAULT_ENDURANCE_LANE,
-  type EnduranceLane,
-  type EnduranceReceipt,
-} from "../types.js";
+import { DEFAULT_ENDURANCE_LANE, type EnduranceLane, type EnduranceReceipt } from "../types.js";
 import { carrierPath, ENDURANCE_TSCONFIG, type WorkspaceFiles } from "../workspace.js";
 import { buildReceipt, convergeProbe, FailureBag, type ScenarioContext } from "./common.js";
 
@@ -106,13 +99,13 @@ export function churnCarrierContent(blocks: number, lane: EnduranceLane): string
     ...derived,
     "const churnHeadline = props.churnLabel.toUpperCase();",
     "function fireChurn() {",
-    "  emit(\"churn\", churnHeadline);",
+    '  emit("churn", churnHeadline);',
     "}",
     "</script>",
     "",
     "<template>",
     "  <section>",
-    "    <h1 :title=\"churnHeadline\">{{ churnHeadline }}</h1>",
+    '    <h1 :title="churnHeadline">{{ churnHeadline }}</h1>',
     ...markup,
     '    <button @click="fireChurn">go</button>',
     "  </section>",
@@ -130,7 +123,7 @@ function churnConsumerContent(churnImport: string): string {
     "</script>",
     "",
     "<template>",
-    "  <main :data-len=\"consumerLength\">",
+    '  <main :data-len="consumerLength">',
     '    <Churn :churn-label="consumerLabel" />',
     "  </main>",
     "</template>",
@@ -266,6 +259,474 @@ export function decideChurnGrowth(
   };
 }
 
+/**
+ * The cycle count WSP6-AC1 names: "1000 open/edit/close cycles show no unbounded
+ * retained-byte slope after quiescence".
+ *
+ * A shorter run is a perfectly good smoke lane and a perfectly bad acceptance
+ * proof: a leak of a few tens of KiB per cycle disappears inside the absolute
+ * growth floor at 200 cycles and is unmissable at 1000. The acceptance verdict
+ * therefore refuses to be satisfied by a shorter run instead of quietly
+ * reporting a pass for a bound the run could not have exercised.
+ */
+export const CHURN_ACCEPTANCE_MIN_CYCLES = 1_000;
+
+/**
+ * The host's retained OBJECT set at one quiesced checkpoint, as the server
+ * reports it under `$/verter/getStatistics` → `retention`.
+ *
+ * RSS says how much the tree holds; this says which retained set is doing the
+ * holding, so a rising figure can be attributed (superseded artifact versions,
+ * pinned parse snapshots, captured roots) instead of guessed at. Read live from
+ * the owning structures on the server — nothing here needs enabling.
+ */
+export interface RetentionReading {
+  /** Live artifact versions in the indexed store (one per current key). */
+  readonly liveArtifacts: number;
+  /** Superseded versions still retained (root-reachable or not yet swept). */
+  readonly retainedRetiredVersions: number;
+  /** Live captured store roots. */
+  readonly liveRoots: number;
+  /** Live decl-lowering parse-snapshot leases. */
+  readonly snapshotLeases: number;
+  /** Complete carrier parses persisted for same-content adoption (bounded per file). */
+  readonly carrierCandidates: number;
+  /** Publication lanes the carrier store retains, live and terminal. */
+  readonly publicationLanes: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly semanticNodes: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly semanticMemoEntries: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly unresolvedReach: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly relationProofs: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly relateKeys: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly shapeCacheEntries: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly flowGraphs: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly flowHashEntries: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly flowLoweredEntries: number;
+  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
+  readonly mapperFingerprints: number;
+  /** Bytes charged as pinned against the aggregate semantic retention account. */
+  readonly pinnedBytes: number;
+  /** Bytes charged as retained (reusable) against the aggregate account. */
+  readonly retainedBytes: number;
+  /** Reservations the aggregate account refused for pressure, lifetime. */
+  readonly refusalsPressure: number;
+  /** Populated semantic memo slots per family label (reported, not bounded). */
+  readonly semanticMemoFamilies?: Readonly<Record<string, number>>;
+}
+
+/** The `retention` object keys the host emits, exactly as serialized. */
+const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
+  "liveArtifacts",
+  "retainedRetiredVersions",
+  "liveRoots",
+  "snapshotLeases",
+  "carrierCandidates",
+  "publicationLanes",
+  "semanticNodes",
+  "semanticMemoEntries",
+  "unresolvedReach",
+  "relationProofs",
+  "relateKeys",
+  "shapeCacheEntries",
+  "flowGraphs",
+  "flowHashEntries",
+  "flowLoweredEntries",
+  "mapperFingerprints",
+  "pinnedBytes",
+  "retainedBytes",
+  "refusalsPressure",
+];
+
+/**
+ * Project a `$/verter/getStatistics` snapshot down to its retention reading,
+ * or `null` when the server did not report one (an older server, or a
+ * malformed field). A missing reading is an UNAVAILABLE metric: the consumer
+ * labels it, and never reads it as zero.
+ */
+export function extractRetentionReading(snapshot: unknown): RetentionReading | null {
+  const retention = (snapshot as { retention?: unknown } | null | undefined)?.retention;
+  if (!retention || typeof retention !== "object") return null;
+  const record = retention as Record<string, unknown>;
+  const reading: Partial<Record<keyof RetentionReading, number>> = {};
+  for (const key of RETENTION_KEYS) {
+    const value = record[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    reading[key] = value;
+  }
+  const families = record.semanticMemoFamilies;
+  if (families && typeof families === "object") {
+    const byFamily: Record<string, number> = {};
+    for (const [family, count] of Object.entries(families as Record<string, unknown>)) {
+      if (typeof count === "number" && Number.isFinite(count)) byFamily[family] = count;
+    }
+    (reading as { semanticMemoFamilies?: Record<string, number> }).semanticMemoFamilies = byFamily;
+  }
+  return reading as RetentionReading;
+}
+
+/** One quiesced process-tree reading, stamped with the cycles behind it. */
+export interface ChurnCheckpoint {
+  /** Cycles completed when this reading was taken. */
+  readonly cyclesCompleted: number;
+  /** Whether the host reached quiescence before the reading. */
+  readonly quiesced: boolean;
+  readonly sample: ProcessTreeRssSample;
+  /** The host's retained object set, or null when the server reported none. */
+  readonly retention: RetentionReading | null;
+  /**
+   * Cumulative JSON-RPC body bytes over the client's pipes at this reading:
+   * `inbound` is what the server sent (its outbound bytes), `outbound` what the
+   * harness sent. Absent when the client does not count. Reported, not bounded:
+   * no shared limit exists for it, and a figure without a limit is evidence,
+   * not a verdict.
+   */
+  readonly wireBytes?: { readonly inbound: number; readonly outbound: number };
+}
+
+/** Per-window retained-byte rate between two consecutive checkpoints. */
+export interface ChurnSlopeSegment {
+  readonly fromCycle: number;
+  readonly toCycle: number;
+  readonly cycles: number;
+  readonly growthBytes: number;
+  readonly bytesPerCycle: number;
+  readonly withinBound: boolean;
+}
+
+/** The multi-window retained-byte slope verdict. */
+export interface ChurnSlopeCheck {
+  readonly observable: boolean;
+  readonly cyclesCompleted: number;
+  readonly minimumCycles: number;
+  readonly allowedBytesPerCycle: number;
+  readonly segments: readonly ChurnSlopeSegment[];
+  /** The rate over the final window — the one a plateau must have driven to ~0. */
+  readonly finalBytesPerCycle: number | null;
+  readonly pass: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Decide WSP6-AC1's actual claim: after quiescence, the retained-byte SLOPE is
+ * bounded over a run of at least {@link CHURN_ACCEPTANCE_MIN_CYCLES} cycles.
+ *
+ * Two quiesced endpoints and a `final <= baseline * factor + floor` envelope
+ * cannot express that claim. At a 75 MiB baseline a 1.25 factor plus a 64 MiB
+ * floor admits ~83 MiB of growth, so ~85 KiB retained on every post-warm-up
+ * cycle — a strictly LINEAR leak, the exact shape the criterion forbids — lands
+ * inside the envelope and reads as a pass. An envelope describes a destination;
+ * the criterion is about the trajectory.
+ *
+ * So the run is read as a series of quiesced windows, and each window's retained
+ * bytes-per-cycle is required to be within bound. A bounded session's
+ * post-warm-up windows sit at ~0 (allocator wobble either sign); a linear leak
+ * shows the same positive rate in EVERY window, so no window can hide it.
+ *
+ * Refused outright — `observable: false, pass: false`, never a pass — when:
+ *
+ *  - the run was shorter than `minimumCycles` (the criterion's own run length);
+ *  - fewer than two post-baseline windows exist, so there is no trajectory to read;
+ *  - any checkpoint was read without the host reaching quiescence, so the figure
+ *    includes in-flight work rather than what the session retains;
+ *  - any checkpoint is not a complete whole-tree observation;
+ *  - a process present at the first checkpoint is missing from a later one, which
+ *    takes its retained bytes out of the comparison (a respawned provider is
+ *    exactly this shape).
+ */
+export function decideChurnSlope(
+  checkpoints: readonly ChurnCheckpoint[],
+  options: { readonly allowedBytesPerCycle: number; readonly minimumCycles: number },
+): ChurnSlopeCheck {
+  const { allowedBytesPerCycle, minimumCycles } = options;
+  const cyclesCompleted =
+    checkpoints.length > 0 ? checkpoints[checkpoints.length - 1].cyclesCompleted : 0;
+  const unevaluated = (detail: string): ChurnSlopeCheck => ({
+    observable: false,
+    cyclesCompleted,
+    minimumCycles,
+    allowedBytesPerCycle,
+    segments: [],
+    finalBytesPerCycle: null,
+    pass: false,
+    detail,
+  });
+
+  if (checkpoints.length < 3) {
+    return unevaluated(
+      "the retained-byte slope needs a baseline plus at least two later quiesced readings, " +
+        `got ${checkpoints.length} — NOT evaluated`,
+    );
+  }
+  if (cyclesCompleted < minimumCycles) {
+    return unevaluated(
+      `the run completed ${cyclesCompleted} cycles, below the ${minimumCycles} the acceptance ` +
+        "criterion names, so the retained-byte slope was NOT evaluated",
+    );
+  }
+  const unquiesced = checkpoints.filter((checkpoint) => !checkpoint.quiesced);
+  if (unquiesced.length > 0) {
+    return unevaluated(
+      `checkpoint(s) at cycle ${unquiesced.map((c) => c.cyclesCompleted).join(", ")} were read ` +
+        "without the host reaching quiescence, so the slope was NOT evaluated",
+    );
+  }
+  const unobservable = checkpoints.filter((checkpoint) => !checkpoint.sample.observable);
+  if (unobservable.length > 0) {
+    return unevaluated(
+      `checkpoint(s) at cycle ${unobservable.map((c) => c.cyclesCompleted).join(", ")} are not ` +
+        "complete whole-tree observations: " +
+        `${unobservable[0].sample.unavailable?.detail ?? "no detail"} — NOT evaluated`,
+    );
+  }
+  const firstPids = checkpoints[0].sample.members.map((member) => member.pid);
+  for (const checkpoint of checkpoints.slice(1)) {
+    const present = new Set(checkpoint.sample.members.map((member) => member.pid));
+    const departed = firstPids.filter((pid) => !present.has(pid));
+    if (departed.length > 0) {
+      return unevaluated(
+        `process(es) ${departed.join(", ")} left the tree before the reading at cycle ` +
+          `${checkpoint.cyclesCompleted}, so their retained bytes left the comparison — ` +
+          "the slope was NOT evaluated",
+      );
+    }
+  }
+
+  const segments: ChurnSlopeSegment[] = [];
+  for (let index = 1; index < checkpoints.length; index += 1) {
+    const from = checkpoints[index - 1];
+    const to = checkpoints[index];
+    const cycles = to.cyclesCompleted - from.cyclesCompleted;
+    if (cycles <= 0) {
+      return unevaluated(
+        `the reading at cycle ${to.cyclesCompleted} did not advance past the previous one ` +
+          `(${from.cyclesCompleted}), so no per-cycle rate exists — NOT evaluated`,
+      );
+    }
+    const growthBytes = (to.sample.totalBytes as number) - (from.sample.totalBytes as number);
+    const bytesPerCycle = growthBytes / cycles;
+    segments.push({
+      fromCycle: from.cyclesCompleted,
+      toCycle: to.cyclesCompleted,
+      cycles,
+      growthBytes,
+      bytesPerCycle,
+      withinBound: bytesPerCycle <= allowedBytesPerCycle,
+    });
+  }
+
+  const breached = segments.filter((segment) => !segment.withinBound);
+  const finalBytesPerCycle = segments[segments.length - 1].bytesPerCycle;
+  return {
+    observable: true,
+    cyclesCompleted,
+    minimumCycles,
+    allowedBytesPerCycle,
+    segments,
+    finalBytesPerCycle,
+    pass: breached.length === 0,
+    detail:
+      `${segments.length} quiesced window(s) over ${cyclesCompleted} cycles, ` +
+      `allowed <=${bytesPerCycleToKib(allowedBytesPerCycle)}/cycle: ` +
+      segments
+        .map(
+          (segment) =>
+            `[${segment.fromCycle}..${segment.toCycle}] ` +
+            `${bytesPerCycleToKib(segment.bytesPerCycle)}/cycle` +
+            (segment.withinBound ? "" : " BREACH"),
+        )
+        .join(" "),
+  };
+}
+
+function bytesPerCycleToKib(bytes: number): string {
+  return `${(bytes / 1024).toFixed(1)}KiB`;
+}
+
+/** The retained-object counters whose per-cycle growth the lifetime verdict bounds. */
+export const CHURN_RETENTION_COUNTERS = [
+  "liveArtifacts",
+  "retainedRetiredVersions",
+  "liveRoots",
+  "snapshotLeases",
+  "carrierCandidates",
+  "publicationLanes",
+  "semanticNodes",
+  "semanticMemoEntries",
+  "unresolvedReach",
+  "relationProofs",
+  "relateKeys",
+  "shapeCacheEntries",
+  "flowGraphs",
+  "flowHashEntries",
+  "flowLoweredEntries",
+  "mapperFingerprints",
+] as const satisfies readonly (keyof RetentionReading)[];
+
+export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
+
+/** One counter's growth between the baseline and the final quiesced reading. */
+export interface ChurnRetentionTrend {
+  readonly counter: ChurnRetentionCounter;
+  readonly baseline: number;
+  readonly final: number;
+  readonly peak: number;
+  readonly perCycle: number;
+  readonly withinBound: boolean;
+}
+
+/** The object-lifetime verdict: retained objects do not accumulate per cycle. */
+export interface ChurnRetentionCheck {
+  /** False when any checkpoint lacked a reading, or the run was too short. */
+  readonly observable: boolean;
+  readonly cyclesCompleted: number;
+  readonly allowedObjectsPerCycle: number;
+  readonly trends: readonly ChurnRetentionTrend[];
+  /** Pressure refusals at the final reading; the standard corpus must show 0. */
+  readonly pressureRefusals: number | null;
+  readonly pass: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Decide the object-lifetime half of WSP6.1 ("measure process-tree memory AND
+ * object lifetimes"): across the quiesced checkpoints, no retained-object
+ * counter may grow in proportion to the cycles run, and the aggregate account
+ * must have refused nothing for pressure (WSP6.3: pressure outcomes stay
+ * explicit and must not occur on the admitted standard corpus).
+ *
+ * Why objects and not only bytes: an RSS plateau can hide a slow object leak
+ * behind allocator reuse for hundreds of cycles, and an RSS rise cannot say
+ * which retained set is responsible. Each counter is read live from its owning
+ * structure, so its trend names the retainer. The bound is per cycle so a
+ * counter that is legitimately amortised (an occasional sweep leaves a few
+ * superseded versions behind until the next one) still passes, while a
+ * counter that keeps one object per superseded document version — one or more
+ * per cycle — cannot.
+ *
+ * Refused (`observable: false, pass: false`, never a pass) when any
+ * checkpoint carries no reading, the readings span no cycles, or a checkpoint
+ * was not quiesced. An unreported retention is an UNAVAILABLE metric.
+ */
+export function decideChurnRetention(
+  checkpoints: readonly ChurnCheckpoint[],
+  options: { readonly allowedObjectsPerCycle: number },
+): ChurnRetentionCheck {
+  const { allowedObjectsPerCycle } = options;
+  const cyclesCompleted =
+    checkpoints.length > 0 ? checkpoints[checkpoints.length - 1].cyclesCompleted : 0;
+  const unevaluated = (detail: string): ChurnRetentionCheck => ({
+    observable: false,
+    cyclesCompleted,
+    allowedObjectsPerCycle,
+    trends: [],
+    pressureRefusals: null,
+    pass: false,
+    detail,
+  });
+  if (checkpoints.length < 2) {
+    return unevaluated(
+      `the retained-object trend needs a baseline and a later quiesced reading, got ${checkpoints.length} — NOT evaluated`,
+    );
+  }
+  const missing = checkpoints.filter((checkpoint) => checkpoint.retention === null);
+  if (missing.length > 0) {
+    return unevaluated(
+      `checkpoint(s) at cycle ${missing.map((c) => c.cyclesCompleted).join(", ")} carry no retention ` +
+        "reading (the server reported none), so the retained-object trend is UNAVAILABLE — NOT evaluated",
+    );
+  }
+  const unquiesced = checkpoints.filter((checkpoint) => !checkpoint.quiesced);
+  if (unquiesced.length > 0) {
+    return unevaluated(
+      `checkpoint(s) at cycle ${unquiesced.map((c) => c.cyclesCompleted).join(", ")} were read ` +
+        "without the host reaching quiescence, so the retained-object trend was NOT evaluated",
+    );
+  }
+  const first = checkpoints[0];
+  const last = checkpoints[checkpoints.length - 1];
+  const cycles = last.cyclesCompleted - first.cyclesCompleted;
+  if (cycles <= 0) {
+    return unevaluated(
+      `the final reading at cycle ${last.cyclesCompleted} did not advance past the baseline ` +
+        `(${first.cyclesCompleted}), so no per-cycle rate exists — NOT evaluated`,
+    );
+  }
+  const readings = checkpoints.map((checkpoint) => checkpoint.retention as RetentionReading);
+  const trends: ChurnRetentionTrend[] = CHURN_RETENTION_COUNTERS.map((counter) => {
+    const baseline = readings[0][counter];
+    const final = readings[readings.length - 1][counter];
+    const peak = Math.max(...readings.map((reading) => reading[counter]));
+    const perCycle = (final - baseline) / cycles;
+    return {
+      counter,
+      baseline,
+      final,
+      peak,
+      perCycle,
+      withinBound: perCycle <= allowedObjectsPerCycle,
+    };
+  });
+  const pressureRefusals = readings[readings.length - 1].refusalsPressure;
+  const breached = trends.filter((trend) => !trend.withinBound);
+  const pass = breached.length === 0 && pressureRefusals === 0;
+  return {
+    observable: true,
+    cyclesCompleted,
+    allowedObjectsPerCycle,
+    trends,
+    pressureRefusals,
+    pass,
+    detail:
+      `retained objects over ${cycles} measured cycles, allowed <=${allowedObjectsPerCycle}/cycle: ` +
+      trends
+        .map(
+          (trend) =>
+            `${trend.counter} ${trend.baseline}→${trend.final} (peak ${trend.peak}, ` +
+            `${trend.perCycle.toFixed(3)}/cycle)${trend.withinBound ? "" : " BREACH"}`,
+        )
+        .join("; ") +
+      `; pressure refusals=${pressureRefusals}${pressureRefusals === 0 ? "" : " BREACH"}`,
+  };
+}
+
+/** Render a checkpoint's wire byte counts for a receipt line. */
+export function describeWireBytes(
+  wireBytes: { readonly inbound: number; readonly outbound: number } | undefined,
+): string {
+  if (wireBytes === undefined) return "wire: UNAVAILABLE (client does not count)";
+  return `wire server→client=${bytesToMib(wireBytes.inbound)} client→server=${bytesToMib(wireBytes.outbound)}`;
+}
+
+/** Render one retention reading for a receipt line. */
+export function describeRetentionReading(reading: RetentionReading | null): string {
+  if (reading === null) return "retention: UNAVAILABLE (server reported none)";
+  return (
+    `artifacts=${reading.liveArtifacts} retired=${reading.retainedRetiredVersions} ` +
+    `roots=${reading.liveRoots} leases=${reading.snapshotLeases} ` +
+    `candidates=${reading.carrierCandidates} lanes=${reading.publicationLanes} ` +
+    `nodes=${reading.semanticNodes} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
+    `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} shapes=${reading.shapeCacheEntries} ` +
+    `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} ` +
+    `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
+    `pressureRefusals=${reading.refusalsPressure}` +
+    (reading.semanticMemoFamilies
+      ? ` memoFamilies={${Object.entries(reading.semanticMemoFamilies)
+          .filter(([, count]) => count > 0)
+          .map(([family, count]) => `${family}:${count}`)
+          .join(",")}}`
+      : "")
+  );
+}
+
 function bytesToMib(bytes: number): string {
   return `${(bytes / 1024 ** 2).toFixed(1)}MiB`;
 }
@@ -274,10 +735,16 @@ function bytesToMib(bytes: number): string {
 export interface ChurnScenarioResult {
   readonly receipt: EnduranceReceipt;
   readonly growth: ChurnGrowthCheck;
+  /** The WSP6-AC1 verdict: bounded retained-byte rate over every quiesced window. */
+  readonly slope: ChurnSlopeCheck;
+  /** The object-lifetime verdict: no retained-object counter grows per cycle. */
+  readonly retention: ChurnRetentionCheck;
+  /** Every quiesced reading taken, baseline first. */
+  readonly checkpoints: readonly ChurnCheckpoint[];
   readonly baseline: ProcessTreeRssSample;
   readonly final: ProcessTreeRssSample;
   readonly cyclesCompleted: number;
-  /** True when BOTH checkpoints reached host quiescence before being read. */
+  /** True when EVERY checkpoint reached host quiescence before being read. */
   readonly quiescedAtBothCheckpoints: boolean;
 }
 
@@ -287,6 +754,14 @@ export interface ChurnScenarioOptions {
   readonly fixture?: ChurnFixture;
   readonly cycles?: number;
   readonly warmupCycles?: number;
+  /** Quiesced readings taken AFTER the baseline (default from config, min 2). */
+  readonly windows?: number;
+  /**
+   * Cycles the slope verdict requires before it will evaluate at all. Defaults
+   * to {@link CHURN_ACCEPTANCE_MIN_CYCLES}; a shorter smoke run may lower it and
+   * gets an explicitly unevaluated verdict, never a pass.
+   */
+  readonly minimumCycles?: number;
 }
 
 /**
@@ -298,10 +773,7 @@ export interface ChurnScenarioOptions {
  * lane does not invent a second readiness rule, and never sleeps a fixed
  * duration and calls it quiet.
  */
-async function quiesceHost(
-  context: ScenarioContext,
-  timeoutMs: number,
-): Promise<boolean> {
+async function quiesceHost(context: ScenarioContext, timeoutMs: number): Promise<boolean> {
   const client = context.session.client;
   const drainWarnLines = createWarnLineDrainer(client.stderr);
   drainWarnLines();
@@ -314,6 +786,20 @@ async function quiesceHost(
     timeoutMs,
   });
   return result.quiesced;
+}
+
+/**
+ * Read the host's retained object set, AFTER quiescence, so the figure is what
+ * the session keeps rather than what it is mid-flight on. `null` when the
+ * server reports no retention (labelled UNAVAILABLE downstream, never zero).
+ */
+async function readRetention(context: ScenarioContext): Promise<RetentionReading | null> {
+  const snapshot: unknown = await context.session.client.sendRequest(
+    GET_STATISTICS_METHOD,
+    {},
+    context.config.probeTimeoutMs,
+  );
+  return extractRetentionReading(snapshot);
 }
 
 /** One open → edit → query → close cycle over the churn document. */
@@ -372,14 +858,45 @@ export async function runChurnScenario(
     for (let cycle = 0; cycle < warmupCycles; cycle += 1) {
       await runOneCycle(context, fixture, cycle, failures);
     }
-    const baselineQuiesced = await quiesceHost(context, context.config.churnQuiesceMs);
-    const baseline = await sampleProcessTreeRss(options.serverPid);
+    const checkpoints: ChurnCheckpoint[] = [];
+    const takeCheckpoint = async (cyclesCompleted: number): Promise<ChurnCheckpoint> => {
+      const quiesced = await quiesceHost(context, context.config.churnQuiesceMs);
+      if (!quiesced) {
+        failures.add(
+          `the host did not quiesce within ${context.config.churnQuiesceMs}ms before the ` +
+            `reading at cycle ${cyclesCompleted}`,
+        );
+      }
+      const checkpoint: ChurnCheckpoint = {
+        cyclesCompleted,
+        quiesced,
+        sample: await sampleProcessTreeRss(options.serverPid),
+        retention: await readRetention(context),
+        wireBytes: context.session.client.wireBytes,
+      };
+      checkpoints.push(checkpoint);
+      return checkpoint;
+    };
 
-    for (let cycle = warmupCycles; cycle < cycles; cycle += 1) {
-      await runOneCycle(context, fixture, cycle, failures);
+    // The baseline, then one reading per measured window. Windows — not just two
+    // endpoints — are what make a LINEAR leak visible: an envelope between two
+    // points admits a constant per-cycle drip, a per-window rate does not.
+    const baselineCheckpoint = await takeCheckpoint(warmupCycles);
+    const windows = Math.max(2, options.windows ?? context.config.churnSlopeWindows);
+    const measuredCycles = Math.max(0, cycles - warmupCycles);
+    let completed = warmupCycles;
+    for (let window = 1; window <= windows; window += 1) {
+      const target = warmupCycles + Math.round((measuredCycles * window) / windows);
+      for (; completed < target; completed += 1) {
+        await runOneCycle(context, fixture, completed, failures);
+      }
+      await takeCheckpoint(completed);
     }
-    const finalQuiesced = await quiesceHost(context, context.config.churnQuiesceMs);
-    const final = await sampleProcessTreeRss(options.serverPid);
+    const finalCheckpoint = checkpoints[checkpoints.length - 1];
+    const baselineQuiesced = baselineCheckpoint.quiesced;
+    const finalQuiesced = finalCheckpoint.quiesced;
+    const baseline = baselineCheckpoint.sample;
+    const final = finalCheckpoint.sample;
 
     // WSP6.3: the memory figure is worthless if the session got there by
     // answering less. The session must still answer a strict, content-checked
@@ -400,30 +917,29 @@ export async function runChurnScenario(
       { timeoutMs: context.config.probeTimeoutMs },
     );
 
-    if (!baselineQuiesced) {
-      failures.add(
-        `the host did not quiesce within ${context.config.churnQuiesceMs}ms before the baseline reading`,
-      );
-    }
-    if (!finalQuiesced) {
-      failures.add(
-        `the host did not quiesce within ${context.config.churnQuiesceMs}ms before the final reading`,
-      );
-    }
-
     const growth = decideChurnGrowth(
       baseline,
       final,
       context.config.churnGrowthFactor,
       context.config.churnGrowthFloorBytes,
     );
+    const slope = decideChurnSlope(checkpoints, {
+      allowedBytesPerCycle: context.config.churnSlopeBytesPerCycle,
+      minimumCycles: options.minimumCycles ?? CHURN_ACCEPTANCE_MIN_CYCLES,
+    });
+    const retention = decideChurnRetention(checkpoints, {
+      allowedObjectsPerCycle: context.config.churnRetentionObjectsPerCycle,
+    });
     return {
       receipt: buildReceipt(context, startedAtMs, { finalSanityPass, failures: failures.list }),
       growth,
+      slope,
+      retention,
+      checkpoints,
       baseline,
       final,
-      cyclesCompleted: cycles,
-      quiescedAtBothCheckpoints: baselineQuiesced && finalQuiesced,
+      cyclesCompleted: completed,
+      quiescedAtBothCheckpoints: checkpoints.every((checkpoint) => checkpoint.quiesced),
     };
   } finally {
     context.sampler?.stop();

@@ -74,7 +74,7 @@ impl SemanticGraphStore {
             return *id;
         }
         let id = crate::semantic_query::RelationProofId(table.0.len() as u32);
-        table.0.push(proof.clone());
+        table.0.push(Some(proof.clone()));
         table.1.insert(proof, id);
         id
     }
@@ -90,12 +90,13 @@ impl SemanticGraphStore {
             return *id;
         }
         let id = crate::semantic_query::RelateKeyId(table.0.len() as u32);
-        table.0.push(key.clone());
+        table.0.push(Some(key.clone()));
         table.1.insert(key, id);
         id
     }
 
-    /// Read back a proof by id (test + future display surface).
+    /// Read back a proof by id (test + future display surface). `None`
+    /// for an unknown id and for a slot a document release dropped.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn relation_proof_for(
@@ -107,16 +108,23 @@ impl SemanticGraphStore {
             .0
             .get(id.0 as usize)
             .cloned()
+            .flatten()
     }
 
-    /// Read back a co-discharged key by id (test surface).
+    /// Read back a co-discharged key by id (test surface). `None` for an
+    /// unknown id and for a slot a document release dropped.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn relate_key_for_id(
         &self,
         id: crate::semantic_query::RelateKeyId,
     ) -> Option<crate::semantic_query::RelateMemoKey> {
-        self.relate_key_table.lock().0.get(id.0 as usize).cloned()
+        self.relate_key_table
+            .lock()
+            .0
+            .get(id.0 as usize)
+            .cloned()
+            .flatten()
     }
 
     /// Strict warm-hit read of a published relation payload for the full

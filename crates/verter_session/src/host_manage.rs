@@ -730,6 +730,48 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam into `intrinsic_members_for_tag`: a ONE-SHOT hook the
+    /// reader fires on its own thread AFTER it has observed a warm intrinsic
+    /// surface strictly older than the generation it sampled and BEFORE it
+    /// retires that surface. The interleaving under test — a reader paused
+    /// exactly there while a concurrent writer advances the generation and
+    /// admits a newer surface under the same key — is staged inside the hook,
+    /// deterministically, with no threads or sleeps. Taken out of the slot
+    /// before it runs, so a re-entrant read cannot fire it twice.
+    static INTRINSIC_RETIREMENT_PAUSE: std::cell::RefCell<Option<IntrinsicRetirementPauseHook>> =
+        std::cell::RefCell::new(None);
+}
+
+/// The one-shot hook [`INTRINSIC_RETIREMENT_PAUSE`] holds: host, the stable
+/// intrinsic key being read, and the generation the reader sampled.
+#[cfg(test)]
+type IntrinsicRetirementPauseHook =
+    Box<dyn FnOnce(&VerterHost, &crate::resolver_core::FallthroughNodeKey, u64)>;
+
+/// Arm [`INTRINSIC_RETIREMENT_PAUSE`] for the next superseded-surface
+/// observation on this thread. The hook receives the host, the stable
+/// intrinsic key being read, and the generation the reader sampled.
+#[cfg(test)]
+pub(in crate::host_manage) fn pause_before_intrinsic_retirement_for_test(
+    hook: impl FnOnce(&VerterHost, &crate::resolver_core::FallthroughNodeKey, u64) + 'static,
+) {
+    INTRINSIC_RETIREMENT_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn fire_intrinsic_retirement_pause(
+    host: &VerterHost,
+    key: &crate::resolver_core::FallthroughNodeKey,
+    observed_generation: u64,
+) {
+    let hook = INTRINSIC_RETIREMENT_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(host, key, observed_generation);
+    }
+}
+
 impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     type ChildResolution = crate::types::FallthroughResolution;
 
@@ -781,6 +823,11 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                     return members;
                 }
                 Some((_, node_generation)) if node_generation < cache_generation => {
+                    // The seam a paused-reader test stages the concurrent
+                    // writer in: between the observation above and the
+                    // retirement below. Compiled out of production.
+                    #[cfg(test)]
+                    fire_intrinsic_retirement_pause(self.host, &cache_key, cache_generation);
                     self.host
                         .resolver_runtime()
                         .fallthrough

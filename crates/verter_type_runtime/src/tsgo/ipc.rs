@@ -968,14 +968,15 @@ async fn deliver_document_sync(
     let uri = TsgoTypeProvider::path_to_uri(path);
     let mut versions_guard = versions.lock().await;
     let mut contents_guard = contents.lock().await;
-    let contents_key = contents_key(path);
+    // ONE document identity for BOTH ledger maps — see [`contents_key`].
+    let document_key = contents_key(path);
 
     // `Unchanged` returns before a frame exists, so the arms below are exactly the
     // notifications that reach the wire — there is no mode without a frame.
-    let (mode, version, method, params) = match versions_guard.get(path) {
+    let (mode, version, method, params) = match versions_guard.get(&document_key) {
         Some(version) => {
             if contents_guard
-                .get(&contents_key)
+                .get(&document_key)
                 .is_some_and(|held| held.as_ref() == content)
             {
                 return Ok(DocumentSyncMode::Unchanged);
@@ -1008,8 +1009,8 @@ async fn deliver_document_sync(
 
     transport.try_notify_with_priority(method, &params, priority)?;
 
-    versions_guard.insert(path.to_string(), version);
-    contents_guard.insert(contents_key, Arc::from(content));
+    versions_guard.insert(document_key.clone(), version);
+    contents_guard.insert(document_key, Arc::from(content));
     Ok(mode)
 }
 
@@ -1037,9 +1038,11 @@ async fn deliver_document_close(
     let uri = TsgoTypeProvider::path_to_uri(path);
     let mut versions_guard = versions.lock().await;
     let mut contents_guard = contents.lock().await;
+    // ONE document identity for BOTH ledger maps — see [`contents_key`].
+    let document_key = contents_key(path);
 
-    if !versions_guard.contains_key(path) {
-        contents_guard.remove(&contents_key(path));
+    if !versions_guard.contains_key(&document_key) {
+        contents_guard.remove(&document_key);
         return Ok(());
     }
 
@@ -1049,8 +1052,8 @@ async fn deliver_document_close(
         priority,
     )?;
 
-    versions_guard.remove(path);
-    contents_guard.remove(&contents_key(path));
+    versions_guard.remove(&document_key);
+    contents_guard.remove(&document_key);
     Ok(())
 }
 
@@ -1635,7 +1638,8 @@ fn normalize_file_uri(uri: &str) -> String {
     normalize_file_uri_for_cache(uri)
 }
 
-/// The single key convention for the `contents` cache.
+/// The single key convention for the document ledger — BOTH the `contents` cache
+/// and the `versions` open set.
 ///
 /// The cache is keyed by canonical filesystem path so every producer/consumer of
 /// a carrier's content agrees on identity: the file-lifecycle inserts, the
@@ -1646,6 +1650,16 @@ fn normalize_file_uri(uri: &str) -> String {
 /// slashed / drive-cased lookup (e.g. the engine echoes `c:/…` while a didOpen
 /// used `C:\…`) is a FALSE miss that would strand a carrier's content; routing
 /// every access through this helper makes the insert and lookup forms agree.
+///
+/// The OPEN SET keys by this same identity, because `versions` and `contents` must
+/// answer for the same document. Keying the open set by the caller's raw spelling
+/// while the content map canonicalized made two equivalent spellings of one path
+/// disagree: a `didOpen` delivered as `C:\Ws\Src\A.ts` and a retract arriving as
+/// the engine's own `root_files` form `c:/Ws/Src/A.ts`. The retract found no open
+/// row, so it sent no `didClose` and removed only the content entry — leaving the
+/// ledger row and the child's overlay alive for the rest of the session, while the
+/// next update under the original spelling was delivered as a `didChange` over a
+/// buffer the caller believed was closed.
 fn contents_key(path: &str) -> String {
     verter_span::path::canonicalize_path(path)
 }
@@ -2347,8 +2361,9 @@ impl TsgoTypeProvider {
     /// Used by a non-owning feature facade whose real overlay lifecycle is driven
     /// through the relay's separately tracked carrier-injection channel.
     pub async fn forget_cached_content(&self, path: &str) {
-        self.contents.lock().await.remove(&contents_key(path));
-        self.versions.lock().await.remove(path);
+        let document_key = contents_key(path);
+        self.contents.lock().await.remove(&document_key);
+        self.versions.lock().await.remove(&document_key);
     }
 
     /// Wait until the engine has processed every notification sent before this

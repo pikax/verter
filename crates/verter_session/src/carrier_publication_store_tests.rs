@@ -53,9 +53,23 @@ fn accepted(
     generation: u64,
     bytes: &str,
 ) -> verter_language::carrier_grammar::AcceptedRegisteredCarrierSource {
+    accepted_file(source, grammar, APP_VUE, generation, bytes)
+}
+
+const APP_VUE: &str = "file:///workspace/App.vue";
+
+/// [`accepted`] for any canonical file: registers `bytes` as generation
+/// `generation` of `canonical` and accepts it under the Vue grammar.
+fn accepted_file(
+    source: &RegisteredSourceAuthority,
+    grammar: &CarrierGrammarAuthority,
+    canonical: &str,
+    generation: u64,
+    bytes: &str,
+) -> verter_language::carrier_grammar::AcceptedRegisteredCarrierSource {
     let snapshot = source
         .register_source(
-            CanonicalFileId::new("file:///workspace/App.vue"),
+            CanonicalFileId::new(canonical),
             FileIncarnation::new(7),
             SourceGeneration::new(generation),
             verter_language::FileLanguage::vue(),
@@ -619,6 +633,12 @@ struct ProducerDriftPersistence {
 impl crate::carrier_publication_store::persistence::CarrierPersistence
     for ProducerDriftPersistence
 {
+    fn retained_candidate_count(&self) -> usize {
+        crate::carrier_publication_store::persistence::CarrierPersistence::retained_candidate_count(
+            &self.inner,
+        )
+    }
+
     fn take_candidate(
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
@@ -714,6 +734,12 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
 }
 
 impl crate::carrier_publication_store::persistence::CarrierPersistence for CorruptingPersistence {
+    fn retained_candidate_count(&self) -> usize {
+        crate::carrier_publication_store::persistence::CarrierPersistence::retained_candidate_count(
+            &self.inner,
+        )
+    }
+
     fn take_candidate(
         &self,
         id: &crate::carrier_publication_store::FrameworkArtifactId,
@@ -1052,4 +1078,249 @@ fn vue_parse_time_error_diagnostic_still_fails_close_ide_compile() {
         "TemplateFunctionalUnsupported must still fail-close IDE compile \
          (unchanged pre-existing Vue behavior, out of this fix's scope)"
     );
+}
+
+/// Publishes `bytes` as generation `generation` of `canonical` through
+/// `store` and returns the outcome with its envelope dropped, so the lane's
+/// artifact expires the way a closed buffer's does. The outcome tells whether
+/// the publication was `Published` (a fresh parse) or `Adopted` (a persisted
+/// candidate).
+fn publish_and_drop(
+    store: &CarrierPublicationStore,
+    source: &RegisteredSourceAuthority,
+    grammar: &CarrierGrammarAuthority,
+    canonical: &str,
+    generation: u64,
+    request_id: u64,
+    bytes: &str,
+) -> PublicationOutcome {
+    let accepted = accepted_file(source, grammar, canonical, generation, bytes);
+    store.publish_or_get(&accepted, request(request_id, &accepted))
+}
+
+/// Persistence window: the in-memory persistence keeps at most two parse
+/// candidates PER canonical file, newest first, and an adoption takes its
+/// candidate out.
+///
+/// On the unbounded code (a plain content-keyed map that only an adoption
+/// ever shrinks) the count after five distinct publications of one file is 5,
+/// not 2; and republishing the oldest content is ADOPTED (`parser_started`
+/// stays put) instead of parsed again, because that content was never
+/// dropped from the window.
+#[test]
+fn persisted_candidates_are_windowed_per_canonical_file() {
+    let (source, grammar) = authorities();
+    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let other_vue = "file:///workspace/Other.vue";
+    let contents_a: Vec<String> = (1..=5)
+        .map(|n| format!("<template><p>a{n}</p></template>"))
+        .collect();
+    for (index, bytes) in contents_a.iter().enumerate() {
+        let generation = index as u64 + 1;
+        assert!(matches!(
+            publish_and_drop(&store, &source, &grammar, APP_VUE, generation, generation, bytes),
+            PublicationOutcome::Published(_)
+        ));
+    }
+    assert_eq!(store.audit_snapshot().parser_started, 5);
+    assert_eq!(
+        store.retained_candidate_count(),
+        2,
+        "one file keeps only its newest two candidates"
+    );
+
+    for generation in 1..=2 {
+        let bytes = format!("<template><p>b{generation}</p></template>");
+        assert!(matches!(
+            publish_and_drop(
+                &store,
+                &source,
+                &grammar,
+                other_vue,
+                generation,
+                5 + generation,
+                &bytes
+            ),
+            PublicationOutcome::Published(_)
+        ));
+    }
+    assert_eq!(
+        store.retained_candidate_count(),
+        4,
+        "the window is per file: the second file's candidates add to the first's"
+    );
+
+    // The newest content of the first file is still in its window: adopting
+    // it takes the candidate, so the count drops by one and nothing parses.
+    assert!(matches!(
+        publish_and_drop(&store, &source, &grammar, APP_VUE, 6, 8, &contents_a[4]),
+        PublicationOutcome::Adopted(_)
+    ));
+    assert_eq!(store.audit_snapshot().adopted, 1);
+    assert_eq!(store.audit_snapshot().parser_started, 7);
+    assert_eq!(store.retained_candidate_count(), 3);
+
+    // The oldest content fell out of the window: it parses afresh and, being
+    // the newest publication again, re-enters the window beside a4.
+    assert!(matches!(
+        publish_and_drop(&store, &source, &grammar, APP_VUE, 7, 9, &contents_a[0]),
+        PublicationOutcome::Published(_)
+    ));
+    assert_eq!(store.audit_snapshot().adopted, 1);
+    assert_eq!(
+        store.audit_snapshot().parser_started,
+        8,
+        "the oldest content was dropped from the window, so it parses again"
+    );
+    assert_eq!(store.retained_candidate_count(), 4);
+}
+
+/// Lane pruning: when a file publishes a new version, the lanes of its
+/// superseded versions whose artifacts have expired are dropped; a lane whose
+/// envelope somebody still holds survives, and other files' lanes are never
+/// touched by this file's publications.
+///
+/// On the unbounded code the lane map keeps one lane per version ever
+/// published: 5 after the first loop, 7 with the held lane, 9 with the other
+/// file and 10 at the end, where this test expects 1, 2, 3 and 2.
+#[test]
+fn superseded_lanes_with_expired_artifacts_are_pruned_on_the_next_publication() {
+    let (source, grammar) = authorities();
+    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    for generation in 1..=5 {
+        let bytes = format!("<template><p>v{generation}</p></template>");
+        assert!(matches!(
+            publish_and_drop(&store, &source, &grammar, APP_VUE, generation, generation, &bytes),
+            PublicationOutcome::Published(_)
+        ));
+    }
+    assert_eq!(
+        store.retained_lane_count(),
+        1,
+        "only the newest version's lane survives once every envelope is dropped"
+    );
+
+    let held = accepted(&source, &grammar, 6, "<template><p>held</p></template>");
+    let held_envelope = store
+        .publish_or_get(&held, request(6, &held))
+        .into_envelope()
+        .expect("held publication");
+    assert_eq!(store.retained_lane_count(), 1);
+
+    assert!(matches!(
+        publish_and_drop(
+            &store,
+            &source,
+            &grammar,
+            APP_VUE,
+            7,
+            7,
+            "<template><p>after held</p></template>"
+        ),
+        PublicationOutcome::Published(_)
+    ));
+    assert_eq!(
+        store.retained_lane_count(),
+        2,
+        "a lane whose artifact is still held is never pruned"
+    );
+
+    // Another file's expired lane is not this file's to prune.
+    assert!(matches!(
+        publish_and_drop(
+            &store,
+            &source,
+            &grammar,
+            "file:///workspace/Other.vue",
+            1,
+            8,
+            "<template><p>other</p></template>"
+        ),
+        PublicationOutcome::Published(_)
+    ));
+    assert_eq!(store.retained_lane_count(), 3);
+    assert!(matches!(
+        publish_and_drop(
+            &store,
+            &source,
+            &grammar,
+            APP_VUE,
+            8,
+            9,
+            "<template><p>still held</p></template>"
+        ),
+        PublicationOutcome::Published(_)
+    ));
+    assert_eq!(
+        store.retained_lane_count(),
+        3,
+        "held lane 6, newest lane 8 and the other file's lane; lane 7 pruned"
+    );
+
+    drop(held_envelope);
+    assert!(matches!(
+        publish_and_drop(
+            &store,
+            &source,
+            &grammar,
+            APP_VUE,
+            9,
+            10,
+            "<template><p>released</p></template>"
+        ),
+        PublicationOutcome::Published(_)
+    ));
+    assert_eq!(
+        store.retained_lane_count(),
+        2,
+        "once released, the held lane is pruned like any other expired one"
+    );
+}
+
+/// Audit window: the log retains only the newest 1024 events while its
+/// counters keep counting every request exactly.
+///
+/// On the unbounded code `audit_events()` returns every event ever pushed —
+/// two per live hit here, so about 2200 for these requests — and the first
+/// request's events are still in it.
+#[test]
+fn audit_events_are_windowed_while_counters_stay_exact() {
+    use crate::carrier_publication_store::PublicationAuditKind;
+
+    const REQUESTS: u64 = 1100;
+    let (source, grammar) = authorities();
+    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let accepted = accepted(&source, &grammar, 1, "<template><p>hot</p></template>");
+    let envelope = store
+        .publish_or_get(&accepted, request(1, &accepted))
+        .into_envelope()
+        .expect("first publication");
+    for id in 2..=REQUESTS {
+        assert!(matches!(
+            store.publish_or_get(&accepted, request(id, &accepted)),
+            PublicationOutcome::Published(_)
+        ));
+    }
+
+    let events = store.audit_events();
+    assert!(
+        events.len() <= 1024,
+        "retained {} events, more than the window",
+        events.len()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.request == AuditRequestId::new(1)),
+        "the oldest events are the ones let go"
+    );
+    let newest = events.last().expect("the window keeps the newest events");
+    assert_eq!(newest.request, AuditRequestId::new(REQUESTS));
+    assert!(matches!(newest.kind, PublicationAuditKind::LiveHit));
+
+    let snapshot = store.audit_snapshot();
+    assert_eq!(snapshot.live_hits, REQUESTS - 1);
+    assert_eq!(snapshot.parser_started, 1);
+    assert_eq!(snapshot.leaders, 1);
+    drop(envelope);
 }
