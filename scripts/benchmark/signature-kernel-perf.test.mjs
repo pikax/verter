@@ -9,10 +9,13 @@ import test from "node:test";
 
 import {
   LOCKED_RUNNER,
+  canonicalCpu,
+  canonicalLockedRunner,
   compareOutcomes,
   minInvocationsOf,
   renderMarkdown,
   runnerMismatches,
+  rustcFacts,
   summarize,
   workloadIsMatched,
 } from "./signature-kernel-perf.mjs";
@@ -163,39 +166,80 @@ test("the markdown renders an unmatched workload without a ratio", () => {
   assert.match(markdown, /`original` `\/sk\/m1\.ts#witnessChain1`/);
 });
 
+const LOCKED = canonicalLockedRunner(LOCKED_RUNNER);
+
+/** What `rustc -vV` prints for the locked toolchain (full commit hash). */
+const LOCKED_RUSTC_VV = `rustc ${LOCKED_RUNNER.rust_toolchain}
+binary: rustc
+commit-hash: ${LOCKED.rust.hash}68e0e26f0bb7960be334d5b520ea452
+commit-date: ${LOCKED.rust.date}
+host: aarch64-apple-darwin
+release: ${LOCKED.rust.release}
+LLVM version: 22.1.6
+`;
+
+/** The locked runner's facts as `checkLockedRunner` observes them on that machine. */
 const LOCKED_FACTS = {
-  os: LOCKED_RUNNER.os,
-  cpu: LOCKED_RUNNER.cpu,
-  logical_cpus: LOCKED_RUNNER.logical_cpus,
-  memory_bytes: LOCKED_RUNNER.memory_bytes,
-  node_runtime: LOCKED_RUNNER.node_runtime,
-  rust_toolchain: {
-    baseline: LOCKED_RUNNER.rust_toolchain,
-    candidate: LOCKED_RUNNER.rust_toolchain,
-  },
+  os: { ...LOCKED.os },
+  cpu: LOCKED.cpu,
+  logical_cpus: LOCKED.logical_cpus,
+  memory_bytes: LOCKED.memory_bytes,
+  node: LOCKED.node.join("."),
+  rust: { baseline: rustcFacts(LOCKED_RUSTC_VV), candidate: rustcFacts(LOCKED_RUSTC_VV) },
   platform: "darwin",
-  power_source: "Now drawing from 'AC Power'",
+  power_source: "AC Power",
   low_power_mode: "0",
 };
 
 test("the locked runner class is read from performance-gates.toml", () => {
   assert.equal(LOCKED_RUNNER.cpu, "Apple M3");
   assert.equal(LOCKED_RUNNER.class, "apple-silicon-laptop-8core-24gib");
-  assert.deepEqual(runnerMismatches(LOCKED_RUNNER, LOCKED_FACTS), []);
+  assert.deepEqual(runnerMismatches(LOCKED, LOCKED_FACTS), []);
 });
 
-test("every runner field, both toolchains and the power clauses are enforced", () => {
+test("formatting differences alone are never a lock mismatch", () => {
+  // A CPU model with incidental whitespace, the full commit hash `rustc -vV` reports
+  // against the lock's short one, and a node version with its `v` all match.
+  assert.equal(
+    canonicalCpu(`  ${LOCKED_RUNNER.cpu.replace(" ", "   ")}
+`),
+    LOCKED.cpu,
+  );
+  assert.equal(rustcFacts(LOCKED_RUSTC_VV).hash.length, 40);
+  assert.deepEqual(
+    runnerMismatches(LOCKED, { ...LOCKED_FACTS, node: `v${LOCKED.node.join(".")}` }),
+    [],
+  );
+});
+
+test("every locked runner dimension refuses on a genuine mismatch", () => {
   const cases = [
-    [{ os: "Darwin 26.0.0 arm64" }, "os "],
+    [{ os: { ...LOCKED.os, release: "26.0.0" } }, "os release"],
+    [{ os: { ...LOCKED.os, system: "Linux" } }, "os system"],
+    [{ os: { ...LOCKED.os, machine: "x86_64" } }, "os machine"],
     [{ cpu: "Apple M4" }, "cpu "],
     [{ logical_cpus: 10 }, "logical_cpus "],
     [{ memory_bytes: 17179869184 }, "memory_bytes "],
-    [{ node_runtime: "v24.0.0" }, "node_runtime "],
+    [{ node: "24.0.0" }, "node runtime"],
     [
-      { rust_toolchain: { baseline: "1.98.0", candidate: LOCKED_RUNNER.rust_toolchain } },
+      {
+        rust: {
+          baseline: { ...LOCKED_FACTS.rust.baseline, release: "1.98.0" },
+          candidate: LOCKED_FACTS.rust.candidate,
+        },
+      },
       "baseline toolchain",
     ],
-    [{ power_source: "Now drawing from 'Battery Power'" }, "power source"],
+    [
+      {
+        rust: {
+          baseline: LOCKED_FACTS.rust.baseline,
+          candidate: { ...LOCKED_FACTS.rust.candidate, hash: "0000000000" },
+        },
+      },
+      "candidate toolchain",
+    ],
+    [{ power_source: "Battery Power" }, "power source"],
     [{ low_power_mode: "1" }, "low-power mode"],
     [
       { platform: "linux", power_source: undefined, low_power_mode: undefined },
@@ -203,10 +247,16 @@ test("every runner field, both toolchains and the power clauses are enforced", (
     ],
   ];
   for (const [change, expected] of cases) {
-    const mismatches = runnerMismatches(LOCKED_RUNNER, { ...LOCKED_FACTS, ...change });
+    const mismatches = runnerMismatches(LOCKED, { ...LOCKED_FACTS, ...change });
     assert.equal(mismatches.length, 1, `${JSON.stringify(change)}: ${mismatches.join("; ")}`);
     assert.ok(mismatches[0].startsWith(expected), mismatches[0]);
   }
+});
+
+test("a locked runner value that does not parse fails loudly", () => {
+  assert.throws(() => canonicalLockedRunner({ ...LOCKED_RUNNER, os: "Darwin" }));
+  assert.throws(() => canonicalLockedRunner({ ...LOCKED_RUNNER, rust_toolchain: "1.97.1" }));
+  assert.throws(() => canonicalLockedRunner({ ...LOCKED_RUNNER, node_runtime: "twenty" }));
 });
 
 test("the invocation minimum is read from the interleave policy", () => {

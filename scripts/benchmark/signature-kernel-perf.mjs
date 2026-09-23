@@ -467,26 +467,28 @@ function machineFacts() {
 /**
  * This machine, both trees' toolchains and the power state against the LOCKED runner
  * class of performance-gates.toml. Every mismatch refuses lock evidence: a session on
- * another class is a measurement, never lock evidence.
+ * another class is a measurement, never lock evidence. Both sides are compared in one
+ * canonical form, so the formatting of a command's output never decides a match.
  */
 function checkLockedRunner(trees) {
   const observed = {
-    os: tryRun("uname", ["-srm"]) ?? `${os.type()} ${os.release()} ${process.arch}`,
-    cpu: (os.cpus()[0]?.model ?? "unknown").trim(),
+    os: { system: os.type(), release: os.release(), machine: os.machine() },
+    cpu: canonicalCpu(os.cpus()[0]?.model ?? "unknown"),
     logical_cpus: os.cpus().length,
     memory_bytes: os.totalmem(),
-    node_runtime: process.version,
+    node: process.versions.node,
     // Each tree resolves its own pinned toolchain.
-    rust_toolchain: Object.fromEntries(
+    rust: Object.fromEntries(
       Object.entries(trees).map(([arm, tree]) => [
         arm,
-        tryRun("rustc", ["-V"], { cwd: tree })?.replace(/^rustc /, "") ?? "unknown",
+        rustcFacts(tryRun("rustc", ["-vV"], { cwd: tree }) ?? ""),
       ]),
     ),
     platform: process.platform,
   };
   if (process.platform === "darwin") {
-    observed.power_source = (tryRun("pmset", ["-g", "batt"]) ?? "").split("\n")[0] || "unknown";
+    observed.power_source =
+      (tryRun("pmset", ["-g", "batt"]) ?? "").match(/'([^']+)'/)?.[1] ?? "unknown";
     observed.low_power_mode =
       tryRun("pmset", ["-g"])?.match(/lowpowermode\s+(\d)/)?.[1] ?? "unknown";
   }
@@ -502,20 +504,76 @@ function checkLockedRunner(trees) {
       power_policy: LOCKED_RUNNER.power_policy,
     },
     observed,
-    mismatches: runnerMismatches(LOCKED_RUNNER, observed),
+    mismatches: runnerMismatches(canonicalLockedRunner(LOCKED_RUNNER), observed),
   };
 }
 
-/** Every way `observed` falls outside the locked runner class `expected`. */
+/** A CPU model with its incidental whitespace removed. */
+function canonicalCpu(model) {
+  return model.trim().replace(/\s+/g, " ");
+}
+
+/** `rustc -vV`'s release, commit hash and commit date. */
+function rustcFacts(verbose) {
+  const field = (name) => verbose.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? null;
+  return { release: field("release"), hash: field("commit-hash"), date: field("commit-date") };
+}
+
+/** A `major.minor.patch` version, with or without a leading `v`, as numbers. */
+function semver(text) {
+  const parts = String(text).trim().replace(/^v/, "").split(".").map(Number);
+  return parts.length === 3 && parts.every(Number.isInteger) ? parts : null;
+}
+
+/**
+ * The locked `[runner]` table in canonical form. A lock value that does not parse is
+ * a loud failure: the lock would otherwise match nothing, silently.
+ */
+function canonicalLockedRunner(runner) {
+  const os = runner.os.trim().split(/\s+/);
+  if (os.length !== 3)
+    throw new Error(`performance-gates.toml runner.os is not "system release machine"`);
+  const rust = runner.rust_toolchain.match(/^(\S+) \((\w+) (\d{4}-\d{2}-\d{2})\)$/);
+  if (!rust)
+    throw new Error(`performance-gates.toml runner.rust_toolchain is not "release (hash date)"`);
+  const node = semver(runner.node_runtime);
+  if (!node) throw new Error("performance-gates.toml runner.node_runtime is not a version");
+  return {
+    os: { system: os[0], release: os[1], machine: os[2] },
+    cpu: canonicalCpu(runner.cpu),
+    logical_cpus: runner.logical_cpus,
+    memory_bytes: runner.memory_bytes,
+    rust: { release: rust[1], hash: rust[2], date: rust[3] },
+    node,
+    power_policy: runner.power_policy,
+  };
+}
+
+/** Every way the canonical `observed` facts fall outside the canonical locked class. */
 function runnerMismatches(expected, observed) {
   const mismatches = [];
-  for (const key of ["os", "cpu", "logical_cpus", "memory_bytes", "node_runtime"]) {
+  for (const part of ["system", "release", "machine"]) {
+    if (observed.os[part] !== expected.os[part])
+      mismatches.push(`os ${part} is ${observed.os[part]}, locked ${expected.os[part]}`);
+  }
+  for (const key of ["cpu", "logical_cpus", "memory_bytes"]) {
     if (observed[key] !== expected[key])
       mismatches.push(`${key} is ${observed[key]}, locked ${expected[key]}`);
   }
-  for (const [arm, toolchain] of Object.entries(observed.rust_toolchain)) {
-    if (toolchain !== expected.rust_toolchain)
-      mismatches.push(`${arm} toolchain is ${toolchain}, locked ${expected.rust_toolchain}`);
+  const node = semver(observed.node);
+  if (!node || node.join(".") !== expected.node.join("."))
+    mismatches.push(`node runtime is ${observed.node}, locked ${expected.node.join(".")}`);
+  for (const [arm, rust] of Object.entries(observed.rust)) {
+    // The lock records the commit's short hash; `rustc -vV` reports the full one.
+    const same =
+      rust.release === expected.rust.release &&
+      rust.date === expected.rust.date &&
+      typeof rust.hash === "string" &&
+      rust.hash.startsWith(expected.rust.hash);
+    if (!same)
+      mismatches.push(
+        `${arm} toolchain is ${rust.release} (${rust.hash?.slice(0, expected.rust.hash.length)} ${rust.date}), locked ${expected.rust.release} (${expected.rust.hash} ${expected.rust.date})`,
+      );
   }
   // The power policy is prose; the machine-checkable clauses it states are enforced.
   const wantsAc = /AC power/i.test(expected.power_policy);
@@ -524,8 +582,8 @@ function runnerMismatches(expected, observed) {
     if (observed.platform !== "darwin") {
       mismatches.push(`power state cannot be verified on ${observed.platform}`);
     } else {
-      if (wantsAc && !/'AC Power'/.test(observed.power_source ?? ""))
-        mismatches.push(`power source is "${observed.power_source}", locked AC power`);
+      if (wantsAc && observed.power_source !== "AC Power")
+        mismatches.push(`power source is ${observed.power_source}, locked AC Power`);
       if (wantsLowPowerOff && observed.low_power_mode !== "0")
         mismatches.push(`low-power mode is ${observed.low_power_mode}, locked 0`);
     }
@@ -1212,10 +1270,13 @@ function renderMarkdown(s) {
 
 export {
   LOCKED_RUNNER,
+  canonicalCpu,
+  canonicalLockedRunner,
   compareOutcomes,
   minInvocationsOf,
   renderMarkdown,
   runnerMismatches,
+  rustcFacts,
   summarize,
   workloadIsMatched,
 };
