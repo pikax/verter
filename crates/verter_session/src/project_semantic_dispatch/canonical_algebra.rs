@@ -1108,7 +1108,7 @@ fn canonicalize(
     //    `Canonical`; anything else is stamped `CanonicalUnproven` at rest
     //    — never skip-eligible.
     if is_union {
-        crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut kept);
+        crate::semantic_query::stable_key::sort_union_members_by_stable_key(graph, &mut kept);
         // An over-deep arm cannot be proven equal to anything within the
         // encoder's depth budget: keep every arm and refuse canonical warm
         // admission rather than collapsing on the shared marker.

@@ -9,9 +9,6 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
-
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
     AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
@@ -965,6 +962,9 @@ pub fn canonicalize_union_members(
         .map(|&id| (stable_key_for_node(graph, id), id))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if graph.union_order_reversed() {
+        keyed.reverse();
+    }
     // Admission-time convergence is ORDER only: structurally equal but
     // arena-distinct members stay — the build's budgeted comparator owns
     // the collapse and its discard-evidence discipline.
@@ -972,36 +972,32 @@ pub fn canonicalize_union_members(
     keyed.into_iter().map(|(_, id)| id).collect()
 }
 
-struct UnionViewTable {
-    by_key: FxHashMap<SemanticUnionMembersKey, Arc<[SemanticNodeId]>>,
-}
-
-fn union_view_table() -> &'static Mutex<UnionViewTable> {
-    static TABLE: std::sync::OnceLock<Mutex<UnionViewTable>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        Mutex::new(UnionViewTable {
-            by_key: FxHashMap::default(),
-        })
-    })
+/// Order a union's members by the `VerterStableV1` stable key — THE union
+/// order. Every union construction sorts through here, so the one order has
+/// one site (and one test-only counterfactual, a store that reverses it).
+pub fn sort_union_members_by_stable_key(
+    graph: &SemanticGraphStore,
+    members: &mut [SemanticNodeId],
+) {
+    sort_by_stable_key(graph, members);
+    if graph.union_order_reversed() {
+        members.reverse();
+    }
 }
 
 /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
+/// Views live in the store whose arena the union's id indexes.
 pub fn semantic_union_members(
     graph: &SemanticGraphStore,
     union: SemanticNodeId,
     ctx: &SemanticContext,
 ) -> Arc<[SemanticNodeId]> {
     let key = SemanticUnionMembersKey::from_context(union, ctx);
-    {
-        let table = union_view_table().lock();
-        if let Some(view) = table.by_key.get(&key) {
-            return Arc::clone(view);
-        }
+    if let Some(view) = graph.union_view(&key) {
+        return view;
     }
     let view = build_union_view(graph, union);
-    let mut table = union_view_table().lock();
-    table.by_key.entry(key).or_insert_with(|| Arc::clone(&view));
-    view
+    graph.keep_union_view(key, &view)
 }
 
 fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[SemanticNodeId]> {
