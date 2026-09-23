@@ -75,7 +75,7 @@ interface CloseCostSample {
 const BLIND_SETTLE_MS = 500;
 
 function generateSlice(): string {
-  const root = mkdtempSync(path.join(tmpdir(), "verter-close-cost-"));
+  const root = mkdtempSync(path.join(tmpdir(), "verter-endurance-close-cost-"));
   const corpus = path.join(root, "corpus");
   const generator = path.join(REPO_ROOT, "test-corpora/perf/synthetic-15k/generator/generate.mjs");
   execFileSync(
