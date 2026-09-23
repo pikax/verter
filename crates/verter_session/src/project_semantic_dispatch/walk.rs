@@ -1871,7 +1871,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // what `build_typeof` already mints for a top-level
                     // function overload group, so `obj.m` and a same-shaped
                     // `f` answer alike from here on.
+                    // An ACCESSOR is a property: its read is the accessor's
+                    // VALUE type (the getter's return, else the setter's
+                    // parameter), whichever of a get/set pair came first.
+                    let graph = self.dispatch.graph();
                     let first_wins = |needle: &crate::semantic_query::PropertyKey| {
+                        if let Some(accessor) = surface.project_known_key_accessor(needle) {
+                            return accessor.read_value(graph);
+                        }
                         match surface.project_known_key(needle) {
                             crate::semantic_query::SurfaceKeyProjection::Exact(member)
                                 if member.visibility.is_public() =>

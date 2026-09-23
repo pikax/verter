@@ -118,6 +118,8 @@ mod call_resolve;
 mod call_resolve_tests;
 pub(crate) mod dispatch_txn;
 pub(crate) mod flow_return;
+#[cfg(test)]
+mod flow_return_accessor_tests;
 pub(crate) mod flow_return_callee;
 #[cfg(test)]
 mod flow_return_construct_tests;
@@ -140,6 +142,8 @@ mod flow_return_products;
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_tests;
+#[cfg(test)]
+mod flow_return_type_argument_default_tests;
 // The completeness-proof layer for flow-bearing operations: production-live
 // (the flow evaluator's demand preparation installs demands from here and
 // the component close finalizes through it), and the `FlowReturnKey`

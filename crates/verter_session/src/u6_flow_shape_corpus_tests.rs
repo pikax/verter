@@ -2071,6 +2071,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "G03_emits_new_spread",
         "91947af5d9430228abb3f409c16a917195753c624b392120f5ee11856437531c",
     ),
+    (
+        "X12_class_getter_member",
+        "234f0284ed82bf1e3c8ec892b13a9731b9dd11440b5b0bfe135f728841eba44d",
+    ),
 ];
 
 // The suite
@@ -3225,9 +3229,8 @@ mod corpus_suite {
             ),
             (
                 "X12_class_getter_member",
-                "checker prints `{ label: string; n: number; }`; the renderer spells \
-                 `{ label: () => string, n: number }` — print syntax AND semantics \
-                 differ; the KnownOwed divergence is held by the semantic test",
+                "checker prints `{ label: string; n: number; }`; the renderer spells the \
+                 same node `{ label: string, n: number }` — member terminators differ",
             ),
             (
                 "N09_narrow_then_write",
@@ -5016,9 +5019,6 @@ const OPEN_DEBTS: &[&str] = &[
     // computes the contextual union.
     "CC06_contextual_arrow_param",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
-    // A class getter read through an instance publishes the getter's
-    // function type instead of the property type, clean and warm.
-    "X12_class_getter_member",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // The macro lane correctly rejects a generator return, but the TSX lane
@@ -5152,9 +5152,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // `Promise<…>` carrier matches the checker).
     // A `new` resolves to the instance: D01, D09 and G03 match the checker;
     // their tagged-template twins D12, D13 and G07 keep the unmodelled
-    // position, and X12's class getter read through the constructed
-    // instance is parked (the getter publishes its function type).
-    (Owner::U6FlowReturnSubstrate, 66, 51, 3),
+    // position. An accessor reads as its value type, so X12's class getter
+    // read through the constructed instance matches too.
+    (Owner::U6FlowReturnSubstrate, 66, 52, 2),
     (Owner::U6NarrowTypeof, 48, 29, 19),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the

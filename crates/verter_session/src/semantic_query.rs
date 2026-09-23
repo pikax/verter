@@ -4059,6 +4059,37 @@ pub enum SurfaceKeyProjection<'a> {
     AbsentProven,
 }
 
+/// The accessor members one key names on a surface
+/// ([`SurfaceView::project_known_key_accessor`]); at least one is present.
+pub(crate) struct KnownKeyAccessor<'a> {
+    getter: Option<&'a SurfaceMember>,
+    setter: Option<&'a SurfaceMember>,
+}
+
+impl KnownKeyAccessor<'_> {
+    /// The accessor's VALUE type as a read sees it: the getter's return,
+    /// else the setter's parameter. `None` when the accessor's signature
+    /// carries neither.
+    pub(crate) fn read_value(
+        &self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Option<SemanticNodeId> {
+        if let Some(getter) = self.getter {
+            return match graph.node_data(getter.value).as_deref() {
+                Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                _ => None,
+            };
+        }
+        let setter = self.setter?;
+        match graph.node_data(setter.value).as_deref() {
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                split_this_receiver(params).1.first().map(|param| param.ty)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl SurfaceView {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -4240,6 +4271,42 @@ impl SurfaceView {
                 .map(|ordinal| group[ordinal].value)
                 .collect(),
         )
+    }
+
+    /// The ACCESSOR a key names: the public `get` and / or `set` members
+    /// colliding with `key`, when every public member colliding with it is
+    /// an accessor. `None` for a key with no accessor member.
+    ///
+    /// An accessor is one PROPERTY to every reader: reading it reads its
+    /// value type — the getter's return, else the setter's parameter — never
+    /// the accessor function, and a get/set pair reads through the getter
+    /// whichever of the two was declared first.
+    pub(crate) fn project_known_key_accessor(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<KnownKeyAccessor<'_>> {
+        let mut accessor = KnownKeyAccessor {
+            getter: None,
+            setter: None,
+        };
+        for member in self.members.iter().filter(|member| {
+            member.visibility.is_public()
+                && member
+                    .key
+                    .as_known()
+                    .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }) {
+            match member.method_kind {
+                Some(verter_type_expr::ObjectMethodKind::Get) => {
+                    accessor.getter.get_or_insert(member);
+                }
+                Some(verter_type_expr::ObjectMethodKind::Set) => {
+                    accessor.setter.get_or_insert(member);
+                }
+                _ => return None,
+            }
+        }
+        (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
     }
 
     /// Project an ordinary string key supplied by a string-only external
