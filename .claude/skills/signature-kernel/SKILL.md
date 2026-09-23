@@ -185,6 +185,26 @@ change; never weaken the test.
    to a complete TypeScript project check and label the ratio a speedup.
 6. **A corpus verdict moves by re-pin only.** Change the row literal in the same
    change that changes the answer, and move the matching ledger row with it.
+7. **Semantic decisions read `SignaturesOfType`; representation may read the
+   surface.** A reader whose answer depends on which signatures a type HAS —
+   callability, callable anchoring, runtime classification, overload choice,
+   applicability — asks discovery (`shared_signature_nodes` /
+   `shared_signature_buckets`), as the apparent-type anchor and the broad
+   runtime classifier do. Rendering, serialization, hashing, traversal and
+   surface carriage read an object's `call_signatures` / `construct_signatures`
+   directly. That split is sound only because every list on an interned object
+   is either the object's own authored list or discovery's answer for the
+   composite it was merged from: the shallow intersection merge keeps arm
+   members, but takes its call/construct entries from `SignaturesOfType` for
+   the intersection (`with_discovered_signatures`), never from its own
+   identity-deduplicated concatenation. A new merge that interns an object
+   carrying signatures must do the same, or it creates a second signature
+   authority. The one exception is an interface/class body's heritage
+   overlay: it is an intersection NODE but inherits by concatenation
+   (TypeScript's `resolveObjectTypeMembers` keeps identical base signatures an
+   intersection would collapse), so its flush keeps the merge's lists. The
+   kernel itself still answers such a body with intersection rules — an open
+   divergence for identical inherited signatures, not a licence to copy.
 
 ## Related skills
 

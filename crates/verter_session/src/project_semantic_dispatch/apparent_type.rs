@@ -68,6 +68,10 @@ enum CallableAnchor {
     /// The callable is rootless (no authored occurrence): only a lexical
     /// demand canonical can scope the lookup.
     Rootless,
+    /// Signature discovery did not settle for the node, so whether it is
+    /// callable is unknown: no apparent surface, and the discovery read's
+    /// own partial rails keep the answer out of the shared memo.
+    Undecided,
 }
 
 impl ProjectSemanticDispatch<'_> {
@@ -90,7 +94,7 @@ impl ProjectSemanticDispatch<'_> {
         // is transaction-local: `cache_suppress` keeps it (and every
         // enclosing projection that read it) out of the shared memo.
         let (canonical, rootless): (Arc<str>, bool) = match self.callable_anchor(base) {
-            CallableAnchor::NotCallable => return miss(),
+            CallableAnchor::NotCallable | CallableAnchor::Undecided => return miss(),
             CallableAnchor::Authored(canonical) => (canonical, false),
             CallableAnchor::Rootless => match &context.demand_scope {
                 ApparentDemandScope::Rootless { canonical } => (Arc::clone(canonical), true),
@@ -156,7 +160,7 @@ impl ProjectSemanticDispatch<'_> {
     /// stack fails closed.
     pub(super) fn apparent_type_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
         let (canonical, demand_scope) = match self.callable_anchor(base) {
-            CallableAnchor::NotCallable => return None,
+            CallableAnchor::NotCallable | CallableAnchor::Undecided => return None,
             CallableAnchor::Authored(canonical) => (canonical, ApparentDemandScope::Anchored),
             CallableAnchor::Rootless => {
                 let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
@@ -231,15 +235,27 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::DeferredCallable(callable) => {
                     return CallableAnchor::Authored(Arc::clone(callable.declaring_canonical()));
                 }
-                // A surface carrying call signatures is callable too; its
-                // FIRST call signature anchors the lookup (every signature of
-                // one callable position is authored in the same file).
-                SemanticNodeData::Object(surface) => {
-                    let Some(first) = surface.call_signatures.first().copied() else {
-                        return CallableAnchor::NotCallable;
-                    };
+                // A surface with call signatures is callable too; its FIRST
+                // call signature anchors the lookup (every signature of one
+                // callable position is authored in the same file). The
+                // signatures are the discovery authority's, never the
+                // surface's own lists: a surface merged for presentation
+                // carries lists the kernel did not produce.
+                SemanticNodeData::Object(_) => {
                     drop(data);
-                    node = first;
+                    match self
+                        .shared_signature_nodes(node, crate::semantic_query::SignatureKind::Call)
+                    {
+                        super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                            let Some(first) = nodes.first().copied() else {
+                                return CallableAnchor::NotCallable;
+                            };
+                            node = first;
+                        }
+                        super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
+                            return CallableAnchor::Undecided;
+                        }
+                    }
                 }
                 _ => return CallableAnchor::NotCallable,
             }

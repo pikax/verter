@@ -4456,6 +4456,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 Frame::FlushIntersection {
                     buffer_id,
                     parent_target,
+                    node: intersection,
+                    heritage,
                 } => {
                     let mut arm_surfaces =
                         intersection_buffers.remove(&buffer_id).unwrap_or_default();
@@ -4477,6 +4479,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         );
                         self.dispatch.deposit_canonical_evidence(canonical_evidence);
                         merged
+                    };
+                    // A heritage overlay is an intersection NODE but not an
+                    // intersection TYPE: an interface/class inherits its
+                    // bases' signatures by concatenation (TypeScript's
+                    // `resolveObjectTypeMembers`), keeping identical ones the
+                    // intersection rule would collapse. It keeps the merge's
+                    // lists.
+                    let merged = if heritage {
+                        merged
+                    } else {
+                        merged.map(|surface| self.with_discovered_signatures(intersection, surface))
                     };
                     self.contribute_surface(
                         parent_target,
@@ -4721,6 +4734,90 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// child Visits + a flush frame onto the worklist (Intersection,
     /// Union, Mapped, InstantiationRef, Conditional, Alias).
     #[allow(clippy::too_many_arguments)]
+    /// Replace the call/construct entries of `surface` — the shallow merge of
+    /// `intersection`'s arms — with the signature-discovery authority's answer
+    /// for `intersection`.
+    ///
+    /// The merge keeps each arm's call/construct entries with identity dedup,
+    /// and drops a bare signature arm altogether. Those lists reach semantic
+    /// readers once the surface is interned as an object, so they must be the
+    /// kernel's (signature-equivalence dedup, result-aware overload identity,
+    /// constructor/mixin composition), never an alternative authority. A
+    /// surface with no signature entries over arms with none is returned as is.
+    /// When discovery does not settle, the surface keeps its presentation
+    /// lists: the discovery read already folded its partial rails, so the
+    /// answer this surface feeds is never admitted.
+    fn with_discovered_signatures(
+        &self,
+        intersection: SemanticNodeId,
+        surface: ShallowSurface,
+    ) -> ShallowSurface {
+        let has_signature_entries = surface.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ShallowSurfaceEntry::CallSignature(_) | ShallowSurfaceEntry::ConstructSignature(_)
+            )
+        });
+        let has_bare_callable_arm = match self.graph().node_data(intersection).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => arms.iter().any(|arm| {
+                matches!(
+                    self.graph().node_data(*arm).as_deref(),
+                    Some(
+                        SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_)
+                    )
+                )
+            }),
+            _ => false,
+        };
+        if !has_signature_entries && !has_bare_callable_arm {
+            return surface;
+        }
+        let Ok((calls, constructs)) = self.dispatch.shared_signature_buckets(intersection) else {
+            return surface;
+        };
+        let mut entries = Vec::with_capacity(surface.entries.len());
+        let mut calls_placed = false;
+        let mut constructs_placed = false;
+        for entry in surface.entries {
+            match entry {
+                ShallowSurfaceEntry::CallSignature(_) => {
+                    if !calls_placed {
+                        calls_placed = true;
+                        entries.extend(
+                            calls
+                                .iter()
+                                .copied()
+                                .map(ShallowSurfaceEntry::CallSignature),
+                        );
+                    }
+                }
+                ShallowSurfaceEntry::ConstructSignature(_) => {
+                    if !constructs_placed {
+                        constructs_placed = true;
+                        entries.extend(
+                            constructs
+                                .iter()
+                                .copied()
+                                .map(ShallowSurfaceEntry::ConstructSignature),
+                        );
+                    }
+                }
+                other => entries.push(other),
+            }
+        }
+        if !calls_placed {
+            entries.extend(calls.into_iter().map(ShallowSurfaceEntry::CallSignature));
+        }
+        if !constructs_placed {
+            entries.extend(
+                constructs
+                    .into_iter()
+                    .map(ShallowSurfaceEntry::ConstructSignature),
+            );
+        }
+        ShallowSurface::from_entries(entries, surface.keyspace)
+    }
+
     fn visit_shallow_node(
         &mut self,
         cur: SemanticNodeId,
@@ -4813,6 +4910,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 work.push(Frame::FlushIntersection {
                     buffer_id,
                     parent_target: target,
+                    node: cur,
+                    heritage: heritage_overlay_body,
                 });
                 if !arms.is_empty() {
                     work.push(Frame::VisitArmAt {
@@ -6510,6 +6609,12 @@ enum Frame {
     FlushIntersection {
         buffer_id: usize,
         parent_target: BufferTarget,
+        /// The intersection whose arms the buffer merges: its signature
+        /// entries are the discovery authority's answer for this node.
+        node: SemanticNodeId,
+        /// Whether the intersection is an interface/class body's heritage
+        /// overlay rather than an intersection type.
+        heritage: bool,
     },
     FlushUnion {
         buffer_id: usize,

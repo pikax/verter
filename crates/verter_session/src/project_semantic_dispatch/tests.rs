@@ -30403,6 +30403,74 @@ fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
     );
 }
 
+/// A shallow merge's signature entries are the signature-discovery
+/// authority's answer for the intersection, never the merge's own. The
+/// merged surface is interned as an object, and every semantic reader of an
+/// object — `SignaturesOfType`'s own object arm included — reads its lists.
+/// A bare callable arm has no surface to contribute, so the merged object
+/// used to read as NOT callable while discovery answered the intersection
+/// with the arm's signature.
+#[test]
+fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
+    use crate::semantic_query::{FunctionParam, SignatureKind, TypeParamDecl};
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let num_id = primitive(&graph, PrimitiveKind::Number);
+    let call = graph.intern_node(SemanticNodeData::Signature {
+        kind: SignatureKind::Call,
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: num_id,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(num_id),
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let members = intern_file_scoped_object(
+        &graph,
+        vec![surface_member("x", str_id, false, false)],
+        false,
+    );
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![call, members].into_boxed_slice(),
+        )),
+    ));
+
+    let discovered = match dispatch.shared_signature_nodes(base, SignatureKind::Call) {
+        super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => nodes,
+        super::signature_discovery::SharedSignatureNodes::Incomplete(reason) => {
+            panic!("discovery must settle for a closed intersection: {reason:?}")
+        }
+    };
+    assert!(
+        !discovered.is_empty(),
+        "the kernel answers the bare callable arm's signature"
+    );
+    let result = run_empty_path_shallow(&dispatch, base);
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_intersection_signature_entries_are_the_discovery_authoritys",
+    );
+    assert_eq!(
+        view.call_signatures.as_ref(),
+        discovered.as_slice(),
+        "the merged object's call signatures are exactly what discovery answers"
+    );
+    assert_eq!(
+        view.positive_members()
+            .iter()
+            .map(|m| m.string_name().expect("string-key fixture"))
+            .collect::<Vec<_>>(),
+        vec!["x"],
+        "the members still merge"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Wide-surface member-hop semantics through the member-ordinal index.
 //
