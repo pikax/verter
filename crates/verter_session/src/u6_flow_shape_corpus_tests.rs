@@ -1372,8 +1372,16 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c641157ff36c975ad319a9643cbbf6f2e1e6f9a31a0c5dc09122d66502bdf4a3",
     ),
     (
+        "N44_typeof_over_unknown",
+        "6da5b651557dd09d8a5026ca7abfb57506570447559e5de5e4675c9109694eb2",
+    ),
+    (
         "N45_destructured_parameter_discriminant",
         "a80e5dc02aaf92fc332064af44e9debe551db7e7e0cfbbaf6cf917f279c5330e",
+    ),
+    (
+        "N46_typeof_over_any",
+        "789109d5d44af0ccaca4dbb6d68a61b4743d596611a77da7de289567965c47ae",
     ),
     (
         "N49_closure_narrows_own_parameter",
@@ -1670,6 +1678,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N83_optional_property_truthiness",
         "efdc012efc005f13011543f60358f17e89b529cd7cd29701231e972d01b1f111",
+    ),
+    (
+        "N84_let_aliased_condition_does_not_narrow",
+        "f58d5cbca34eded7bd90ba09f8218cfff4d335899be8a1957f4f070c3b761a33",
     ),
     (
         "X89_never_returning_call_terminates_branch",
@@ -3138,6 +3150,11 @@ mod corpus_suite {
                  `{ v: Union(string | number) }`",
             ),
             (
+                "N84_let_aliased_condition_does_not_narrow",
+                "checker prints `{ v: string | number; }`; the renderer spells \
+                 `{ v: Union(string | number) }`",
+            ),
+            (
                 "N127_typeof_non_null_asserted_subject",
                 "checker prints `{ v: string | number; }`; the renderer spells the \
                  same node `{ v: Union(string | number) }`",
@@ -3191,11 +3208,15 @@ mod corpus_suite {
             ),
             (
                 "N44_typeof_over_unknown",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(unknown | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N46_typeof_over_any",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(any | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N47_correlated_tuple_discriminant",
@@ -4927,11 +4948,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowTypeof,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
-    (
-        "N84_let_aliased_condition_does_not_narrow",
-        Owner::U6NarrowTypeof,
-        "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
-    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -4955,7 +4971,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// unmodelled-position dispositions of those shapes are carried by their
 /// tagged-template twins.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 71;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -5061,8 +5077,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N41_instanceof_member_expression_constructor",
     "N42_comma_sequence_guard",
     "N43_boolean_wrapped_guard",
-    "N44_typeof_over_unknown",
-    "N46_typeof_over_any",
     "N47_correlated_tuple_discriminant",
     "N48_closure_narrows_captured_binding",
     "N50_sequence_discriminant_test",
@@ -5093,7 +5107,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N79_equality_against_const_literal_binding",
     "N80_equality_against_const_literal_target_narrows",
     "N81_equality_against_let_widened_target_does_not_narrow",
-    "N84_let_aliased_condition_does_not_narrow",
     // Evolving `let` bindings, the `never`-default switch admission, the
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.
@@ -5155,7 +5168,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // position, and X12's class getter read through the constructed
     // instance is parked (the getter publishes its function type).
     (Owner::U6FlowReturnSubstrate, 66, 51, 3),
-    (Owner::U6NarrowTypeof, 48, 29, 19),
+    // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
+    // implied type (N44, N46), and a comparison value is `boolean`, so the
+    // `let`-aliased condition control (N84) publishes complete: 32 match.
+    (Owner::U6NarrowTypeof, 48, 32, 16),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish

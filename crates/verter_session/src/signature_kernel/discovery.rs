@@ -91,10 +91,21 @@ pub trait DiscoveryTypes: SlotTypeFacts {
     fn unknown(&self) -> Option<TypeToken>;
     fn any(&self) -> Option<TypeToken>;
     fn is_any(&self, ty: TypeToken) -> bool;
-    /// The return type a candidate's recipe denotes. This FORCES a body
-    /// recipe; discovery calls it only when comparison semantics need a
-    /// return (exact matching that includes returns).
-    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason>;
+    /// The result a candidate's recipe denotes: its return type and its
+    /// predicate effect. This FORCES a body recipe; discovery calls it
+    /// only when comparison semantics need a result (exact matching that
+    /// includes results).
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<ForcedResult, IncompleteReason>;
+}
+
+/// A candidate's forced result — see [`DiscoveryTypes::forced_result`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedResult {
+    pub return_type: TypeToken,
+    pub effects: Option<super::records::PredicateEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,12 +575,30 @@ pub fn signatures_identical(
         );
         if !same_body {
             let a = types
-                .forced_return(&source)
+                .forced_result(&source)
                 .map_err(DiscoveryError::Incomplete)?;
             let b = types
-                .forced_return(&target)
+                .forced_result(&target)
                 .map_err(DiscoveryError::Incomplete)?;
-            if !ident(types, a, b, &corr)? {
+            // A predicate replaces the return in the comparison, as the
+            // checker's `compareTypePredicatesIdentical` does: two
+            // predicates of the same kind about the same subject with
+            // identical targets, or none on either side and identical
+            // returns.
+            let identical = match (a.effects, b.effects) {
+                (None, None) => ident(types, a.return_type, b.return_type, &corr)?,
+                (Some(a), Some(b)) => {
+                    a.subject == b.subject
+                        && a.asserts == b.asserts
+                        && match (a.ty, b.ty) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => ident(types, a, b, &corr)?,
+                            _ => false,
+                        }
+                }
+                _ => false,
+            };
+            if !identical {
                 return Ok(false);
             }
         }

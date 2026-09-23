@@ -383,10 +383,11 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
     assert_ne!(strict, loose, "the effective option is part of the shape");
 }
 
-/// Enumeration forces zero bodies; only a result read demanding the return
-/// forces one, and an effects-only demand never does.
+/// Enumeration forces zero bodies; only a result read forces one. An
+/// effects-only demand over a body with no recoverable obligation forces
+/// nothing, while a return read of it counts the attempt.
 #[test]
-fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
+fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let string = prim(&d, PrimitiveKind::String);
@@ -429,7 +430,7 @@ fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
     assert_eq!(
         store.bodies_forced(),
         0,
-        "an effects-only demand forced no body"
+        "an effects-only demand over an unrecoverable body forced no body"
     );
 
     assert_eq!(
