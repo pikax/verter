@@ -18,6 +18,7 @@
 //! ```text
 //! cargo run --release -p verter_session --example signature_kernel_bench -- \
 //!     [--modules N] [--depth N] [--samples N] [--cold-samples N] [--soak N]
+//!     [--exclude Kind,Kind]
 //! ```
 //!
 //! Workloads, each a distribution:
@@ -36,8 +37,9 @@
 //! determinism matrix's DET-05 records the same boundary).
 //!
 //! Allocation is counted by a process-wide counting allocator that is OFF
-//! during timing passes (one relaxed load per allocation) and ON for a
-//! separate accounting pass, so the counter never inflates a timing sample.
+//! during timing passes (relaxed loads only) and ON for a separate
+//! accounting pass, so the counter never inflates a timing sample. Live
+//! bytes are tracked only for the soak, from zero before its host exists.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -59,6 +61,11 @@ struct Counting;
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Whether live bytes are being tracked: ON only for the soak, so a timing
+/// pass pays one relaxed load per allocation and free, never a shared
+/// read-modify-write.
+static TRACKING_LIVE: AtomicBool = AtomicBool::new(false);
+/// Net bytes allocated since tracking started.
 static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 
 // SAFETY: every method forwards to `System` unchanged; the counters are
@@ -74,7 +81,9 @@ unsafe impl GlobalAlloc for Counting {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) };
-        LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+        if TRACKING_LIVE.load(Ordering::Relaxed) {
+            LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+        }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
@@ -88,7 +97,9 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let grown = unsafe { System.realloc(ptr, layout, new_size) };
         if !grown.is_null() {
-            LIVE_BYTES.fetch_add(new_size as i64 - layout.size() as i64, Ordering::Relaxed);
+            if TRACKING_LIVE.load(Ordering::Relaxed) {
+                LIVE_BYTES.fetch_add(new_size as i64 - layout.size() as i64, Ordering::Relaxed);
+            }
             if COUNTING.load(Ordering::Relaxed) {
                 ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
                 ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
@@ -98,10 +109,12 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
-/// Live bytes are tracked ALWAYS (the soak reads them between rounds);
-/// the allocation totals only while an accounting pass is running.
+/// Live bytes are tracked only during the soak; the allocation totals only
+/// while an accounting pass is running.
 fn note_alloc(size: usize) {
-    LIVE_BYTES.fetch_add(size as i64, Ordering::Relaxed);
+    if TRACKING_LIVE.load(Ordering::Relaxed) {
+        LIVE_BYTES.fetch_add(size as i64, Ordering::Relaxed);
+    }
     if COUNTING.load(Ordering::Relaxed) {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
@@ -136,6 +149,10 @@ const WITNESSES: [&str; 6] = ["Chain", "Union", "Call", "New", "Await", "Global"
 struct Corpus {
     modules: usize,
     depth: usize,
+    /// The witness kinds QUERIED (every kind is still written into each
+    /// module, so the program under test never changes). Excluding a kind
+    /// the arms answer differently makes every timing a matched workload.
+    kinds: Vec<&'static str>,
 }
 
 impl Corpus {
@@ -216,15 +233,17 @@ impl Corpus {
         files
     }
 
-    fn witnesses_of(i: usize) -> Vec<(String, String)> {
-        WITNESSES
+    fn witnesses_of(&self, i: usize) -> Vec<(String, String)> {
+        self.kinds
             .iter()
             .map(|kind| (Self::module_path(i), format!("witness{kind}{i}")))
             .collect()
     }
 
     fn all_witnesses(&self) -> Vec<(String, String)> {
-        (0..self.modules).flat_map(Self::witnesses_of).collect()
+        (0..self.modules)
+            .flat_map(|i| self.witnesses_of(i))
+            .collect()
     }
 }
 
@@ -506,9 +525,13 @@ fn throughput(corpus: &Corpus, workers: usize, samples: usize) -> (Workload, u64
 /// heap after every round. A plateau is the retirement policy working;
 /// steady growth is retained state that nothing releases.
 fn soak(corpus: &Corpus, rounds: usize) -> Vec<i64> {
+    // Track from zero BEFORE the soak's host exists, so the series is the
+    // soak host's own net heap (the earlier workloads' hosts are dropped).
+    LIVE_BYTES.store(0, Ordering::Relaxed);
+    TRACKING_LIVE.store(true, Ordering::Relaxed);
     let host = host_with_workers(None);
     load(&host, corpus);
-    let readers = Corpus::witnesses_of(0);
+    let readers = corpus.witnesses_of(0);
     let path = Corpus::module_path(0);
     let versions = [corpus.module(0, false), corpus.module(0, true)];
     query_all(&host, &corpus.all_witnesses());
@@ -518,6 +541,7 @@ fn soak(corpus: &Corpus, rounds: usize) -> Vec<i64> {
         query_all(&host, &readers);
         live.push(LIVE_BYTES.load(Ordering::Relaxed));
     }
+    TRACKING_LIVE.store(false, Ordering::Relaxed);
     live
 }
 
@@ -534,6 +558,32 @@ fn arg(args: &[String], flag: &str, default: usize) -> usize {
                 .unwrap_or_else(|_| panic!("{flag} expects a number, got `{v}`"))
         })
         .unwrap_or(default)
+}
+
+/// The witness kinds left after `--exclude Kind,Kind`; an unknown kind is
+/// refused rather than silently ignored.
+fn queried_kinds(args: &[String]) -> Vec<&'static str> {
+    let excluded: Vec<&str> = args
+        .iter()
+        .position(|a| a == "--exclude")
+        .and_then(|i| args.get(i + 1))
+        .map(|list| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for kind in &excluded {
+        assert!(
+            WITNESSES.contains(kind),
+            "--exclude names unknown witness kind `{kind}`; known: {WITNESSES:?}"
+        );
+    }
+    WITNESSES
+        .into_iter()
+        .filter(|kind| !excluded.contains(kind))
+        .collect()
 }
 
 fn workload_json(workload: &Workload) -> serde_json::Value {
@@ -575,6 +625,7 @@ fn run() {
     let corpus = Corpus {
         modules: arg(&args, "--modules", 24),
         depth: arg(&args, "--depth", 8).max(1),
+        kinds: queried_kinds(&args),
     };
     let samples = arg(&args, "--samples", 30);
     let cold_samples = arg(&args, "--cold-samples", 10);
@@ -590,7 +641,7 @@ fn run() {
         load(&host, &corpus);
         let mut total = Census::default();
         let mut by_witness = serde_json::Map::new();
-        for kind in WITNESSES {
+        for &kind in &corpus.kinds {
             let of_kind: Vec<(String, String)> = (0..corpus.modules)
                 .map(|i| (Corpus::module_path(i), format!("witness{kind}{i}")))
                 .collect();
@@ -615,7 +666,7 @@ fn run() {
         &host,
         &Corpus::module_path(0),
         [module0[0].as_str(), module0[1].as_str()],
-        &Corpus::witnesses_of(0),
+        &corpus.witnesses_of(0),
         samples,
     ));
     let shared = [Corpus::shared(false), Corpus::shared(true)];
@@ -628,7 +679,10 @@ fn run() {
         samples,
     ));
     let augmentation = [Corpus::augmentation(false), Corpus::augmentation(true)];
+    // The augmentation's readers are the Global witnesses — none when that
+    // kind is excluded, and the workload then times the edit alone.
     let global_readers: Vec<(String, String)> = (0..corpus.modules)
+        .filter(|_| corpus.kinds.contains(&"Global"))
         .map(|i| (Corpus::module_path(i), format!("witnessGlobal{i}")))
         .collect();
     workloads.push(edit_workload(
@@ -669,6 +723,7 @@ fn run() {
             "modules": corpus.modules,
             "depth": corpus.depth,
             "witnesses": corpus.all_witnesses().len(),
+            "kinds": corpus.kinds,
         },
         "census": census_json(census),
         "census_by_witness": census_by_witness,

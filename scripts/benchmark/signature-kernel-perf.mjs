@@ -19,9 +19,13 @@
 //   --candidate <rev>      candidate revision (default: HEAD)
 //   --invocations <n>      invocations per arm, ABBA-interleaved (default: 4, the policy minimum)
 //   --modules/--depth/--samples/--cold-samples/--soak <n>   forwarded to the harness
+//   --exclude <Kind,Kind>  witness kinds NOT queried (forwarded); exclude the kinds the census
+//                          shows the arms answer differently, so every ratio is a matched workload
+//   --settle <s>           open the session no sooner than this long after the builds (default 180)
 //   --skip-control         skip the control benchmark (a session without it is not lock evidence)
 //   --quick                small corpus, 2 invocations, no control — a pipeline smoke test only
-//   --keep                 keep the two build worktrees
+//   --keep                 keep the build worktrees; a later run with the same --out reuses them
+//                          and skips the rebuild, so a session can open on a cool machine
 //
 // The default baseline is resolved from the candidate's history by the landing title of
 // the options/admission block ("resolve effective tsconfig semantic options into the type
@@ -39,6 +43,9 @@ const BASELINE_TITLE = "resolve effective tsconfig semantic options into the typ
 const POLICY = {
   // performance-gates.toml [statistics] + the charter's 5% investigation gate.
   investigationFloorPercent: 5,
+  // performance-gates.toml interleave_policy: "at least four invocations per arm".
+  // Fewer cannot measure between-invocation noise (one invocation reads as zero).
+  minInvocationsPerArm: 4,
   noiseMultiplier: 2,
   confidence: 0.95,
   bootstrapResamples: 10000,
@@ -55,12 +62,24 @@ const POLICY = {
   // One control execution before the session-start measurement, never read: the first
   // execution of a freshly built binary pays for page-in and on-access scanning.
   controlWarmupRuns: 1,
+  // A machine's thermal state outlives its load average: two release builds leave a
+  // fanless laptop hot for minutes after the load drops, and a control measured then
+  // drifts against the session's end. The session opens no sooner than this after the
+  // builds (a reused build still waits it out).
+  settleSeconds: 180,
 };
 
 // ── arguments ────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const opts = { invocations: 4, forwarded: {}, quick: false, skipControl: false, keep: false };
+  const opts = {
+    invocations: POLICY.minInvocationsPerArm,
+    forwarded: {},
+    quick: false,
+    skipControl: false,
+    keep: false,
+    settleSeconds: POLICY.settleSeconds,
+  };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = () => {
@@ -86,7 +105,11 @@ function parseArgs(argv) {
       case "--samples":
       case "--cold-samples":
       case "--soak":
+      case "--exclude":
         opts.forwarded[flag] = value();
+        break;
+      case "--settle":
+        opts.settleSeconds = Number(value());
         break;
       case "--skip-control":
         opts.skipControl = true;
@@ -127,6 +150,9 @@ function parseArgs(argv) {
   }
   if (!Number.isInteger(opts.invocations) || opts.invocations < 1)
     throw new Error("--invocations must be a positive integer");
+  if (!Number.isFinite(opts.settleSeconds) || opts.settleSeconds < 0)
+    throw new Error("--settle must be a non-negative number of seconds");
+  if (opts.quick) opts.settleSeconds = 0;
   return opts;
 }
 
@@ -267,6 +293,11 @@ function addWorktree(repo, dir, rev) {
   });
 }
 
+/** A tree kept by an earlier `--keep` run at exactly `rev` — reused, never rebuilt. */
+function keptTreeAt(dir, rev) {
+  return fs.existsSync(dir) && tryRun("git", ["-C", dir, "rev-parse", "HEAD"]) === rev;
+}
+
 function removeWorktree(repo, dir) {
   tryRun("git", ["worktree", "remove", "--force", dir], { cwd: repo });
 }
@@ -335,10 +366,13 @@ function main() {
   let controlBinary = null;
   try {
     for (const arm of ["baseline", "candidate"]) {
-      addWorktree(repo, trees[arm], revs[arm]);
+      if (keptTreeAt(trees[arm], revs[arm])) log(`reusing the kept ${arm} tree`);
+      else addWorktree(repo, trees[arm], revs[arm]);
       const harnessPath = path.join(trees[arm], HARNESS_REL);
       fs.mkdirSync(path.dirname(harnessPath), { recursive: true });
-      fs.writeFileSync(harnessPath, harnessSource);
+      // Rewriting identical bytes would touch the mtime and relink the harness.
+      const current = fs.existsSync(harnessPath) ? fs.readFileSync(harnessPath) : null;
+      if (!current || !current.equals(harnessSource)) fs.writeFileSync(harnessPath, harnessSource);
       binaries[arm] = buildExample(
         trees[arm],
         path.join(out, "target", arm),
@@ -366,6 +400,10 @@ function main() {
       return value;
     };
 
+    if (opts.settleSeconds > 0) {
+      log(`settling ${opts.settleSeconds}s after the builds…`);
+      sleepMs(opts.settleSeconds * 1000);
+    }
     const idleAtStart = waitForIdle(opts.quick ? 0 : POLICY.idleWaitSeconds);
     if (!idleAtStart.idle)
       log("the machine never became idle; the session runs but is not lock evidence");
@@ -553,9 +591,20 @@ function summarize({
     };
   }
 
+  const lockRefusals = [];
+  if (opts.quick) lockRefusals.push("quick run");
+  if (opts.skipControl) lockRefusals.push("control benchmark skipped");
+  if (sessionVoid) lockRefusals.push("void session");
+  if (opts.invocations < POLICY.minInvocationsPerArm) {
+    lockRefusals.push(
+      `too few invocations (${opts.invocations} per arm, policy minimum ${POLICY.minInvocationsPerArm})`,
+    );
+  }
+
   return {
     schema: 1,
-    lock_evidence: !opts.quick && !opts.skipControl && !sessionVoid,
+    lock_evidence: lockRefusals.length === 0,
+    lock_evidence_refusals: lockRefusals,
     revisions: { baseline: revs.baseline, candidate: revs.candidate },
     harness: { path: HARNESS_REL, sha256: harnessDigest, args: opts.forwarded },
     machine: machineFacts(),
@@ -563,6 +612,7 @@ function summarize({
     session: {
       invocations_per_arm: opts.invocations,
       order: "ABBA",
+      settle_seconds: opts.settleSeconds,
       control_warmup_runs: controlStart === null ? 0 : POLICY.controlWarmupRuns,
       control_wall_median_ms:
         controlStart === null ? null : { start: controlStart, end: controlEnd },
@@ -608,11 +658,15 @@ function renderMarkdown(s) {
   lines.push(
     `- Session: ${s.session.invocations_per_arm} invocations per arm, ABBA; control drift ${drift === null ? "not measured" : pct(drift)}${s.session.void ? ` — **SESSION VOID** (${voidReasons.join("; ")})` : ""}`,
   );
+  const control = s.session.control_wall_median_ms;
+  lines.push(
+    `- Control: ${control === null ? "not run" : `${control.start.toFixed(2)} ms at start, ${control.end.toFixed(2)} ms at end`}, after a ${s.session.settle_seconds}s settle and ${s.session.control_warmup_runs} warm-up run(s)`,
+  );
   lines.push(
     `- Idle: load average at start ${idle.at_start.load_average_1m === null ? "n/a on this platform" : idle.at_start.load_average_1m.toFixed(2)} after ${idle.at_start.waited_seconds}s; foreign build processes at start ${idle.at_start.foreign_processes.join(", ") || "none"}, during the session ${idle.foreign_processes_during_session.join(", ") || "none"}`,
   );
   lines.push(
-    `- Lock evidence: **${s.lock_evidence ? "yes" : "no"}**${s.lock_evidence ? "" : " (quick, control skipped, or void session)"}`,
+    `- Lock evidence: **${s.lock_evidence ? "yes" : "no"}**${s.lock_evidence ? "" : ` (${s.lock_evidence_refusals.join("; ")})`}`,
   );
   lines.push(
     `- Corpus: ${s.corpus.modules} modules, depth ${s.corpus.depth}, ${s.corpus.witnesses} witnesses`,
