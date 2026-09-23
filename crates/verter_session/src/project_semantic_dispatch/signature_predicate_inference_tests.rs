@@ -230,6 +230,8 @@ export function anyParam(x: any) { return typeof x === "string"; }
 export function parenthesized(x: unknown) { return (typeof x === "string"); }
 export function notNot(x: unknown) { return !(typeof x !== "string"); }
 export function wrapPred(x: unknown) { return isFoo(x); }
+export function isFooExported(x: unknown): x is Foo { return true; }
+export function wrapExported(x: unknown) { return isFooExported(x); }
 export function withThis(this: unknown, x: unknown) { return typeof x === "string"; }
 export function narrowedBefore(x: string | number | null) { if (x === null) throw 0; return typeof x === "string"; }
 export function memberWrite(x: { a: number } | null) { if (x) x.a = 1; return x !== null; }
@@ -537,19 +539,21 @@ fn a_returned_function_value_infers_its_own_predicate() {
 
 /// A returned test the guard vocabulary cannot read DEGRADES a `boolean`
 /// return rather than publishing it predicate-less. Measured on 7.0.2:
-/// `Array.isArray(x)` over `string | string[]` is `x is string[]`, `x ==
-/// null` is `x is null | undefined`, `typeof x === "object" && "s" in x`
-/// over `Foo | Bar | number` is `x is Bar` and `typeof x === "number" || "n"
-/// in x` over it is `x is number | Foo` (a `typeof` test does not classify
-/// interface arms), an aliased condition `const r =
-/// typeof x === "string"; return r` is `x is string`, and `x === y` over
-/// two parameters is `boolean` — a reference comparison this vocabulary
-/// does not carry either way.
+/// `Array.isArray(x)` over `string | string[]` is `x is string[]`, a call
+/// handing the parameter to an EXPORTED same-file guard (whose signature
+/// set this file cannot close) is `x is Foo`, `x == null` is `x is null |
+/// undefined`, `typeof x === "object" && "s" in x` over `Foo | Bar |
+/// number` is `x is Bar` and `typeof x === "number" || "n" in x` over it
+/// is `x is number | Foo` (a `typeof` test does not classify interface
+/// arms), an aliased condition `const r = typeof x === "string"; return
+/// r` is `x is string`, and `x === y` over two parameters is `boolean` — a
+/// reference comparison this vocabulary does not carry either way.
 #[test]
 fn an_unreadable_returned_test_degrades_the_boolean_return() {
     let host = host_with(SOURCE);
     for name in [
         "isArr",
+        "wrapExported",
         "looseNull",
         "hasKind",
         "orIn",
