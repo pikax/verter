@@ -1,0 +1,61 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP17",
+  "kind": "implementation",
+  "products": ["VueAttributeSequence", "RuntimePropertyKeyPlan", "AttributeConsumerRelation"],
+  "mandatoryCases": [
+    "STP17-spellings",
+    "STP17-merge",
+    "STP17-overwrite",
+    "STP17-optional-spread",
+    "STP17-collision"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP17/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP17/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP17/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP17/probes/tsconfig.json",
+    "hoverNeedle": "stp17HoverTarget",
+    "definitionNeedle": "stp17DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "Comp"
+  },
+  "cases": [
+    {
+      "id": "STP17-spellings",
+      "disposition": "accept",
+      "twins": [
+        "at-save-listener-key",
+        "bound-on-save-camel-key",
+        "bound-kebab-prop-only",
+        "static-text-handler-key"
+      ]
+    },
+    {
+      "id": "STP17-merge",
+      "disposition": "accept",
+      "twins": ["listeners-accumulate-across-spread"]
+    },
+    {
+      "id": "STP17-overwrite",
+      "disposition": "accept",
+      "twins": ["later-merge-argument-overwrites", "literal-group-first-wins"]
+    },
+    {
+      "id": "STP17-optional-spread",
+      "disposition": "reject",
+      "twins": ["opaque-spread-stays-possible"]
+    },
+    {
+      "id": "STP17-collision",
+      "disposition": "reject",
+      "twins": ["prop-and-event-both-validated"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP17 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::attribute_operations",
+  "runtimeCorrectness": true,
+  "notes": "Ordered Vue attribute operations and runtime-key interpretation. Authored operations keep raw spelling next to the plan operation and admitted expressions; runtime keys follow the runtime compiler's property assembly (first-wins literal groups, mergeProps overwrite/combine/accumulate); opaque spreads and dynamic keys stay possible writers; each effective key publishes every reachable consumer channel (declared prop, emitted-event handler lookup, fallthrough attr, reserved) with inference inputs and validation obligations. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::attribute_operations. STP58 owns atomic Vue activation."
+}
