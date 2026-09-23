@@ -1249,41 +1249,58 @@ fn per_callable_captures_are_shadow_exact_and_transitive() {
     );
 }
 
-/// The indexed program serves no class member body or field initializer
+/// The indexed program serves no class constructor or field initializer
 /// and no parameter-list callable, so a cell retained there is named by
 /// no index record. A class evaluated at a site is therefore an unserved
 /// callable, and a SERVED callable whose body creates one only knows a
 /// lower bound of its captures. Neither may read as an exact capture set:
 /// an exact empty set is a capture-free proof, and every fixture here
-/// really retains `a`.
+/// really retains `a`. A class expression's method, and a callable its
+/// initializer holds, ARE served: each is its own callable at the site,
+/// with the exact capture set its index record names.
 #[test]
 fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
-    use SkeletonClosureCorrelation::{Partial, Uncorrelated};
+    use SkeletonClosureCorrelation::{Exact, Partial, Uncorrelated};
     for (source, expected) in [
         (
             "function root() { const a = 1; sink(class { m() { return a; } }); return 1; }",
-            Uncorrelated,
+            &[Uncorrelated, Exact][..],
         ),
         (
             "function root() { const a = 1; sink(class { m = () => a; }); return 1; }",
-            Uncorrelated,
+            &[Uncorrelated, Exact][..],
         ),
         (
             "function root() { const a = 1; sink(() => class { m() { return a; } }); return 1; }",
-            Partial,
+            &[Partial][..],
         ),
         (
             "function root() { const a = 1; sink(() => { function g(q = () => a) { return q; } return g; }); return 1; }",
-            Partial,
+            &[Partial][..],
         ),
     ] {
         let prepared = indexed_structure_of(source);
-        let closures = sole_closure_inventory(prepared.skeleton());
-        assert_eq!(closures.len(), 1, "one authored callable at the site: {source}");
+        let skeleton = prepared.skeleton();
+        let a = single_binding_named(skeleton, "a");
+        let closures = sole_closure_inventory(skeleton);
         assert_eq!(
-            closures[0].correlation, expected,
+            closures
+                .iter()
+                .map(|closure| closure.correlation)
+                .collect::<Vec<_>>(),
+            expected,
             "an unserved capture is never an exact set: {source}"
         );
+        for closure in closures
+            .iter()
+            .filter(|closure| closure.correlation == Exact)
+        {
+            assert_eq!(
+                closure.captures.as_ref(),
+                &[FlowBindingRef::Local(a)],
+                "a served class member names the cell it retains: {source}"
+            );
+        }
     }
 }
 

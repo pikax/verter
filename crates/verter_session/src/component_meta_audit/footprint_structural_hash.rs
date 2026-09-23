@@ -744,7 +744,11 @@ impl StructuralEncoder<'_> {
                 self.buf.push(SemanticNodeTag::DeclRef.stable_id());
                 self.encode_decl_identity(identity);
             }
-            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
                 self.buf
                     .push(SemanticNodeTag::ClassExpressionInstance.stable_id());
                 self.push_str(&identity.canonical_id);
@@ -757,13 +761,15 @@ impl StructuralEncoder<'_> {
                     .extend_from_slice(&identity.owner.ordinal().to_le_bytes());
                 self.buf.extend_from_slice(&identity.offset.to_le_bytes());
                 self.push_str(&identity.name);
-                match &identity.qualifier {
-                    Some(qualifier) => {
-                        self.push_present(true);
-                        self.push_str(qualifier);
-                    }
-                    None => self.push_present(false),
+                self.buf
+                    .extend_from_slice(&(identity.outer_clauses.len() as u64).to_le_bytes());
+                for clause in identity.outer_clauses.iter() {
+                    self.push_str(&clause.container);
+                    self.push_str_slice(&clause.parameters);
                 }
+                self.buf
+                    .extend_from_slice(&identity.own_arity.to_le_bytes());
+                self.encode_child_slice(type_arguments, depth);
                 self.encode_child(*surface, depth);
             }
             // The sealed callable carrier: its composed parts are readable

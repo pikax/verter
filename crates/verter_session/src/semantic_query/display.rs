@@ -829,11 +829,30 @@ fn display_resolved_type_node(
         SemanticNodeData::DeclRef { identity } => {
             qualified_name(needs, &identity.canonical_id, &identity.decl_name)
         }
-        // A class expression renders by the name the checker prints for it
-        // (`Mixin.(Anonymous class)`) — like a lazy reference, its body is
-        // never re-rendered here.
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
-            qualified_name(needs, &identity.canonical_id, &identity.printed_name())
+        // A class expression renders by the name the checker prints for a
+        // reference to it (`Mixin.(Anonymous class)`, `(Anonymous
+        // class)<string>`) — like a lazy reference, its body is never
+        // re-rendered here.
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        } => {
+            let name = qualified_name(
+                needs,
+                &identity.canonical_id,
+                &identity.printed_name_in(store, type_arguments),
+            );
+            let own = identity.own_type_arguments(type_arguments);
+            if own.is_empty() {
+                name
+            } else {
+                let rendered: Vec<String> = own
+                    .iter()
+                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
+                    .collect();
+                format!("{name}<{}>", rendered.join(", "))
+            }
         }
         // A compiler-native operation renders by its OP name — there is no
         // declaration to qualify, because none was applied.
@@ -1124,7 +1143,7 @@ fn display_program_analysis(
 fn back_ref_token(data: &SemanticNodeData) -> String {
     match data {
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => identity.printed_name(),
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => identity.name.to_string(),
         SemanticNodeData::InstantiationRef { base, .. } => base.decl_name.to_string(),
         SemanticNodeData::IntrinsicApplication { op, .. } => op.display_name().to_string(),
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),

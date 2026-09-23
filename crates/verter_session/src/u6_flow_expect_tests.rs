@@ -615,8 +615,22 @@ pub(crate) fn render_node(
         SemanticNodeData::InstantiationRef { base, .. } => {
             format!("InstantiationRef({})", base.decl_name)
         }
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
-            format!("ClassExpressionInstance({})", identity.printed_name())
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        } => {
+            let own: Vec<String> = identity
+                .own_type_arguments(type_arguments)
+                .iter()
+                .map(|arg| render_node(dispatch, *arg, depth + 1))
+                .collect();
+            let name = identity.printed_name_in(dispatch.graph(), type_arguments);
+            if own.is_empty() {
+                format!("ClassExpressionInstance({name})")
+            } else {
+                format!("ClassExpressionInstance({name}<{}>)", own.join(", "))
+            }
         }
         SemanticNodeData::BareRef(_) => format!(
             "BareRef({})",
@@ -1855,13 +1869,38 @@ pub(crate) mod checker_syntax {
                 &*identity.decl_name == name.as_str()
             }
             // A class-expression instance matches the name the checker
-            // prints for it (`Mixin.(Anonymous class)`, `(Anonymous
-            // class)`, the variable a class expression initializes) — its
-            // printed NAME, never its structural surface.
+            // prints for a reference to it (`Mixin.(Anonymous class)`,
+            // `(Anonymous class)`, the variable a class expression
+            // initializes) — its printed NAME, never its structural surface
+            // — and a generic class's own type arguments
+            // (`(Anonymous class)<string>`) in order.
             (
                 CheckerType::Ref(name),
-                SemanticNodeData::ClassExpressionInstance { identity, .. },
-            ) => identity.printed_name() == *name,
+                SemanticNodeData::ClassExpressionInstance {
+                    identity,
+                    type_arguments,
+                    ..
+                },
+            ) => {
+                identity.own_arity == 0
+                    && identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+            }
+            (
+                CheckerType::GenericRef { name, args },
+                SemanticNodeData::ClassExpressionInstance {
+                    identity,
+                    type_arguments,
+                    ..
+                },
+            ) => {
+                let own = identity.own_type_arguments(type_arguments);
+                identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+                    && own.len() == args.len()
+                    && own
+                        .iter()
+                        .zip(args.iter())
+                        .all(|(got, want)| matches_node(dispatch, *got, want, depth + 1))
+            }
             (
                 CheckerType::Ref(name),
                 SemanticNodeData::InstantiationRef {

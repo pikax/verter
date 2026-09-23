@@ -1822,9 +1822,9 @@ fn assignment_expression_return_is_the_assigned_type() {
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 ///
 /// The value is complete and undegraded, and still `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them and the result never warms.
+/// class's constructor and field initializers are callables no indexed
+/// function position serves, so the capture family keeps its typed gap
+/// over them and the result never warms.
 #[test]
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
@@ -5800,10 +5800,9 @@ export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> 
 /// How a CLASSES probe's answer is admitted.
 ///
 /// An answer read through a class expression's value is `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them — the answer is complete and undegraded, and it
-/// never warms.
+/// class's constructor and field initializers are callables no indexed
+/// function position serves, so the capture family keeps its typed gap
+/// over them — the answer is complete and undegraded, and it never warms.
 #[derive(Clone, Copy, Debug)]
 enum ClassProbeAdmission {
     Warm,

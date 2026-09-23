@@ -653,6 +653,11 @@ pub struct FunctionProgramEntry {
     /// (a hoisted nested function declaration or a call-argument
     /// function value); `None` for a top-level position.
     pub lexical_parent: Option<Box<FunctionProgramKey>>,
+    /// Whether this NESTED position is a class expression's method or
+    /// accessor (the checker types its body-derived return as a class
+    /// method's, never as a function expression's). `false` for every
+    /// other position.
+    pub class_member: bool,
     /// The authored binding name of a HOISTED NESTED FUNCTION DECLARATION
     /// (`function inner() { … }` inside another body). `None` for every
     /// other position — a top-level position, a callback value, an
@@ -2926,13 +2931,14 @@ pub fn take_nested_callable_walk_visits_for_tests() -> usize {
     NESTED_CALLABLE_WALK_VISITS.with(|visits| visits.replace(0))
 }
 
-/// Visit each directly nested callable once, without entering its frame.
+/// Visit each directly nested callable once, without entering its frame,
+/// with whether it is a class expression's method or accessor.
 fn for_each_nested_callable<'a>(
     statements: &'a [Statement<'a>],
-    mut visit: impl FnMut(FunctionNode<'a>),
+    mut visit: impl FnMut(FunctionNode<'a>, bool),
 ) {
     struct CallableVisitor<'f, F>(&'f mut F);
-    impl<'a, F: FnMut(FunctionNode<'a>)> Visit<'a> for CallableVisitor<'_, F> {
+    impl<'a, F: FnMut(FunctionNode<'a>, bool)> Visit<'a> for CallableVisitor<'_, F> {
         fn visit_statement(&mut self, statement: &Statement<'a>) {
             #[cfg(any(test, feature = "test-support"))]
             NESTED_CALLABLE_WALK_VISITS.with(|visits| visits.set(visits.get() + 1));
@@ -2944,13 +2950,29 @@ fn for_each_nested_callable<'a>(
             _flags: oxc_syntax::scope::ScopeFlags,
         ) {
             let function = self.alloc(function);
-            (self.0)(FunctionNode::Function(function));
+            (self.0)(FunctionNode::Function(function), false);
         }
         fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
             let arrow = self.alloc(arrow);
-            (self.0)(FunctionNode::Arrow(arrow));
+            (self.0)(FunctionNode::Arrow(arrow), false);
         }
-        fn visit_class(&mut self, _class: &Class<'a>) {}
+        fn visit_method_definition(&mut self, method: &oxc_ast::ast::MethodDefinition<'a>) {
+            self.visit_decorators(&method.decorators);
+            self.visit_property_key(&method.key);
+            let function = self.alloc(&*method.value);
+            (self.0)(FunctionNode::Function(function), true);
+        }
+        // A class EXPRESSION is a value of this frame: its methods,
+        // accessors and the callables its initializers hold are served
+        // under this frame, so the flow lane infers a body-derived member
+        // type exactly as it infers an object-literal method's. A local
+        // class DECLARATION is not a value any position of this frame
+        // lowers.
+        fn visit_class(&mut self, class: &Class<'a>) {
+            if class.r#type == oxc_ast::ast::ClassType::ClassExpression {
+                walk::walk_class(self, class);
+            }
+        }
         fn visit_ts_type(&mut self, _ty: &oxc_ast::ast::TSType<'a>) {}
     }
     let mut visitor = CallableVisitor(&mut visit);
@@ -2969,7 +2991,7 @@ fn discover_nested_positions<'ast>(
     let previous_type_parameters = ctx.enclosing_type_parameters.take();
     let previous_heritage = ctx.enclosing_heritage.take();
     let mut local_ordinal = 0;
-    for_each_nested_callable(statements, |node| {
+    for_each_nested_callable(statements, |node, class_member| {
         let ordinal = ctx.next_nested_ordinal;
         ctx.next_nested_ordinal += 1;
         let mut descent = parent_locator.descent.to_vec();
@@ -2979,11 +3001,11 @@ fn discover_nested_positions<'ast>(
         local_ordinal += 1;
         discover_nested_callable(
             node,
-            node.span().into(),
             parent_key,
             parent_locator,
             descent,
             ordinal,
+            class_member,
             ctx,
         );
     });
@@ -2994,13 +3016,14 @@ fn discover_nested_positions<'ast>(
 /// under its lexical parent's key.
 fn discover_nested_callable<'ast>(
     node: FunctionNode<'ast>,
-    span: verter_span::Span,
     parent_key: &FunctionProgramKey,
     parent_locator: &FunctionBodyLocator,
     descent: Vec<FunctionDescentStep>,
     ordinal: u32,
+    class_member: bool,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
+    let span: verter_span::Span = node.span().into();
     let (params, statements) = match &node {
         FunctionNode::Function(func) => {
             let Some(body) = func.body.as_ref() else {
@@ -3028,6 +3051,7 @@ fn discover_nested_callable<'ast>(
         node,
     );
     entry.lexical_parent = Some(Box::new(parent_key.clone()));
+    entry.class_member = class_member;
     if let FunctionNode::Function(function) = node {
         if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
             entry.nested_declaration_name =
@@ -3345,6 +3369,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             direct_calls: Arc::from(Vec::new().into_boxed_slice()),
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),
             lexical_parent: None,
+            class_member: false,
             nested_declaration_name: None,
             captures: CanonicalCaptureIdentity::default(),
             captures_exhaustive: !creates_unserved_callable,
@@ -3501,6 +3526,31 @@ impl InventoryVisitor<'_, '_> {
     }
 }
 
+impl<'a> InventoryVisitor<'_, 'a> {
+    /// Visit one class property initializer. A STATIC initializer runs at
+    /// class evaluation, in this frame. A class expression's INSTANCE
+    /// initializer runs at construction, but it reads this frame's
+    /// lexical scope and the flow lane types it here, so its references
+    /// carry occurrence authority in this frame; its writes run at
+    /// construction, never at this frame's position, so none of them
+    /// retypes a binding here. A local class declaration's instance
+    /// initializer is not a position any lowering of this frame reads.
+    fn visit_class_initializer(
+        &mut self,
+        value: &Expression<'a>,
+        is_static: bool,
+        class: &Class<'a>,
+    ) {
+        if is_static {
+            self.visit_expression(value);
+        } else if class.r#type == oxc_ast::ast::ClassType::ClassExpression {
+            let writes_before = self.writes.len();
+            self.visit_expression(value);
+            self.writes.truncate(writes_before);
+        }
+    }
+}
+
 impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     fn visit_ts_type(&mut self, _it: &oxc_ast::ast::TSType<'a>) {}
 
@@ -3545,8 +3595,9 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
     }
 
     fn visit_class(&mut self, class: &Class<'a>) {
-        // No entry serves a class's constructor, member bodies or field
-        // initializers, nor any callable inside the class.
+        // No entry serves a class's constructor or field initializers (a
+        // class EXPRESSION's methods and accessors are served as nested
+        // callables, a local class declaration's are not).
         self.creates_unserved_callable = true;
         // Class evaluation has occurrence authority, but remains outside the
         // function's supported flow topology. Keep only lexical references,
@@ -3593,10 +3644,8 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
                     if property.computed {
                         evaluated.visit_property_key(&property.key);
                     }
-                    if property.r#static {
-                        if let Some(value) = &property.value {
-                            evaluated.visit_expression(value);
-                        }
+                    if let Some(value) = &property.value {
+                        evaluated.visit_class_initializer(value, property.r#static, class);
                     }
                 }
                 oxc_ast::ast::ClassElement::AccessorProperty(property) => {
@@ -3604,10 +3653,8 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
                     if property.computed {
                         evaluated.visit_property_key(&property.key);
                     }
-                    if property.r#static {
-                        if let Some(value) = &property.value {
-                            evaluated.visit_expression(value);
-                        }
+                    if let Some(value) = &property.value {
+                        evaluated.visit_class_initializer(value, property.r#static, class);
                     }
                 }
                 _ => {}
@@ -4263,7 +4310,7 @@ pub fn resolve_function_node<'a>(
                 let body = current_body?;
                 let mut position = 0;
                 let mut selected = None;
-                for_each_nested_callable(&body.statements, |node| {
+                for_each_nested_callable(&body.statements, |node, _| {
                     if position == *ordinal {
                         selected = Some(node);
                     }
