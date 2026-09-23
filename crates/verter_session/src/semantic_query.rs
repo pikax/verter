@@ -147,6 +147,10 @@ mod flow_return_result;
 pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
 mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
+mod checker_diagnostic;
+pub use checker_diagnostic::{
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -5237,6 +5241,17 @@ pub enum QueryError {
     /// minted itself one frame down: doing so fed the marker straight back
     /// into the frame-level failure it exists to avoid.
     UnmodeledPosition,
+    /// The checker's ERROR TYPE after a diagnostic it recovers from: the
+    /// operation [`CheckerDiagnostic::operation`] names raised
+    /// [`CheckerDiagnostic::code`], and the checker continues with its error
+    /// type, which reads as the diagnostic's
+    /// [`recovery`](CheckerDiagnostic::recovery) (`any`).
+    ///
+    /// A complete, language-defined answer: it relates, absorbs and raises
+    /// as that recovery, carrying the diagnostic that produced it. Never a
+    /// stand-in for something this substrate cannot answer — those stay
+    /// typed gaps.
+    CheckerRecovery(CheckerDiagnostic),
 }
 
 impl QueryError {
@@ -5244,13 +5259,16 @@ impl QueryError {
     ///
     /// Recursive references and declaration placeholders are publishable type
     /// carriers: the former is a settled recursion leaf, while the latter is
-    /// an addressable declaration shell. Every other variant represents a
+    /// an addressable declaration shell. A checker recovery is the checker's
+    /// own answer after a diagnostic. Every other variant represents a
     /// failure, unresolved control state, or unrepresentable/open value and
     /// therefore cannot contribute a recovered inference value.
     #[must_use]
     pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
         match self {
-            QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. } => false,
+            QueryError::RecursiveRef { .. }
+            | QueryError::DeclPlaceholder { .. }
+            | QueryError::CheckerRecovery(_) => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5288,6 +5306,9 @@ impl QueryError {
     ///   resolved to an intrinsic the registry cannot compute.
     /// - [`ValueDomainMismatch`](Self::ValueDomainMismatch) — a genuine
     ///   value-domain type error.
+    /// - [`CheckerRecovery`](Self::CheckerRecovery) — the checker's own error
+    ///   type after a diagnostic it recovers from (it raises as its recovery
+    ///   rather than as a failure shell).
     ///
     /// The CONTROL / recursion sentinels are NOT the error type and keep their
     /// existing semantics — the walker / raiser / relation engine interpret
@@ -5306,8 +5327,8 @@ impl QueryError {
     ///
     /// Derived from the SINGLE `QueryError` disposition authority
     /// (`project_semantic_dispatch::query_error_disposition`) — the §22 error
-    /// type is exactly the `Failure` disposition. There is no second listing
-    /// of which arms are errors.
+    /// type is exactly the `Failure` and `CheckerRecovery` dispositions. There
+    /// is no second listing of which arms are errors.
     #[must_use]
     pub(crate) fn is_error_type(&self) -> bool {
         crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(self)
@@ -5373,6 +5394,7 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
+            (Self::CheckerRecovery(a), Self::CheckerRecovery(b)) => a == b,
             _ => false,
         }
     }
@@ -5407,6 +5429,7 @@ impl QueryError {
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
+            Self::CheckerRecovery(_) => 21,
         }
     }
 }
@@ -5461,6 +5484,7 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
             | Self::OpenSurface => {}
+            Self::CheckerRecovery(diagnostic) => diagnostic.hash(state),
         }
     }
 }
@@ -8307,10 +8331,16 @@ pub enum SemanticQueryKey {
     ///   one level through `Instantiate` and re-enters this family on the
     ///   body; an unchanged body answers with the CARRIER, so a
     ///   non-thenable alias keeps its identity;
+    /// - a thenable whose promised value is a type this family is ALREADY
+    ///   unwrapping on the current path is the checker's recursive
+    ///   thenable: TS1062, with the arm dropped from an enclosing union and
+    ///   otherwise the checker's error type as the answer
+    ///   (`Opaque(QueryError::CheckerRecovery(..))`, reading as `any`) —
+    ///   complete, but ReturnOnly;
     /// - a `then` shape the reader cannot enumerate, a carrier that does
-    ///   not expand, a cyclic carrier, an exhausted budget, or any other
-    ///   unsettled shape is an HONEST REFUSAL (the deferred `Opaque(Miss)`
-    ///   shell), never a fabricated passthrough.
+    ///   not expand, an exhausted budget, or any other unsettled shape is
+    ///   an HONEST REFUSAL (the deferred `Opaque(Miss)` shell), never a
+    ///   fabricated passthrough.
     ///
     /// Value domain: [`SemanticQueryValueTag::TypeNode`].
     ///
@@ -8355,7 +8385,8 @@ pub enum SemanticQueryKey {
     ///   first: a reduced application is this family's operand, a deferred
     ///   one strips to this family over `X`;
     /// - object surfaces and declaration carriers follow the same thenable
-    ///   protocol and carrier expansion as [`Self::AwaitedNormalize`], each
+    ///   protocol, carrier expansion and recursive-thenable rule (TS1062,
+    ///   raised by the async return) as [`Self::AwaitedNormalize`], each
     ///   re-entering THIS family;
     /// - anything else is an honest refusal.
     ///
@@ -10304,6 +10335,10 @@ mod tests {
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
             QueryError::UnmodeledPosition,
+            QueryError::CheckerRecovery(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            }),
         ];
         let mut tags = HashSet::new();
         for variant in &variants {

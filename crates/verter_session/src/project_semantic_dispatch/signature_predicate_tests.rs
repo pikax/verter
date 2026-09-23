@@ -451,6 +451,71 @@ fn a_type_predicate_target_relates_predicates_not_returns() {
     );
 }
 
+/// A target signature whose result is exactly `void` or `any` accepts any
+/// source result: neither the source's return nor its predicate is
+/// compared, while the parameters still are. Measured on 7.0.2 (each
+/// `A extends B ? 1 : 0`): `() => number` against `() => void`, `() => any`,
+/// `() => unknown`, an alias of `void` and an alias of `any` is `1`;
+/// against `() => undefined` and `() => void | undefined` it is `0`; a type
+/// guard and a plain `boolean` function against an assertion are `1`; a
+/// plain `boolean` function against a type guard stays `0`; a parameter
+/// mismatch against a `void` result stays `0`; a construct signature, an
+/// async function, an object's call signature, `never` and `undefined`
+/// results against `void` are `1`; and `() => void` against
+/// `() => number` is `0`.
+#[test]
+fn a_void_or_any_target_result_accepts_any_source_result() {
+    const ALIASES: &str = "type V = void;\ntype A = any;\ntype VU = void | undefined;";
+    for (probe, expected) in [
+        ("(() => number) extends (() => void) ? 1 : 0", 1.0),
+        ("(() => number) extends (() => any) ? 1 : 0", 1.0),
+        ("(() => number) extends (() => unknown) ? 1 : 0", 1.0),
+        ("(() => number) extends (() => V) ? 1 : 0", 1.0),
+        ("(() => number) extends (() => A) ? 1 : 0", 1.0),
+        ("(() => number) extends (() => undefined) ? 1 : 0", 0.0),
+        (
+            "(() => number) extends (() => void | undefined) ? 1 : 0",
+            0.0,
+        ),
+        ("(() => number) extends (() => VU) ? 1 : 0", 0.0),
+        (
+            "((x: unknown) => x is string) extends ((x: unknown) => asserts x is string) ? 1 : 0",
+            1.0,
+        ),
+        (
+            "((x: unknown) => boolean) extends ((x: unknown) => asserts x is string) ? 1 : 0",
+            1.0,
+        ),
+        (
+            "((x: unknown) => boolean) extends ((x: unknown) => x is string) ? 1 : 0",
+            0.0,
+        ),
+        (
+            "((x: string) => number) extends ((x: number) => void) ? 1 : 0",
+            0.0,
+        ),
+        (
+            "((x: number) => number) extends ((x: number) => void) ? 1 : 0",
+            1.0,
+        ),
+        ("(new () => { a: 1 }) extends (new () => void) ? 1 : 0", 1.0),
+        ("(() => Promise<number>) extends (() => void) ? 1 : 0", 1.0),
+        ("{ (): number } extends { (): void } ? 1 : 0", 1.0),
+        ("(() => never) extends (() => void) ? 1 : 0", 1.0),
+        ("(() => undefined) extends (() => void) ? 1 : 0", 1.0),
+        ("(() => void) extends (() => number) ? 1 : 0", 0.0),
+    ] {
+        with_probe(ALIASES, probe, |dispatch, node| {
+            assert_eq!(
+                dispatch.graph().node_data(node).as_deref(),
+                Some(&SemanticNodeData::Literal(LiteralValue::Number(expected))),
+                "`{probe}` is `{expected}` on 7.0.2; measured `{}`",
+                describe(dispatch, node)
+            );
+        });
+    }
+}
+
 /// The predicate is part of a signature's identity: a type predicate, an
 /// assertion, a receiver predicate and a predicate-less `boolean` signature
 /// over the same parameters intern apart and key apart under

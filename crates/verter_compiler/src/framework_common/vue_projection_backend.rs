@@ -33,6 +33,7 @@ use crate::framework_common::projection_plan::{
 use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::vue_carrier_frontend::VueSfcV3;
 use crate::framework_common::FrameworkParseArtifact;
+use crate::ide::vue_projection::attribute_operations::project_attribute_operations;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
 use crate::ide::vue_projection::options_api::project_options_pair;
@@ -43,6 +44,18 @@ use crate::ide::vue_projection::options_api::project_options_pair;
 /// and the STP58 activation owner name the same types as this backend.
 pub use crate::ide::vue_projection::options_api::{
     CombinedScriptProjection, OptionsComponentProjection, OptionsTemplateBindingView,
+};
+
+/// Attribute-operation products: the acceptance surface of
+/// [`VueProjectionBackend::attribute_operations`]. Re-exported here (rather
+/// than through `ide`, which is crate-internal) so qualification harnesses
+/// and the use-inference and event consumers name the same types as this
+/// backend.
+pub use crate::ide::vue_projection::attribute_operations::{
+    AttributeConsumerRelation, AttributeOperationsProjection, AttributeSyntax, Certainty,
+    ConsumerChannel, Contribution, EffectiveProperty, MergeRule, OpaqueSpread, RuntimeKey,
+    RuntimePropertyKeyPlan, RuntimePropertyWrite, SpreadKind, ValidationObligation, VueAttributeOp,
+    VueAttributeSequence, WriteValue,
 };
 
 /// STP15 named products: the acceptance surface of
@@ -180,6 +193,28 @@ impl VueProjectionBackend {
     ) -> Result<CombinedScriptProjection, SetupProjectionRefusal> {
         let (normal, setup, generic) = self.script_blocks(source, artifact)?;
         project_options_pair(normal, setup, generic)
+    }
+
+    /// Ordered attribute operations, runtime property keys and consumer
+    /// relations for every component use of the admitted parse, derived
+    /// from the same [`ProjectionPlan`] operations and expressions. An
+    /// incomplete plan or an unjoinable use yields an incomplete product.
+    /// Dormant relative to [`Self::project_ide`] until Vue atomic
+    /// activation switches the live route.
+    pub fn attribute_operations(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<AttributeOperationsProjection, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        Ok(project_attribute_operations(&plan, parsed, source))
     }
 
     /// Live template read/write views for the admitted parse: unwrapped

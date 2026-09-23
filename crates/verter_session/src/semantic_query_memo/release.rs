@@ -85,6 +85,9 @@ pub struct SemanticReleaseReport {
     pub storage_slots_after: usize,
     /// Wall time of the payload release, in microseconds.
     pub elapsed_micros: u64,
+    /// Whether this release replaced the signature kernel's epoch (its
+    /// tables had outgrown their record cap).
+    pub signature_epoch_replaced: bool,
     /// Shape-cache entries dropped by the owning store (see the type doc).
     pub shape_entries_released: usize,
 }
@@ -203,6 +206,13 @@ impl SemanticGraphStore {
         // raced the tombstone could have landed a mapping whose value names
         // a released node; clearing again after the tombstone closes it.
         self.clear_hash_cons_memos();
+        // The signature kernel's tables are append-only within an epoch and
+        // their type tokens name node ids, so this release strands the
+        // records that named the released nodes. Once the tables outgrow
+        // their cap the epoch is replaced (V8's `signature_epoch`), here at
+        // the zero-reader instant the activity gate provides; the memo
+        // families a retired epoch leaves unreachable go with it.
+        report.signature_epoch_replaced = self.compact_signature_store_if_over_cap().is_some();
         report.storage_slots_after = self.arena.storage_slots();
         report.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         report

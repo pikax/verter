@@ -939,9 +939,18 @@ fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
         QueryError::UnrepresentableSurfaceMember => 19,
         QueryError::OpenSurface => 20,
         QueryError::UnmodeledPosition => 21,
+        QueryError::CheckerRecovery(_) => 22,
     };
     enc.u8(tag);
     match err {
+        QueryError::CheckerRecovery(diagnostic) => {
+            enc.u16(u16::try_from(diagnostic.code.code()).unwrap_or(u16::MAX));
+            enc.u8(match diagnostic.operation {
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
+                crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand => 2,
+                crate::semantic_query::CheckerDiagnosticOperation::AsyncReturnPayload => 3,
+            });
+        }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
         QueryError::RecursiveRef { name } => enc.str(name),
         QueryError::Other(s) => enc.str(s),

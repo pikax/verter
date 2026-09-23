@@ -26,7 +26,8 @@
 //! constraints, defaults, predicates, rest/receiver layout, grouping
 //! order) in executable bytes. `diagnostic` records a checker
 //! DIAGNOSTIC as the observation where the checker refuses to print a
-//! type at all (TS2589 on the recursive thenable).
+//! type through the wrapper (TS2589 on the recursive thenable), together
+//! with the recovery type it continues with.
 
 /// One recorded observation.
 pub(crate) struct Row {
@@ -54,14 +55,30 @@ pub(crate) struct Row {
     /// `signature_corpus_tests.rs`).
     pub(crate) checker_display_only: bool,
     /// A checker DIAGNOSTIC recorded as the observation (the checker
-    /// refuses to print a type for this probe).
-    pub(crate) diagnostic: Option<&'static str>,
+    /// refuses to print a type for this probe through the wrapper), with
+    /// the recovery it continues with.
+    pub(crate) diagnostic: Option<RecordedDiagnostic>,
     /// The recorded `--declaration --emitDeclarationOnly --strict`
     /// output bytes for the witness module.
     pub(crate) decl_emit: &'static str,
     /// The current implementation's recorded verdict against the
     /// observation (see `signature_corpus_tests.rs`).
     pub(crate) verdict: Verdict,
+}
+
+/// A checker diagnostic recorded as a row's observation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecordedDiagnostic {
+    /// The checker's diagnostic code (`2589` for TS2589).
+    pub(crate) code: u32,
+    /// The diagnostic's message text.
+    pub(crate) message: &'static str,
+    /// The type the checker continues with after reporting, as 7.0.2
+    /// prints it through the TUPLE wrapper (`declare const __v: [<probe>];
+    /// export const __shape: null = __v;`). The checker's error type keeps
+    /// both the two-step wrapper and the `IsAny` leg silent, so the tuple
+    /// print is the one place the recovery is observable.
+    pub(crate) recovery: &'static str,
 }
 
 /// The observation families the corpus covers
@@ -407,9 +424,13 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_is_any: false,
         checker_is_never: false,
         checker_display_only: false,
-        diagnostic: Some("Type instantiation is excessively deep and possibly infinite."),
+        diagnostic: Some(RecordedDiagnostic {
+            code: 2589,
+            message: "Type instantiation is excessively deep and possibly infinite.",
+            recovery: "any",
+        }),
         decl_emit: "interface Rec {\n    then(onfulfilled: (v: Rec) => void): void;\n}\nexport declare function witness(): Rec;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Recursive thenable: 7.0.2 itself refuses with diagnostic TS2589 — the recorded OBSERVATION is the diagnostic, not a type print. The rail also declines to answer: the structural-fact demand measures `Opaque(Miss)` — the substrate does not fabricate a recovery type — and the row pins that NON-ANSWER, not any particular termination mechanism. Whether the shared family cycle guard is what terminated it is NOT established by this row; a checker-faithful recovery disposition is owed." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV22_awaited_nested_promise",

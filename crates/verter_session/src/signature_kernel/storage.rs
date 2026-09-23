@@ -85,6 +85,14 @@ impl<T> AppendInterner<T> {
         self.shard_lock_acquires.load(Ordering::Relaxed)
     }
 
+    /// Records this table holds, including a duplicate a racing publisher
+    /// stored before equality chose the other id. It is the table's
+    /// retained size, not a published-handle range.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.slots.count()
+    }
+
     fn shard_index(hash: u64) -> usize {
         (hash as usize) % DEDUP_SHARDS
     }
@@ -112,17 +120,6 @@ impl<T> AppendInterner<T> {
     /// Intern `value`. Fully initializes the record before publishing a handle.
     /// Duplicate publishers race on the shard; equality selects one id. A
     /// cancelled or panicking producer publishes nothing.
-    /// Slots claimed in this epoch (retention observability).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        usize::try_from(self.claimed_slots.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn intern(&self, value: T, cancelled: Option<&AtomicBool>) -> Result<u64, InternError>
     where
         T: Eq + Hash,

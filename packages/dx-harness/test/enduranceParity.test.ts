@@ -1045,6 +1045,7 @@ describe("churn retained-byte plateau verdict", () => {
     componentMetaStates: 0,
     registeredSources: 0,
     signatureRecords: 0,
+    signatureRecordCap: 262144,
     releasesApplied: 0,
     releaseWaitMaxMicros: 0,
     releaseElapsedMaxMicros: 0,
@@ -1430,6 +1431,7 @@ describe("churn retained-object verdict", () => {
     componentMetaStates: 0,
     registeredSources: 0,
     signatureRecords: 0,
+    signatureRecordCap: 262144,
     releasesApplied: 0,
     releaseWaitMaxMicros: 0,
     releaseElapsedMaxMicros: 0,
@@ -1528,6 +1530,30 @@ describe("churn retained-object verdict", () => {
     const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
     expect(memo?.withinBound).toBe(false);
     expect(verdict.pass).toBe(false);
+  });
+
+  it("judges the kernel's record count by its cap, not by its trend", () => {
+    // Six records per cycle against a cap of 2^18: a sawtooth whose period
+    // is far longer than the lane. A trend test would call it a leak; the
+    // bound is the verdict, and a reading past the cap breaches.
+    const under = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        signatureRecords: 600 + 6 * sinceBaseline,
+      })),
+      options,
+    );
+    expect(under.pass).toBe(true);
+    expect(under.detail).toContain("signatureRecords peak");
+    const over = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        signatureRecords: 262_000 + 6 * sinceBaseline,
+      })),
+      options,
+    );
+    expect(over.pass).toBe(false);
+    expect(over.detail).toContain("of cap 262144 BREACH");
   });
 
   it("fails a retainer that keeps one object per document version", () => {
@@ -1662,6 +1688,7 @@ describe("retention reading extraction", () => {
     componentMetaStates: 0,
     registeredSources: 0,
     signatureRecords: 0,
+    signatureRecordCap: 262144,
     releasesApplied: 0,
     releaseWaitMaxMicros: 0,
     releaseElapsedMaxMicros: 0,

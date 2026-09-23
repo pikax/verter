@@ -890,6 +890,11 @@ impl VerterHost {
                 .semantic_graph()
                 .signature_store()
                 .interned_len(),
+            signature_record_cap: self
+                .project_type_store
+                .semantic_graph()
+                .signature_store()
+                .record_cap(),
             reclaim: self.project_type_store.deferred_release_stats(),
             shape_cache_entries: self.project_type_store.shape_cache_db().live_count(),
             flow_graphs: self.project_type_store.flow_slice().graphs_entry_count(),

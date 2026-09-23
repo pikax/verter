@@ -7749,6 +7749,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::NotAssignable;
             }
         }
+        // The checker's `compareSignaturesRelated`: a target whose result is
+        // exactly `void` or `any` accepts any source result, so neither the
+        // source's return nor its type predicate is compared — `() => number`
+        // is assignable to `() => void`, and a plain `boolean` function to an
+        // assertion signature. The parameters above still are.
+        if self.signature_result_accepts_any(target_result.return_type) {
+            return acc;
+        }
         if let Some(target_predicate) = target_result
             .predicate
             .filter(|predicate| !predicate.asserts)
@@ -7780,6 +7788,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
             InferPosition::Return,
         );
         result_and(acc, r)
+    }
+
+    /// Whether a target signature's result is exactly the checker's `void`
+    /// or `any` — the two results `compareSignaturesRelated` accepts any
+    /// source result against. Transparent aliases and declaration carriers
+    /// are followed (`type V = void` is `void` itself); a union such as
+    /// `void | undefined` is not `void`, and a carrier that cannot be
+    /// resolved is not assumed to be.
+    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
+        /// Alias and declaration-carrier hops followed before giving up.
+        const RESULT_CARRIER_HOPS: usize = 8;
+        let mut current = result;
+        // bounded-loop: RESULT_CARRIER_HOPS alias / declaration-carrier hops.
+        for _ in 0..RESULT_CARRIER_HOPS {
+            // The node read ends here, before any carrier resolution runs.
+            let alias_target = match self.graph().node_data(current).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Any)) => {
+                    return true;
+                }
+                Some(SemanticNodeData::Alias(inner)) => Some(*inner),
+                Some(
+                    SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
+                ) => None,
+                _ => return false,
+            };
+            current = match alias_target {
+                Some(inner) => inner,
+                None => match self.unwrap_identity_carrier_one_step(current) {
+                    IdentityCarrierUnwrap::Concrete(next) => next,
+                    IdentityCarrierUnwrap::Unresolvable => return false,
+                },
+            };
+        }
+        false
     }
 
     /// Relate a function source against an object target carrying call

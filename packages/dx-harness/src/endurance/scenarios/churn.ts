@@ -316,8 +316,10 @@ export interface RetentionReading {
   readonly componentMetaStates: number;
   /** Registered source snapshots (base plus current overlay per document). */
   readonly registeredSources: number;
-  /** Records interned in the signature kernel's current epoch (reported, not bounded). */
+  /** Records interned in the signature kernel's current epoch: bounded by `signatureRecordCap`, not flat. */
   readonly signatureRecords: number;
+  /** The record cap the kernel replaces its epoch at. */
+  readonly signatureRecordCap: number;
   /** Queued releases applied so far (monotonic by design, so not a retention counter). */
   readonly releasesApplied: number;
   /** The longest a queued release waited for a zero-reader instant, in microseconds. */
@@ -420,6 +422,7 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "componentMetaStates",
   "registeredSources",
   "signatureRecords",
+  "signatureRecordCap",
   "releasesApplied",
   "releaseWaitMaxMicros",
   "releaseElapsedMaxMicros",
@@ -1070,6 +1073,17 @@ export const CHURN_RETENTION_COUNTERS = [
 
 export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
 
+/**
+ * Counters bounded by a cap the server reports rather than flat: the
+ * signature kernel's tables are append-only within an epoch and the epoch
+ * is replaced once they pass the cap, so the count is a sawtooth whose
+ * period is far longer than a lane. Such a counter breaches when any
+ * reading exceeds its cap.
+ */
+export const CHURN_CAPPED_COUNTERS = [
+  { counter: "signatureRecords", cap: "signatureRecordCap" },
+] as const satisfies readonly { counter: keyof RetentionReading; cap: keyof RetentionReading }[];
+
 /** One counter's late-span plateau. */
 export interface ChurnRetentionTrend {
   readonly counter: ChurnRetentionCounter;
@@ -1192,8 +1206,14 @@ export function decideChurnRetention(
     };
   });
   const pressureRefusals = readings[readings.length - 1].refusalsPressure;
+  const capped = CHURN_CAPPED_COUNTERS.map(({ counter, cap }) => {
+    const peak = Math.max(...readings.map((reading) => reading[counter]));
+    const bound = Math.min(...readings.map((reading) => reading[cap]));
+    return { counter, peak, bound, withinBound: peak <= bound };
+  });
   const breached = trends.filter((trend) => !trend.withinBound);
-  const pass = breached.length === 0 && pressureRefusals === 0;
+  const pass =
+    breached.length === 0 && pressureRefusals === 0 && capped.every((c) => c.withinBound);
   return {
     observable: true,
     cyclesCompleted,
@@ -1216,6 +1236,11 @@ export function decideChurnRetention(
             `)${trend.withinBound ? "" : " BREACH"}`,
         )
         .join("; ") +
+      capped
+        .map(
+          (c) => `; ${c.counter} peak ${c.peak} of cap ${c.bound}${c.withinBound ? "" : " BREACH"}`,
+        )
+        .join("") +
       `; pressure refusals=${pressureRefusals}${pressureRefusals === 0 ? "" : " BREACH"}`,
   };
 }

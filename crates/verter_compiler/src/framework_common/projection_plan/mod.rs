@@ -1701,7 +1701,7 @@ fn prop_value<'a>(source: &'a str, prop: &NodeProp) -> Option<&'a str> {
     Some(&source[s as usize..e as usize])
 }
 
-fn classify_op(prop: &NodeProp, source: &str) -> Option<(AttributeOpKind, String)> {
+pub(crate) fn classify_op(prop: &NodeProp, source: &str) -> Option<(AttributeOpKind, String)> {
     if !prop.is_directive {
         let name = &source[prop.start as usize..prop.name_end as usize];
         return Some((AttributeOpKind::Static, name.to_string()));

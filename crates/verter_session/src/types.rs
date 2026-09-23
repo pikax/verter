@@ -5002,9 +5002,12 @@ pub struct HostRetentionSnapshot {
     /// Registered source snapshots (the base registration per document plus
     /// the current overlay; superseded overlays are retracted).
     pub registered_sources: usize,
-    /// Records interned in the signature kernel's current epoch (append-only
-    /// within an epoch; reported, see `SignatureStore::interned_len`).
+    /// Records interned in the signature kernel's current epoch. Append-only
+    /// within an epoch; the epoch is replaced once they pass
+    /// `signature_record_cap`, so the count is bounded by the cap, not flat.
     pub signature_records: usize,
+    /// The record cap the kernel replaces its epoch at.
+    pub signature_record_cap: usize,
     /// What the activity gate has applied so far: counts, the longest a
     /// queued release waited, and the last release's own cost.
     pub reclaim: crate::project_type_store::semantic_activity::SemanticReclaimStats,

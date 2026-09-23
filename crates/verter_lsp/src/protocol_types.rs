@@ -414,7 +414,10 @@ pub struct RetentionStatistics {
     pub resolved_import_facts: usize,
     pub component_meta_states: usize,
     pub registered_sources: usize,
+    /// Signature kernel records in the current epoch, and the cap the epoch
+    /// is replaced at: the count is bounded by the cap, not flat.
     pub signature_records: usize,
+    pub signature_record_cap: usize,
     /// Queued releases applied so far, the longest one waited for a
     /// zero-reader instant, and the slowest / summed release wall time.
     pub releases_applied: u64,
@@ -471,6 +474,7 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             component_meta_states: snapshot.component_meta_states,
             registered_sources: snapshot.registered_sources,
             signature_records: snapshot.signature_records,
+            signature_record_cap: snapshot.signature_record_cap,
             releases_applied: snapshot.reclaim.releases_applied,
             release_wait_max_micros: snapshot.reclaim.wait_max_micros,
             release_elapsed_max_micros: snapshot.reclaim.elapsed_max_micros,

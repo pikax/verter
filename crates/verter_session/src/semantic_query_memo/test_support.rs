@@ -114,6 +114,18 @@ impl SemanticGraphStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test-only observability accessor: how many joiners forked away from
+    /// a completed winner whose value they could not share (a carrier that
+    /// does not validate for their view, or a retired kernel epoch).
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn test_joiner_view_mismatch_forks(&self) -> u64 {
+        self.stats
+            .joiner_view_mismatch_forks
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Test-only probe: `true` when the `inflight` table `Mutex` can be
     /// `try_lock`-acquired right now (no thread is holding it). The
     /// abort-loop lock-order test uses it to assert

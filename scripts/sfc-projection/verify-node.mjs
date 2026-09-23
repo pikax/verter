@@ -45,6 +45,7 @@ import {
   STP13_MANDATORY_CASES,
   STP14_MANDATORY_CASES,
   STP15_MANDATORY_CASES,
+  STP17_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
 
@@ -64,6 +65,7 @@ export {
   STP13_MANDATORY_CASES,
   STP14_MANDATORY_CASES,
   STP15_MANDATORY_CASES,
+  STP17_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 };
 
@@ -2075,6 +2077,11 @@ export async function verifyNode(options) {
     errors.push(...stp15.errors);
   }
 
+  if (nodeId === "STP17") {
+    const stp17 = await evaluateStp17Node({ repoRoot });
+    errors.push(...stp17.errors);
+  }
+
   if (nodeId === "STS0") {
     const sts0 = await evaluateSts0Node({ repoRoot, skipProbes: options.skipProbes });
     errors.push(...sts0.errors);
@@ -2256,6 +2263,15 @@ async function evaluateStp15Node({ repoRoot }) {
   const protocol = await import(protocolHref);
   const stp15 = await protocol.evaluateStp15({ repoRoot });
   return { errors: stp15.errors };
+}
+
+async function evaluateStp17Node({ repoRoot }) {
+  const protocolHref = pathToFileURL(
+    repoPath(repoRoot, "tests/sfc-projection/STP17/protocol.mjs"),
+  ).href;
+  const protocol = await import(protocolHref);
+  const stp17 = await protocol.evaluateStp17({ repoRoot });
+  return { errors: stp17.errors };
 }
 
 async function evaluateSts0Node({ repoRoot, skipProbes }) {
