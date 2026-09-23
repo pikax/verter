@@ -168,7 +168,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface B {\n    b: 2;\n}\nexport declare function witness(): B;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Instance side of a CONSTRUCT-signature intersection: 7.0.2 reduces the instance type to B; the consumer-expanded answer is the FIRST arm's instance instead (measured `DeclRef(A)`). Construct-signature intersection reduction is owed by the `SignaturesOfType` set authority over `ReduceIntersection`." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV04_mixin_intersection",

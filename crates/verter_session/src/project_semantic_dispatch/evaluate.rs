@@ -511,7 +511,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Full structural-fact demand: resolve BOTH residual carriers
         // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
-        self.resolve_structural_fact_demand(node, context, true)
+        self.resolve_structural_fact_demand(node, context, true, true)
     }
 
     /// Carrier-PRESERVING sibling of
@@ -549,21 +549,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
         // `InstantiationRef` (do NOT instantiate — leave the args readable).
-        self.resolve_structural_fact_demand(node, context, false)
+        self.resolve_structural_fact_demand(node, context, false, true)
     }
 
-    /// Shared residual-carrier resolution loop backing both
-    /// [`Self::normalize_node_for_structural_fact_demand`]
-    /// (`instantiate_instantiation_refs = true`) and
-    /// [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
-    /// (`= false`). ONE loop, one resolver — the two entry points differ ONLY by
-    /// whether the `InstantiationRef` arm instantiates (there is no divergent
-    /// second implementation).
+    /// Declaration-KEEPING sibling of
+    /// [`Self::normalize_node_for_structural_fact_demand`]: instantiates
+    /// residual `InstantiationRef` carriers through the shared `Instantiate`
+    /// query exactly as it does, but STOPS at a named `DeclRef` instead of
+    /// resolving it to the declaration's body.
+    ///
+    /// That is the altitude a type is PRINTED at: a utility or conditional
+    /// application (`InstanceType<…>`, `ReturnType<…>`, `Awaited<…>`) is
+    /// reduced, while a named interface is shown by its name. The checker's
+    /// printed answer to `InstanceType<typeof CtorA & typeof CtorB>` is `B`,
+    /// the interface — not `{ b: 2 }`, its body — so an evidence lane that
+    /// compares a live answer against a recorded print needs this stop, and
+    /// the fully resolving demand overshoots it by exactly one step.
+    ///
+    /// Same loop, same resolver, same bounds and typed `Partial` outcome as
+    /// its siblings; STRICTLY test-scoped because its only consumer is the
+    /// in-crate signature-corpus driver.
+    #[cfg(test)]
+    pub(crate) fn normalize_node_keeping_declaration_refs_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome {
+        self.resolve_structural_fact_demand(node, context, true, false)
+    }
+
+    /// Shared residual-carrier resolution loop backing
+    /// [`Self::normalize_node_for_structural_fact_demand`] (both residual arms
+    /// resolve), [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
+    /// (`instantiate_instantiation_refs = false`) and, under test,
+    /// `normalize_node_keeping_declaration_refs_for_tests`
+    /// (`resolve_declaration_refs = false`). ONE loop, one resolver — the
+    /// entry points differ ONLY in which residual arm is allowed to resolve
+    /// (there is no divergent second implementation).
     fn resolve_structural_fact_demand(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         instantiate_instantiation_refs: bool,
+        resolve_declaration_refs: bool,
     ) -> StructuralFactDemandOutcome {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
@@ -606,9 +634,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // reached its terminal structural body on exactly the last
             // permitted step is a stable stop, never a false partial. The
             // non-residual break also covers the peel's deliberate
-            // un-instantiated `InstantiationRef` stop.
+            // un-instantiated `InstantiationRef` stop, and the
+            // declaration-keeping mode's stop at a named `DeclRef`.
             let is_residual = match data.as_ref() {
-                SemanticNodeData::DeclRef { .. } => true,
+                SemanticNodeData::DeclRef { .. } => resolve_declaration_refs,
                 SemanticNodeData::InstantiationRef { .. } => instantiate_instantiation_refs,
                 _ => false,
             };

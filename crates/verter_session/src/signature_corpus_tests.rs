@@ -404,17 +404,23 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     // carrier against a reduced print measures publication laziness, not
     // a semantic difference, and no row could ever match.
     //
-    // A structural comparison IS a structural-fact demand, so make it one:
-    // `normalize_node_for_structural_fact_demand` is the production
-    // primitive for exactly this (evaluate deferred shells, resolve a
-    // residual `DeclRef` through `ResolveDecl` and a residual
-    // `InstantiationRef` through `Instantiate`), bounded by exact-identity
-    // cycle detection and fail-closed. It is not a second resolver, and
-    // this lane must not grow one: a hand-rolled expansion loop would
-    // drop the cycle detection and the typed `Partial` outcome, and a
-    // cyclic alias would silently decide the compared node by the
-    // iteration budget.
-    let demand = dispatch.normalize_node_for_structural_fact_demand(
+    // Reduce the carrier to the altitude the checker PRINTS at, through the
+    // production structural-fact loop (evaluate deferred shells, instantiate
+    // a residual `InstantiationRef` through the shared `Instantiate` query),
+    // bounded by exact-identity cycle detection and fail-closed. It is not a
+    // second resolver, and this lane must not grow one: a hand-rolled
+    // expansion loop would drop the cycle detection and the typed `Partial`
+    // outcome, and a cyclic alias would silently decide the compared node by
+    // the iteration budget.
+    //
+    // The loop runs in its declaration-KEEPING mode: it stops at a named
+    // `DeclRef` rather than resolving it to the declaration's body. The
+    // recorded column prints a named interface by its NAME
+    // (`InstanceType<typeof CtorA & typeof CtorB>` prints `B`), and the
+    // checker-syntax matcher compares a name against a `DeclRef` — never
+    // against an expanded body. Resolving the reference would overshoot the
+    // printed answer by one step and read a correct answer as owed.
+    let demand = dispatch.normalize_node_keeping_declaration_refs_for_tests(
         result.return_type(),
         crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
