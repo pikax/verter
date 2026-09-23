@@ -425,10 +425,10 @@ pub(crate) const CORPUS: &[Row] = &[
         checker: "unknown",
         checker_is_any: false,
         checker_is_never: false,
-        checker_display_only: true,
+        checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T>(v: Awaited<T>): Awaited<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Deferred generic: the witness signature is (v: Awaited<T>) => Awaited<T>; instantiating the binder at its constraint prints unknown. The consumer-expanded answer is `unknown`, which does not carry the declared-return structure this row compares against. Deferred-symbolic instantiation through the constraint is owed." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV24_awaited_constrained_generic",
@@ -441,7 +441,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T extends Promise<number>>(v: T): Promise<T>;\n",
-        verdict: Verdict::KnownOwed { note: "Constrained generic async wrap: Promise<Promise<number>> (the body returns v: T unreduced); the consumer-expanded answer is a typed gap instead (measured `Opaque(Miss)`). The async-wrap/constraint interaction is owed by the runtime/lib `Awaited` lane." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV25_generic_union_dedup",

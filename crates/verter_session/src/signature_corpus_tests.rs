@@ -481,7 +481,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     };
     // The checker text is a basis only where it carries a STRUCTURAL
     // claim: a display-only column (a binder-at-constraint display,
-    // SV23/25/26) is checker PRINT OUTPUT, never semantic identity, so
+    // SV25/26) is checker PRINT OUTPUT, never semantic identity, so
     // those rows compare through their declared return alone and a
     // reduction to the display text must not satisfy or flip them.
     let matched_checker = !row.checker.is_empty()
@@ -489,7 +489,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         && structural_match(row.checker, false);
     // The declared return is a LIVE basis when the checker column is a
     // display-only binder instantiation (the dedup/order claim lives in
-    // the declaration bytes — SV23/25/26) or when the row records a
+    // the declaration bytes — SV25/26) or when the row records a
     // refusal (no checker text at all — SV21). Union arm ORDER is a
     // structured field of the declaration bytes, so this basis rides
     // the order-sensitive comparator: a wrong-order implementation must

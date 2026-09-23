@@ -300,14 +300,16 @@ impl ProjectSemanticDispatch<'_> {
                     Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
                     _ => return None,
                 };
-                // Free signature generics instantiate at `unknown`:
-                // `ReturnType<typeof id>` over `id<T>(x: T): T` is `unknown`.
-                Some(self.instantiate_free_signature_params_at_unknown(signature, return_type))
+                // Free signature generics instantiate at their base
+                // constraints: `ReturnType<typeof id>` over `id<T>(x: T): T`
+                // is `unknown`, over `id<T extends string>(x: T): T` it is
+                // `string`.
+                Some(self.instantiate_signature_params_at_base_constraints(signature, return_type))
             }
             SignatureUtilityProjection::ParameterTuple => {
                 let signature = inferred?;
                 let tuple = self.intern_function_params_tuple(signature)?;
-                Some(self.instantiate_free_signature_params_at_unknown(signature, tuple))
+                Some(self.instantiate_signature_params_at_base_constraints(signature, tuple))
             }
             // A signature with no authored `this` has none, which is
             // `unknown`; so does a subject with no signature to infer from.
