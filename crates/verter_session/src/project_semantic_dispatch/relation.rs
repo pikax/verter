@@ -1009,18 +1009,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         scope: impl FnOnce() -> T,
     ) -> T {
-        let environment = self.relation_environment_for(canonical);
-        let _environment =
-            super::RelationEnvironmentScope::push(&self.relation_env_scope, environment);
-        let outer = self
-            .dispatch_txn
-            .borrow_mut()
-            .relation
-            .strict
-            .replace(environment.strict);
-        let result = scope();
-        self.dispatch_txn.borrow_mut().relation.strict = outer;
-        result
+        let cached = self.relation_env_by_file.borrow().get(canonical).copied();
+        let environment = cached.unwrap_or_else(|| {
+            let environment = self.relation_environment_for(canonical);
+            self.relation_env_by_file
+                .borrow_mut()
+                .insert(Arc::from(canonical), environment);
+            environment
+        });
+        let _environment = super::RelationEnvironmentScope::push(
+            &self.relation_env_scope,
+            &self.dispatch_txn,
+            environment,
+        );
+        scope()
     }
 
     /// The strict-family configuration in force for this dispatch — the

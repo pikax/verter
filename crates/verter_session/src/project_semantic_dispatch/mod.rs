@@ -448,6 +448,12 @@ pub struct ProjectSemanticDispatch<'a> {
     /// [`RelationEnvironmentScope`].
     pub(super) relation_env_scope:
         std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    /// The relation environment of each file a flow-return frame has been
+    /// decided under in this dispatch — resolved once per file, like
+    /// [`Self::relation_env`] for the request, since every frame of a
+    /// function in that file asks again.
+    pub(super) relation_env_by_file:
+        std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -575,24 +581,35 @@ impl<'g> Drop for LexicalDemandScopeGuard<'g> {
 }
 
 /// RAII scope of one entry on
-/// [`ProjectSemanticDispatch::relation_env_scope`]: the environment is in
-/// force until the scope drops (panic-safe).
+/// [`ProjectSemanticDispatch::relation_env_scope`]: the environment — and
+/// its strict-family configuration as the relation reducer's snapshot — is
+/// in force until the scope drops, which restores the outer snapshot
+/// (panic-safe).
 pub(super) struct RelationEnvironmentScope<'g> {
     stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    outer_strict: Option<dispatch_txn::StrictFamilyConfig>,
 }
 
 impl<'g> RelationEnvironmentScope<'g> {
     pub(super) fn push(
         stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+        txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
         environment: dispatch_txn::RelationEnvironment,
     ) -> Self {
         stack.borrow_mut().push(environment);
-        Self { stack }
+        let outer_strict = txn.borrow_mut().relation.strict.replace(environment.strict);
+        Self {
+            stack,
+            txn,
+            outer_strict,
+        }
     }
 }
 
 impl<'g> Drop for RelationEnvironmentScope<'g> {
     fn drop(&mut self) {
+        self.txn.borrow_mut().relation.strict = self.outer_strict;
         self.stack.borrow_mut().pop();
     }
 }
@@ -626,6 +643,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             relation_env: std::cell::OnceCell::new(),
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_context(ctx),
