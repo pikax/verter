@@ -275,6 +275,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Instantiating the outer type parameters of the declaration a
+            // class expression is authored under substitutes into its
+            // instance surface; the class identity is unchanged.
+            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+                let (sub, changed) =
+                    self.substitute_with_change_tracking(*surface, parameter_node, arg);
+                if !changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            surface: sub,
+                        },
+                    ),
+                    true,
+                )
+            }
             // Substitution is a composite CONSTRUCTION site (the ruling's
             // "substitution and post-substitution finalization" inclusion
             // arm): a CHANGED union routes through the canonical authority
@@ -1332,6 +1352,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::TypeParam { .. } => {}
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
+                }
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    stack.push(*surface);
                 }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");

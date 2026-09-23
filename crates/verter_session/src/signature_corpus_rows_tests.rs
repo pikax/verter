@@ -181,7 +181,7 @@ pub(crate) const CORPUS: &[Row] = &[
         checker_display_only: false,
         diagnostic: None,
         decl_emit: "interface Base {\n    label: string;\n}\nexport declare function Mixin<S extends new (...args: any[]) => Base>(Base: S): {\n    new (...args: any[]): {\n        extra: number;\n        label: string;\n    };\n} & S;\nexport declare function witness(): {\n    extra: number;\n    label: string;\n} & Base;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Mixin intersection witness (Mixin.(Anonymous class) & Base): the anonymous-class instance plus base intersection. The live rail publishes a typed gap instead (measured `Opaque(Miss)`, degraded). Owed by the `SignaturesOfType` construct-signature/mixin semantics." },
+        verdict: Verdict::MatchesChecker,
     },
     Row {
         id: "SV05_generic_default",

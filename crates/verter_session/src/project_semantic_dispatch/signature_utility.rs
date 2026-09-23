@@ -191,7 +191,11 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// The signature a utility of `kind` infers from `subject`: the LAST
-    /// candidate of the shared signature list.
+    /// candidate of the shared signature list, in the node form every
+    /// node-based consumer reads — the authored node of a leaf candidate,
+    /// and the composed node of a composite one (a mixin construct
+    /// intersection's candidate has no authored node of its own; its
+    /// result is the intersection the kernel composed).
     pub(super) fn utility_inference_signature(
         &self,
         subject: SemanticNodeId,
@@ -200,7 +204,10 @@ impl ProjectSemanticDispatch<'_> {
         if !self.subject_infers_a_signature(subject) {
             return None;
         }
-        let signature = (*self.authored_candidates_of(subject, kind)?.last()?)?;
+        let signature = match self.shared_signature_nodes(subject, kind) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => *nodes.last()?,
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+        };
         match self.graph().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: node_kind, ..

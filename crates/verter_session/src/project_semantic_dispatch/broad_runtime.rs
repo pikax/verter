@@ -216,6 +216,12 @@ impl ProjectSemanticDispatch<'_> {
                     node: *inner,
                     filter_unknown: item.filter_unknown,
                 }),
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    work.push(RuntimeWork {
+                        node: *surface,
+                        filter_unknown: item.filter_unknown,
+                    })
+                }
                 SemanticNodeData::Union(arms) => {
                     for arm in arms.iter().rev() {
                         work.push(RuntimeWork {

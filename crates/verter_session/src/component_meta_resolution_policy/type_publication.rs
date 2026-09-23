@@ -208,6 +208,11 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
             SemanticNodeData::Alias(target) => {
                 stack.push(ProofWalkFrame::Enter(*target, path));
             }
+            // A class expression names no declaration; its references are
+            // its instance surface's.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                stack.push(ProofWalkFrame::Enter(*surface, path));
+            }
             SemanticNodeData::Object(surface) => {
                 for (index, member) in surface.positive_members().iter().enumerate() {
                     push_proof_child(

@@ -736,6 +736,28 @@ impl StructuralEncoder<'_> {
                 self.buf.push(SemanticNodeTag::DeclRef.stable_id());
                 self.encode_decl_identity(identity);
             }
+            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+                self.buf
+                    .push(SemanticNodeTag::ClassExpressionInstance.stable_id());
+                self.push_str(&identity.canonical_id);
+                self.buf.push(match identity.owner.kind() {
+                    verter_type_expr::TopLevelOwnerKind::Module => 0,
+                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+                });
+                self.buf
+                    .extend_from_slice(&identity.owner.ordinal().to_le_bytes());
+                self.buf.extend_from_slice(&identity.offset.to_le_bytes());
+                self.push_str(&identity.name);
+                match &identity.qualifier {
+                    Some(qualifier) => {
+                        self.push_present(true);
+                        self.push_str(qualifier);
+                    }
+                    None => self.push_present(false),
+                }
+                self.encode_child(*surface, depth);
+            }
             // The sealed callable carrier: its composed parts are readable
             // only by its two consumers, so the encoding is the tag alone.
             SemanticNodeData::DeferredCallable(_) => {

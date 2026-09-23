@@ -1340,6 +1340,7 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
         | D::Signature { .. }
         | D::DeferredCallable(_)
         | D::InstantiationRef { .. }
+        | D::ClassExpressionInstance { .. }
         | D::MergedDecl { .. }
         | D::BareRef(_)
         | D::ImportType(_)
@@ -1716,6 +1717,9 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             base.hash(hasher);
             args.len().hash(hasher);
         }
+        // The class identity; the instance surface hashes through the
+        // shared child walk.
+        D::ClassExpressionInstance { identity, .. } => identity.hash(hasher),
         // Childless payloads (whole-payload hashed by the caller before
         // this function is ever reached) and the opaque payloads (same):
         // deliberately unreachable here, hashed as their full payload for
@@ -2355,6 +2359,24 @@ fn compare_shallow(
         // payload-Eq fast path already admitted identical pairs).
         (D::DeferredCallable(_), D::DeferredCallable(_)) => false,
         (D::DeclRef { identity: a }, D::DeclRef { identity: b }) => a == b,
+        // One class expression, compared through its instance surface (an
+        // instantiation of its outer type parameters).
+        (
+            D::ClassExpressionInstance {
+                identity: ia,
+                surface: sa,
+            },
+            D::ClassExpressionInstance {
+                identity: ib,
+                surface: sb,
+            },
+        ) => {
+            if ia != ib {
+                return false;
+            }
+            work.push((*sa, *sb));
+            true
+        }
         (
             D::InstantiationRef { base: ba, args: aa },
             D::InstantiationRef { base: bb, args: ab },

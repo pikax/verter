@@ -3341,6 +3341,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(args.iter().copied());
                 }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
@@ -6948,6 +6949,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     current = *inner;
                     continue;
                 }
+                // A class expression's instance relates through its surface.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    current = *surface;
+                    continue;
+                }
                 SemanticNodeData::MergedDecl { contributors } => {
                     let contributors = Arc::clone(contributors);
                     drop(data);
@@ -7972,9 +7978,11 @@ fn comparable_root_kind(data: &SemanticNodeData) -> Option<ComparableRootKind> {
         // it structurally would compare the operation, not its value.
         SemanticNodeData::IntrinsicApplication { .. } => None,
         SemanticNodeData::TypeOfNominal(_) => Some(ComparableRootKind::Nominal),
+        // A class instance is an object whatever its members.
         SemanticNodeData::Object(_)
         | SemanticNodeData::ObjectSpreadProgram(_)
-        | SemanticNodeData::MergedDecl { .. } => Some(ComparableRootKind::Object),
+        | SemanticNodeData::MergedDecl { .. }
+        | SemanticNodeData::ClassExpressionInstance { .. } => Some(ComparableRootKind::Object),
         SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
             Some(ComparableRootKind::ArrayLike)
         }

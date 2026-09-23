@@ -539,6 +539,9 @@ impl ProjectSemanticDispatch<'_> {
                 // raw-fallback / synthetic-binding carriers hold no
                 // infer-bearing child node id.
                 | SemanticNodeData::DeclRef { .. }
+                // A class expression's instance is produced from a class body,
+                // never authored inside a conditional's `extends` clause.
+                | SemanticNodeData::ClassExpressionInstance { .. }
                 | SemanticNodeData::RawFallback { .. }
                 // The sealed callable carrier never carries an `infer`
                 // placeholder: it is composed from an indexed function

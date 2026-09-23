@@ -1086,6 +1086,47 @@ impl DeclIdentity {
     }
 }
 
+/// Identity of one class EXPRESSION — the payload of
+/// [`SemanticNodeData::ClassExpressionInstance`].
+///
+/// A class expression declares nothing a [`DeclIdentity`] could name, so it
+/// is identified by where it was authored: the defining file and owner, and
+/// the expression's offset in that file. The two print fields are what the
+/// checker spells the instance type as — `Mixin.(Anonymous class)` for
+/// `function Mixin<S …>(Base: S) { return class extends Base { … } }`,
+/// measured on TypeScript 7.0.2.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassExpressionIdentity {
+    /// The file the class expression is authored in.
+    pub canonical_id: Arc<str>,
+    /// The authored top-level owner within `canonical_id`.
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    /// The class expression's start offset in `canonical_id`.
+    pub offset: u32,
+    /// The class's own printed name: its binding identifier
+    /// (`class Foo {}`), else the variable it directly initializes
+    /// (`const C = class {}`), else the checker's `(Anonymous class)`.
+    pub name: Arc<str>,
+    /// The declaration whose type-parameter clause encloses the class
+    /// (`Mixin` above), when one does. The class then has OUTER type
+    /// parameters, and the checker qualifies every instantiated reference
+    /// with their declaring container (`Mixin.(Anonymous class)`); a class
+    /// no clause encloses prints its bare name (`(Anonymous class)`).
+    pub qualifier: Option<Arc<str>>,
+}
+
+impl ClassExpressionIdentity {
+    /// The printed name the checker spells an instantiated reference to
+    /// this class as.
+    #[must_use]
+    pub fn printed_name(&self) -> String {
+        match &self.qualifier {
+            Some(qualifier) => format!("{qualifier}.{}", self.name),
+            None => self.name.to_string(),
+        }
+    }
+}
+
 /// Content-free identity for a synthetic slot-binding / `defineSlots`
 /// binding carrier.
 ///
@@ -9225,6 +9266,27 @@ pub enum SemanticNodeData {
         args: Arc<[SemanticNodeId]>,
     },
 
+    /// The INSTANCE type of a class expression (`return class extends
+    /// Base { … }`) — the checker's `Mixin.(Anonymous class)`.
+    ///
+    /// A class expression declares nothing a [`Self::DeclRef`] could
+    /// resolve, so the class identity rides the payload
+    /// ([`ClassExpressionIdentity`]) and the instance SURFACE — the class's
+    /// own members over its inherited base instance — is the `surface`
+    /// child, produced where the class expression was evaluated. The node
+    /// is nominal exactly where a `DeclRef` is: display, stable keys and a
+    /// declaration-keeping read keep the identity, and a structural read
+    /// reads through to `surface` exactly as a `DeclRef` read resolves its
+    /// declaration's body. Instantiating the class's outer type parameters
+    /// substitutes into `surface` under the same identity.
+    ///
+    /// Raises to the raised `surface` — the declaration emitter's own
+    /// spelling of a class expression's instance type.
+    ClassExpressionInstance {
+        identity: Arc<ClassExpressionIdentity>,
+        surface: SemanticNodeId,
+    },
+
     /// A same-name merged declaration carrier (TS same-file declaration
     /// merging). `contributors` holds the lowered body of each same-name
     /// `interface` part, in source order. The peer-merge reducer unions their
@@ -9380,6 +9442,8 @@ impl SemanticNodeData {
             | Self::DeferredCallable(_)
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
+            // A class expression's instance IS its identity plus its surface.
+            | Self::ClassExpressionInstance { .. }
             // A deferred intrinsic application is a KNOWN value — the operation
             // is decided, only the operand's binder is still open.
             | Self::IntrinsicApplication { .. }
@@ -9575,6 +9639,16 @@ impl PartialEq for SemanticNodeData {
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
             (
+                Self::ClassExpressionInstance {
+                    identity: ai,
+                    surface: asf,
+                },
+                Self::ClassExpressionInstance {
+                    identity: bi,
+                    surface: bsf,
+                },
+            ) => ai == bi && asf == bsf,
+            (
                 Self::IntrinsicApplication { op: ao, args: aa },
                 Self::IntrinsicApplication { op: bo, args: ba },
             ) => ao == bo && aa == ba,
@@ -9731,6 +9805,10 @@ impl std::hash::Hash for SemanticNodeData {
             Self::InstantiationRef { base, args } => {
                 base.hash(state);
                 args.hash(state);
+            }
+            Self::ClassExpressionInstance { identity, surface } => {
+                identity.hash(state);
+                surface.hash(state);
             }
             Self::IntrinsicApplication { op, args } => {
                 // The FROZEN tag, for the same reason the TypeExpr stream uses

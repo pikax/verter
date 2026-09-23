@@ -287,6 +287,13 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 drop(data);
                 self.discover(target)
             }
+            // A class expression's INSTANCE carries the signatures of its
+            // instance surface.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                let surface = *surface;
+                drop(data);
+                self.discover(surface)
+            }
             SemanticNodeData::MergedDecl { .. } => {
                 drop(data);
                 match self.dispatch().unwrap_identity_carrier_for_relation(node) {

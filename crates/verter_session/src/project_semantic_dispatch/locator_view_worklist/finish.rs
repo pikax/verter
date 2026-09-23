@@ -127,6 +127,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Alias(target) => projected(memo, *target, context),
+            // The same class expression over its projected instance surface.
+            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+                let projected_surface = projected(memo, *surface, context);
+                if projected_surface == *surface {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            surface: projected_surface,
+                        },
+                    )
+                }
+            }
             SemanticNodeData::TypeParam {
                 decl,
                 param_index,

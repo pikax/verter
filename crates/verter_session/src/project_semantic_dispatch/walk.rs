@@ -2855,6 +2855,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
+                // A class expression's instance projects through its instance
+                // surface, exactly as a `DeclRef` projects through the
+                // declaration body it resolves to.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    current = *surface;
+                }
                 SemanticNodeData::Alias(target) => {
                     // Alias unwrap — emit AliasResolve edge and
                     // continue from the target. Cycle detection via
@@ -5350,6 +5356,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     ),
                 });
             }
+            // A class expression's instance contributes its instance surface —
+            // the body a `DeclRef` arm resolves to, already in hand.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                let surface = *surface;
+                drop(data);
+                work.push(Frame::Visit {
+                    node: surface,
+                    target,
+                    member_role_override,
+                    heritage_overlay_body,
+                    provenance_override,
+                });
+            }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
@@ -7289,6 +7308,7 @@ pub(super) fn value_may_contribute_call_signatures(
             }
             // Transparent carriers / composites — classify what they carry.
             SemanticNodeData::Alias(inner) => stack.push(*inner),
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
             composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                 let arms = composite.composite_members().expect("composite arm");
                 stack.extend(arms.iter().copied());

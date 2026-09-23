@@ -1113,6 +1113,10 @@ fn combine_union_signatures(
     Ok(Some(store.candidate(descriptor, left.provenance)?))
 }
 
+/// Whether a member's construct list is a MIXIN constructor: exactly one
+/// non-generic signature whose only parameter is an `any`-element array
+/// rest (`new (...args: any[]) => X`). A `this` receiver is not a
+/// parameter and does not take part (TypeScript's `isMixinConstructorType`).
 fn is_mixin_constructor(
     view: &SemanticReadView,
     types: &dyn DiscoveryTypes,
@@ -1120,8 +1124,8 @@ fn is_mixin_constructor(
 ) -> Res<bool> {
     let [only] = list else { return Ok(false) };
     let loaded = load(view, *only)?;
-    Ok(loaded.layout.parameters.is_empty()
-        && loaded.receiver.is_none()
+    Ok(loaded.space.binders.is_empty()
+        && loaded.layout.parameters.is_empty()
         && loaded.layout.rest.as_ref().is_some_and(|r| {
             r.kind == RestKind::Array && r.tail.is_empty() && types.is_any(r.slot.ty)
         }))
@@ -1133,9 +1137,16 @@ fn is_mixin_constructor(
 /// Call signatures concatenate, dropping only a signature IDENTICAL to one
 /// already present — result included ([`append_signatures`]); signatures
 /// that differ only in their result are distinct overloads and both stay.
-/// Construct signatures do the same, except that when any member is a mixin
-/// constructor (`new (...args: any[]) => X`) every other member's construct
-/// signature is composed with the mixin returns (`IntersectionConstruct`).
+///
+/// Construct signatures follow TypeScript's mixin rule
+/// (`resolveIntersectionTypeMembers`): a member that is a mixin constructor
+/// (`new (...args: any[]) => X`) contributes NO construct signature of its
+/// own — its instance type is mixed into every other member's construct
+/// result instead (`IntersectionConstruct`, the results intersected in
+/// member order). When every constructor member is a mixin, the first one
+/// is not counted as a mixin, so it keeps its signature and the others mix
+/// into it: `typeof CtorB & typeof MixA` constructs `B & A` from `CtorB`'s
+/// parameters, and two mixins construct from the first one's.
 pub fn intersection_signatures(
     store: &SignatureStore,
     types: &dyn DiscoveryTypes,
@@ -1148,11 +1159,18 @@ pub fn intersection_signatures(
         for (i, list) in members.iter().enumerate() {
             mixin_flags[i] = is_mixin_constructor(&view, types, list)?;
         }
+        let constructor_count = members.iter().filter(|list| !list.is_empty()).count();
+        let mixins = mixin_flags.iter().filter(|f| **f).count();
+        if constructor_count > 0 && constructor_count == mixins {
+            if let Some(first) = mixin_flags.iter().position(|f| *f) {
+                mixin_flags[first] = false;
+            }
+        }
     }
     let mixin_count = mixin_flags.iter().filter(|f| **f).count();
     let mut out: Vec<SignatureCandidate> = Vec::new();
     for (index, list) in members.iter().enumerate() {
-        if list.is_empty() {
+        if list.is_empty() || mixin_flags[index] {
             continue;
         }
         let mapped: Vec<SignatureCandidate> = if mixin_count > 0 {

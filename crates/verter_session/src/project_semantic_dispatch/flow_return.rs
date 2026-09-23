@@ -6068,6 +6068,20 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
     }
 }
 
+/// What a class expression's `extends` value provides to the class.
+struct ClassBase {
+    /// The parameters of each accepted base construct signature, in order —
+    /// a constructor-less class inherits one construct signature per entry.
+    constructor_params: Vec<Arc<[crate::semantic_query::FunctionParam]>>,
+    /// The base instance type: the first accepted construct signature's
+    /// result.
+    instance: SemanticNodeId,
+    /// The base constructor's static members.
+    static_members: Vec<crate::semantic_query::SurfaceMember>,
+    /// The base constructor's type variable, when the class extends one.
+    type_variable: Option<SemanticNodeId>,
+}
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
@@ -7013,6 +7027,279 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 has_index_signature: false,
             },
         )))
+    }
+
+    /// Evaluate a class EXPRESSION to its value: the class's constructor
+    /// type, composed by TypeScript's class rules (measured on 7.0.2).
+    ///
+    /// - The INSTANCE type is the class's own identity
+    ///   ([`SemanticNodeData::ClassExpressionInstance`]) over its instance
+    ///   surface: the base instance intersected with the own members
+    ///   (heritage first, so an own member shadows an inherited one). The
+    ///   base instance is the result of the FIRST base construct signature
+    ///   that accepts the `extends` type arguments
+    ///   (`resolveBaseTypesOfClass`).
+    /// - The CONSTRUCTOR type carries the construct signatures — the
+    ///   declared constructor's parameters, else one per accepted base
+    ///   construct signature with its parameters (`getDefaultConstructSignatures`),
+    ///   else `new () =>` — all returning the instance, over the static
+    ///   members (own ones shadowing the base constructor's).
+    /// - A class that extends a TYPE VARIABLE (`class extends Base` over
+    ///   `Base: S`) is the constructor type intersected with that variable
+    ///   (`getBaseTypeVariableOfClass`) — the mixin form, whose construct
+    ///   signatures the intersection rules compose.
+    ///
+    /// A base the class cannot be composed over (an unevaluable `extends`
+    /// value, `any`, a base with no accepted construct signature, a base
+    /// constructor type whose static side is not an object surface) is the
+    /// unmodelled position; a member whose type is not modelled keeps its
+    /// key over the typed marker.
+    fn eval_class_value(
+        &mut self,
+        class: &crate::flow_slice_content::SliceClass,
+    ) -> Positional<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let base = match &class.heritage {
+            None => None,
+            Some(heritage) => {
+                // A hold inside the `extends` value is not this class's
+                // value: the class cannot be composed over a provisional base.
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(&heritage.base);
+                self.holds.truncate(holds_before);
+                let Positional::Value(constructor) = outcome else {
+                    return Positional::Unmodeled;
+                };
+                let mut type_arguments = Vec::with_capacity(heritage.type_arguments.len());
+                for argument in heritage.type_arguments.iter() {
+                    if signature_answer_is_frame_shadowed(self.dispatch, self.binder_env, argument)
+                    {
+                        return Positional::Unmodeled;
+                    }
+                    type_arguments.push(self.lower_body_type(argument.ty()));
+                }
+                match self.class_base(constructor, &type_arguments) {
+                    Some(base) => Some(base),
+                    None => return Positional::Unmodeled,
+                }
+            }
+        };
+        let mut instance_members = Vec::new();
+        let mut static_members = Vec::new();
+        for member in class.members.iter() {
+            let value = match &member.ty {
+                Some(ty)
+                    if !signature_answer_is_frame_shadowed(self.dispatch, self.binder_env, ty) =>
+                {
+                    self.lower_body_type(ty.ty())
+                }
+                _ => self.unmodeled_position(),
+            };
+            let surface_member = crate::semantic_query::SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::string(member.key.as_ref()),
+                value,
+                optional: member.optional,
+                readonly: member.readonly,
+                method_kind: member.method_kind,
+                has_implementation_body: member.method_kind.is_some(),
+                visibility: member.visibility,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                spans: member.spans,
+                declaration_origin: Some(Arc::from(self.canonical)),
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                merge_role: crate::semantic_query::MergeRoleStamp::default(),
+            };
+            if member.is_static {
+                static_members.push(surface_member);
+            } else {
+                instance_members.push(surface_member);
+            }
+        }
+        let own_instance = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::SurfaceView::from_members(instance_members, None),
+        ));
+        let surface = match &base {
+            Some(base) => self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[base.instance, own_instance], false),
+            None => own_instance,
+        };
+        let instance = graph.intern_node_with_scope(
+            SemanticNodeData::ClassExpressionInstance {
+                identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
+                    canonical_id: Arc::from(self.canonical),
+                    owner: self.owner,
+                    offset: class.offset,
+                    name: Arc::clone(&class.name),
+                    qualifier: class.qualifier.clone(),
+                }),
+                surface,
+            },
+            self.binder_env.scope.clone(),
+        );
+        let construct = |params: Arc<[crate::semantic_query::FunctionParam]>| {
+            graph.intern_node(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                params,
+                return_type: instance,
+                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                occurrence: None,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(instance),
+                signature_span: None,
+                return_type_span: None,
+            })
+        };
+        let construct_signatures: Vec<SemanticNodeId> = match (&class.constructor, &base) {
+            (Some(parameters), _) => {
+                let mut params = Vec::with_capacity(parameters.len());
+                for parameter in parameters.iter() {
+                    if signature_answer_is_frame_shadowed(
+                        self.dispatch,
+                        self.binder_env,
+                        &parameter.ty,
+                    ) {
+                        return Positional::Unmodeled;
+                    }
+                    params.push(crate::semantic_query::FunctionParam::synthetic(
+                        parameter.name.clone(),
+                        self.lower_body_type(parameter.ty.ty()),
+                        parameter.optional,
+                        parameter.rest,
+                    ));
+                }
+                vec![construct(Arc::from(params.into_boxed_slice()))]
+            }
+            (None, Some(base)) => base
+                .constructor_params
+                .iter()
+                .map(|params| construct(Arc::clone(params)))
+                .collect(),
+            (None, None) => vec![construct(Arc::from(Vec::new().into_boxed_slice()))],
+        };
+        if let Some(base) = &base {
+            for inherited in base.static_members.iter() {
+                if !static_members.iter().any(|own| own.key == inherited.key) {
+                    static_members.push(inherited.clone());
+                }
+            }
+        }
+        let constructor = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(static_members.into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ));
+        Positional::Value(match base.and_then(|base| base.type_variable) {
+            Some(type_variable) => self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[constructor, type_variable], false),
+            None => constructor,
+        })
+    }
+
+    /// The base a class expression's `extends` value provides, `None` when
+    /// the class cannot be composed over it (see [`Self::eval_class_value`]).
+    fn class_base(
+        &self,
+        constructor: SemanticNodeId,
+        type_arguments: &[SemanticNodeId],
+    ) -> Option<ClassBase> {
+        let graph = self.dispatch.graph();
+        let settled = self.dispatch.resolve_signature_source_carrier(
+            constructor,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        if matches!(
+            graph.node_data(settled).as_deref(),
+            Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Opaque(_))
+        ) {
+            return None;
+        }
+        let signatures = match self
+            .dispatch
+            .shared_signature_nodes(settled, crate::semantic_query::SignatureKind::Construct)
+        {
+            super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => signatures,
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+        };
+        // The base construct signatures that accept the `extends` type
+        // arguments, instantiated with them
+        // (`getInstantiatedConstructorsForTypeArguments`): a generic one
+        // takes the arguments (its defaults filling the rest), a
+        // non-generic one only an argument-less `extends`.
+        let mut constructors = Vec::with_capacity(signatures.len());
+        for signature in signatures {
+            let generic = match graph.node_data(signature).as_deref() {
+                Some(SemanticNodeData::Signature {
+                    type_parameters, ..
+                }) => !type_parameters.is_empty(),
+                _ => return None,
+            };
+            let accepted = if generic {
+                self.dispatch
+                    .instantiate_call_candidate(signature, type_arguments)
+            } else {
+                type_arguments.is_empty().then_some(signature)
+            };
+            if let Some(accepted) = accepted {
+                constructors.push(accepted);
+            }
+        }
+        let mut constructor_params = Vec::with_capacity(constructors.len());
+        let mut instance = None;
+        for signature in &constructors {
+            let Some(SemanticNodeData::Signature {
+                params,
+                return_type,
+                ..
+            }) = graph.node_data(*signature).as_deref().cloned()
+            else {
+                return None;
+            };
+            instance.get_or_insert(return_type);
+            constructor_params.push(params);
+        }
+        let instance = instance?;
+        // The base constructor's own type variable, when it is one (or an
+        // intersection carrying one).
+        let mut node = constructor;
+        let mut visited = rustc_hash::FxHashSet::default();
+        let type_variable = loop {
+            if !visited.insert(node) {
+                break None;
+            }
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Alias(target)) => node = *target,
+                Some(SemanticNodeData::TypeParam { .. }) => break Some(node),
+                Some(SemanticNodeData::Intersection(members)) => {
+                    break members.iter().copied().find(|member| {
+                        matches!(
+                            graph.node_data(*member).as_deref(),
+                            Some(SemanticNodeData::TypeParam { .. })
+                        )
+                    })
+                }
+                _ => break None,
+            }
+        };
+        // The static members the class inherits: a type-variable base
+        // contributes its statics through the intersection with it, an
+        // object base through its surface.
+        let static_members = match (type_variable, graph.node_data(settled).as_deref()) {
+            (Some(_), _) => Vec::new(),
+            (None, Some(SemanticNodeData::Object(view))) => view.positive_members().to_vec(),
+            (None, _) => return None,
+        };
+        Some(ClassBase {
+            constructor_params,
+            instance,
+            static_members,
+            type_variable,
+        })
     }
 
     /// Evaluate a right-hand side under assignment context. Object literals
@@ -13899,6 +14186,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     *has_declared_return,
                 ))
             }
+            crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
 
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own

@@ -637,7 +637,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // un-instantiated `InstantiationRef` stop, and the
             // declaration-keeping mode's stop at a named `DeclRef`.
             let is_residual = match data.as_ref() {
-                SemanticNodeData::DeclRef { .. } => resolve_declaration_refs,
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. } => resolve_declaration_refs,
                 SemanticNodeData::InstantiationRef { .. } => instantiate_instantiation_refs,
                 _ => false,
             };
@@ -656,6 +657,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 break Some(reasons);
             }
             let resolved = match data.as_ref() {
+                // A class expression's instance resolves to the instance surface
+                // it carries — the body a `DeclRef` resolves to, already in hand.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => *surface,
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the `ScopeId { canonical_id, local_scope: None }` shape the
                 // canonical resolver issues).

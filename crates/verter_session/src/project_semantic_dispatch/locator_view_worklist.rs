@@ -1237,6 +1237,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(index)
                 .map(|argument| (*argument, context.into_structural_provenance())),
             SemanticNodeData::Alias(target) => (index == 0).then_some((*target, context)),
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                (index == 0).then_some((*surface, context))
+            }
             SemanticNodeData::TypeParam {
                 constraint,
                 default,

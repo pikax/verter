@@ -92,6 +92,17 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             active.remove(&node);
             return result;
         }
+        // A class expression's instance raises to its raised instance
+        // surface — the declaration emitter's own spelling of it, since a
+        // type expression has no name for a class expression.
+        SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+            if !active.insert(node) {
+                return Some(alg.opaque_sentinel(&QueryError::RaiseAliasCycle));
+            }
+            let result = fold_node(alg, dispatch, *surface, active);
+            active.remove(&node);
+            return result;
+        }
         SemanticNodeData::Union(members) => {
             // Presence-aware: a PRESENT-but-unraisable member fails the WHOLE
             // composite (never silently erased).

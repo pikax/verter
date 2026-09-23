@@ -951,6 +951,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(child) => stack.push(*child),
+                // A class expression's instance surface can reach the outer
+                // binders of the declaration it is authored under.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     stack.extend(
                         composite
