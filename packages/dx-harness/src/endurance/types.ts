@@ -8,6 +8,8 @@
  */
 import type { EditorNeutralProviderRoute } from "@verter/lsp-test-client";
 
+import type { ChurnPlateauBands } from "./scenarios/churn.js";
+
 /** The three verter-lsp type-provider routes the harness can exercise. */
 export type EnduranceProviderRoute = EditorNeutralProviderRoute;
 
@@ -193,30 +195,30 @@ export interface EnduranceConfig {
    */
   readonly churnSlopeWindows: number;
   /**
-   * Retained bytes per cycle the SERVER may show over the late span
-   * (VERTER_ENDURANCE_CHURN_SLOPE_BYTES_PER_CYCLE, default 16 KiB): its
-   * least-squares rate over the run's second half, one level shift set aside.
-   * A settled session sits at ~0 either side there; one retained document
-   * version is hundreds of KiB, so a real per-cycle retainer breaches it.
+   * The absolute bands the churn plateau verdicts are read against (see
+   * `decideChurnSlope`): the server's exact-heap rise
+   * (VERTER_ENDURANCE_CHURN_HEAP_PLATEAU_BYTES, default 2 MiB), the server's
+   * resident-set settling allowance (VERTER_ENDURANCE_CHURN_RSS_SETTLING_BYTES,
+   * default 8 MiB), a child's per-segment resident-set rise
+   * (VERTER_ENDURANCE_CHURN_CHILD_PLATEAU_BYTES, default 8 MiB), the smallest
+   * increment read as a level shift (VERTER_ENDURANCE_CHURN_SHIFT_BYTES,
+   * default 8 MiB) and the readings a plateau needs
+   * (VERTER_ENDURANCE_CHURN_MIN_PLATEAU_READINGS, default 5). Absolute, so a
+   * longer run has to fit the same band.
    */
-  readonly churnSlopeBytesPerCycle: number;
+  readonly churnPlateauBands: ChurnPlateauBands;
   /**
-   * The late-span bound for a CHILD of the server — the type-provider engine
-   * (VERTER_ENDURANCE_CHURN_SLOPE_CHILD_BYTES_PER_CYCLE, default 64 KiB). The
-   * provider is a Go runtime whose resident set follows its collector's heap
-   * goal and moves between plateaus; the bound leaves room for that drift and
-   * stays below half the ~150 KiB/cycle it leaked before per-version documents
-   * were closed.
+   * Cycles the churn run may add past the planned count to prove a plateau
+   * after a late level shift (VERTER_ENDURANCE_CHURN_MAX_EXTENSION_CYCLES,
+   * default 400).
    */
-  readonly churnSlopeChildBytesPerCycle: number;
+  readonly churnMaxExtensionCycles: number;
   /**
-   * Retained-object growth each lifetime counter may show per measured cycle
-   * (VERTER_ENDURANCE_CHURN_RETENTION_OBJECTS_PER_CYCLE, default 0.25). A store
-   * that amortises its sweep leaves a few superseded versions behind between
-   * sweeps; a retainer that keeps one object per document version adds at
-   * least one per cycle and breaches at any run length.
+   * Objects a retained-object counter's fitted late-span rise may reach
+   * before a significantly rising trend counts as a breach
+   * (VERTER_ENDURANCE_CHURN_RETENTION_PLATEAU_OBJECTS, default 4).
    */
-  readonly churnRetentionObjectsPerCycle: number;
+  readonly churnRetentionPlateauObjects: number;
   /** Receipt destination (file path or directory), if set. */
   readonly receiptPath: string | null;
 }

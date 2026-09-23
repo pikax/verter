@@ -402,6 +402,7 @@ pub struct RetentionStatistics {
     pub carrier_candidates: usize,
     pub publication_lanes: usize,
     pub semantic_nodes: usize,
+    pub semantic_node_slots: usize,
     pub semantic_memo_entries: usize,
     pub unresolved_reach: usize,
     pub relation_proofs: usize,
@@ -421,6 +422,11 @@ pub struct RetentionStatistics {
     pub refusals_pressure: u64,
     pub refusals_oversized: u64,
     pub refusals_active: u64,
+    /// Bytes the platform allocator reports as currently allocated from the
+    /// process heap (see [`crate::heap_in_use`]), or `None` where it cannot
+    /// say. Unlike a resident-set figure it excludes allocator settling, so a
+    /// long session's retained bytes can be read exactly.
+    pub heap_in_use_bytes: Option<u64>,
 }
 
 impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
@@ -433,6 +439,7 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             carrier_candidates: snapshot.carrier_candidates,
             publication_lanes: snapshot.publication_lanes,
             semantic_nodes: snapshot.semantic_nodes,
+            semantic_node_slots: snapshot.semantic_node_slots,
             semantic_memo_entries: snapshot.semantic_memo_entries,
             unresolved_reach: snapshot.unresolved_reach,
             relation_proofs: snapshot.relation_proofs,
@@ -451,6 +458,7 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             refusals_pressure: snapshot.refusals_pressure,
             refusals_oversized: snapshot.refusals_oversized,
             refusals_active: snapshot.refusals_active,
+            heap_in_use_bytes: crate::heap_in_use::heap_in_use_bytes(),
         }
     }
 }

@@ -950,3 +950,63 @@ fn a_job_dropped_after_a_reset_does_not_release_against_the_new_ledger() {
     let _ = dag.complete(&identity);
     assert_eq!(dag.in_flight_io_permits(), 0);
 }
+
+/// A superseded job's node share was dropped at `cancel`; when its queued
+/// closure finally starts, the job's share is the last one, so the permit
+/// returns there — outside any pump — and the driver must be woken.
+///
+/// Discriminating: without the wake, the freed permit sits unused until the
+/// driver's idle re-pump (5 s). In the WSP6 churn lane (a document closed and
+/// reopened in a loop) that put a 5 s stall under roughly one request in
+/// five.
+#[test]
+fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
+    let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+    let _ = submit_io(&mut dag, "/churn.vue", Priority::Background);
+    let job = dag.next_ready().expect("the load dispatches");
+    let _ = dag.cancel(&job.identity);
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        1,
+        "the superseded job still queued in the pool holds its permit"
+    );
+
+    let (inbox, wakes) = crossbeam_channel::unbounded();
+    let _job = job.started(&inbox);
+
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        0,
+        "the permit returns when the closure starts"
+    );
+    assert!(
+        matches!(wakes.try_recv(), Ok(crate::driver::Submission::Wake)),
+        "returning the permit outside a pump wakes the driver"
+    );
+}
+
+/// A live job's node keeps its share until `complete`, so starting the
+/// closure neither returns the permit nor posts a wake: the completion path
+/// returns it and pumps, exactly as before the share existed.
+#[test]
+fn a_started_live_job_leaves_the_permit_with_its_node() {
+    let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+    let _ = submit_io(&mut dag, "/churn.vue", Priority::Background);
+    let job = dag.next_ready().expect("the load dispatches");
+
+    let (inbox, wakes) = crossbeam_channel::unbounded();
+    let job = job.started(&inbox);
+
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        1,
+        "the running job's node holds the permit"
+    );
+    assert!(
+        wakes.try_recv().is_err(),
+        "no wake while the node holds the permit"
+    );
+    let identity = job.identity.clone();
+    let _ = dag.complete(&identity);
+    assert_eq!(dag.in_flight_io_permits(), 0);
+}

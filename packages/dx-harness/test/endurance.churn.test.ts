@@ -110,9 +110,10 @@ describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
     // WSP6-AC1 is a claim about the TRAJECTORY, not the destination: "1000
     // open/edit/close cycles show no unbounded retained-byte slope after
     // quiescence". The envelope above admits a constant per-cycle drip that
-    // happens to land inside `baseline * factor + floor`; each process's slope
-    // over the run's second half (allocator settling has levelled off there, a
-    // retainer has not), against its own bound, does not, and it refuses to
+    // happens to land inside `baseline * factor + floor`; a plateau over the
+    // run's second half does not: the server's exact heap figure must hold
+    // level within an absolute band and show no trend the noise cannot
+    // explain, and each resident set must fit its own band. It refuses to
     // evaluate a run shorter than the criterion's own 1000 cycles (a shorter
     // run is a smoke lane, never this proof).
     expect(

@@ -4933,8 +4933,12 @@ pub struct HostRetentionSnapshot {
     pub carrier_candidates: usize,
     /// Publication lanes the carrier store retains (live and terminal).
     pub publication_lanes: usize,
-    /// Interned semantic-graph nodes (the arena never shrinks on its own).
+    /// Live interned semantic-graph nodes (payloads no close has released).
     pub semantic_nodes: usize,
+    /// Node slots the semantic arena physically holds: live chunks times the
+    /// chunk size. Bounded by the live set, so growth here is storage the
+    /// release path failed to give back.
+    pub semantic_node_slots: usize,
     /// Populated semantic memo slots across every family.
     pub semantic_memo_entries: usize,
     /// Semantic-graph `unresolved_reach` entries.

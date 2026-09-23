@@ -507,6 +507,34 @@ pub struct ReadyJob {
     pub capacity: Option<Arc<DagCapacityReservation>>,
 }
 
+impl ReadyJob {
+    /// A pool closure has started running this job: drop the job's share of
+    /// its admission permit, waking the driver when that share was the last.
+    ///
+    /// The permit is shared between the DAG node and the dispatched job (see
+    /// the node's `reservation`) so that a closure still QUEUED in a pool
+    /// always holds one: queued closures can then never outnumber the
+    /// budget, and the transport (sized to dominate it) never reports `Full`.
+    /// Once the closure runs it occupies a pool thread, not a transport slot,
+    /// so the job's share has done its work. While the node is live its own
+    /// share keeps the permit until `complete` / `cancel`, exactly as before.
+    /// A superseded job's node share was dropped at `cancel`, so the job's
+    /// share is the last one and the permit returns HERE, outside any pump:
+    /// without a wake, the ready work it admits would wait for the driver's
+    /// idle re-pump.
+    #[must_use]
+    pub(crate) fn started(
+        mut self,
+        inbox_sender: &crossbeam_channel::Sender<crate::driver::Submission>,
+    ) -> Self {
+        if let Some(reservation) = self.capacity.take().and_then(Arc::into_inner) {
+            drop(reservation);
+            let _ = inbox_sender.send(crate::driver::Submission::Wake);
+        }
+        self
+    }
+}
+
 /// Per-file aggregation of request groups, keyed by `(canonical, generation)`.
 ///
 /// Each entry holds the per-target waiter groups for that file/generation.

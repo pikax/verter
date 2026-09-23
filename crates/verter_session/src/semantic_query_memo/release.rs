@@ -198,50 +198,30 @@ impl SemanticGraphStore {
     fn release_relation_tables(&self, dead: &FxHashSet<SemanticNodeId>) -> (usize, usize) {
         use crate::semantic_query::{RelateKeyId, RelationProof};
 
-        let mut released_keys: FxHashSet<RelateKeyId> = FxHashSet::default();
-        {
-            let mut table = self.relate_key_table.lock();
-            let (slots, index) = &mut *table;
-            for (ordinal, slot) in slots.iter_mut().enumerate() {
-                let stale = slot
-                    .as_ref()
-                    .is_some_and(|key| dead.contains(&key.source) || dead.contains(&key.target));
-                if !stale {
-                    continue;
+        let released_keys: FxHashSet<RelateKeyId> = self
+            .relate_key_table
+            .lock()
+            .release_where(|key| dead.contains(&key.source) || dead.contains(&key.target))
+            .into_iter()
+            .map(RelateKeyId)
+            .collect();
+        let released_proofs = self
+            .relation_proof_table
+            .lock()
+            .release_where(|proof| match proof {
+                RelationProof::Assignable { witness } => witness
+                    .sub_derivations
+                    .iter()
+                    .any(|sub| dead.contains(&sub.source) || dead.contains(&sub.target)),
+                RelationProof::NotAssignable { failing_sub, .. } => {
+                    dead.contains(&failing_sub.source) || dead.contains(&failing_sub.target)
                 }
-                if let Some(key) = slot.take() {
-                    index.remove(&key);
-                    released_keys.insert(RelateKeyId(ordinal as u32));
+                RelationProof::BudgetExceeded { .. } => false,
+                RelationProof::CoinductiveCycle { keys } => {
+                    keys.iter().any(|key| released_keys.contains(key))
                 }
-            }
-        }
-        let mut released_proofs = 0usize;
-        {
-            let mut table = self.relation_proof_table.lock();
-            let (slots, index) = &mut *table;
-            for slot in slots.iter_mut() {
-                let stale = slot.as_ref().is_some_and(|proof| match proof {
-                    RelationProof::Assignable { witness } => witness
-                        .sub_derivations
-                        .iter()
-                        .any(|sub| dead.contains(&sub.source) || dead.contains(&sub.target)),
-                    RelationProof::NotAssignable { failing_sub, .. } => {
-                        dead.contains(&failing_sub.source) || dead.contains(&failing_sub.target)
-                    }
-                    RelationProof::BudgetExceeded { .. } => false,
-                    RelationProof::CoinductiveCycle { keys } => {
-                        keys.iter().any(|key| released_keys.contains(key))
-                    }
-                });
-                if !stale {
-                    continue;
-                }
-                if let Some(proof) = slot.take() {
-                    index.remove(&proof);
-                    released_proofs += 1;
-                }
-            }
-        }
+            })
+            .len();
         (released_keys.len(), released_proofs)
     }
 }
@@ -286,5 +266,48 @@ fn result_names_dead(
             dead.contains(id)
         }
         _ => false,
+    }
+}
+
+impl SemanticGraphStore {
+    /// Whether a warm candidate's result still names a live node.
+    ///
+    /// Until the first [`Self::release_canonical`] every id is live and
+    /// this is one relaxed load. Afterwards a `TypeNode` / `Recursive`
+    /// result naming a tombstoned node is reported dead so the warm read
+    /// treats the candidate as a miss: the release drains every entry the
+    /// reverse index and the key / result sweep can find, but this is the
+    /// read-side guarantee that a released node is never SERVED from the
+    /// warm memo whatever drained it. Non-node value domains are not
+    /// inspected here (they carry no arena id at top level).
+    #[inline]
+    pub(super) fn result_is_live(&self, result: &QueryResult<SemanticQueryValue>) -> bool {
+        if !self.released_any.load(Ordering::Relaxed) {
+            return true;
+        }
+        match result {
+            QueryResult::Value(SemanticQueryValue::TypeNode(id)) | QueryResult::Recursive(id) => {
+                self.arena.is_live(*id)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether a family identity names a node whose payload a document
+    /// close released. Such a family can never be looked up by a live
+    /// producer (the id is never re-minted): the only way to present it is
+    /// a stale holder re-dispatching a released ordinal after the close,
+    /// and admitting its result would leave a candidate no later release
+    /// can find — keyed on an id that is dead BEFORE that release runs, it
+    /// is never in the release's dead set. The publish paths refuse it and
+    /// the close sweep drops it. One relaxed load until the first release.
+    #[inline]
+    pub(super) fn family_names_released_node(&self, family: &FamilyKey) -> bool {
+        if !self.released_any.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut released = false;
+        family.for_each_node_id(|id| released |= !self.arena.is_live(id));
+        released
     }
 }

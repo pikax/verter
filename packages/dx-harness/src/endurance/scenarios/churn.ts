@@ -295,6 +295,8 @@ export interface RetentionReading {
   readonly publicationLanes: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly semanticNodes: number;
+  /** Node slots the semantic arena physically holds (chunked; bounded by the live set). */
+  readonly semanticNodeSlots: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly semanticMemoEntries: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
@@ -321,6 +323,12 @@ export interface RetentionReading {
   readonly retainedBytes: number;
   /** Reservations the aggregate account refused for pressure, lifetime. */
   readonly refusalsPressure: number;
+  /**
+   * Bytes the server's platform allocator reports as currently allocated
+   * (`heapInUseBytes`), or null where the platform cannot say. Exact where a
+   * resident-set figure is not: it excludes allocator settling.
+   */
+  readonly heapInUseBytes: number | null;
   /** Populated semantic memo slots per family label (reported, not bounded). */
   readonly semanticMemoFamilies?: Readonly<Record<string, number>>;
 }
@@ -334,6 +342,7 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "carrierCandidates",
   "publicationLanes",
   "semanticNodes",
+  "semanticNodeSlots",
   "semanticMemoEntries",
   "unresolvedReach",
   "relationProofs",
@@ -365,6 +374,9 @@ export function extractRetentionReading(snapshot: unknown): RetentionReading | n
     if (typeof value !== "number" || !Number.isFinite(value)) return null;
     reading[key] = value;
   }
+  const heap = record.heapInUseBytes;
+  (reading as { heapInUseBytes?: number | null }).heapInUseBytes =
+    typeof heap === "number" && Number.isFinite(heap) ? heap : null;
   const families = record.semanticMemoFamilies;
   if (families && typeof families === "object") {
     const byFamily: Record<string, number> = {};
@@ -402,29 +414,68 @@ export interface ChurnSlopeSegment {
   readonly cycles: number;
   readonly growthBytes: number;
   readonly bytesPerCycle: number;
-  /**
-   * Whether this one window's rate is within the bound. Evidence, not the
-   * verdict: one short window is dominated by allocator and GC noise (see
-   * {@link decideChurnSlope}).
-   */
-  readonly withinBound: boolean;
 }
 
+/** The bands the plateau verdicts are read against (see {@link decideChurnSlope}). */
+export interface ChurnPlateauBands {
+  /**
+   * How far the server's exact heap figure may rise over the late span, in
+   * bytes. An absolute band, not a per-cycle allowance: a longer run has to
+   * fit the same band.
+   */
+  readonly heapPlateauBytes: number;
+  /**
+   * How far the server's resident set may rise over the late span: the
+   * allocator's settling allowance. The exact heap figure, not this, is the
+   * server's retention instrument.
+   */
+  readonly rssSettlingBytes: number;
+  /** How far a child's resident set may rise within one plateau segment. */
+  readonly childPlateauBytes: number;
+  /** The smallest single-window increment read as a level shift. */
+  readonly shiftBytes: number;
+  /** Readings a segment needs before its plateau counts as proven. */
+  readonly minPlateauReadings: number;
+}
+
+/** The defaults of {@link ChurnPlateauBands}. */
+export const CHURN_PLATEAU_BANDS: ChurnPlateauBands = {
+  heapPlateauBytes: 2 * 1024 ** 2,
+  rssSettlingBytes: 8 * 1024 ** 2,
+  childPlateauBytes: 8 * 1024 ** 2,
+  shiftBytes: 8 * 1024 ** 2,
+  minPlateauReadings: 5,
+};
+
 /**
- * The single largest increment a late-span rate set aside as a one-time level
- * shift. On the tree-level figure it is attributed to the member that grew
- * most across it.
+ * A least-squares fit over one span of quiesced readings, read as a plateau
+ * test: the fitted rise across the span must fit an absolute band, and the
+ * slope must not be significantly positive (its lower confidence bound —
+ * 2.5 standard errors from the residuals — must not clear zero).
  */
+export interface PlateauCheck {
+  readonly fromCycle: number;
+  readonly toCycle: number;
+  readonly readings: number;
+  /** Least-squares slope, in the reading's unit per cycle. */
+  readonly perCycle: number;
+  /** Standard error of that slope, from the fit's residuals. */
+  readonly standardError: number;
+  /** The fitted rise across the span: slope times the span's cycles. */
+  readonly riseOverSpan: number;
+  readonly band: number;
+  readonly withinBand: boolean;
+  /** `perCycle - 2.5 * standardError > 0`: a trend the noise cannot explain. */
+  readonly significantlyRising: boolean;
+  /** Within the band and not significantly rising. */
+  readonly plateau: boolean;
+}
+
+/** A single-window increment set aside as a one-time level shift. */
 export interface ChurnLevelShift {
   readonly fromCycle: number;
   readonly toCycle: number;
   readonly growthBytes: number;
-  /** The member whose resident set grew most across the shift, if any grew. */
-  readonly member: {
-    readonly pid: number;
-    readonly image: string | null;
-    readonly growthBytes: number;
-  } | null;
 }
 
 /** One process-tree member's late-span verdict. */
@@ -433,45 +484,50 @@ export interface ChurnMemberSlope {
   readonly image: string | null;
   /** `root`: the spawned server. `child`: a descendant (the type-provider engine). */
   readonly role: "root" | "child";
-  readonly allowedBytesPerCycle: number;
-  /** Least-squares rate over the late span, as measured. */
-  readonly lateBytesPerCycle: number;
-  /** This member's largest late increment, set aside as a one-time level shift. */
+  /**
+   * The server's exact heap figure over the late span (the retention
+   * instrument), or null for a child or when the server reports none.
+   */
+  readonly heap: PlateauCheck | null;
+  /**
+   * Resident-set plateau segments over the late span: one, or two around a
+   * level shift.
+   */
+  readonly rss: readonly PlateauCheck[];
   readonly levelShift: ChurnLevelShift | null;
-  /** The late-span rate with that level shift set aside: this member's verdict figure. */
-  readonly verdictBytesPerCycle: number;
+  /**
+   * A level shift sits too close to the end for its post-shift segment to
+   * prove a plateau: not a pass, and the scenario extends the run.
+   */
+  readonly inconclusive: boolean;
   readonly withinBound: boolean;
 }
 
-/** The retained-byte slope verdict over the quiesced trajectory. */
+/** The retained-byte plateau verdict over the quiesced trajectory. */
 export interface ChurnSlopeCheck {
   readonly observable: boolean;
   readonly cyclesCompleted: number;
   readonly minimumCycles: number;
-  /** The server's (tree root's) late-span bound. */
-  readonly allowedBytesPerCycle: number;
-  /** The bound for every descendant (the type-provider engine). */
-  readonly allowedChildBytesPerCycle: number;
+  readonly bands: ChurnPlateauBands;
   /** Every consecutive window's whole-tree rate: the trajectory, reported as evidence. */
   readonly segments: readonly ChurnSlopeSegment[];
-  /** The whole-tree rate over the final window. */
-  readonly finalBytesPerCycle: number | null;
-  /** First cycle of the late span the verdict is read over (the run's second half). */
+  /** First cycle of the late span the verdict is read over. */
   readonly lateFromCycle: number | null;
-  /** Whole-tree least-squares rate over the late span, as measured (evidence). */
+  /** Whole-tree least-squares rate over the late span (evidence). */
   readonly lateBytesPerCycle: number | null;
-  /** The whole tree's largest late increment, set aside (evidence). */
-  readonly levelShift: ChurnLevelShift | null;
-  /** The whole-tree late-span rate with that level shift set aside (evidence). */
-  readonly verdictBytesPerCycle: number | null;
-  /** The verdict: every member's late-span rate against its own bound. */
+  /** The verdict: every member against its own plateau bands. */
   readonly members: readonly ChurnMemberSlope[];
+  /** Some member's post-shift plateau is unproven: extend the run. */
+  readonly inconclusive: boolean;
   readonly pass: boolean;
   readonly detail: string;
 }
 
-/** Fewest quiesced readings the late span must hold for its slope to mean anything. */
+/** Fewest quiesced readings the late span must hold for a plateau to mean anything. */
 export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
+
+/** Slope significance: the lower confidence bound is this many standard errors below the slope. */
+const PLATEAU_CONFIDENCE_STANDARD_ERRORS = 2.5;
 
 /**
  * Decide WSP6-AC1's actual claim: after quiescence, 1000 open/edit/close cycles
@@ -482,37 +538,40 @@ export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
  * floor admits ~83 MiB of growth, so ~85 KiB retained on every post-warm-up
  * cycle — a strictly LINEAR leak, the exact shape the criterion forbids — lands
  * inside the envelope and reads as a pass. An envelope describes a destination;
- * the criterion is about the trajectory.
+ * the criterion is about the trajectory. A per-cycle allowance cannot express
+ * it either: any rate under the allowance is a leak with a lower gradient, and
+ * the growth it admits scales with the session.
  *
- * What separates bounded from unbounded is what the trajectory does LATE, and
- * each process in the tree has its own bounded dynamics:
+ * So the verdict is a PLATEAU over the late span (every reading from the
+ * run's midpoint on), read per process against absolute bands:
  *
- *  - The server settles. With every retained-object counter flat and its live
- *    heap flat (a heap profile over the whole run: ~40 MiB, first and last
- *    quarters within 1 MiB), its committed memory still climbs for several
+ *  - The server's exact heap figure (`heapInUseBytes`, the allocator's own
+ *    in-use count) is the retention instrument. Its fitted rise over the
+ *    late span must fit `heapPlateauBytes`, and its slope must not be
+ *    significantly positive. Unlike a resident-set figure it holds no
+ *    allocator settling, so a slow linear retainer shows as a trend the
+ *    noise cannot explain, however long it takes. A server that reports no
+ *    such figure has not produced the evidence: UNAVAILABLE, never a pass.
+ *  - The server's resident set must fit `rssSettlingBytes` over the late
+ *    span. Measured with every retained-object counter and the exact heap
+ *    figure flat, the server's committed memory still climbs for several
  *    hundred cycles while the allocator reaches steady-state fragmentation,
- *    then levels off: ~15 MiB before the run's midpoint, a few MiB after it.
- *    An early window of that curve reads 60-90 KiB/cycle.
- *  - The type-provider child is a Go runtime whose resident set follows its
- *    garbage collector's heap goal, not its live objects. It sits in one of two
- *    plateaus (~95-100 MiB, ~124-129 MiB) and moves up once, at a random cycle,
- *    by 20-29 MiB, sometimes with a few MiB of drift around the move (4 of 11
- *    runs, anywhere from cycle ~150 to ~900), then holds for hundreds of
- *    cycles.
+ *    a few MiB of it after the midpoint. That band is allocator settling,
+ *    read against an exact instrument that would show a retainer instead.
+ *  - A child (the type-provider engine, a Go runtime whose resident set
+ *    follows its collector's heap goal) has no exact figure. Its resident set
+ *    must fit `childPlateauBytes` within each plateau segment. It moves
+ *    between plateaus once in some runs, by 20-35 MiB at a random cycle: one
+ *    single-window increment of at least `shiftBytes` is read as that level
+ *    shift, and the segments before and after it must each be a plateau. A
+ *    post-shift segment shorter than `minPlateauReadings` proves nothing —
+ *    the verdict is INCONCLUSIVE, not a pass, and the scenario extends the
+ *    run until it is proven or the extension budget is spent. A second shift
+ *    is a breach.
  *
- * A retainer, by contrast, keeps its rate to the end of the run. So each member
- * is judged on its own least-squares rate over the LATE span (every reading
- * from the run's midpoint on), with that member's single largest late
- * increment set aside as a possible one-time level shift, against its own
- * bound: the server against `allowedBytesPerCycle`, a child against
- * `allowedChildBytesPerCycle`, which leaves room for garbage-collector drift
- * and still sits below half of the ~150 KiB/cycle the provider child leaked
- * before this node closed its per-version documents. A linear retainer in
- * either process — one retained document version is hundreds of KiB — still
- * breaches with one increment removed; two level shifts in one member, or a
- * slope that survives the removal, breach too. The whole-tree late rate and
- * every window's whole-tree rate stay in the detail as evidence, and the
- * envelope still bounds the total growth any shift can add.
+ * The bands are absolute, so extending the run tightens the test rather than
+ * loosening it. Every window's whole-tree rate stays in the detail as
+ * evidence, and the envelope still bounds the total growth any shift can add.
  *
  * Refused outright — `observable: false, pass: false`, never a pass — when:
  *
@@ -520,6 +579,7 @@ export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
  *  - fewer than two post-baseline windows exist, so there is no trajectory to read;
  *  - the late span holds fewer than {@link CHURN_SLOPE_MIN_LATE_READINGS}
  *    readings, or a member appears in fewer of them than that;
+ *  - the server reported no exact heap figure at some late reading;
  *  - any checkpoint was read without the host reaching quiescence, so the figure
  *    includes in-flight work rather than what the session retains;
  *  - any checkpoint is not a complete whole-tree observation;
@@ -530,29 +590,30 @@ export const CHURN_SLOPE_MIN_LATE_READINGS = 5;
 export function decideChurnSlope(
   checkpoints: readonly ChurnCheckpoint[],
   options: {
-    readonly allowedBytesPerCycle: number;
     readonly minimumCycles: number;
-    readonly allowedChildBytesPerCycle?: number;
+    readonly bands?: Partial<ChurnPlateauBands>;
+    /**
+     * First cycle of the late span. Defaults to the midpoint between the
+     * baseline and the final reading; the scenario pins it to the planned
+     * run's midpoint so an extension lengthens the span instead of moving it.
+     */
+    readonly lateFromCycle?: number;
   },
 ): ChurnSlopeCheck {
-  const { allowedBytesPerCycle, minimumCycles } = options;
-  const allowedChildBytesPerCycle =
-    options.allowedChildBytesPerCycle ?? CHURN_CHILD_SLOPE_BYTES_PER_CYCLE;
+  const { minimumCycles } = options;
+  const bands: ChurnPlateauBands = { ...CHURN_PLATEAU_BANDS, ...options.bands };
   const cyclesCompleted =
     checkpoints.length > 0 ? checkpoints[checkpoints.length - 1].cyclesCompleted : 0;
   const unevaluated = (detail: string): ChurnSlopeCheck => ({
     observable: false,
     cyclesCompleted,
     minimumCycles,
-    allowedBytesPerCycle,
-    allowedChildBytesPerCycle,
+    bands,
     segments: [],
-    finalBytesPerCycle: null,
     lateFromCycle: null,
     lateBytesPerCycle: null,
-    levelShift: null,
-    verdictBytesPerCycle: null,
     members: [],
+    inconclusive: false,
     pass: false,
     detail,
   });
@@ -609,49 +670,33 @@ export function decideChurnSlope(
       );
     }
     const growthBytes = (to.sample.totalBytes as number) - (from.sample.totalBytes as number);
-    const bytesPerCycle = growthBytes / cycles;
     segments.push({
       fromCycle: from.cyclesCompleted,
       toCycle: to.cyclesCompleted,
       cycles,
       growthBytes,
-      bytesPerCycle,
-      withinBound: bytesPerCycle <= allowedBytesPerCycle,
+      bytesPerCycle: growthBytes / cycles,
     });
   }
 
-  // The late span: every reading from the run's midpoint on.
+  // The late span: every reading from the midpoint on.
   const midpoint =
+    options.lateFromCycle ??
     checkpoints[0].cyclesCompleted + (cyclesCompleted - checkpoints[0].cyclesCompleted) / 2;
   const late = checkpoints.filter((checkpoint) => checkpoint.cyclesCompleted >= midpoint);
   if (late.length < CHURN_SLOPE_MIN_LATE_READINGS) {
     return unevaluated(
       `the late span (cycle ${Math.ceil(midpoint)} on) holds ${late.length} quiesced ` +
-        `reading(s), below the ${CHURN_SLOPE_MIN_LATE_READINGS} its slope needs — raise ` +
+        `reading(s), below the ${CHURN_SLOPE_MIN_LATE_READINGS} a plateau needs — raise ` +
         "VERTER_ENDURANCE_CHURN_SLOPE_WINDOWS; the slope was NOT evaluated",
     );
   }
   const xs = late.map((checkpoint) => checkpoint.cyclesCompleted);
-
-  // Whole-tree evidence.
-  const tree = slopeWithOneShiftSetAside(
+  const lateBytesPerCycle = leastSquares(
     xs,
     late.map((checkpoint) => checkpoint.sample.totalBytes as number),
-  );
-  const treeShift: ChurnLevelShift | null =
-    tree.shiftIndex > 0
-      ? {
-          fromCycle: xs[tree.shiftIndex - 1],
-          toCycle: xs[tree.shiftIndex],
-          growthBytes: tree.shiftBytes,
-          member: largestMemberGrowth(
-            late[tree.shiftIndex - 1].sample,
-            late[tree.shiftIndex].sample,
-          ),
-        }
-      : null;
+  ).slope;
 
-  // The verdict: every member against its own bound.
   const rootPid = checkpoints[0].sample.members[0]?.pid;
   const memberPids = [
     ...new Set(late.flatMap((checkpoint) => checkpoint.sample.members.map((m) => m.pid))),
@@ -667,74 +712,109 @@ export function decideChurnSlope(
     if (readings.length < CHURN_SLOPE_MIN_LATE_READINGS) {
       return unevaluated(
         `process ${pid} appears in ${readings.length} late reading(s), below the ` +
-          `${CHURN_SLOPE_MIN_LATE_READINGS} a slope needs — the slope was NOT evaluated`,
+          `${CHURN_SLOPE_MIN_LATE_READINGS} a plateau needs — the slope was NOT evaluated`,
       );
     }
-    const memberXs = readings.map((reading) => reading.cycle);
-    const fit = slopeWithOneShiftSetAside(
-      memberXs,
-      readings.map((reading) => reading.bytes),
-    );
     const role = pid === rootPid ? "root" : "child";
-    const allowed = role === "root" ? allowedBytesPerCycle : allowedChildBytesPerCycle;
+    const cycles = readings.map((reading) => reading.cycle);
+    const rss = readings.map((reading) => reading.bytes);
+
+    // The server: its exact heap figure is the retention instrument.
+    let heap: PlateauCheck | null = null;
+    if (role === "root") {
+      const heapReadings = late.map((checkpoint) => checkpoint.retention?.heapInUseBytes ?? null);
+      const missing = heapReadings.some((bytes) => bytes === null);
+      if (missing) {
+        return unevaluated(
+          "the server reported no exact heap figure (retention.heapInUseBytes) at a late " +
+            "reading, so its retained bytes are UNAVAILABLE — NOT evaluated",
+        );
+      }
+      heap = plateau(xs, heapReadings as number[], bands.heapPlateauBytes, true);
+    }
+
+    // The resident set: one plateau, or two around a single level shift.
+    const shiftIndex = largestIncrement(rss);
+    const shiftBytes = shiftIndex > 0 ? rss[shiftIndex] - rss[shiftIndex - 1] : 0;
+    const band = role === "root" ? bands.rssSettlingBytes : bands.childPlateauBytes;
+    let levelShift: ChurnLevelShift | null = null;
+    let inconclusive = false;
+    let rssChecks: PlateauCheck[];
+    let secondShift = false;
+    if (shiftIndex > 0 && shiftBytes >= bands.shiftBytes) {
+      levelShift = {
+        fromCycle: cycles[shiftIndex - 1],
+        toCycle: cycles[shiftIndex],
+        growthBytes: shiftBytes,
+      };
+      const before = { xs: cycles.slice(0, shiftIndex), ys: rss.slice(0, shiftIndex) };
+      const after = { xs: cycles.slice(shiftIndex), ys: rss.slice(shiftIndex) };
+      secondShift = [before, after].some((segment) => {
+        const index = largestIncrement(segment.ys);
+        return index > 0 && segment.ys[index] - segment.ys[index - 1] >= bands.shiftBytes;
+      });
+      inconclusive = after.ys.length < bands.minPlateauReadings;
+      rssChecks = [before, after]
+        .filter((segment) => segment.ys.length >= 2)
+        .map((segment) => plateau(segment.xs, segment.ys, band, false));
+    } else {
+      rssChecks = [plateau(cycles, rss, band, false)];
+    }
+    const withinBound =
+      !inconclusive &&
+      !secondShift &&
+      rssChecks.every((check) => check.plateau) &&
+      (heap === null || heap.plateau);
     members.push({
       pid,
       image: readings[0].image,
       role,
-      allowedBytesPerCycle: allowed,
-      lateBytesPerCycle: fit.measured,
-      levelShift:
-        fit.shiftIndex > 0
-          ? {
-              fromCycle: memberXs[fit.shiftIndex - 1],
-              toCycle: memberXs[fit.shiftIndex],
-              growthBytes: fit.shiftBytes,
-              member: null,
-            }
-          : null,
-      verdictBytesPerCycle: fit.verdict,
-      withinBound: fit.verdict <= allowed,
+      heap,
+      rss: rssChecks,
+      levelShift,
+      inconclusive,
+      withinBound,
     });
   }
 
+  const inconclusive = members.some((member) => member.inconclusive);
   const pass = members.every((member) => member.withinBound);
-  const finalBytesPerCycle = segments[segments.length - 1].bytesPerCycle;
   const mib = (bytes: number) => `${(bytes / 1024 ** 2).toFixed(1)}MiB`;
+  const describeCheck = (label: string, check: PlateauCheck) =>
+    `${label} [${check.fromCycle}..${check.toCycle}] rise ${mib(check.riseOverSpan)} of ` +
+    `${mib(check.band)} (${bytesPerCycleToKib(check.perCycle)}/cycle ± ` +
+    `${bytesPerCycleToKib(check.standardError)})` +
+    (check.plateau ? "" : check.withinBand ? " RISING" : " BREACH");
   const memberDetail = members
-    .map(
-      (member) =>
-        `${member.image ?? "process"}#${member.pid} (${member.role === "root" ? "server" : "child"}) ` +
-        `${bytesPerCycleToKib(member.verdictBytesPerCycle)}/cycle, allowed <=` +
-        `${bytesPerCycleToKib(member.allowedBytesPerCycle)}/cycle` +
-        (member.withinBound ? "" : " BREACH") +
-        (member.levelShift
-          ? ` (measured ${bytesPerCycleToKib(member.lateBytesPerCycle)}/cycle, level shift ` +
-            `[${member.levelShift.fromCycle}..${member.levelShift.toCycle}] ` +
-            `+${mib(member.levelShift.growthBytes)} set aside)`
-          : ""),
-    )
+    .map((member) => {
+      const parts = [
+        ...(member.heap ? [describeCheck("heap", member.heap)] : []),
+        ...member.rss.map((check) => describeCheck("rss", check)),
+      ];
+      const shift = member.levelShift
+        ? ` level shift [${member.levelShift.fromCycle}..${member.levelShift.toCycle}] ` +
+          `+${mib(member.levelShift.growthBytes)}${member.inconclusive ? " (post-shift plateau unproven: INCONCLUSIVE)" : ""}`
+        : "";
+      return (
+        `${member.image ?? "process"}#${member.pid} (${member.role === "root" ? "server" : "child"})` +
+        `${member.withinBound ? "" : " BREACH"}: ${parts.join(", ")}${shift}`
+      );
+    })
     .join("; ");
   return {
     observable: true,
     cyclesCompleted,
     minimumCycles,
-    allowedBytesPerCycle,
-    allowedChildBytesPerCycle,
+    bands,
     segments,
-    finalBytesPerCycle,
     lateFromCycle: xs[0],
-    lateBytesPerCycle: tree.measured,
-    levelShift: treeShift,
-    verdictBytesPerCycle: tree.verdict,
+    lateBytesPerCycle,
     members,
+    inconclusive,
     pass,
     detail:
       `late span [${xs[0]}..${cyclesCompleted}] over ${late.length} quiesced readings: ` +
-      `${memberDetail}; whole tree ${bytesPerCycleToKib(tree.measured)}/cycle` +
-      (treeShift
-        ? ` (${bytesPerCycleToKib(tree.verdict)}/cycle with ${describeShift(treeShift)} set aside)`
-        : "") +
-      "; windows: " +
+      `${memberDetail}; whole tree ${bytesPerCycleToKib(lateBytesPerCycle)}/cycle; windows: ` +
       segments
         .map(
           (segment) =>
@@ -745,37 +825,11 @@ export function decideChurnSlope(
   };
 }
 
-/**
- * Default late-span bound for a descendant process (the type-provider engine):
- * room for its garbage collector's drift, below half the ~150 KiB/cycle the
- * provider leaked before per-version documents were closed.
- */
-export const CHURN_CHILD_SLOPE_BYTES_PER_CYCLE = 64 * 1024;
-
-/**
- * Least-squares rate of `ys` over `xs`, as measured and with the single
- * largest positive increment set aside (every reading after it lowered by it).
- */
-function slopeWithOneShiftSetAside(
+/** Least-squares slope of `ys` over `xs` with its standard error from the residuals. */
+export function leastSquares(
   xs: readonly number[],
   ys: readonly number[],
-): { measured: number; verdict: number; shiftIndex: number; shiftBytes: number } {
-  const measured = leastSquaresSlope(xs, ys);
-  let shiftIndex = -1;
-  for (let index = 1; index < ys.length; index += 1) {
-    const growth = ys[index] - ys[index - 1];
-    if (growth > 0 && (shiftIndex < 0 || growth > ys[shiftIndex] - ys[shiftIndex - 1])) {
-      shiftIndex = index;
-    }
-  }
-  if (shiftIndex < 0) return { measured, verdict: measured, shiftIndex, shiftBytes: 0 };
-  const shiftBytes = ys[shiftIndex] - ys[shiftIndex - 1];
-  const adjusted = ys.map((y, index) => (index >= shiftIndex ? y - shiftBytes : y));
-  return { measured, verdict: leastSquaresSlope(xs, adjusted), shiftIndex, shiftBytes };
-}
-
-/** Ordinary least-squares slope of `ys` over `xs` (bytes per cycle). */
-function leastSquaresSlope(xs: readonly number[], ys: readonly number[]): number {
+): { slope: number; standardError: number } {
   const n = xs.length;
   const meanX = xs.reduce((sum, x) => sum + x, 0) / n;
   const meanY = ys.reduce((sum, y) => sum + y, 0) / n;
@@ -785,33 +839,57 @@ function leastSquaresSlope(xs: readonly number[], ys: readonly number[]): number
     covariance += (xs[index] - meanX) * (ys[index] - meanY);
     variance += (xs[index] - meanX) ** 2;
   }
-  return variance === 0 ? 0 : covariance / variance;
+  if (variance === 0) return { slope: 0, standardError: 0 };
+  const slope = covariance / variance;
+  const intercept = meanY - slope * meanX;
+  let residuals = 0;
+  for (let index = 0; index < n; index += 1) {
+    residuals += (ys[index] - (intercept + slope * xs[index])) ** 2;
+  }
+  const standardError = n > 2 ? Math.sqrt(residuals / (n - 2) / variance) : 0;
+  return { slope, standardError };
 }
 
-/** The tree member whose resident set grew most between two readings. */
-function largestMemberGrowth(
-  from: ProcessTreeRssSample,
-  to: ProcessTreeRssSample,
-): ChurnLevelShift["member"] {
-  const before = new Map(from.members.map((member) => [member.pid, member.rssBytes]));
-  let best: ChurnLevelShift["member"] = null;
-  for (const member of to.members) {
-    const previous = before.get(member.pid);
-    if (previous === undefined || previous === null || member.rssBytes === null) continue;
-    const growthBytes = member.rssBytes - previous;
-    if (growthBytes > 0 && (best === null || growthBytes > best.growthBytes)) {
-      best = { pid: member.pid, image: member.image, growthBytes };
+/**
+ * Read `ys` over `xs` as a plateau against `band`. With `testTrend`, a slope
+ * whose lower confidence bound clears zero is a breach even inside the band.
+ */
+export function plateau(
+  xs: readonly number[],
+  ys: readonly number[],
+  band: number,
+  testTrend: boolean,
+): PlateauCheck {
+  const { slope, standardError } = leastSquares(xs, ys);
+  const span = xs[xs.length - 1] - xs[0];
+  const riseOverSpan = slope * span;
+  const withinBand = riseOverSpan <= band;
+  const significantlyRising =
+    testTrend && slope - PLATEAU_CONFIDENCE_STANDARD_ERRORS * standardError > 0;
+  return {
+    fromCycle: xs[0],
+    toCycle: xs[xs.length - 1],
+    readings: xs.length,
+    perCycle: slope,
+    standardError,
+    riseOverSpan,
+    band,
+    withinBand,
+    significantlyRising,
+    plateau: withinBand && !significantlyRising,
+  };
+}
+
+/** Index of the largest positive increment in `ys` (0 when none is positive). */
+function largestIncrement(ys: readonly number[]): number {
+  let index = 0;
+  for (let candidate = 1; candidate < ys.length; candidate += 1) {
+    const growth = ys[candidate] - ys[candidate - 1];
+    if (growth > 0 && (index === 0 || growth > ys[index] - ys[index - 1])) {
+      index = candidate;
     }
   }
-  return best;
-}
-
-function describeShift(shift: ChurnLevelShift): string {
-  const mib = (bytes: number) => `${(bytes / 1024 ** 2).toFixed(1)}MiB`;
-  const who = shift.member
-    ? ` (${shift.member.image ?? "process"}#${shift.member.pid} ${mib(shift.member.growthBytes)})`
-    : "";
-  return `[${shift.fromCycle}..${shift.toCycle}] +${mib(shift.growthBytes)}${who}`;
+  return index;
 }
 
 function bytesPerCycleToKib(bytes: number): string {
@@ -827,6 +905,7 @@ export const CHURN_RETENTION_COUNTERS = [
   "carrierCandidates",
   "publicationLanes",
   "semanticNodes",
+  "semanticNodeSlots",
   "semanticMemoEntries",
   "unresolvedReach",
   "relationProofs",
@@ -841,22 +920,24 @@ export const CHURN_RETENTION_COUNTERS = [
 
 export type ChurnRetentionCounter = (typeof CHURN_RETENTION_COUNTERS)[number];
 
-/** One counter's growth between the baseline and the final quiesced reading. */
+/** One counter's late-span plateau. */
 export interface ChurnRetentionTrend {
   readonly counter: ChurnRetentionCounter;
   readonly baseline: number;
   readonly final: number;
   readonly peak: number;
-  readonly perCycle: number;
+  /** The late-span fit, in objects per cycle. */
+  readonly late: PlateauCheck;
   readonly withinBound: boolean;
 }
 
-/** The object-lifetime verdict: retained objects do not accumulate per cycle. */
+/** The object-lifetime verdict: no retained-object counter keeps rising. */
 export interface ChurnRetentionCheck {
   /** False when any checkpoint lacked a reading, or the run was too short. */
   readonly observable: boolean;
   readonly cyclesCompleted: number;
-  readonly allowedObjectsPerCycle: number;
+  /** Objects a counter's fitted late-span rise may reach before a trend counts. */
+  readonly plateauObjects: number;
   readonly trends: readonly ChurnRetentionTrend[];
   /** Pressure refusals at the final reading; the standard corpus must show 0. */
   readonly pressureRefusals: number | null;
@@ -864,37 +945,42 @@ export interface ChurnRetentionCheck {
   readonly detail: string;
 }
 
+/** Default objects a counter's fitted late-span rise may reach before a trend counts. */
+export const CHURN_RETENTION_PLATEAU_OBJECTS = 4;
+
 /**
  * Decide the object-lifetime half of WSP6.1 ("measure process-tree memory AND
- * object lifetimes"): across the quiesced checkpoints, no retained-object
- * counter may grow in proportion to the cycles run, and the aggregate account
- * must have refused nothing for pressure (WSP6.3: pressure outcomes stay
- * explicit and must not occur on the admitted standard corpus).
+ * object lifetimes"): over the late span, no retained-object counter may show
+ * a rising trend, and the aggregate account must have refused nothing for
+ * pressure (WSP6.3: pressure outcomes stay explicit and must not occur on the
+ * admitted standard corpus).
  *
  * Why objects and not only bytes: an RSS plateau can hide a slow object leak
  * behind allocator reuse for hundreds of cycles, and an RSS rise cannot say
  * which retained set is responsible. Each counter is read live from its owning
- * structure, so its trend names the retainer. The bound is per cycle so a
- * counter that is legitimately amortised (an occasional sweep leaves a few
- * superseded versions behind until the next one) still passes, while a
- * counter that keeps one object per superseded document version — one or more
- * per cycle — cannot.
+ * structure, so its trend names the retainer. A counter breaches when its
+ * least-squares slope over the late span is significantly positive (its lower
+ * confidence bound clears zero) AND its fitted rise exceeds `plateauObjects`:
+ * an amortised sweep that leaves a few superseded versions behind between
+ * sweeps is noise around a level, a retainer that keeps one object per
+ * document version — or one per ten — is a trend the noise cannot explain,
+ * at any run length.
  *
  * Refused (`observable: false, pass: false`, never a pass) when any
- * checkpoint carries no reading, the readings span no cycles, or a checkpoint
+ * checkpoint carries no reading, the late span is too short, or a checkpoint
  * was not quiesced. An unreported retention is an UNAVAILABLE metric.
  */
 export function decideChurnRetention(
   checkpoints: readonly ChurnCheckpoint[],
-  options: { readonly allowedObjectsPerCycle: number },
+  options: { readonly plateauObjects?: number; readonly lateFromCycle?: number } = {},
 ): ChurnRetentionCheck {
-  const { allowedObjectsPerCycle } = options;
+  const plateauObjects = options.plateauObjects ?? CHURN_RETENTION_PLATEAU_OBJECTS;
   const cyclesCompleted =
     checkpoints.length > 0 ? checkpoints[checkpoints.length - 1].cyclesCompleted : 0;
   const unevaluated = (detail: string): ChurnRetentionCheck => ({
     observable: false,
     cyclesCompleted,
-    allowedObjectsPerCycle,
+    plateauObjects,
     trends: [],
     pressureRefusals: null,
     pass: false,
@@ -921,26 +1007,41 @@ export function decideChurnRetention(
   }
   const first = checkpoints[0];
   const last = checkpoints[checkpoints.length - 1];
-  const cycles = last.cyclesCompleted - first.cyclesCompleted;
-  if (cycles <= 0) {
+  if (last.cyclesCompleted - first.cyclesCompleted <= 0) {
     return unevaluated(
       `the final reading at cycle ${last.cyclesCompleted} did not advance past the baseline ` +
         `(${first.cyclesCompleted}), so no per-cycle rate exists — NOT evaluated`,
     );
   }
+  const midpoint =
+    options.lateFromCycle ??
+    first.cyclesCompleted + (last.cyclesCompleted - first.cyclesCompleted) / 2;
+  const late = checkpoints.filter((checkpoint) => checkpoint.cyclesCompleted >= midpoint);
+  if (late.length < CHURN_SLOPE_MIN_LATE_READINGS) {
+    return unevaluated(
+      `the late span (cycle ${Math.ceil(midpoint)} on) holds ${late.length} quiesced ` +
+        `reading(s), below the ${CHURN_SLOPE_MIN_LATE_READINGS} a plateau needs — NOT evaluated`,
+    );
+  }
   const readings = checkpoints.map((checkpoint) => checkpoint.retention as RetentionReading);
+  const lateXs = late.map((checkpoint) => checkpoint.cyclesCompleted);
   const trends: ChurnRetentionTrend[] = CHURN_RETENTION_COUNTERS.map((counter) => {
     const baseline = readings[0][counter];
     const final = readings[readings.length - 1][counter];
     const peak = Math.max(...readings.map((reading) => reading[counter]));
-    const perCycle = (final - baseline) / cycles;
+    const fit = plateau(
+      lateXs,
+      late.map((checkpoint) => (checkpoint.retention as RetentionReading)[counter]),
+      plateauObjects,
+      true,
+    );
     return {
       counter,
       baseline,
       final,
       peak,
-      perCycle,
-      withinBound: perCycle <= allowedObjectsPerCycle,
+      late: fit,
+      withinBound: !(fit.significantlyRising && !fit.withinBand),
     };
   });
   const pressureRefusals = readings[readings.length - 1].refusalsPressure;
@@ -949,17 +1050,19 @@ export function decideChurnRetention(
   return {
     observable: true,
     cyclesCompleted,
-    allowedObjectsPerCycle,
+    plateauObjects,
     trends,
     pressureRefusals,
     pass,
     detail:
-      `retained objects over ${cycles} measured cycles, allowed <=${allowedObjectsPerCycle}/cycle: ` +
+      `retained objects over the late span [${lateXs[0]}..${cyclesCompleted}], a trend counts past ` +
+      `${plateauObjects} objects: ` +
       trends
         .map(
           (trend) =>
-            `${trend.counter} ${trend.baseline}→${trend.final} (peak ${trend.peak}, ` +
-            `${trend.perCycle.toFixed(3)}/cycle)${trend.withinBound ? "" : " BREACH"}`,
+            `${trend.counter} ${trend.baseline}→${trend.final} (peak ${trend.peak}, late ` +
+            `${trend.late.perCycle.toFixed(3)}±${trend.late.standardError.toFixed(3)}/cycle, ` +
+            `rise ${trend.late.riseOverSpan.toFixed(1)})${trend.withinBound ? "" : " BREACH"}`,
         )
         .join("; ") +
       `; pressure refusals=${pressureRefusals}${pressureRefusals === 0 ? "" : " BREACH"}`,
@@ -981,11 +1084,12 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `artifacts=${reading.liveArtifacts} retired=${reading.retainedRetiredVersions} ` +
     `roots=${reading.liveRoots} leases=${reading.snapshotLeases} ` +
     `candidates=${reading.carrierCandidates} lanes=${reading.publicationLanes} ` +
-    `nodes=${reading.semanticNodes} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
+    `nodes=${reading.semanticNodes}/${reading.semanticNodeSlots} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
     `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} shapes=${reading.shapeCacheEntries} ` +
     `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} surfaces=${reading.frameworkSurfaceEntries} ` +
     `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
-    `pressureRefusals=${reading.refusalsPressure}` +
+    `pressureRefusals=${reading.refusalsPressure} ` +
+    `heapInUse=${reading.heapInUseBytes === null ? "n/a" : bytesToMib(reading.heapInUseBytes)}` +
     (reading.semanticMemoFamilies
       ? ` memoFamilies={${Object.entries(reading.semanticMemoFamilies)
           .filter(([, count]) => count > 0)
@@ -1007,6 +1111,8 @@ export interface ChurnScenarioResult {
   readonly slope: ChurnSlopeCheck;
   /** The object-lifetime verdict: no retained-object counter grows per cycle. */
   readonly retention: ChurnRetentionCheck;
+  /** Cycles run past the planned count to prove a post-shift plateau. */
+  readonly extendedCycles: number;
   /** Every quiesced reading taken, baseline first. */
   readonly checkpoints: readonly ChurnCheckpoint[];
   readonly baseline: ProcessTreeRssSample;
@@ -1160,6 +1266,39 @@ export async function runChurnScenario(
       }
       await takeCheckpoint(completed);
     }
+    // The verdicts read the late span from the PLANNED run's midpoint, so an
+    // extension lengthens the span rather than moving it. A level shift too
+    // close to the end leaves its post-shift plateau unproven: run on, one
+    // window at a time, until it is proven or the extension budget is spent.
+    const lateFromCycle = warmupCycles + measuredCycles / 2;
+    const minimumCycles = options.minimumCycles ?? CHURN_ACCEPTANCE_MIN_CYCLES;
+    const evaluate = () => ({
+      slope: decideChurnSlope(checkpoints, {
+        minimumCycles,
+        bands: context.config.churnPlateauBands,
+        lateFromCycle,
+      }),
+      retention: decideChurnRetention(checkpoints, {
+        plateauObjects: context.config.churnRetentionPlateauObjects,
+        lateFromCycle,
+      }),
+    });
+    let verdicts = evaluate();
+    const windowCycles = Math.max(1, Math.round(measuredCycles / windows));
+    let extendedCycles = 0;
+    while (
+      verdicts.slope.observable &&
+      verdicts.slope.inconclusive &&
+      extendedCycles + windowCycles <= context.config.churnMaxExtensionCycles
+    ) {
+      const target = completed + windowCycles;
+      for (; completed < target; completed += 1) {
+        await runOneCycle(context, fixture, completed, failures);
+      }
+      await takeCheckpoint(completed);
+      extendedCycles += windowCycles;
+      verdicts = evaluate();
+    }
     const finalCheckpoint = checkpoints[checkpoints.length - 1];
     const baselineQuiesced = baselineCheckpoint.quiesced;
     const finalQuiesced = finalCheckpoint.quiesced;
@@ -1191,14 +1330,7 @@ export async function runChurnScenario(
       context.config.churnGrowthFactor,
       context.config.churnGrowthFloorBytes,
     );
-    const slope = decideChurnSlope(checkpoints, {
-      allowedBytesPerCycle: context.config.churnSlopeBytesPerCycle,
-      allowedChildBytesPerCycle: context.config.churnSlopeChildBytesPerCycle,
-      minimumCycles: options.minimumCycles ?? CHURN_ACCEPTANCE_MIN_CYCLES,
-    });
-    const retention = decideChurnRetention(checkpoints, {
-      allowedObjectsPerCycle: context.config.churnRetentionObjectsPerCycle,
-    });
+    const { slope, retention } = verdicts;
     return {
       receipt: buildReceipt(context, startedAtMs, { finalSanityPass, failures: failures.list }),
       growth,
@@ -1208,6 +1340,7 @@ export async function runChurnScenario(
       baseline,
       final,
       cyclesCompleted: completed,
+      extendedCycles,
       quiescedAtBothCheckpoints: checkpoints.every((checkpoint) => checkpoint.quiesced),
     };
   } finally {

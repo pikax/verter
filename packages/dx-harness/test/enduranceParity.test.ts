@@ -1002,7 +1002,7 @@ describe("churn growth verdict", () => {
   });
 });
 
-describe("churn retained-byte slope verdict", () => {
+describe("churn retained-byte plateau verdict", () => {
   const MIB = 1024 ** 2;
   const KIB = 1024;
   const sample = (totalBytes: number, pids: readonly number[] = [1, 2]) => ({
@@ -1025,7 +1025,7 @@ describe("churn retained-byte slope verdict", () => {
     unavailable: { kind: "member-unreadable" as const, detail: "pid 1 unreadable" },
     atMs: 0,
   };
-  /** A flat retained-object set: the byte slope is the only thing under test here. */
+  /** A flat retained-object set: the byte plateau is the only thing under test here. */
   const flatRetention: RetentionReading = {
     liveArtifacts: 4,
     retainedRetiredVersions: 2,
@@ -1034,6 +1034,7 @@ describe("churn retained-byte slope verdict", () => {
     carrierCandidates: 2,
     publicationLanes: 3,
     semanticNodes: 1,
+    semanticNodeSlots: 1,
     semanticMemoEntries: 1,
     unresolvedReach: 1,
     relationProofs: 1,
@@ -1047,17 +1048,25 @@ describe("churn retained-byte slope verdict", () => {
     pinnedBytes: 1_000_000,
     retainedBytes: 500_000,
     refusalsPressure: 0,
+    heapInUseBytes: 40 * MIB,
   };
+  interface Reading {
+    readonly server: number;
+    readonly provider: number;
+    /** The server's exact heap figure; flat at 40 MiB unless the trajectory says otherwise. */
+    readonly heap?: number | null;
+  }
   /**
    * Baseline plus `windows` quiesced readings of a two-member tree (server,
-   * provider) whose resident sets follow `at(cyclesSinceWarmup)`.
+   * provider) whose resident sets and the server's heap follow
+   * `at(cyclesSinceWarmup)`.
    */
   const trajectory = (
-    at: (cyclesSinceWarmup: number) => { readonly server: number; readonly provider: number },
+    at: (cyclesSinceWarmup: number) => Reading,
     { cycles = 1000, warmup = 100, windows = 18, quiesced = true } = {},
   ): ChurnCheckpoint[] => {
     const reading = (cyclesCompleted: number): ChurnCheckpoint => {
-      const { server, provider } = at(cyclesCompleted - warmup);
+      const { server, provider, heap } = at(cyclesCompleted - warmup);
       return {
         cyclesCompleted,
         quiesced,
@@ -1072,7 +1081,7 @@ describe("churn retained-byte slope verdict", () => {
           unavailable: null,
           atMs: 0,
         },
-        retention: flatRetention,
+        retention: { ...flatRetention, heapInUseBytes: heap === undefined ? 40 * MIB : heap },
       };
     };
     const measured = cycles - warmup;
@@ -1082,16 +1091,25 @@ describe("churn retained-byte slope verdict", () => {
     }
     return checkpoints;
   };
-  /** Baseline plus `windows` readings, the server growing by `bytesPerCycle`. */
+  /** Baseline plus `windows` readings, the server's resident set AND heap growing by `bytesPerCycle`. */
   const run = (
     bytesPerCycle: number,
     runOptions: { cycles?: number; warmup?: number; windows?: number; quiesced?: boolean } = {},
   ): ChurnCheckpoint[] =>
     trajectory(
-      (cycles) => ({ server: 40 * MIB + cycles * bytesPerCycle, provider: 35 * MIB }),
+      (cycles) => ({
+        server: 40 * MIB + cycles * bytesPerCycle,
+        provider: 35 * MIB,
+        heap: 40 * MIB + cycles * bytesPerCycle,
+      }),
       runOptions,
     );
-  const options = { allowedBytesPerCycle: 16 * KIB, minimumCycles: CHURN_ACCEPTANCE_MIN_CYCLES };
+  /** Reproducible measurement noise: ±`amplitude`, zero-mean, no trend. */
+  const wobble = (cycles: number, amplitude: number) =>
+    amplitude * Math.sin(cycles / 37) * Math.cos(cycles / 11);
+  const options = { minimumCycles: CHURN_ACCEPTANCE_MIN_CYCLES };
+  const member = (slope: ReturnType<typeof decideChurnSlope>, role: "root" | "child") =>
+    slope.members.find((candidate) => candidate.role === role);
 
   it("rejects a strictly LINEAR leak that the two-endpoint envelope admits", () => {
     // ~85 KiB retained on every post-warm-up cycle against a 75 MiB baseline is
@@ -1106,23 +1124,48 @@ describe("churn retained-byte slope verdict", () => {
     );
     expect(
       envelope.pass,
-      "the two-endpoint envelope is the weaker oracle this slope check exists to replace",
+      "the two-endpoint envelope is the weaker oracle this plateau check exists to replace",
     ).toBe(true);
 
     const slope = decideChurnSlope(checkpoints, options);
     expect(slope.observable).toBe(true);
     expect(slope.pass).toBe(false);
-    expect(slope.segments.every((segment) => !segment.withinBound)).toBe(true);
-    expect(slope.verdictBytesPerCycle).toBeGreaterThan(64 * KIB);
+    expect(member(slope, "root")?.heap?.plateau).toBe(false);
+    expect(member(slope, "root")?.rss[0].plateau).toBe(false);
     expect(slope.detail).toContain("BREACH");
   });
 
-  it("keeps a retainer breaching when its largest increment is set aside", () => {
-    // Setting one increment aside as a level shift must not launder a slope:
-    // a 32 KiB/cycle retainer loses one window of growth and still breaches.
-    const slope = decideChurnSlope(run(32 * KIB), options);
-    expect(slope.levelShift).not.toBeNull();
-    expect(slope.verdictBytesPerCycle).toBeGreaterThan(16 * KIB);
+  it("dirty twin: an 8 KiB/cycle server heap drift fails, however small each window looks", () => {
+    // 8 KiB a cycle is 3.5 MiB over the late span — a leak with a low gradient,
+    // not a plateau. The exact heap figure has no allocator settling to hide
+    // it in, so its trend is one the noise cannot explain.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB + wobble(cycles, 1.5 * MIB),
+        provider: 35 * MIB,
+        heap: 40 * MIB + cycles * 8 * KIB + wobble(cycles, 0.5 * MIB),
+      })),
+      options,
+    );
+    const heap = member(slope, "root")?.heap;
+    expect(heap?.significantlyRising).toBe(true);
+    expect(heap?.withinBand).toBe(false);
+    expect(slope.pass).toBe(false);
+  });
+
+  it("dirty twin: a 40 KiB/cycle child drift fails", () => {
+    // 18 MiB over the late span, in even 2 MiB steps: no single window is a
+    // level shift, and the rise does not fit the child's band.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + cycles * 40 * KIB + wobble(cycles, 2 * MIB),
+      })),
+      options,
+    );
+    const child = member(slope, "child");
+    expect(child?.levelShift).toBeNull();
+    expect(child?.rss[0].withinBand).toBe(false);
     expect(slope.pass).toBe(false);
   });
 
@@ -1130,57 +1173,101 @@ describe("churn retained-byte slope verdict", () => {
     const slope = decideChurnSlope(run(0), options);
     expect(slope.observable).toBe(true);
     expect(slope.pass).toBe(true);
-    expect(slope.finalBytesPerCycle).toBe(0);
-    expect(slope.verdictBytesPerCycle).toBe(0);
-    expect(slope.levelShift).toBeNull();
+    expect(slope.inconclusive).toBe(false);
+    expect(member(slope, "root")?.heap?.plateau).toBe(true);
   });
 
-  it("passes allocator settling that levels off before the run's second half", () => {
-    // The measured shape of the server with every retained-object counter and
-    // its live heap flat: ~20 MiB of committed memory approached with a
-    // ~200-cycle time constant. Its early windows read far above the bound —
-    // the per-window rule this verdict replaced failed exactly this run — but
-    // the late span has levelled off.
+  it("passes allocator settling in the server's resident set when its heap is flat", () => {
+    // The measured shape with every retained-object counter and the exact heap
+    // figure flat: ~20 MiB of committed memory approached with a ~200-cycle
+    // time constant. The late-span rise fits the settling band; the heap
+    // figure, which has no settling in it, is what would show a retainer.
     const slope = decideChurnSlope(
       trajectory((cycles) => ({
-        server: 40 * MIB + 20 * MIB * (1 - Math.exp(-cycles / 200)),
+        server: 40 * MIB + 20 * MIB * (1 - Math.exp(-cycles / 200)) + wobble(cycles, MIB),
         provider: 35 * MIB,
+        heap: 40 * MIB + wobble(cycles, 0.5 * MIB),
       })),
       options,
     );
-    expect(slope.segments[0].withinBound, "an early window breaches on its own").toBe(false);
-    expect(slope.lateFromCycle).toBe(550);
-    expect(slope.pass).toBe(true);
-  });
-
-  it("sets aside one late level shift and names the member that stepped", () => {
-    // The provider child steps up once by ~26 MiB and stays flat after it.
-    const slope = decideChurnSlope(
-      trajectory((cycles) => ({
-        server: 40 * MIB,
-        provider: 35 * MIB + (cycles >= 600 ? 26 * MIB : 0),
-      })),
-      options,
-    );
-    expect(slope.lateBytesPerCycle, "the step alone reads as a late slope").toBeGreaterThan(
+    expect(slope.segments[0].bytesPerCycle, "an early window climbs on its own").toBeGreaterThan(
       16 * KIB,
     );
-    expect(slope.levelShift).toMatchObject({
-      fromCycle: 650,
-      toCycle: 700,
-      growthBytes: 26 * MIB,
-      member: { pid: 2, image: "tsgo", growthBytes: 26 * MIB },
-    });
-    expect(slope.verdictBytesPerCycle).toBe(0);
+    expect(member(slope, "root")?.rss[0].withinBand).toBe(true);
     expect(slope.pass).toBe(true);
-    expect(slope.detail).toContain("[650..700] +26.0MiB (tsgo#2 26.0MiB)");
   });
 
-  it("does not set aside a second level shift", () => {
+  it("refuses a server that reports no exact heap figure, never reading its resident set alone", () => {
     const slope = decideChurnSlope(
       trajectory((cycles) => ({
         server: 40 * MIB,
-        provider: 35 * MIB + (cycles >= 600 ? 26 * MIB : 0) + (cycles >= 800 ? 26 * MIB : 0),
+        provider: 35 * MIB,
+        heap: cycles >= 800 ? null : 40 * MIB,
+      })),
+      options,
+    );
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("heapInUseBytes");
+  });
+
+  it("accepts one level shift in the child once its post-shift plateau is proven", () => {
+    // The provider child steps up once by ~26 MiB at cycle 700 and holds: seven
+    // readings after the shift prove the new plateau.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 600 ? 26 * MIB : 0) + wobble(cycles, 2 * MIB),
+      })),
+      options,
+    );
+    const child = member(slope, "child");
+    expect(child?.levelShift).toMatchObject({ fromCycle: 650, toCycle: 700 });
+    expect(child?.rss.map((check) => check.plateau)).toEqual([true, true]);
+    expect(child?.inconclusive).toBe(false);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("calls a level shift too close to the end INCONCLUSIVE, never a pass", () => {
+    // Three readings after the shift cannot prove a plateau; the scenario
+    // extends the run instead of blessing whatever the last window showed.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 800 ? 26 * MIB : 0),
+      })),
+      options,
+    );
+    expect(member(slope, "child")?.inconclusive).toBe(true);
+    expect(slope.inconclusive).toBe(true);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("INCONCLUSIVE");
+  });
+
+  it("proves the plateau once the run is extended past a late level shift", () => {
+    // The same shift, read over a run extended by six windows: the late span
+    // keeps its planned start (cycle 550) and the post-shift segment is long
+    // enough to prove the plateau.
+    const slope = decideChurnSlope(
+      trajectory(
+        (cycles) => ({
+          server: 40 * MIB,
+          provider: 35 * MIB + (cycles >= 800 ? 26 * MIB : 0) + wobble(cycles, 2 * MIB),
+        }),
+        { cycles: 1300, windows: 24 },
+      ),
+      { ...options, lateFromCycle: 550 },
+    );
+    expect(slope.lateFromCycle).toBe(550);
+    expect(member(slope, "child")?.inconclusive).toBe(false);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("does not accept a second level shift", () => {
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 500 ? 26 * MIB : 0) + (cycles >= 700 ? 26 * MIB : 0),
       })),
       options,
     );
@@ -1188,94 +1275,51 @@ describe("churn retained-byte slope verdict", () => {
     expect(slope.detail).toContain("BREACH");
   });
 
-  it("holds the server to its own bound and a child to the wider one", () => {
-    // A child drifting at 40 KiB/cycle (garbage-collector slack) passes; the
-    // same drift in the server breaches the server's 16 KiB/cycle.
-    const childDrift = decideChurnSlope(
-      trajectory((cycles) => ({ server: 40 * MIB, provider: 35 * MIB + cycles * 40 * KIB })),
-      options,
-    );
-    expect(childDrift.members.map((member) => [member.role, member.withinBound])).toEqual([
-      ["root", true],
-      ["child", true],
-    ]);
-    expect(childDrift.pass).toBe(true);
-
-    const serverDrift = decideChurnSlope(
-      trajectory((cycles) => ({ server: 40 * MIB + cycles * 40 * KIB, provider: 35 * MIB })),
-      options,
-    );
-    expect(serverDrift.members.find((member) => member.role === "root")?.withinBound).toBe(false);
-    expect(serverDrift.pass).toBe(false);
-  });
-
-  it("still fails a provider child that leaks at the rate it did before the fix", () => {
-    const slope = decideChurnSlope(
-      trajectory((cycles) => ({ server: 40 * MIB, provider: 35 * MIB + cycles * 150 * KIB })),
-      options,
-    );
-    const child = slope.members.find((member) => member.role === "child");
-    expect(child?.verdictBytesPerCycle).toBeGreaterThan(64 * KIB);
-    expect(slope.pass).toBe(false);
-    expect(slope.detail).toContain("BREACH");
-  });
-
-  it("passes the recorded run whose provider moved plateaus late", () => {
-    // A real 1000-cycle run (Windows, merged candidate): the server settles to
-    // ~139 MiB; the tsgo child drifts, then steps from ~106 to ~125 MiB at
-    // cycle 850-900 and drifts again. The whole-tree rate with one shift set
-    // aside is 27.9 KiB/cycle — the rule that judged the tree as one process
-    // failed this run — while each process is within its own bound.
-    const recorded: readonly (readonly [number, number, number])[] = [
-      [100, 118.6, 96.1],
-      [150, 122.9, 94.7],
-      [200, 125.4, 97.7],
-      [250, 126.3, 95.5],
-      [300, 127.7, 97.1],
-      [350, 130.4, 98.8],
-      [400, 131.6, 98.9],
-      [450, 134.1, 97.4],
-      [500, 133.6, 98.9],
-      [550, 135.4, 100.8],
-      [600, 135.4, 101.1],
-      [650, 135.5, 101.2],
-      [700, 136.3, 100.1],
-      [750, 136.9, 102.7],
-      [800, 137.2, 103.6],
-      [850, 138.3, 106.1],
-      [900, 139.1, 125.5],
-      [950, 139.4, 124.0],
-      [1000, 139.4, 129.6],
+  it("passes the recorded run whose provider moved plateaus at the midpoint", () => {
+    // A real 1000-cycle run (Windows, chunked arena, exact heap figure): the
+    // server's resident set settles from 125 to 142 MiB while its heap holds
+    // ~55 MiB; the tsgo child steps from ~95 to ~130 MiB at cycle 500-550 and
+    // wanders ±5 MiB after it.
+    const recorded: readonly (readonly [number, number, number, number])[] = [
+      [100, 125.2, 92.8, 53.5],
+      [150, 127.4, 97.0, 53.0],
+      [200, 130.2, 99.3, 53.2],
+      [250, 133.6, 96.7, 55.4],
+      [300, 133.0, 97.4, 54.8],
+      [350, 133.1, 98.0, 54.1],
+      [400, 134.7, 98.1, 54.6],
+      [450, 135.5, 94.9, 54.8],
+      [500, 136.5, 95.0, 55.1],
+      [550, 136.8, 129.9, 54.6],
+      [600, 138.8, 122.3, 55.5],
+      [650, 139.0, 126.6, 55.1],
+      [700, 142.3, 129.2, 54.8],
+      [750, 139.7, 131.5, 54.6],
+      [800, 141.2, 135.4, 54.8],
+      [850, 140.1, 129.0, 54.7],
+      [900, 141.7, 132.3, 55.9],
+      [950, 143.1, 132.3, 56.2],
+      [1000, 142.2, 126.0, 55.6],
     ];
     const byCycle = new Map(
-      recorded.map(([cycle, server, provider]) => [cycle, { server, provider }]),
+      recorded.map(([cycle, server, provider, heap]) => [cycle, { server, provider, heap }]),
     );
     const slope = decideChurnSlope(
       trajectory((cycles) => {
         const reading = byCycle.get(cycles + 100);
         if (!reading) throw new Error(`no recorded reading at cycle ${cycles + 100}`);
-        return { server: reading.server * MIB, provider: reading.provider * MIB };
+        return {
+          server: reading.server * MIB,
+          provider: reading.provider * MIB,
+          heap: reading.heap * MIB,
+        };
       }),
       options,
     );
-    expect(slope.verdictBytesPerCycle, "the whole tree as one process breaches").toBeGreaterThan(
-      16 * KIB,
-    );
-    const server = slope.members.find((member) => member.role === "root");
-    const child = slope.members.find((member) => member.role === "child");
-    expect(server?.verdictBytesPerCycle).toBeLessThan(16 * KIB);
-    expect(child?.levelShift).toMatchObject({ fromCycle: 850, toCycle: 900 });
-    expect(child?.verdictBytesPerCycle).toBeLessThan(64 * KIB);
+    expect(member(slope, "root")?.heap?.plateau).toBe(true);
+    expect(member(slope, "root")?.rss[0].withinBand).toBe(true);
+    expect(member(slope, "child")?.withinBound).toBe(true);
     expect(slope.pass).toBe(true);
-  });
-
-  it("refuses a late span too thin to fit a slope", () => {
-    // Four windows leave three readings from the midpoint on.
-    const slope = decideChurnSlope(run(0, { windows: 4 }), options);
-    expect(slope.observable).toBe(false);
-    expect(slope.pass).toBe(false);
-    expect(slope.detail).toContain("late span");
-    expect(slope.detail).toContain("NOT evaluated");
   });
 
   it("refuses to evaluate a run shorter than the criterion's 1000 cycles", () => {
@@ -1295,6 +1339,15 @@ describe("churn retained-byte slope verdict", () => {
     expect(slope.observable).toBe(false);
     expect(slope.pass).toBe(false);
     expect(slope.detail).toContain("at least two later quiesced readings");
+  });
+
+  it("refuses a late span too thin to fit a plateau", () => {
+    // Four windows leave three readings from the midpoint on.
+    const slope = decideChurnSlope(run(0, { windows: 4 }), options);
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("late span");
+    expect(slope.detail).toContain("NOT evaluated");
   });
 
   it("refuses a reading taken before the host quiesced", () => {
@@ -1354,6 +1407,7 @@ describe("churn retained-object verdict", () => {
     carrierCandidates: 2,
     publicationLanes: 3,
     semanticNodes: 1,
+    semanticNodeSlots: 1,
     semanticMemoEntries: 1,
     unresolvedReach: 1,
     relationProofs: 1,
@@ -1367,6 +1421,7 @@ describe("churn retained-object verdict", () => {
     pinnedBytes: 1_000_000,
     retainedBytes: 500_000,
     refusalsPressure: 0,
+    heapInUseBytes: null,
   };
   /**
    * Baseline plus `windows` quiesced readings over a 1000-cycle run (100 warm-up,
@@ -1375,7 +1430,7 @@ describe("churn retained-object verdict", () => {
    */
   const run = (
     readingAt: (sinceBaseline: number, index: number) => RetentionReading | null,
-    { cycles = 1000, warmup = 100, windows = 4, quiesced = true } = {},
+    { cycles = 1000, warmup = 100, windows = 18, quiesced = true } = {},
   ): ChurnCheckpoint[] => {
     const measured = cycles - warmup;
     const checkpoints: ChurnCheckpoint[] = [
@@ -1392,8 +1447,8 @@ describe("churn retained-object verdict", () => {
     }
     return checkpoints;
   };
-  // The lane's default `churnRetentionObjectsPerCycle`.
-  const options = { allowedObjectsPerCycle: 0.25 };
+  // The lane's defaults: a trend counts past four objects over the late span.
+  const options = {};
 
   it("passes flat readings and reports every counter's trend", () => {
     const verdict = decideChurnRetention(
@@ -1405,13 +1460,15 @@ describe("churn retained-object verdict", () => {
     expect(verdict.cyclesCompleted).toBe(1000);
     expect(verdict.pressureRefusals).toBe(0);
     expect(verdict.trends.map((trend) => trend.counter)).toEqual([...CHURN_RETENTION_COUNTERS]);
-    expect(verdict.trends.every((trend) => trend.perCycle === 0 && trend.withinBound)).toBe(true);
+    expect(verdict.trends.every((trend) => trend.late.perCycle === 0 && trend.withinBound)).toBe(
+      true,
+    );
     expect(verdict.detail).not.toContain("BREACH");
   });
 
   it("fails a retainer that keeps one object per document version", () => {
     // One lease per synced version, never released on close: the counter grows
-    // by exactly the cycles run, which no per-cycle amortisation bound admits.
+    // by exactly the cycles run, a trend no noise could explain.
     const verdict = decideChurnRetention(
       run((sinceBaseline) => ({
         ...baselineReading,
@@ -1423,7 +1480,8 @@ describe("churn retained-object verdict", () => {
     expect(verdict.pass).toBe(false);
     const leases = verdict.trends.find((trend) => trend.counter === "snapshotLeases");
     expect(leases?.withinBound).toBe(false);
-    expect(leases?.perCycle).toBe(1);
+    expect(leases?.late.perCycle).toBeCloseTo(1, 6);
+    expect(leases?.late.significantlyRising).toBe(true);
     expect(leases?.final).toBe(904);
     expect(verdict.detail).toContain("BREACH");
     expect(verdict.detail).toContain("snapshotLeases");
@@ -1433,11 +1491,11 @@ describe("churn retained-object verdict", () => {
 
   it("passes a bounded sawtooth that returns near its baseline", () => {
     // Superseded versions pile up between sweeps and are released by the next
-    // one: a high peak is not a leak as long as the final reading is back near
-    // where it started. 2→4 over 900 cycles is ~0.002/cycle, far inside 0.25.
-    const retired = [2, 60, 12, 60, 4];
+    // one: a high peak is not a leak as long as the readings keep returning to
+    // where they started — noise around a level, not a trend.
+    const retired = (index: number) => (index === 18 ? 4 : [2, 60, 12, 60][index % 4]);
     const verdict = decideChurnRetention(
-      run((_since, index) => ({ ...baselineReading, retainedRetiredVersions: retired[index] })),
+      run((_since, index) => ({ ...baselineReading, retainedRetiredVersions: retired(index) })),
       options,
     );
     expect(verdict.observable).toBe(true);
@@ -1446,9 +1504,39 @@ describe("churn retained-object verdict", () => {
     expect(trend?.peak).toBe(60);
     expect(trend?.baseline).toBe(2);
     expect(trend?.final).toBe(4);
-    expect(trend?.perCycle).toBeCloseTo(2 / 900, 6);
+    expect(trend?.late.significantlyRising).toBe(false);
     expect(verdict.detail).toContain("peak 60");
     expect(verdict.detail).not.toContain("BREACH");
+  });
+
+  it("dirty twin: a retainer of one object per ten versions fails", () => {
+    // 0.1 objects a cycle is 45 objects over the late span: a small gradient,
+    // still a trend the noise cannot explain, at any run length.
+    const verdict = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        snapshotLeases: baselineReading.snapshotLeases + Math.round(sinceBaseline * 0.1),
+      })),
+      options,
+    );
+    const leases = verdict.trends.find((trend) => trend.counter === "snapshotLeases");
+    expect(leases?.late.significantlyRising).toBe(true);
+    expect(leases?.late.riseOverSpan).toBeGreaterThan(4);
+    expect(verdict.pass).toBe(false);
+  });
+
+  it("does not read a one-object blip at the last reading as a trend", () => {
+    const verdict = decideChurnRetention(
+      run((_since, index) => ({
+        ...baselineReading,
+        liveRoots: baselineReading.liveRoots + (index === 18 ? 1 : 0),
+      })),
+      options,
+    );
+    const roots = verdict.trends.find((trend) => trend.counter === "liveRoots");
+    expect(roots?.late.riseOverSpan).toBeLessThan(4);
+    expect(roots?.withinBound).toBe(true);
+    expect(verdict.pass).toBe(true);
   });
 
   it("refuses when any checkpoint carries no reading, never reading it as zero", () => {
@@ -1478,7 +1566,7 @@ describe("churn retained-object verdict", () => {
     // WSP6.3: pressure outcomes stay explicit and must not occur on the admitted
     // standard corpus. Flat counters do not excuse a refusal.
     const verdict = decideChurnRetention(
-      run((_since, index) => ({ ...baselineReading, refusalsPressure: index === 4 ? 3 : 0 })),
+      run((_since, index) => ({ ...baselineReading, refusalsPressure: index === 18 ? 3 : 0 })),
       options,
     );
     expect(verdict.observable).toBe(true);
@@ -1499,6 +1587,7 @@ describe("retention reading extraction", () => {
     carrierCandidates: 2,
     publicationLanes: 3,
     semanticNodes: 1,
+    semanticNodeSlots: 1,
     semanticMemoEntries: 1,
     unresolvedReach: 1,
     relationProofs: 1,
@@ -1512,6 +1601,7 @@ describe("retention reading extraction", () => {
     pinnedBytes: 1_000_000,
     retainedBytes: 500_000,
     refusalsPressure: 0,
+    heapInUseBytes: null,
   };
 
   it("projects a full retention object into a reading", () => {

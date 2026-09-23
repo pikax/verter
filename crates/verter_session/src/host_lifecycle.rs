@@ -863,6 +863,10 @@ impl VerterHost {
                 .publication_store
                 .retained_lane_count(),
             semantic_nodes: self.project_type_store.semantic_graph().node_count(),
+            semantic_node_slots: self
+                .project_type_store
+                .semantic_graph()
+                .node_storage_slots(),
             semantic_memo_entries: self.project_type_store.semantic_graph().memo_entry_count(),
             unresolved_reach: self
                 .project_type_store
