@@ -22,7 +22,9 @@ SPLIT into `SDL-5`..`SDL-12`, one per owed capability, when the corpus
 driver began asking its probes the question a consumer asks; no row left
 the ledger in that split. `SDL-5` has since MOVED to Class 1: it was a
 defect in the kernel's intersection-signature dedup, not an owed
-capability. The
+capability. `SDL-12` has MOVED to Class 3: its members agree, and its
+order is the mandated `VerterStableV1` order, proven by an order-only
+counterfactual. The
 corpus driver's flip law (`signature_corpus_flip_law_fires_in_both_directions`) makes the re-classification deliberate: a `MatchesChecker`
 row fails when the live answer stops matching, and an owed row fails
 when the live answer STARTS matching.
@@ -37,7 +39,7 @@ Companion evidence: [`determinism-matrix.md`](determinism-matrix.md)
 |---|---|
 | The 344 `u6_flow_shape_corpus_rows_tests` checker columns | Re-measured on the installed TypeScript 7.0.2 executable on the implementing host: 344/344 byte-identical to the recorded columns (the `E01_spread_any` row verified through its `IsAny` leg: `any`→`null` is error-free, so the leg firing `true` is the print). The port from `tsgo 7.0.0-dev.20260526.1` changed no recorded checker value. |
 | The oracle snapshot tree (93 files) | Regenerated with the pinned 7.0.2 engine via the `oracle_gen` binary: every snapshot rewrote byte-identically, zero stale files pruned. Recorded in `docs/evidence/signature-kernel/manifest.json` (`port_witness`). |
-| Signature corpus `MatchesChecker` rows | **14 of 26**: `SV01`, `SV02`, `SV03`, `SV09`, `SV12`, `SV13`, `SV14`, `SV15`, `SV16`, `SV17`, `SV18`, `SV19`, `SV20`, `SV22` — the union-valued and mixed-arm `then` residuals, the construct-signature intersection instance side, explicit type arguments, both 7.0.2 grouping witnesses, the transparent intersection group, and seven Awaited residuals. The live answers are structural matches of the recorded 7.0.2 observations, compared through the typed checker-syntax projection at the altitude the checker prints (utility applications reduced, named declarations kept by name). |
+| Signature corpus `MatchesChecker` rows | **15 of 26**: `SV01`, `SV02`, `SV03`, `SV09`, `SV12`, `SV13`, `SV14`, `SV15`, `SV16`, `SV17`, `SV18`, `SV19`, `SV20`, `SV22`, `SV26` — the union-valued and mixed-arm `then` residuals, the construct-signature intersection instance side, explicit type arguments, both 7.0.2 grouping witnesses, the transparent intersection group, seven Awaited residuals, and the literal/generic union probe. The live answers are structural matches of the recorded 7.0.2 observations, compared through the typed checker-syntax projection at the altitude the checker prints (utility applications reduced, named declarations kept by name). |
 | `SV03_construct_intersection` (formerly `SDL-5`) | Moved from Class 4. `InstanceType<typeof CtorA & typeof CtorB>` is `B` on 7.0.2 and the live answer was `A`: the kernel's intersection-signature dedup compared signatures with their RESULTS IGNORED, so `new () => A` and `new () => B` collapsed onto the first. The checker's `appendSignatures` compares with `ignoreReturnTypes: false`, re-measured on the pinned 7.0.2 for both construct (`InstanceType`) and call (`ReturnType`) intersections, and for the converse: two signatures identical including their result still collapse. Held by `signature_kernel::discovery_tests::intersection_keeps_signatures_that_differ_only_in_their_result`. |
 
 ## Class 2 — presentation-only
@@ -47,11 +49,20 @@ binding/callable effects provably agree.
 
 ## Class 3 — `VerterStableV1` order-induced (causal proof required)
 
-No rows. `VerterStableV1` exists (`semantic_query/stable_key.rs`), so
-the class is open, but nothing has been admitted to it. An admission
-needs the §5.8 counterfactual: only semantic union traversal order
-changed, in an isolated cache namespace (parents included), and
-restoring the stable order recovers the recorded observation.
+An admission needs the §5.8 counterfactual: only semantic union traversal
+order changed, in an isolated cache namespace (parents included), and
+restoring the stable order recovers the recorded observation. The corpus
+carries such a row as `Verdict::StableOrderDifference`, which pins both
+halves — the members match the checker unordered, and the order differs.
+
+| ID | Subject | Both sides | Counterfactual |
+|---|---|---|---|
+| SDL-12 | Deduplicated generic union order (`SV25_generic_union_dedup`) | `ReturnType<typeof witness>` over `A<T> \| B<T> \| A<T>` instantiates `T` at its constraint: 7.0.2 answers `A<unknown> \| B<unknown>`, ordered by its own type identities (it does not preserve authored first occurrence either — `B<T> \| A<T> \| B<T>` prints `A<T> \| B<T>`). The live answer holds the same two members, deduplicated, ordered by the `VerterStableV1` stable key: `B<unknown> \| A<unknown>`; a reversed authored input gives the byte-identical union. | `union_order_is_the_only_difference_from_the_checker`: a fresh host whose store reverses the one union order (`sort_union_members_by_stable_key` and the `ReduceUnion` member canonicalization; union views are store-scoped, so the namespace is isolated with its parents) answers `A<unknown> \| B<unknown>` in order; a fresh host under the stable order answers `B<unknown> \| A<unknown>` again. The contract (§1.1) mandates `VerterStableV1` and forbids cloning the checker's order. |
+
+`SV26_literal_generic_union_order` is exact agreement: its probe is
+`unknown` on both sides. The witness's own declared return orders
+`"a" | "b" | T` on 7.0.2 and by the stable key live; no row observes that
+order, and it would be admitted here on the same counterfactual.
 
 ## Class 4 — independent semantic difference / incompleteness
 
@@ -67,7 +78,6 @@ restoring the stable order recovers the recorded observation.
 | SDL-9 | Alias-applied display through a type-position instantiation (`SV10_nested_instantiation`) | 7.0.2 prints the alias-applied `G<boolean>`; the consumer-expanded answer is the alias's EXPANSION (measured `{ f: Array(boolean) }`). The semantic content agrees; the alias-applied FORM does not. | Owed by the `SignaturesOfType` result projection. Re-examine against Class 2 (presentation-only) once the callable/binding effects are verified equal — it is recorded here, not there, because that verification has not been done. |
 | SDL-10 | Constrained substitution through an indexed access (`SV11_constrained_substitution`) | 7.0.2 reduces `T['a']` over `T extends { a: 1 }` to the literal `1`; the consumer-expanded answer is an EMPTY surface (measured `{  }`). | Owed by the constrained-substitution stage. |
 | SDL-11 | Deferred-symbolic and constrained-generic Awaited (`SV23_awaited_deferred_generic`, `SV24_awaited_constrained_generic`) | The recorded claims live in the declaration bytes (a display-only `unknown` column); the consumer-expanded answer is `unknown`, which does not carry the declared-return structure, and a typed gap for the constrained async wrap (measured `Opaque(Miss)`). | Owed by the runtime/lib `Awaited` lane through the constraint. |
-| SDL-12 | Authored-precedence union ordering (`SV25_generic_union_dedup`, `SV26_literal_generic_union_order`) | 7.0.2 dedups preserving FIRST occurrence and prints literals-first-then-binder; SV25 dedups but REVERSES the authored arm order (measured `B \| A`); SV26's recorded basis is its declared return `"a" \| "b" \| T` (compared order-sensitively, its checker column being a display-only `unknown`), and the consumer-expanded answer is `unknown` — the binder at its constraint, without the declared order. | Owed by `ReduceUnion` authored-precedence ordering. **Not** admitted to Class 3: an order difference is Class 3 only with the §5.8 causal counterfactual, and this one is an unimplemented ordering rule, not a demonstrated `VerterStableV1` traversal-order effect. |
 | SDL-13 | Semantic policy on the flow-return lane (`strictNullChecks`) | Measured on the pinned 7.0.2: `function leaf(v?: string) { return v; }` returns `string \| undefined` with `strictNullChecks` on and `string` with it off, and `(v: string \| null) => v` returns `string` when off. The live flow-return answer is `string \| undefined` and `string \| null` under BOTH settings, on a fresh host whose project provably carries the setting. | `independent difference/incompleteness`: the flow lattice does not model the policy's erasure of `undefined`/`null`. Not a signature-kernel capability; it is also why `DET-09` cannot claim Ready — no answer depends on the policy, so a stale resident parent is unobservable. Owner to be ruled. |
 
 ## Unrecovered evidence

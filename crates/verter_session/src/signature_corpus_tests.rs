@@ -11,7 +11,7 @@
 //!    through their recorded conventions;
 //! 2. **compares the current implementation's answer TO THE RECORDED
 //!    PROBE** under the row's recorded verdict (`MatchesChecker |
-//!    KnownOwed | Degraded`): the live observation lane drives the
+//!    StableOrderDifference | KnownOwed | Degraded`): the live observation lane drives the
 //!    row's probe in TYPE position (a declared binding annotated with
 //!    the probe, read back through the public audited flow-return
 //!    boundary — never the witness's own return, which for wrapper
@@ -173,6 +173,24 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
         }
         match row.verdict {
             Verdict::MatchesChecker => {}
+            Verdict::StableOrderDifference { note } => {
+                // An order-only difference is admitted only as the ORDER the
+                // contract mandates, so the note names it.
+                if !note.contains("VerterStableV1") {
+                    failures.push(format!(
+                        "{}: a stable-order verdict names the `VerterStableV1` order it \
+                         attributes the difference to (found {note:?})",
+                        row.id
+                    ));
+                }
+                if row.checker_display_only || row.checker.is_empty() {
+                    failures.push(format!(
+                        "{}: a stable-order verdict compares members against a RECORDED \
+                         structural checker column",
+                        row.id
+                    ));
+                }
+            }
             Verdict::KnownOwed { note } | Verdict::Degraded { note } => {
                 // An owed verdict must explain what the substrate does NOT
                 // do, in terms a reader can act on: WHICH CAPABILITY is
@@ -314,6 +332,10 @@ struct LiveProbeOutcome {
     /// a display-only checker print (those rows compare through their
     /// declared return alone).
     matched_checker: bool,
+    /// The live answer matches the recorded checker text with union arm
+    /// ORDER included. Differs from `matched_checker` only for an
+    /// order-only difference.
+    matched_checker_in_order: bool,
     /// The live answer structurally matches the claim recorded in the
     /// row's `decl_emit` signature return — the rows whose checker
     /// column is a DISPLAY-ONLY instantiation of the binders (e.g.
@@ -355,11 +377,17 @@ struct LiveProbeOutcome {
 /// Drive one row's probe lane through the public audited boundary and
 /// evaluate both structural bases against the live node.
 fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
-    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
-    let host = make_audit_host();
+    live_probe_outcome_on(
+        row,
+        &crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host(),
+    )
+}
+
+/// [`live_probe_outcome`] on a caller-built host (a fresh one per row).
+fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcome {
     let canonical = "/wb/signature_probe.ts";
     crate::u6_flow_shape_corpus_tests::upsert(
-        &host,
+        host,
         canonical,
         &crate::u6_flow_shape_corpus_tests::module_script(&probe_lane_source(row)),
         crate::FileLanguage::script_ts(),
@@ -383,6 +411,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         // substrate answering. Reported as such, never as a refusal.
         return LiveProbeOutcome {
             matched_checker: false,
+            matched_checker_in_order: false,
             matched_declared_return: false,
             deferred_operator: None,
             refused: false,
@@ -394,7 +423,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     let degraded = result.degradation().is_some();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
     // Publication KEEPS an alias/builtin instantiation carrier: the
     // checker keeps the alias label too, and the carrier is resolved when
@@ -432,6 +461,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     let Some(node) = demand.into_complete_node() else {
         return LiveProbeOutcome {
             matched_checker: false,
+            matched_checker_in_order: false,
             matched_declared_return: false,
             deferred_operator: None,
             refused: true,
@@ -487,6 +517,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
     let matched_checker = !row.checker.is_empty()
         && !row.checker_display_only
         && structural_match(row.checker, false);
+    let matched_checker_in_order = matched_checker && structural_match(row.checker, true);
     // The declared return is a LIVE basis when the checker column is a
     // display-only binder instantiation (the dedup/order claim lives in
     // the declaration bytes — SV23/25/26) or when the row records a
@@ -504,6 +535,7 @@ fn live_probe_outcome(row: &Row) -> LiveProbeOutcome {
         .unwrap_or(false);
     LiveProbeOutcome {
         matched_checker,
+        matched_checker_in_order,
         matched_declared_return,
         deferred_operator,
         refused,
@@ -580,6 +612,27 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                          Either the answer regressed or the observation was edited; \
                          re-measure against the pinned oracle before re-pinning",
                         row.probe, rendered, live.degraded
+                    ))
+                } else {
+                    None
+                }
+            }
+            Verdict::StableOrderDifference { .. } => {
+                if !live.matched_checker {
+                    Some(format!(
+                        "labelled StableOrderDifference but the live answer to the probe `{}` no \
+                         longer equals the recorded observation `{}` even as a SET of members — \
+                         measured `{}` (degraded: {}). That is a semantic difference, not an \
+                         order one: re-measure and move the row and its ledger entry",
+                        row.probe, row.checker, rendered, live.degraded
+                    ))
+                } else if live.matched_checker_in_order {
+                    Some(format!(
+                        "labelled StableOrderDifference but the live answer to the probe `{}` now \
+                         equals the recorded observation `{}` IN ORDER — the order difference is \
+                         gone. Re-pin the row MatchesChecker and move its ledger entry in the \
+                         same change",
+                        row.probe, row.checker
                     ))
                 } else {
                     None
@@ -693,6 +746,7 @@ fn a_boundary_failure_never_satisfies_a_diagnostic_row() {
     };
     let broken = LiveProbeOutcome {
         matched_checker: false,
+        matched_checker_in_order: false,
         matched_declared_return: false,
         deferred_operator: None,
         refused: false,
@@ -881,4 +935,48 @@ fn signature_corpus_records_the_7_0_2_grouping_witness_as_a_pair() {
         l.decl_emit.contains("never") && r.decl_emit.contains("never"),
         "both witnesses' recorded declaration emit carries the reduced `never` return"
     );
+}
+
+/// The §5.8 counterfactual behind every stable-order verdict: the union
+/// ORDER is the only cause of the difference. On a fresh host whose store
+/// reverses the `VerterStableV1` order — an isolated cache namespace, its
+/// union views and memo entries included, where nothing else changes — the
+/// same probe answers the checker's recorded observation IN ORDER; on a
+/// fresh host under the stable order it answers the recorded order
+/// difference again.
+#[test]
+fn union_order_is_the_only_difference_from_the_checker() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
+    let rows: Vec<&Row> = CORPUS
+        .iter()
+        .filter(|row| matches!(row.verdict, Verdict::StableOrderDifference { .. }))
+        .collect();
+    assert!(
+        !rows.is_empty(),
+        "the corpus admits an order-only difference; the counterfactual must cover it"
+    );
+    for row in rows {
+        let reversed = make_audit_host();
+        reversed
+            .project_type_store()
+            .semantic_graph()
+            .reverse_union_order_for_tests();
+        let under_reversal = live_probe_outcome_on(row, &reversed);
+        assert!(
+            under_reversal.matched_checker_in_order,
+            "{}: with ONLY the union order reversed, the probe must answer the recorded \
+             observation `{}` in order — measured `{}`",
+            row.id,
+            row.checker,
+            under_reversal.rendered.as_deref().unwrap_or("<no value>")
+        );
+        let restored = live_probe_outcome(row);
+        assert!(
+            restored.matched_checker && !restored.matched_checker_in_order,
+            "{}: under the stable order the probe must answer the recorded members in the \
+             stable order again — measured `{}`",
+            row.id,
+            restored.rendered.as_deref().unwrap_or("<no value>")
+        );
+    }
 }

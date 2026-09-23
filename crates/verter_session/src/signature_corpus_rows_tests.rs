@@ -127,6 +127,13 @@ pub(crate) enum Verdict {
     KnownOwed { note: &'static str },
     /// The current implementation publishes a typed degraded answer.
     Degraded { note: &'static str },
+    /// The live answer equals the recorded observation as a SET of union
+    /// members and differs only in their order — the `VerterStableV1` order
+    /// the contract mandates. The row pins both halves: the members still
+    /// match unordered, and the order still differs. That the order alone
+    /// causes the difference is proven by reversing it in an isolated store
+    /// (`union_order_is_the_only_difference_from_the_checker`).
+    StableOrderDifference { note: &'static str },
 }
 
 /// THE corpus.
@@ -451,10 +458,10 @@ pub(crate) const CORPUS: &[Row] = &[
         checker: "A<unknown> | B<unknown>",
         checker_is_any: false,
         checker_is_never: false,
-        checker_display_only: true,
+        checker_display_only: false,
         diagnostic: None,
         decl_emit: "type A<T> = {\n    ka: T;\n};\ntype B<T> = {\n    kb: T;\n};\nexport declare function witness<T>(v: A<T> | B<T> | A<T>): A<T> | B<T>;\nexport {};\n",
-        verdict: Verdict::KnownOwed { note: "Order-heavy generic union with a duplicate arm: 7.0.2 deduplicates A<T> | B<T> | A<T> to A<T> | B<T> preserving FIRST occurrence; the live rail dedups but REVERSES the authored arm order (measured `B | A`). Authored-precedence-preserving union reduction is owed by `ReduceUnion`." },
+        verdict: Verdict::StableOrderDifference { note: "Order-heavy generic union with a duplicate arm: `ReturnType` instantiates `T` at its constraint, so `A<unknown> | B<unknown>` is the checker's ANSWER, not a display. The live answer holds the same two members, deduplicated, and orders them by the `VerterStableV1` stable key (`B<unknown> | A<unknown>`); 7.0.2 orders by its own type identities, and the contract forbids cloning that order." },
     },
     Row {
         id: "SV26_literal_generic_union_order",
@@ -464,9 +471,9 @@ pub(crate) const CORPUS: &[Row] = &[
         checker: "unknown",
         checker_is_any: false,
         checker_is_never: false,
-        checker_display_only: true,
+        checker_display_only: false,
         diagnostic: None,
         decl_emit: "export declare function witness<T>(v: 'a' | T | 'b' | 'a'): \"a\" | \"b\" | T;\n",
-        verdict: Verdict::KnownOwed { note: "Literal/generic mixed union order: 7.0.2 prints a | b | T — literals first in authored order, the generic binder last, the duplicate a dropped. `VerterStableV1` ordering over mixed literal/generic unions is owed by `ReduceUnion`." },
+        verdict: Verdict::MatchesChecker,
     },
 ];
