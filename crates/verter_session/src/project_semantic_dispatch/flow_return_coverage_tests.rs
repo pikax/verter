@@ -2036,7 +2036,7 @@ fn generic_chain_work(levels: usize) -> (Outcome, usize) {
     with_dispatch(&host, |dispatch| {
         let key = key_of(dispatch, &path, "w");
         let outcome = eval_key_on(&host, dispatch, key);
-        (outcome, dispatch.connected_demand.work_used.get())
+        (outcome, dispatch.connected_demand.work_used_for_tests())
     })
 }
 
