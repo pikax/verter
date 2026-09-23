@@ -332,6 +332,9 @@ pub(super) enum FamilyKey {
     },
     ReduceUnion {
         members: Arc<[SemanticNodeId]>,
+        /// The union algebra is family identity: a strict-null reduction
+        /// and an erased one over the same members are different answers.
+        nullability: crate::semantic_query::NullabilityPolicy,
     },
     ReduceIntersection {
         input: crate::semantic_query::IntersectionInputRef,
@@ -1815,9 +1818,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             context_to_slot(context.projection_reduction),
         ),
-        SemanticQueryKey::ReduceUnion { members } => (
+        SemanticQueryKey::ReduceUnion {
+            members,
+            nullability,
+        } => (
             FamilyKey::ReduceUnion {
                 members: Arc::clone(members),
+                nullability: *nullability,
             },
             ModeSlot::Single,
         ),

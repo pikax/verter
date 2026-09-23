@@ -10711,9 +10711,11 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::ReduceUnion => (
                 SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 2]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
                 SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 3]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
@@ -11110,7 +11112,9 @@ mod prepared_identity_bijection {
                 project_identity: h16(0),
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-                policy: crate::semantic_query::FlowReturnPolicy {},
+                policy: crate::semantic_query::FlowReturnPolicy {
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),

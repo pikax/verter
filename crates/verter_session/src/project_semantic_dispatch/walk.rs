@@ -7546,7 +7546,9 @@ impl UnionMemberAccum {
             values => {
                 let composite =
                     crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-                        graph, values,
+                        graph,
+                        values,
+                        crate::semantic_query::NullabilityPolicy::Strict,
                     );
                 evidence.absorb(composite.evidence);
                 composite.node

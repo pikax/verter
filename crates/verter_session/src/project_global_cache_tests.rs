@@ -1500,6 +1500,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
 
     let key = SemanticQueryKey::ReduceUnion {
         members: members.clone(),
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
     };
     let _ = dispatch.execute_type_node(key.clone());
     // After canonicalization, the on-memo key holds the members in
@@ -1513,6 +1514,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
     });
     let lookup_key = SemanticQueryKey::ReduceUnion {
         members: Arc::from(sorted.into_boxed_slice()),
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
     };
     let warm = host
         .project_type_store()

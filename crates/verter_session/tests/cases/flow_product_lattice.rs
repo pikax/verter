@@ -6,8 +6,9 @@ use verter_semantic::analysis::flow::flow_graph::{FlowNodeId, FlowNodeKind};
 use verter_session::for_tests::*;
 use verter_session::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, LiteralValue, PrimitiveKind, ResolvedDeclSlotIdentity,
-    ReturnProjectionDemand, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    FlowReturnKey, FlowReturnPolicy, LiteralValue, NullabilityPolicy, PrimitiveKind,
+    ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey,
 };
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
@@ -124,7 +125,9 @@ fn request(basis: u8) -> FlowDemandRequest {
                 project_identity: [0; 16],
                 result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
-                policy: FlowReturnPolicy {},
+                policy: FlowReturnPolicy {
+                    nullability: NullabilityPolicy::Strict,
+                },
             },
             demand: ReturnProjectionDemand::whole_return(),
             input: FlowInputContext::empty(),

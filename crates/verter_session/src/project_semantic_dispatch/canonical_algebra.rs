@@ -36,6 +36,10 @@
 //!    `string`), structural `T | T = T` / `T & T = T` via the comparator,
 //!    and PROVEN-disjoint scalar intersection collapse to `never` via
 //!    [`tag_level_disjoint`] — an undecided relation is never guessed. A
+//!    union is built under an explicit [`NullabilityPolicy`]: with
+//!    `strictNullChecks` off it erases its `null` / `undefined` members
+//!    beside any other member, exactly as the checker's `getUnionType`
+//!    never adds a nullable type to the type set in that mode. A
 //!    derived multi-arm composite interns under `Global`; a singleton
 //!    normalization returns its retained member unchanged, with that
 //!    member's own scope; an empty member set folds to `Primitive(Never)`.
@@ -85,8 +89,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::absorb::SpecialKind;
 use crate::semantic_query::{
-    authored_property_key_child, ChildWalk, LiteralValue, NodeScopeId, PrimitiveKind,
-    SemanticNodeData, SemanticNodeId, SignatureReturnCarrier, SurfaceEntry,
+    authored_property_key_child, ChildWalk, LiteralValue, NodeScopeId, NullabilityPolicy,
+    PrimitiveKind, SemanticNodeData, SemanticNodeId, SignatureReturnCarrier, SurfaceEntry,
 };
 use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
 
@@ -107,7 +111,11 @@ mod literal_provenance_tests {
             .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
             .collect();
         SUBSUMPTION_READS.set(0);
-        let result = intern_ordered_union(&graph, &members);
+        let result = intern_ordered_union(
+            &graph,
+            &members,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        );
         assert!(!result.evidence.incomplete);
         let data = graph.node_data(result.node).unwrap();
         let SemanticNodeData::Union(arms) = data.as_ref() else {
@@ -161,7 +169,12 @@ mod literal_provenance_tests {
             let graph = SemanticGraphStore::new();
             let left = scoped_literal(&graph, left, "/fresh.ts");
             let right = scoped_literal(&graph, right, "/pinned.ts");
-            let result = intern_ordered_union(&graph, &[left, right]).node;
+            let result = intern_ordered_union(
+                &graph,
+                &[left, right],
+                crate::semantic_query::NullabilityPolicy::Strict,
+            )
+            .node;
             let (membership, evidence) = inspect_literal_provenance(
                 &graph,
                 &[
@@ -182,8 +195,18 @@ mod literal_provenance_tests {
         let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
         let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
         let c = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("c".into())));
-        let root = intern_ordered_union(&graph, &[c, b, a]).node;
-        let partial = intern_ordered_union(&graph, &[c, a]).node;
+        let root = intern_ordered_union(
+            &graph,
+            &[c, b, a],
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
+        .node;
+        let partial = intern_ordered_union(
+            &graph,
+            &[c, a],
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
+        .node;
         let members = [partial; 32];
         let (membership, evidence) = inspect_literal_provenance(
             &graph,
@@ -252,7 +275,12 @@ mod literal_provenance_tests {
         let bigint = graph.intern_node(SemanticNodeData::Literal(LiteralValue::BigInt(
             "7".repeat(4096),
         )));
-        let root = intern_ordered_union(&graph, &[string, bigint]).node;
+        let root = intern_ordered_union(
+            &graph,
+            &[string, bigint],
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
+        .node;
         let partial = [string];
         let inputs: Vec<_> = (0..32)
             .map(|index| {
@@ -319,10 +347,21 @@ pub(crate) struct CanonicalMint {
     /// list resurfacing in a later request pays the full re-close (and its
     /// evidence re-deposit) instead of being classified warm-eligible.
     canonical_form_proven: bool,
+    /// The `null` / `undefined` algebra the canonicalization ran. An
+    /// intersection runs the strict-null algebra (the erased collapse of a
+    /// nullable intersection is not modelled), so it always records
+    /// [`NullabilityPolicy::Strict`].
+    nullability: NullabilityPolicy,
     _sealed: (),
 }
 
 impl CanonicalMint {
+    /// The `null` / `undefined` algebra this mint's canonical form holds
+    /// under — recorded on the at-rest `Canonical` fact.
+    pub(crate) fn nullability(&self) -> NullabilityPolicy {
+        self.nullability
+    }
+
     /// Whether this mint's canonicalization reached the budgeted pipeline's
     /// fixed point with no explicit incompleteness signal (see the field
     /// doc above for what this does — and does not — prove). Read by the
@@ -771,26 +810,34 @@ pub(crate) fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
     !same_value_zero
 }
 
-/// Canonical union construction over `members`.
+/// Canonical union construction over `members` under `nullability`.
 pub(crate) fn intern_ordered_union(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
+    nullability: NullabilityPolicy,
 ) -> CanonicalComposite {
-    canonicalize(graph, members, /* is_union */ true)
+    canonicalize(graph, members, /* is_union */ true, nullability)
 }
 
-/// Private ordered-intersection intern. Operand order is preserved.
+/// Private ordered-intersection intern. Operand order is preserved. An
+/// intersection runs the strict-null algebra.
 pub(crate) fn intern_ordered_intersection(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {
-    canonicalize(graph, members, /* is_union */ false)
+    canonicalize(
+        graph,
+        members,
+        /* is_union */ false,
+        NullabilityPolicy::Strict,
+    )
 }
 
 fn canonicalize(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
     is_union: bool,
+    nullability: NullabilityPolicy,
 ) -> CanonicalComposite {
     let mut evidence = CanonicalEvidence::default();
 
@@ -886,6 +933,37 @@ fn canonicalize(
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
             evidence,
         };
+    }
+
+    // 2a. `strictNullChecks` off: `null` and `undefined` inhabit every
+    //     type, so the checker never adds them to a union's type set — a
+    //     nullable arm beside any other arm is erased, and a union of
+    //     nullable arms alone is `null` when it names `null`, else
+    //     `undefined` (the member itself, with its own scope).
+    if is_union && nullability == NullabilityPolicy::Erased {
+        let mut first_null: Option<SemanticNodeId> = None;
+        let mut first_undefined: Option<SemanticNodeId> = None;
+        arms.retain(
+            |&arm| match peek_nullable_via_graph(graph, arm, &mut evidence) {
+                Some(PrimitiveKind::Null) => {
+                    first_null.get_or_insert(arm);
+                    false
+                }
+                Some(_) => {
+                    first_undefined.get_or_insert(arm);
+                    false
+                }
+                None => true,
+            },
+        );
+        if arms.is_empty() {
+            if let Some(only) = first_null.or(first_undefined) {
+                return CanonicalComposite {
+                    node: only,
+                    evidence,
+                };
+            }
+        }
     }
 
     // 3. Union literal subsumption, mirroring the checker's `getUnionType`
@@ -1131,6 +1209,7 @@ fn canonicalize(
             let members: Arc<[SemanticNodeId]> = Arc::from(kept.into_boxed_slice());
             let mint = CanonicalMint {
                 canonical_form_proven: !evidence.incomplete,
+                nullability,
                 _sealed: (),
             };
             if is_union {
@@ -1246,6 +1325,41 @@ pub(super) fn peek_special_via_graph(
     if let Some(evidence) = evidence {
         evidence.incomplete = true;
     }
+    None
+}
+
+/// Whether `id` is the `null` or `undefined` type, following transparent
+/// `Alias` redirects under the same bound as [`peek_special_via_graph`].
+/// Returns the nullable kind, or `None` for any other type. An exhausted
+/// hop bound or a dangling target keeps the arm (`None`) and marks the
+/// canonicalization incomplete — an arm that might be nullable is never
+/// erased on a guess.
+fn peek_nullable_via_graph(
+    graph: &SemanticGraphStore,
+    id: SemanticNodeId,
+    evidence: &mut CanonicalEvidence,
+) -> Option<PrimitiveKind> {
+    let mut cur = id;
+    // bounded-loop: ALIAS_PEEK_HOPS transparent Alias redirects.
+    for _ in 0..ALIAS_PEEK_HOPS {
+        evidence.record_file_root(graph, cur);
+        let Some(data) = graph.node_data(cur) else {
+            evidence.incomplete = true;
+            return None;
+        };
+        match &*data {
+            SemanticNodeData::Alias(inner) => {
+                let next = *inner;
+                drop(data);
+                cur = next;
+            }
+            SemanticNodeData::Primitive(
+                kind @ (PrimitiveKind::Null | PrimitiveKind::Undefined),
+            ) => return Some(*kind),
+            _ => return None,
+        }
+    }
+    evidence.incomplete = true;
     None
 }
 

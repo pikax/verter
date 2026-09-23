@@ -172,6 +172,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
     let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let normalize_key = SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![member].into_boxed_slice()),
+        nullability: verter_session::semantic_query::NullabilityPolicy::Strict,
     };
 
     // Policy probes — the exhaustive, wildcard-free per-family

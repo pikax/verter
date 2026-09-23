@@ -126,6 +126,8 @@ pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_loop_completion_tests;
 #[cfg(test)]
+mod flow_return_null_policy_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_positional_tests;
 mod flow_return_products;
 #[cfg(test)]
@@ -435,6 +437,17 @@ pub struct ProjectSemanticDispatch<'a> {
     /// key carries and the strict-family configuration the reducer
     /// branches on — two projections of the one effective option set.
     pub(super) relation_env: std::cell::OnceCell<dispatch_txn::RelationEnvironment>,
+    /// The relation environments of the answers currently being decided,
+    /// innermost last: a flow-return frame pushes the environment of its
+    /// function's OWN file for the length of its evaluation, so every
+    /// relation root it opens (return-arm subtype reduction, narrowing,
+    /// overload applicability) is keyed and decided under that file's
+    /// project options rather than the request's. Empty outside such a
+    /// frame, where [`Self::relation_environment`] falls back to the
+    /// request environment. Pushed and popped only through
+    /// [`RelationEnvironmentScope`].
+    pub(super) relation_env_scope:
+        std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -561,6 +574,29 @@ impl<'g> Drop for LexicalDemandScopeGuard<'g> {
     }
 }
 
+/// RAII scope of one entry on
+/// [`ProjectSemanticDispatch::relation_env_scope`]: the environment is in
+/// force until the scope drops (panic-safe).
+pub(super) struct RelationEnvironmentScope<'g> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+}
+
+impl<'g> RelationEnvironmentScope<'g> {
+    pub(super) fn push(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+        environment: dispatch_txn::RelationEnvironment,
+    ) -> Self {
+        stack.borrow_mut().push(environment);
+        Self { stack }
+    }
+}
+
+impl<'g> Drop for RelationEnvironmentScope<'g> {
+    fn drop(&mut self) {
+        self.stack.borrow_mut().pop();
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to a sealed request context.
     ///
@@ -589,6 +625,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
             relation_env: std::cell::OnceCell::new(),
+            relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_context(ctx),
@@ -686,7 +723,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // The reduce-query SUBJECT representation: the
             // pre-reduction member list interned verbatim (the query's
             // subject must stay distinct from its canonical result).
-            SemanticQueryKey::ReduceUnion { members } => {
+            SemanticQueryKey::ReduceUnion { members, .. } => {
                 graph.intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
                         members,
@@ -2330,8 +2367,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
-            SemanticQueryKey::ReduceUnion { members } => SemanticQueryKey::ReduceUnion {
+            SemanticQueryKey::ReduceUnion {
+                members,
+                nullability,
+            } => SemanticQueryKey::ReduceUnion {
                 members: canonicalize_node_list(self.graph(), &members),
+                nullability,
             },
             SemanticQueryKey::ReduceIntersection {
                 input,
@@ -2651,7 +2692,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     *distributive,
                     pending.clone(),
                 ),
-                SemanticQueryKey::ReduceUnion { members } => self.build_reduce_union(members),
+                SemanticQueryKey::ReduceUnion {
+                    members,
+                    nullability,
+                } => self.build_reduce_union(members, *nullability),
                 SemanticQueryKey::ReduceIntersection {
                     input,
                     purpose,

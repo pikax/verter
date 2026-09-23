@@ -885,6 +885,7 @@ mod tests {
         };
         let reduce_union = SemanticQueryKey::ReduceUnion {
             members: Arc::from(Vec::new().into_boxed_slice()),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         };
         let normalize_intersection = SemanticQueryKey::reduce_intersection_operands(Arc::from(
             Vec::new().into_boxed_slice(),

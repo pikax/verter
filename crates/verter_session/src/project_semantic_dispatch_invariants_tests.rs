@@ -151,6 +151,7 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
             std::sync::Arc::from(vec![current, literal].into_boxed_slice());
         match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
             members: next_nodes,
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         }) {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryOutput { value: id, .. },
@@ -3080,6 +3081,7 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
         std::sync::Arc::from(vec![a].into_boxed_slice());
     let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
         members: members.clone(),
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
     });
     match result {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
@@ -3096,8 +3098,11 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     // A multi-element union should produce a distinct interned Union node.
     let ab: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a, b].into_boxed_slice());
-    let ab_result = dispatch
-        .execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion { members: ab });
+    let ab_result =
+        dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
+            members: ab,
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+        });
     match ab_result {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
             value: id,

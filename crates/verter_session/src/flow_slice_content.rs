@@ -1790,6 +1790,7 @@ pub(crate) fn build_flow_slice_content(
     carrier_module: bool,
     snapshot: &crate::decl_lowering::SnapshotKey,
     context: Option<&NestedFlowContext>,
+    nullability: crate::semantic_query::NullabilityPolicy,
 ) -> Option<SliceContent> {
     let FlowSliceSource { program, resolved } = retained;
     let module_scope = carrier_module || program_has_module_syntax(program);
@@ -1846,6 +1847,7 @@ pub(crate) fn build_flow_slice_content(
         skeleton,
         &bindings,
         anchor,
+        nullability,
     ) {
         Ok(params) => params,
         Err(reason) => {
@@ -2609,6 +2611,20 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
     }
 }
 
+/// Whether a value expression is a bare `null` / `undefined` / `void`
+/// value — the checker's WIDENING nullable type, seen through the
+/// freshness-transparent wrappers. A type assertion (`null as null`) or a
+/// read of a declared `null` / `undefined` binding is not: its nullable
+/// type is the regular one.
+fn expr_is_widening_nullish(expression: &Expression<'_>) -> bool {
+    match unwrap_freshness_transparent(expression) {
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name.as_str() == "undefined",
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
+        _ => false,
+    }
+}
+
 /// The top-level FRESHNESS shape of one applied write's right-hand side —
 /// the lowering-time input to the evaluator's evolving-target widening
 /// rule (an assignment into a binding with NO declared authority widens
@@ -2631,6 +2647,11 @@ pub enum SliceFreshness {
     Fresh,
     /// Not a fresh literal position: the literal (if any) stays pinned.
     Pinned,
+    /// A bare `null` / `undefined` / `void` value position: no literal to
+    /// widen (pinned for every literal rule), but the checker's WIDENING
+    /// nullable type — with `strictNullChecks` off, a function whose whole
+    /// return is only such values returns `any`.
+    WideningNullish,
     /// A conditional expression: per-branch verdicts, aligned with the
     /// lowered [`SliceExpr::Union`] arms (`[consequent, alternate]`).
     PerArm(Arc<[SliceFreshness]>),
@@ -2643,7 +2664,7 @@ impl SliceFreshness {
     pub fn all_fresh(&self) -> bool {
         match self {
             Self::Fresh => true,
-            Self::Pinned => false,
+            Self::Pinned | Self::WideningNullish => false,
             Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_fresh),
         }
     }
@@ -2653,8 +2674,19 @@ impl SliceFreshness {
     pub fn any_fresh(&self) -> bool {
         match self {
             Self::Fresh => true,
-            Self::Pinned => false,
+            Self::Pinned | Self::WideningNullish => false,
             Self::PerArm(arms) => arms.iter().any(Self::any_fresh),
+        }
+    }
+
+    /// Whether EVERY leaf of the tree is a widening `null` / `undefined`
+    /// value (and the tree is non-empty).
+    #[must_use]
+    pub fn all_widening_nullish(&self) -> bool {
+        match self {
+            Self::WideningNullish => true,
+            Self::Fresh | Self::Pinned => false,
+            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_widening_nullish),
         }
     }
 
@@ -2687,6 +2719,8 @@ fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
         _ => {
             if expr_is_bare_literal(expression) {
                 SliceFreshness::Fresh
+            } else if expr_is_widening_nullish(expression) {
+                SliceFreshness::WideningNullish
             } else {
                 SliceFreshness::Pinned
             }
@@ -3205,6 +3239,7 @@ fn lower_params(
     skeleton: &FunctionBodySkeleton,
     bindings: &verter_semantic::analysis::flow::FlowBindingMap,
     anchor: u32,
+    nullability: crate::semantic_query::NullabilityPolicy,
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
     let binders = scope.param_binders();
     let parameter_bindings = signature_parameter_bindings(skeleton, anchor);
@@ -3289,10 +3324,12 @@ fn lower_params(
             };
         let extra = parameter_list_shadowed(ty.ty(), &parameter_bindings, visible_before);
         ty.add_shadowed(extra);
-        // An optional (`?`) parameter is `T | undefined` inside the body; a
-        // defaulted parameter always has a value. The union rides the
-        // SAME gate verdict: adding `undefined` names nothing new.
-        let ty = if param.optional && param.initializer.is_none() {
+        // An optional (`?`) parameter is `T | undefined` inside the body
+        // under `strictNullChecks`; with it off `undefined` is already a
+        // member of every type and the checker adds nothing. A defaulted
+        // parameter always has a value. The union rides the SAME gate
+        // verdict: adding `undefined` names nothing new.
+        let ty = if param.optional && param.initializer.is_none() && nullability.is_strict() {
             GatedType {
                 ty: TypeExpr::union(vec![ty.ty, TypeExpr::Primitive(PrimitiveName::Undefined)]),
                 shadowed: ty.shadowed,

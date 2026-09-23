@@ -175,8 +175,11 @@ fn identity_audit_four_discriminators() {
     let graph = SemanticGraphStore::new();
     let n = prim(&graph, PrimitiveKind::Number);
     let members: Arc<[SemanticNodeId]> = Arc::from([n, n]);
-    let union =
-        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(&graph, &members);
+    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        &graph,
+        &members,
+        crate::semantic_query::NullabilityPolicy::Strict,
+    );
     match graph.node_data(union.node).as_deref() {
         Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {}
         Some(SemanticNodeData::Union(list)) => {

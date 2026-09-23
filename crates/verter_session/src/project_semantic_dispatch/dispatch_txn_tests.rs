@@ -218,7 +218,9 @@ fn flow_return_key() -> FlowReturnKey {
             project_identity: crate::semantic_query::HashValue::default(),
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-            policy: crate::semantic_query::FlowReturnPolicy {},
+            policy: crate::semantic_query::FlowReturnPolicy {
+                nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            },
         },
         result_contract: super::super::flow_solve::flow_return_result_contract_id(),
     }
@@ -740,7 +742,9 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             project_identity: crate::semantic_query::HashValue::default(),
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-            policy: crate::semantic_query::FlowReturnPolicy {},
+            policy: crate::semantic_query::FlowReturnPolicy {
+                nullability: crate::semantic_query::NullabilityPolicy::Strict,
+            },
         },
         result_contract: super::super::flow_solve::flow_return_result_contract_id(),
     };
@@ -961,7 +965,8 @@ fn flow_demand_carriers_default_none_and_round_trip() {
     };
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, ReturnProjectionDemand, SemanticQueryKey,
+        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, ReturnProjectionDemand,
+        SemanticQueryKey,
     };
 
     let fixture = flow_graph_fixture_for_tests("function carry_me(x) { return x; }\n", 31);
@@ -987,7 +992,9 @@ fn flow_demand_carriers_default_none_and_round_trip() {
             project_identity: [0; 16],
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
-            policy: FlowReturnPolicy {},
+            policy: FlowReturnPolicy {
+                nullability: NullabilityPolicy::Strict,
+            },
         },
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
@@ -1071,7 +1078,8 @@ fn zero_obligation_demand_never_converges_or_seals() {
     };
     use crate::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-        FlowReturnKey, FlowReturnPolicy, ReturnProjectionDemand, SemanticQueryKey,
+        FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, ReturnProjectionDemand,
+        SemanticQueryKey,
     };
 
     let fixture = flow_graph_fixture_for_tests("function seal_me(x) { return x; }\n", 33);
@@ -1097,7 +1105,9 @@ fn zero_obligation_demand_never_converges_or_seals() {
             project_identity: [0; 16],
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
-            policy: FlowReturnPolicy {},
+            policy: FlowReturnPolicy {
+                nullability: NullabilityPolicy::Strict,
+            },
         },
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
