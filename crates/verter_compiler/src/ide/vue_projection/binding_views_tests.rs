@@ -901,3 +901,90 @@ fn stp15_usage_parses_tsx_script_blocks() {
         "valid references in an admitted TSX block count under the TSX fallback"
     );
 }
+
+#[test]
+fn stp15_usage_resolves_v_for_source_against_parent_scope() {
+    // The source sits outside the alias's iteration scope: `item in item`
+    // reads the outer binding even though the alias shadows it inside.
+    let declared = ["item".to_string()];
+    let template = r#"<li v-for="item in item">{{ item }}</li>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(
+        usage.is_used("item"),
+        "the `v-for` source resolves against the enclosing scope, not its own alias"
+    );
+    // A nested `v-for` source reading an outer alias stays local.
+    let declared = ["row".to_string(), "rows".to_string()];
+    let template = r#"<tr v-for="row in rows"><td v-for="cell in row">{{ cell }}</td></tr>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(usage.is_used("rows"));
+    assert!(
+        !usage.is_used("row"),
+        "an inner source naming an outer alias never marks the top-level binding as used"
+    );
+}
+
+#[test]
+fn stp15_usage_keeps_object_brace_before_interpolation_close() {
+    let declared = ["label".to_string()];
+    let usage = BindingUsageSet::from_region_text(&declared, "<p>{{ { title: label}}}</p>", "", "");
+    assert!(
+        usage.is_used("label"),
+        "an object literal's closing brace is not half of the interpolation delimiter"
+    );
+    // A `}}` that closes two nested braces still balances both.
+    let declared = ["a".to_string(), "b".to_string()];
+    let usage =
+        BindingUsageSet::from_region_text(&declared, "{{ { x: { y: a }}.x }} {{ b }}", "", "");
+    assert!(usage.is_used("a") && usage.is_used("b"));
+}
+
+#[test]
+fn stp15_usage_tolerates_unicode_v_for_aliases() {
+    let declared = ["items".to_string()];
+    let template = r#"<li v-for="café in items">{{ café }}</li>"#;
+    let usage = BindingUsageSet::from_region_text(&declared, template, "", "");
+    assert!(
+        usage.is_used("items"),
+        "a non-ASCII alias splits at its separator without panicking"
+    );
+}
+
+#[test]
+fn stp15_usage_reads_quoted_style_vbind_expressions() {
+    let declared = ["theme".to_string(), "size".to_string(), "other".to_string()];
+    let style = ".a { color: v-bind('theme.color'); width: v-bind(size); }";
+    let usage = BindingUsageSet::from_region_text(&declared, "", "", style);
+    assert!(
+        usage.is_used("theme"),
+        "a quoted `v-bind` expression counts its root reference"
+    );
+    assert!(usage.is_used("size"), "bare `v-bind(name)` still counts");
+    assert!(!usage.is_used("other"));
+    let style = r#".a { width: v-bind("scale(other)"); }"#;
+    let usage = BindingUsageSet::from_region_text(&declared, "", "", style);
+    assert!(
+        usage.is_used("other"),
+        "a `)` inside the quoted expression does not end it"
+    );
+}
+
+#[test]
+fn stp15_destructured_computed_result_is_a_plain_binding() {
+    let projection = project_setup(
+        "import { computed } from 'vue';\nconst { value } = computed({ get: () => ({ value: 1 }), set(v: { value: number }) {} });\nconst { other } = computed(() => ({ other: 1 }));\n",
+    );
+    for name in ["value", "other"] {
+        let binding = projection.read.lookup(name).expect(name);
+        assert_eq!(
+            binding.kind,
+            BindingKind::Plain,
+            "a destructured `computed(...)` result holds the extracted value"
+        );
+        assert_eq!(
+            projection.write.write_target(name),
+            Err(WriteRejection::ConstBinding),
+            "the `const` destructured value refuses template reassignment"
+        );
+    }
+}

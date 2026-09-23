@@ -289,9 +289,19 @@ fn template_mentions(template: &str) -> FxHashSet<String> {
             if let Some(name) = close_tag_name(tag) {
                 pop_element_scope(&mut scopes, name);
             } else if let Some(name) = open_tag_name(tag) {
-                // The tag's own aliases scope its own bound attributes
-                // (`v-for="todo in items" :key="todo.id"`): push before
-                // collecting so the alias never counts as a root use.
+                // A `v-for` source sits outside its own alias scope
+                // (`item in item` reads the outer `item`): resolve it
+                // against the enclosing scopes before this tag's aliases
+                // are pushed.
+                let mut outer = ScriptReferenceScan {
+                    names: FxHashSet::default(),
+                };
+                collect_v_for_sources(&allocator, tag, &mut outer);
+                insert_unaliased(&mut scan, outer.names, &scopes);
+                // The tag's own aliases scope its remaining bound
+                // attributes (`v-for="todo in items" :key="todo.id"`):
+                // push before collecting so the alias never counts as a
+                // root use.
                 scopes.push(ElementScope {
                     name: name.to_string(),
                     aliases: tag_aliases(&allocator, tag),
@@ -579,28 +589,16 @@ fn interpolation_end(bytes: &[u8], start: usize) -> Option<usize> {
                 } else if byte == b'{' {
                     braces.push(false);
                 } else if byte == b'}' {
-                    if next == Some(b'}') && braces.is_empty() {
-                        return Some(j + 2);
-                    }
-                    if let Some(was_template) = braces.pop() {
-                        if was_template {
-                            mode = suspended.pop().unwrap_or(Mode::Normal);
-                        }
-                    }
-                    // The second half of a `}}` pair balances one more level
-                    // too, or closes the interpolation when nothing is open.
-                    // Only while still in expression position: a `}` that
-                    // resumed template text leaves its neighbour alone.
-                    if next == Some(b'}') && mode == Mode::Normal {
-                        if braces.is_empty() {
+                    // Only a `}}` pair seen with no brace open closes the
+                    // interpolation; otherwise this `}` closes the innermost
+                    // open brace and its neighbour is examined on its own
+                    // (`{{ { title: label}}}` keeps the object's brace).
+                    if braces.is_empty() {
+                        if next == Some(b'}') {
                             return Some(j + 2);
                         }
-                        if let Some(was_template) = braces.pop() {
-                            if was_template {
-                                mode = suspended.pop().unwrap_or(Mode::Normal);
-                            }
-                        }
-                        j += 1;
+                    } else if braces.pop() == Some(true) {
+                        mode = suspended.pop().unwrap_or(Mode::Normal);
                     }
                 }
             }
@@ -792,7 +790,9 @@ fn collect_directive_references(
         DirectiveKind::Bind | DirectiveKind::Other => {
             collect_expression_references(allocator, value, scan);
         }
-        DirectiveKind::For => collect_v_for_source(allocator, value, scan),
+        // A `v-for` source resolves against the enclosing scope, so the
+        // caller collects it before this tag's aliases apply.
+        DirectiveKind::For => {}
         // A slot value (`v-slot="props"`, `#default="{ item }"`) declares
         // template-local aliases, never root uses.
         DirectiveKind::Slot | DirectiveKind::Static => {}
@@ -878,24 +878,19 @@ fn is_plain_identifier(candidate: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-/// Root references of a `v-for="alias in source"` value: the source side
-/// parses as an expression while the alias side only declares
-/// template-local names (including destructuring and index aliases),
-/// which are subtracted so a shadowing alias never marks a top-level
-/// binding as used. A value without a top-level `in`/`of` separator is
-/// malformed; it contributes nothing rather than a false alias use.
-fn collect_v_for_source(allocator: &Allocator, value: &str, scan: &mut ScriptReferenceScan) {
-    let Some((aliases, source)) = split_v_for(value) else {
-        return;
-    };
-    let mut source_scan = ScriptReferenceScan {
-        names: FxHashSet::default(),
-    };
-    collect_expression_references(allocator, source, &mut source_scan);
-    let alias_names = v_for_alias_names(allocator, aliases);
-    for name in source_scan.names {
-        if !alias_names.contains(name.as_str()) {
-            scan.names.insert(name);
+/// Root references of one tag's `v-for="alias in source"` values: only
+/// the source side, parsed as an expression. The source lies outside the
+/// alias's iteration scope, so the caller resolves these names against
+/// the enclosing scopes; the alias side only declares template-local
+/// names. A value without a top-level `in`/`of` separator is malformed;
+/// it contributes nothing rather than a false alias use.
+fn collect_v_for_sources(allocator: &Allocator, tag: &str, scan: &mut ScriptReferenceScan) {
+    for (name, value) in tag_attributes(tag) {
+        if directive_kind(name) != DirectiveKind::For {
+            continue;
+        }
+        if let Some((_, source)) = value.and_then(split_v_for) {
+            collect_expression_references(allocator, source, scan);
         }
     }
 }
@@ -952,8 +947,11 @@ fn split_v_for(value: &str) -> Option<(&str, &str)> {
             }
             _ => {
                 if depth == 0 {
+                    // Compare bytes, never slice: `i` may sit inside a
+                    // multi-byte character (`café in items`). A match is
+                    // ASCII, so `i` is then a character boundary.
                     for separator in [" in ", " of "] {
-                        if value[i..].starts_with(separator) {
+                        if bytes[i..].starts_with(separator.as_bytes()) {
                             // `for...in`/`for...of` keywords only separate at
                             // an identifier boundary on the left.
                             let left_ok = i > 0
@@ -973,7 +971,7 @@ fn split_v_for(value: &str) -> Option<(&str, &str)> {
                     }
                     // Fall back to tab/newline separators (`item\tin\tlist`).
                     for keyword in ["in", "of"] {
-                        if value[i..].starts_with(keyword) {
+                        if bytes[i..].starts_with(keyword.as_bytes()) {
                             let before = i.checked_sub(1).map(|k| bytes[k]);
                             let after = bytes.get(i + keyword.len()).copied();
                             let boundary =
@@ -1128,27 +1126,37 @@ fn script_reference_names(script: &str, declared: &[String]) -> FxHashSet<String
 }
 
 /// Style `v-bind()` names: the only way authored style references script
-/// bindings. Handles `v-bind(name)` and quoted `v-bind('name')` forms.
+/// bindings. Bare `v-bind(name)` names one identifier; quoted
+/// `v-bind('theme.color')` holds a JavaScript expression whose root
+/// references count (`theme`), with any `)` inside the quotes kept.
 fn style_vbind_names(style: &str) -> FxHashSet<String> {
-    let mut names = FxHashSet::default();
+    let allocator = Allocator::default();
+    let mut scan = ScriptReferenceScan {
+        names: FxHashSet::default(),
+    };
     let mut rest = style;
     while let Some(open) = rest.find("v-bind(") {
         rest = &rest[open + "v-bind(".len()..];
+        let inner = rest.trim_start();
+        if let Some(quote) = inner.chars().next().filter(|c| *c == '\'' || *c == '"') {
+            let body = &inner[1..];
+            let Some(end) = body.find(quote) else {
+                break;
+            };
+            collect_expression_references(&allocator, &body[..end], &mut scan);
+            rest = &body[end + 1..];
+            continue;
+        }
         let Some(close) = rest.find(')') else {
             break;
         };
-        let candidate = rest[..close].trim().trim_matches(|c| c == '\'' || c == '"');
-        if !candidate.is_empty()
-            && candidate
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-            && !candidate.as_bytes()[0].is_ascii_digit()
-        {
-            names.insert(candidate.to_string());
+        let candidate = rest[..close].trim();
+        if is_plain_identifier(candidate) {
+            scan.names.insert(candidate.to_string());
         }
         rest = &rest[close + 1..];
     }
-    names
+    scan.names
 }
 
 /// Actual usage accounting over one declared name set.
@@ -1616,6 +1624,21 @@ fn classify_declarator(
                     BindingKind::Ref
                 };
                 push_binding(projection, name, kind, range, None, ctx.mutable);
+            }
+        }
+        // A destructured `computed(...)` result holds the extracted value,
+        // not the computed ref: those names are plain bindings with the
+        // declaration mutability, exactly like a destructured `ref(...)`.
+        Some("computed") if !matches!(id, BindingPattern::BindingIdentifier(_)) => {
+            for (name, range) in names {
+                push_binding(
+                    projection,
+                    name,
+                    BindingKind::Plain,
+                    range,
+                    None,
+                    ctx.mutable,
+                );
             }
         }
         Some("computed") => match first_argument(call) {
