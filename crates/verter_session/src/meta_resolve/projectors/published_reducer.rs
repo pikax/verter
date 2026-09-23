@@ -147,8 +147,15 @@ pub(crate) fn node_contains_reducible_operator(
         SemanticNodeData::Signature {
             params,
             return_type,
+            predicate,
             ..
-        } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
+        } => {
+            params.iter().any(|p| recur(p.ty))
+                || recur(*return_type)
+                || predicate
+                    .and_then(|predicate| predicate.ty)
+                    .is_some_and(&recur)
+        }
         SemanticNodeData::TemplateLiteral { expressions, .. } => {
             expressions.iter().any(|&e| recur(e))
         }

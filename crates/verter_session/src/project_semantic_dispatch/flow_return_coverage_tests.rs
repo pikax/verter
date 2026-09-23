@@ -1815,28 +1815,35 @@ fn assignment_expression_return_is_the_assigned_type() {
     assert_clean_warm(&host, LEAF, "leafAssign", number());
 }
 
-/// CANARY (fail-closed leg) — a `ClassExpression` in return position is
-/// the anonymous class's constructor type, not `any`.
+/// A `ClassExpression` in return position is the class's constructor
+/// type.
 ///
 /// Oracle: `ReturnType<typeof leafClassExpr>` is
-/// `typeof (Anonymous class)`.
+/// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 ///
-/// The fabricated `any` this row was parked against is DELETED: the
-/// shared shallow pass's unmodelled-form fallback now reports
-/// completeness `Unmodeled` and the leaf lowers to the typed
-/// `FlowGap::UnmodeledExpression` — the value is the positional marker,
-/// nothing warms. The typed publication (the constructor type through
-/// `ResolveClassSurface`) has no stable spelling for an ANONYMOUS class
-/// expression in this IR, so the form keeps the charter's fail-closed
-/// branch and this row stays the `!= any` discriminator.
+/// The value is complete and undegraded, and still `ReturnOnly`: the
+/// class body's constructor, members and field initializers are callables
+/// no indexed function position serves, so the capture family keeps its
+/// typed gap over them and the result never warms.
 #[test]
-fn class_expression_return_is_not_any() {
+fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
+    let instance = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        properties: Vec::new(),
+    }));
     assert_eq!(
         eval(&host, LEAF, "leafClassExpr"),
         Outcome::Value {
-            ty: TypeExpr::Unknown(UnknownValue::compatibility_projection("unmodeledPosition")),
-            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression)),
+            ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                properties: vec![verter_type_expr::ObjectMember::ConstructSignature(
+                    verter_type_expr::FunctionExpr::synthetic(
+                        Vec::new(),
+                        Some(Arc::new(instance)),
+                        Vec::new(),
+                    ),
+                )],
+            })),
+            degradation: None,
             candidates: 0,
         },
         "leafClassExpr"
@@ -1850,8 +1857,9 @@ fn class_expression_return_is_not_any() {
 /// Oracle: `ReturnType<typeof leafImportExpr>` is
 /// `Promise<typeof import("…/dep")>`.
 ///
-/// The fabricated `any` this row was parked against is DELETED (see the
-/// class-expression row): the form lowers to the typed
+/// The fabricated `any` this row was parked against is DELETED: the
+/// shared shallow pass's unmodelled-form fallback reports completeness
+/// `Unmodeled`, so the form lowers to the typed
 /// `FlowGap::UnmodeledExpression` and never warms. The typed
 /// publication — `Promise<typeof import("m")>` through the
 /// module-namespace surface — has no carrier spelling in this IR yet,
@@ -1956,6 +1964,166 @@ fn optional_member_read_return_is_the_stripped_member_or_undefined() {
             number(),
             TypeExpr::Primitive(PrimitiveName::Undefined),
         ]),
+    );
+}
+
+/// A member read through a SYNTHESIZED optional member folds the absent-key
+/// `undefined` exactly like the authored one.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): with
+/// `type Authored = { a?: 1 }` and `type Synthetic = Partial<{ a: 1 }>`,
+/// `v.a` is `1 | undefined` for BOTH.
+///
+/// Before, the synthesized read published `1`: the optionality proof that
+/// gates the fold recognised only an `Object` surface, and `Partial<…>`
+/// reaches the read as a deferred mapped shell whose optional member is
+/// visible only once it is reduced. One shape then answered differently by
+/// origin — the section 5.9 determinism row DET-07 found it.
+#[test]
+fn synthesized_optional_member_read_folds_undefined_like_the_authored_one() {
+    const PATH: &str = "/ws/cov/synthetic_optional.ts";
+    const SRC: &str = "type Authored = { a?: 1 };\n\
+                       type Synthetic = Partial<{ a: 1 }>;\n\
+                       export function authored(v: Authored) { return v.a; }\n\
+                       export function synthetic(v: Synthetic) { return v.a; }\n";
+    let host = host_with(&[(PATH, SRC)]);
+    let authored = eval(&host, PATH, "authored");
+    match &authored {
+        Outcome::Value {
+            ty: TypeExpr::Union(arms),
+            degradation: None,
+            candidates: 1,
+        } => {
+            let one = TypeExpr::Literal(LiteralValue::Number(1.0));
+            let undefined = TypeExpr::Primitive(PrimitiveName::Undefined);
+            assert!(
+                arms.len() == 2 && arms.contains(&one) && arms.contains(&undefined),
+                "the authored read must be `1 | undefined`: {authored:?}"
+            );
+        }
+        other => panic!("the authored read must be a clean `1 | undefined` union: {other:?}"),
+    }
+    assert_eq!(
+        eval(&host, PATH, "synthetic"),
+        authored,
+        "a SYNTHESIZED optional member must read exactly like the authored one"
+    );
+}
+
+/// A generic call chain `c{n}<T>(x: T) { return c{n-1}(x); }` of `levels`
+/// functions over `c0`, and a witness `w` calling the last one. `c0` is
+/// imported from `dep` when `import_c0`, else defined locally with `tag`.
+fn generic_chain(levels: usize, import_c0: bool, tag: &str) -> String {
+    let mut source = if import_c0 {
+        "import { c0 } from \"./dep\";\n".to_string()
+    } else {
+        generic_chain_head(tag)
+    };
+    for level in 1..levels {
+        source.push_str(&format!(
+            "export function c{level}<T>(x: T) {{ return c{}(x); }}\n",
+            level - 1
+        ));
+    }
+    source.push_str(&format!(
+        "export function w(v: number | string) {{ return c{}(v); }}\n",
+        levels - 1
+    ));
+    source
+}
+
+fn generic_chain_head(tag: &str) -> String {
+    format!("export function c0<T>(x: T) {{ return {{ v: x, tag: \"{tag}\" as const }}; }}\n")
+}
+
+/// The answer for `w` over a `levels`-long chain, and the connected work
+/// units its demand charged.
+fn generic_chain_work(levels: usize) -> (Outcome, usize) {
+    let path = format!("/ws/cov/chain_{levels}.ts");
+    let host = host_with(&[(path.as_str(), generic_chain(levels, false, "o").as_str())]);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, &path, "w");
+        let outcome = eval_key_on(&host, dispatch, key);
+        (outcome, dispatch.connected_demand.work_used_for_tests())
+    })
+}
+
+/// §12 hard gate "shared body-obligation consumers reuse completed return
+/// work": each chain level demands its callee both generically and under
+/// the call's instantiation, and each of those re-demands both forms of
+/// the level below. Before a completed inline member was reusable on its
+/// own transaction, every repeat re-evaluated the body and the work
+/// DOUBLED per level (20504 units at eleven levels, against 306 now); the
+/// host's audited entry ran out of connected-work budget at eleven. Every
+/// added level must now cost the same.
+///
+/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB): eleven
+/// levels nest 22 connected queries, deeper than a default test thread
+/// holds in an unoptimized build.
+#[test]
+fn a_generic_call_chain_reuses_each_completed_callee() {
+    let worker = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let (short, _) = generic_chain_work(2);
+            assert!(
+                matches!(
+                    short,
+                    Outcome::Value {
+                        degradation: None,
+                        ..
+                    }
+                ),
+                "the two-level chain must answer cleanly: {short:?}"
+            );
+            let (nine, work_nine) = generic_chain_work(9);
+            let (ten, work_ten) = generic_chain_work(10);
+            let (eleven, work_eleven) = generic_chain_work(11);
+            for (levels, outcome) in [(9, nine), (10, ten), (11, eleven)] {
+                assert_eq!(
+                    outcome, short,
+                    "a {levels}-level chain answers exactly like a two-level one"
+                );
+            }
+            assert_eq!(
+                work_eleven - work_ten,
+                work_ten - work_nine,
+                "every added level must cost the same connected work \
+                 ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 levels)"
+            );
+        })
+        .expect("spawn the chain worker");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// A reused member's reads are REPLAYED into the builds demanding it, so
+/// an edit to a callee in another file still reaches every consumer: the
+/// callee's body fact must root whatever was built from the reused value,
+/// or the second read below would serve the stale tag.
+#[test]
+fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
+    const DEP: &str = "/ws/cov/chain_dep/dep.ts";
+    const MAIN: &str = "/ws/cov/chain_dep/main.ts";
+    let main = generic_chain(6, true, "");
+    let host = host_with(&[(DEP, &generic_chain_head("before")), (MAIN, &main)]);
+    let before = eval(&host, MAIN, "w");
+    assert!(
+        format!("{before:?}").contains("before"),
+        "the chain carries the callee's tag: {before:?}"
+    );
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(DEP.to_string()),
+        input_id: DEP.to_string(),
+        source: Arc::from(generic_chain_head("after").as_str()),
+        file_language: lang(DEP),
+        aliases: Vec::new(),
+    });
+    let after = eval(&host, MAIN, "w");
+    assert!(
+        format!("{after:?}").contains("after") && !format!("{after:?}").contains("before"),
+        "an edit to the reused callee must reach the chain's answer: {after:?}"
     );
 }
 /// CANARY (landed) — a `super.m()` call in a derived class method
@@ -5573,5 +5741,321 @@ fn recursive_thenable_terminates_without_fabricating_a_type() {
         ),
         "the lib conditional over a recursive thenable keeps its authored \
          application rather than selecting a branch, got {lib:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Class expressions: the constructor type, the instance surface, and the
+// mixin form over a constructor-constrained type parameter
+// ──────────────────────────────────────────────────────────────────────
+
+const CLASSES: &str = "/ws/cov/classes.ts";
+const CLASSES_SRC: &str = r#"
+interface Base { label: string }
+declare const BaseCtor: new (...args: any[]) => Base;
+export class Named { n = 1; constructor(a: string, b?: number) {} static s = "s"; }
+
+export function plainClass() {
+  return class { extra = 1; readonly lit = 1; static st = "s"; m(): number { return 1; } get g(): boolean { return true; } };
+}
+export function ctorClass() { return class { constructor(public a: string, b?: number) {} }; }
+export function extendsNamed() { return class extends Named { e = 2; }; }
+export function Mixin<S extends new (...args: any[]) => Base>(Base: S) {
+  return class extends Base { extra = 1; };
+}
+export declare function DM<S extends new (...args: any[]) => Base>(b: S): (new (...args: any[]) => { extra: number }) & S;
+declare function G<S>(b: S): S;
+declare function O<T>(a: T): T;
+declare function O(a: number, b: number): number;
+declare function assertString(x: unknown): asserts x is string;
+export function staticBlockAssertion(x: string | number) {
+  const C = class { static { assertString(x); } };
+  return { C, x };
+}
+
+export function plainInstance() { const x: InstanceType<ReturnType<typeof plainClass>> = null as any; return x; }
+export function plainExtra() { const x: InstanceType<ReturnType<typeof plainClass>>['extra'] = null as any; return x; }
+export function plainLit() { const x: InstanceType<ReturnType<typeof plainClass>>['lit'] = null as any; return x; }
+export function plainMethod() { const x: InstanceType<ReturnType<typeof plainClass>>['m'] = null as any; return x; }
+export function plainGetter() { const x: InstanceType<ReturnType<typeof plainClass>>['g'] = null as any; return x; }
+export function plainStatic() { const x: ReturnType<typeof plainClass>['st'] = null as any; return x; }
+export function protoRead() { const C = class { extra = 1; }; return C.prototype; }
+export function plainCtorParams() { const x: ConstructorParameters<ReturnType<typeof plainClass>> = null as any; return x; }
+export function ctorParams() { const x: ConstructorParameters<ReturnType<typeof ctorClass>> = null as any; return x; }
+export function ctorProperty() { const x: InstanceType<ReturnType<typeof ctorClass>>['a'] = null as any; return x; }
+export function derivedInstance() { const x: InstanceType<ReturnType<typeof extendsNamed>> = null as any; return x; }
+export function derivedCtorParams() { const x: ConstructorParameters<ReturnType<typeof extendsNamed>> = null as any; return x; }
+export function derivedInherited() { const x: InstanceType<ReturnType<typeof extendsNamed>>['n'] = null as any; return x; }
+export function derivedOwn() { const x: InstanceType<ReturnType<typeof extendsNamed>>['e'] = null as any; return x; }
+export function derivedStatic() { const x: ReturnType<typeof extendsNamed>['s'] = null as any; return x; }
+export function mixinInstance() { const x: InstanceType<ReturnType<typeof Mixin<typeof BaseCtor>>> = null as any; return x; }
+export function mixinCtorParams() { const x: ConstructorParameters<ReturnType<typeof Mixin<typeof BaseCtor>>> = null as any; return x; }
+export function mixinInherited() { const x: InstanceType<ReturnType<typeof Mixin<typeof BaseCtor>>>['label'] = null as any; return x; }
+export function mixinOwn() { const x: InstanceType<ReturnType<typeof Mixin<typeof BaseCtor>>>['extra'] = null as any; return x; }
+export function declaredMixinInstance() { const x: InstanceType<ReturnType<typeof DM<typeof BaseCtor>>> = null as any; return x; }
+export function instantiatedDeclaration() { const x: ReturnType<typeof G<string>> = null as any; return x; }
+export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> = null as any; return x; }
+"#;
+
+/// How a CLASSES probe's answer is admitted.
+///
+/// An answer read through a class expression's value is `ReturnOnly`: the
+/// class body's constructor, members and field initializers are callables
+/// no indexed function position serves, so the capture family keeps its
+/// typed gap over them — the answer is complete and undegraded, and it
+/// never warms.
+#[derive(Clone, Copy, Debug)]
+enum ClassProbeAdmission {
+    Warm,
+    ReturnOnly,
+}
+
+/// Evaluate one CLASSES probe CLEAN (undegraded) under `admission`, and
+/// hand its answer to `check` normalized the way the signature corpus
+/// compares a probe: deferred utility applications reduced, named
+/// declarations — and class expressions — kept by name.
+#[track_caller]
+fn with_class_probe<R>(
+    name: &str,
+    admission: ClassProbeAdmission,
+    check: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    let host = host_with(&[(CLASSES, CLASSES_SRC)]);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, CLASSES, name);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            panic!("{name} must produce a value");
+        };
+        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            match admission {
+                ClassProbeAdmission::Warm => 1,
+                ClassProbeAdmission::ReturnOnly => 0,
+            },
+            "{name} must be admitted {admission:?}"
+        );
+        let normalized = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .unwrap_or_else(|| panic!("{name}: the probe's structural-fact demand completes"));
+        check(dispatch, normalized)
+    })
+}
+
+/// One CLASSES probe structurally equals the checker print `expected`,
+/// through the shared checker-syntax projection.
+#[track_caller]
+fn assert_class_probe(name: &str, admission: ClassProbeAdmission, expected: &str) {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    with_class_probe(name, admission, |dispatch, node| {
+        let parsed = checker_syntax::parse(expected)
+            .unwrap_or_else(|error| panic!("`{expected}` must parse: {error}"));
+        assert!(
+            checker_syntax::matches_node(dispatch, node, &parsed, 0),
+            "{name}: expected `{expected}`, measured `{}`",
+            render_node(dispatch, node, 0)
+        );
+    });
+}
+
+/// One CLASSES probe is a parameter tuple: each element's label, its
+/// optionality, and whether its value is the `string` primitive.
+#[track_caller]
+fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
+    with_class_probe(
+        name,
+        ClassProbeAdmission::ReturnOnly,
+        |dispatch, node| match dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => elements
+                .iter()
+                .map(|element| {
+                    (
+                        element.label.as_deref().map(str::to_owned),
+                        element.optional,
+                        matches!(
+                            dispatch.graph().node_data(element.value).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                        ),
+                    )
+                })
+                .collect(),
+            other => panic!("{name}: expected a parameter tuple, got {other:?}"),
+        },
+    )
+}
+
+/// A class expression's value is its constructor type: an instance named
+/// the way the checker names it, the class's own members on that
+/// instance, its statics on the constructor, and a constructor that takes
+/// nothing when the class declares none.
+///
+/// Oracle (tsc 7.0.2), over `plainClass`'s `class { extra = 1; readonly
+/// lit = 1; static st = "s"; m(): number { … }; get g(): boolean { … } }`:
+/// the instance prints `(Anonymous class)` (no type-parameter clause
+/// encloses it); `extra` is `number`, `lit` is `1`, `m` is `() => number`,
+/// `g` is `boolean`; the static `st` is `string`; `ConstructorParameters`
+/// is `[]`. `protoRead`'s `C.prototype` over `const C = class { extra = 1;
+/// }` is `C`: the constructor's `prototype` is the instance, and a class
+/// expression that initializes a variable is named after it.
+#[test]
+fn class_expression_value_is_its_constructor_over_its_own_members() {
+    assert_class_probe(
+        "plainInstance",
+        ClassProbeAdmission::ReturnOnly,
+        "(Anonymous class)",
+    );
+    assert_class_probe("plainExtra", ClassProbeAdmission::ReturnOnly, "number");
+    assert_class_probe("plainLit", ClassProbeAdmission::ReturnOnly, "1");
+    assert_class_probe(
+        "plainMethod",
+        ClassProbeAdmission::ReturnOnly,
+        "() => number",
+    );
+    assert_class_probe("plainGetter", ClassProbeAdmission::ReturnOnly, "boolean");
+    assert_class_probe("plainStatic", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("protoRead", ClassProbeAdmission::ReturnOnly, "C");
+    assert_eq!(class_probe_tuple("plainCtorParams"), Vec::new());
+}
+
+/// A declared constructor's parameters are the class's construct
+/// signature, and a parameter property is an instance member.
+///
+/// Oracle (tsc 7.0.2), over `class { constructor(public a: string, b?:
+/// number) {} }`: `ConstructorParameters` is `[a: string, b?: number |
+/// undefined]` and the instance's `a` is `string`.
+#[test]
+fn class_expression_declared_constructor_types_the_construct_signature() {
+    assert_eq!(
+        class_probe_tuple("ctorParams"),
+        vec![
+            (Some("a".to_owned()), false, true),
+            (Some("b".to_owned()), true, false),
+        ]
+    );
+    assert_class_probe("ctorProperty", ClassProbeAdmission::ReturnOnly, "string");
+}
+
+/// A class expression extending a named class inherits the base
+/// constructor's parameters (it declares none of its own), the base
+/// instance members, and the base statics.
+///
+/// Oracle (tsc 7.0.2), over `class extends Named { e = 2; }` with `class
+/// Named { n = 1; constructor(a: string, b?: number) {} static s = "s"; }`:
+/// the instance prints `(Anonymous class)`; `ConstructorParameters` is
+/// `[a: string, b?: number | undefined]`; `n` and `e` are `number`; the
+/// static `s` is `string`.
+#[test]
+fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
+    assert_class_probe(
+        "derivedInstance",
+        ClassProbeAdmission::ReturnOnly,
+        "(Anonymous class)",
+    );
+    assert_eq!(
+        class_probe_tuple("derivedCtorParams"),
+        vec![
+            (Some("a".to_owned()), false, true),
+            (Some("b".to_owned()), true, false),
+        ]
+    );
+    assert_class_probe(
+        "derivedInherited",
+        ClassProbeAdmission::ReturnOnly,
+        "number",
+    );
+    assert_class_probe("derivedOwn", ClassProbeAdmission::ReturnOnly, "number");
+    assert_class_probe("derivedStatic", ClassProbeAdmission::ReturnOnly, "string");
+}
+
+/// The mixin form: a class expression extending a parameter typed by a
+/// constructor-constrained type parameter is its constructor type
+/// intersected with that type parameter, so instantiating the factory
+/// composes the two constructors under the checker's mixin rule — the
+/// instance is the class over the base instance, named after the factory
+/// whose clause encloses the class.
+///
+/// Oracle (tsc 7.0.2), over `function Mixin<S extends new (...args: any[])
+/// => Base>(Base: S) { return class extends Base { extra = 1; }; }` and
+/// `declare const BaseCtor: new (...args: any[]) => Base`:
+/// `InstanceType<ReturnType<typeof Mixin<typeof BaseCtor>>>` prints
+/// `Mixin.(Anonymous class) & Base`, its `label` is `string` and its
+/// `extra` is `number`, and `ConstructorParameters` is `any[]`.
+#[test]
+fn mixin_class_expression_composes_with_its_instantiated_base() {
+    assert_class_probe(
+        "mixinInstance",
+        ClassProbeAdmission::ReturnOnly,
+        "Mixin.(Anonymous class) & Base",
+    );
+    assert_class_probe("mixinCtorParams", ClassProbeAdmission::ReturnOnly, "any[]");
+    assert_class_probe("mixinInherited", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("mixinOwn", ClassProbeAdmission::ReturnOnly, "number");
+}
+
+/// A DECLARED mixin factory's result composes the same way: the
+/// constructor it declares is a mixin constructor, so its instance mixes
+/// into the instantiated base's.
+///
+/// Oracle (tsc 7.0.2), over `declare function DM<S extends new (...args:
+/// any[]) => Base>(b: S): (new (...args: any[]) => { extra: number }) &
+/// S`: `InstanceType<ReturnType<typeof DM<typeof BaseCtor>>>` is `{ extra:
+/// number; } & Base`.
+#[test]
+fn declared_mixin_factory_instance_is_its_constructor_result_over_the_base() {
+    assert_class_probe(
+        "declaredMixinInstance",
+        ClassProbeAdmission::Warm,
+        "{ extra: number; } & Base",
+    );
+}
+
+/// An instantiation expression over a function DECLARATION instantiates
+/// every signature the declaration carries whose type-parameter list
+/// accepts the arguments, and drops the others.
+///
+/// Oracle (tsc 7.0.2): `ReturnType<typeof G<string>>` over `declare
+/// function G<S>(b: S): S` is `string`; `ReturnType<typeof O<string>>`
+/// over the overloads `O<T>(a: T): T` and `O(a: number, b: number):
+/// number` is `string` (the non-generic overload takes no type argument).
+#[test]
+fn instantiation_expression_instantiates_a_declarations_signatures() {
+    assert_class_probe(
+        "instantiatedDeclaration",
+        ClassProbeAdmission::Warm,
+        "string",
+    );
+    assert_class_probe("instantiatedOverloads", ClassProbeAdmission::Warm, "string");
+}
+
+/// A class expression's class-evaluation-time positions RUN in the
+/// enclosing frame: an `asserts` call in a static block narrows what
+/// follows the class expression, so the composed class value never lets
+/// the frame publish the un-narrowed read clean.
+///
+/// Oracle (tsc 7.0.2): `function staticBlockAssertion(x: string | number) {
+/// const C = class { static { assertString(x); } }; return { C, x }; }`
+/// returns `{ C: { new (): {}; }; x: string; }`. The narrowing through a
+/// static block is not modelled, so the statement carries the typed
+/// guard-narrowing gap.
+#[test]
+fn class_expression_static_block_assertion_is_not_dropped() {
+    let host = host_with(&[(CLASSES, CLASSES_SRC)]);
+    assert_degraded(
+        &host,
+        CLASSES,
+        "staticBlockAssertion",
+        FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing),
     );
 }

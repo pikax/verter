@@ -314,6 +314,9 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
         SemanticNodeData::DeclRef { identity } => names(&identity.canonical_id),
         SemanticNodeData::InstantiationRef { base, .. } => names(&base.canonical_id),
         SemanticNodeData::TypeParam { decl, .. } => names(&decl.canonical_id),
+        // A class expression's instance is the class authored in `canonical_id`;
+        // its surface node is reached by the child cascade.
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => names(&identity.canonical_id),
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
             canonical_id: refused,
             ..
@@ -696,6 +699,15 @@ impl NodeArena {
                             embeds_dead = true;
                         }
                     });
+                    // A class expression's instance embeds its surface node
+                    // outside the child walk (the walk serves the semantic
+                    // definition of structure; the surface is the instance's
+                    // own evaluation product), so the cascade reaches it here.
+                    if let SemanticNodeData::ClassExpressionInstance { surface, .. } =
+                        payload.as_ref()
+                    {
+                        embeds_dead |= dead.contains(&surface.0);
+                    }
                     if embeds_dead {
                         dead.insert(id);
                         changed = true;

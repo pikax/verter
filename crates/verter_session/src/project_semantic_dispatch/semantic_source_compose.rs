@@ -890,6 +890,10 @@ impl ProjectSemanticDispatch<'_> {
                 return_carrier,
                 signature_span: None,
                 return_type_span: None,
+                // The signature fact records no predicate slot: a predicate
+                // signature composes to its checker return (`boolean` /
+                // `void`) alone.
+                predicate: None,
             },
             scope,
         ))

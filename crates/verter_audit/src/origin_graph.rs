@@ -189,8 +189,8 @@ pub enum SemanticNodeKind {
     Mapped,
     /// Template-literal type.
     TemplateLiteral,
-    /// Normalized union (post-flatten).
-    NormalizeUnion,
+    /// Ordered union reduction (post-flatten).
+    ReduceUnion,
     /// Ordered intersection reduction (post-flatten).
     ReduceIntersection,
     /// Catch-all for variants added to the semantic graph after the

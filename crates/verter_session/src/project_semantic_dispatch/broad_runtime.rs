@@ -216,6 +216,12 @@ impl ProjectSemanticDispatch<'_> {
                     node: *inner,
                     filter_unknown: item.filter_unknown,
                 }),
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    work.push(RuntimeWork {
+                        node: *surface,
+                        filter_unknown: item.filter_unknown,
+                    })
+                }
                 SemanticNodeData::Union(arms) => {
                     for arm in arms.iter().rev() {
                         work.push(RuntimeWork {
@@ -258,8 +264,17 @@ impl ProjectSemanticDispatch<'_> {
                 }
                 SemanticNodeData::Signature { .. } => kinds.push(BroadRuntimeKind::Function),
                 SemanticNodeData::Object(surface) => {
-                    let callable = !surface.call_signatures.is_empty()
-                        || !surface.construct_signatures.is_empty();
+                    // Callability is a signature-discovery answer, never the
+                    // surface's own lists: a surface merged for presentation
+                    // carries lists the kernel did not produce.
+                    let (call, construct) = match self.shared_signature_buckets(item.node) {
+                        Ok(buckets) => buckets,
+                        Err(_) => {
+                            undecidable = true;
+                            continue;
+                        }
+                    };
+                    let callable = !call.is_empty() || !construct.is_empty();
                     if callable {
                         kinds.push(BroadRuntimeKind::Function);
                     }

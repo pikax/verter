@@ -1173,13 +1173,18 @@ impl DeclBodyMemo {
             .mint_bound_flow_graph(key, prepared)
     }
 
+    /// Lower the selected slice content of `entry`. `nullability` is the
+    /// function's own project's `strictNullChecks` algebra: the content
+    /// lowering types an optional parameter under it (the rest of the
+    /// content is policy-free syntax).
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
-        self.flow_slice_content_with_context(entry, Some(selection), bound, None)
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None, nullability)
     }
 
     pub(crate) fn flow_slice_content_with_context(
@@ -1188,6 +1193,7 @@ impl DeclBodyMemo {
         selection: Option<crate::flow_slice_content::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
         if bound.key().function != entry.key
             || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
@@ -1231,6 +1237,7 @@ impl DeclBodyMemo {
                         carrier_module,
                         &snapshot,
                         context.as_deref(),
+                        nullability,
                     )
                 })
                 .flatten()

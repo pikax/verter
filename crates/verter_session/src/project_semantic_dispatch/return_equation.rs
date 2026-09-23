@@ -47,9 +47,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Err(ReturnEquationFailure::UnresolvedOutsideHold);
         }
 
+        // Each member joins under the null algebra of the file its value is
+        // typed in; a component may span projects.
+        let nullabilities = members
+            .iter()
+            .map(|member| self.return_equation_nullability(&member.identity))
+            .collect::<Vec<_>>();
         let seeds = members
             .iter()
-            .map(|member| self.return_equation_leaf_set(&member.concrete_seeds))
+            .zip(&nullabilities)
+            .map(|(member, nullability)| {
+                self.return_equation_leaf_set(&member.concrete_seeds, *nullability)
+            })
             .collect::<Vec<_>>();
         let mut current = seeds.clone();
         let mut outside: FxHashMap<
@@ -69,7 +78,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 outside.insert(
                     hold.clone(),
-                    (self.return_equation_leaf_set(&[result]), fresh),
+                    (
+                        self.return_equation_leaf_set(
+                            &[result],
+                            self.return_equation_nullability(hold),
+                        ),
+                        fresh,
+                    ),
                 );
             }
         }
@@ -105,7 +120,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         leaves.extend_from_slice(contributed);
                     }
                 }
-                let next = self.return_equation_leaf_set(&leaves);
+                let next = self.return_equation_leaf_set(&leaves, nullabilities[position]);
                 if next != current[position] {
                     current[position] = next;
                     progressed = true;
@@ -121,11 +136,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         Ok(current
             .iter()
-            .map(|leaves| self.intern_normalized_union_or_intersection(leaves, true))
+            .zip(&nullabilities)
+            .map(|(leaves, nullability)| self.intern_normalized_union(leaves, *nullability))
             .collect())
     }
 
-    fn return_equation_leaf_set(&self, nodes: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+    /// The null algebra one equation member joins under: a flow member's
+    /// own key policy, a call member's call-site file's project.
+    fn return_equation_nullability(
+        &self,
+        identity: &ReturnObligationIdentity,
+    ) -> crate::semantic_query::NullabilityPolicy {
+        match identity {
+            ReturnObligationIdentity::FlowReturn(key) => key.context.policy.nullability,
+            ReturnObligationIdentity::ResolveCall(key) => {
+                self.nullability_for(&key.point.canonical_id)
+            }
+        }
+    }
+
+    fn return_equation_leaf_set(
+        &self,
+        nodes: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> Vec<SemanticNodeId> {
         if nodes.is_empty() {
             return Vec::new();
         }
@@ -139,7 +173,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut leaves);
         leaves.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
-        let normalized = self.intern_normalized_union_or_intersection(&leaves, true);
+        let normalized = self.intern_normalized_union(&leaves, nullability);
         match graph.node_data(normalized).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),
             _ => vec![normalized],

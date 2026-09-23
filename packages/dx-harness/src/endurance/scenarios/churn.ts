@@ -305,6 +305,8 @@ export interface RetentionReading {
   readonly relationProofs: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly relateKeys: number;
+  /** Resident union member views, released with their union's document. */
+  readonly unionViews: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly shapeCacheEntries: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
@@ -347,6 +349,7 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "unresolvedReach",
   "relationProofs",
   "relateKeys",
+  "unionViews",
   "shapeCacheEntries",
   "flowGraphs",
   "flowHashEntries",
@@ -910,6 +913,7 @@ export const CHURN_RETENTION_COUNTERS = [
   "unresolvedReach",
   "relationProofs",
   "relateKeys",
+  "unionViews",
   "shapeCacheEntries",
   "flowGraphs",
   "flowHashEntries",
@@ -1085,7 +1089,7 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `roots=${reading.liveRoots} leases=${reading.snapshotLeases} ` +
     `candidates=${reading.carrierCandidates} lanes=${reading.publicationLanes} ` +
     `nodes=${reading.semanticNodes}/${reading.semanticNodeSlots} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
-    `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} shapes=${reading.shapeCacheEntries} ` +
+    `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} unionViews=${reading.unionViews} shapes=${reading.shapeCacheEntries} ` +
     `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} surfaces=${reading.frameworkSurfaceEntries} ` +
     `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
     `pressureRefusals=${reading.refusalsPressure} ` +

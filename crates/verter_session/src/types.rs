@@ -4638,9 +4638,11 @@ impl MetaProvenance {
             node_arena_inner_write_wait_ns: self.node_arena_inner_write_wait_ns.load(Relaxed),
             scheduler_submit_count: self.scheduler_submit_count.load(Relaxed),
             scheduler_inbox_depth_max: self.scheduler_inbox_depth_max.load(Relaxed),
-            node_arena_pushes_per_discriminant: std::array::from_fn(|i| {
-                self.node_arena_pushes_per_discriminant[i].load(Relaxed)
-            }),
+            node_arena_pushes_per_discriminant: self
+                .node_arena_pushes_per_discriminant
+                .iter()
+                .map(|slot| slot.load(Relaxed))
+                .collect(),
             materialize_structure_fact_tracer_installs: self
                 .materialize_structure_fact_tracer_installs
                 .load(Relaxed),
@@ -4872,8 +4874,10 @@ pub struct MetaProvenanceSnapshot {
     pub node_arena_inner_write_wait_ns: u64,
     pub scheduler_submit_count: u64,
     pub scheduler_inbox_depth_max: u64,
-    /// Per-`SemanticNodeData` discriminant push count.
-    pub node_arena_pushes_per_discriminant: [u64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
+    /// Per-`SemanticNodeData` discriminant push count, indexed by
+    /// [`crate::semantic_query::SemanticNodeTag::bucket_index`]
+    /// ([`SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`] entries).
+    pub node_arena_pushes_per_discriminant: Vec<u64>,
 
     // ── Family B/C/D producer-install observability ───────────
     /// Structural-materialiser `install_fact_tracer` wrap count (always
@@ -4947,6 +4951,9 @@ pub struct HostRetentionSnapshot {
     pub relation_proofs: usize,
     /// Interned co-discharged relate keys.
     pub relate_keys: usize,
+    /// Resident union member views (one per distinct union built, released
+    /// with the union's document).
+    pub union_views: usize,
     /// Live shape-cache entries.
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.

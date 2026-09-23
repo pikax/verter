@@ -41,6 +41,13 @@ impl SemanticGraphStore {
         self.arena.is_live(id)
     }
 
+    /// Number of resident union member views (V8's `union_views`); each is
+    /// released with the union it belongs to.
+    #[must_use]
+    pub fn union_view_count(&self) -> usize {
+        self.union_views.lock().len()
+    }
+
     /// Number of `unresolved_reach` entries (retention observability).
     #[must_use]
     pub fn unresolved_reach_count(&self) -> usize {

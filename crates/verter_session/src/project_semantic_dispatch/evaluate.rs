@@ -18,6 +18,20 @@ use crate::semantic_query::{
     ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
+/// How the checker prints an application of a named declaration — the
+/// altitude the declaration-keeping structural-fact demand stops at (see
+/// `ProjectSemanticDispatch::printed_declaration`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrintedDeclaration {
+    /// An interface or class: printed by its name.
+    Named,
+    /// An alias the checker prints by name when its application settles
+    /// on the type the alias constructs.
+    AliasNamed,
+    /// An alias the checker prints as what it resolves to.
+    AliasTransparent,
+}
+
 /// Map a residual-carrier resolution read's `QueryError` onto the demand
 /// loop's typed exit classification.
 ///
@@ -511,7 +525,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Full structural-fact demand: resolve BOTH residual carriers
         // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
-        self.resolve_structural_fact_demand(node, context, true)
+        self.resolve_structural_fact_demand(node, context, true, true)
     }
 
     /// Carrier-PRESERVING sibling of
@@ -549,21 +563,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
         // `InstantiationRef` (do NOT instantiate — leave the args readable).
-        self.resolve_structural_fact_demand(node, context, false)
+        self.resolve_structural_fact_demand(node, context, false, true)
     }
 
-    /// Shared residual-carrier resolution loop backing both
-    /// [`Self::normalize_node_for_structural_fact_demand`]
-    /// (`instantiate_instantiation_refs = true`) and
-    /// [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
-    /// (`= false`). ONE loop, one resolver — the two entry points differ ONLY by
-    /// whether the `InstantiationRef` arm instantiates (there is no divergent
-    /// second implementation).
+    /// Declaration-KEEPING sibling of
+    /// [`Self::normalize_node_for_structural_fact_demand`]: resolves
+    /// residual carriers through the shared `ResolveDecl` / `Instantiate`
+    /// queries exactly as it does, but STOPS where the checker prints a
+    /// NAME instead of resolving it to the declaration's body.
+    ///
+    /// That is the altitude a type is PRINTED at: a utility or conditional
+    /// application (`InstanceType<…>`, `ReturnType<…>`, `Awaited<…>`) is
+    /// reduced, while a named interface is shown by its name, and so is an
+    /// alias application the checker names by its alias — each with its
+    /// omitted defaulted arguments filled (see
+    /// `ProjectSemanticDispatch::printed_declaration`). The checker's
+    /// printed answer to `InstanceType<typeof CtorA & typeof CtorB>` is `B`,
+    /// the interface — not `{ b: 2 }`, its body — and to a `WithDefault`
+    /// reference it is `WithDefault<string>`, so an evidence lane that
+    /// compares a live answer against a recorded print needs this stop, and
+    /// the fully resolving demand overshoots it by exactly one step.
+    ///
+    /// Same loop, same resolver, same bounds and typed `Partial` outcome as
+    /// its siblings; STRICTLY test-scoped because its only consumer is the
+    /// in-crate signature-corpus driver.
+    #[cfg(test)]
+    pub(crate) fn normalize_node_keeping_declaration_refs_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome {
+        self.resolve_structural_fact_demand(node, context, true, false)
+    }
+
+    /// Shared residual-carrier resolution loop backing
+    /// [`Self::normalize_node_for_structural_fact_demand`] (both residual arms
+    /// resolve), [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
+    /// (`instantiate_instantiation_refs = false`) and, under test,
+    /// `normalize_node_keeping_declaration_refs_for_tests`
+    /// (`resolve_declaration_refs = false`). ONE loop, one resolver — the
+    /// entry points differ ONLY in which residual arm is allowed to resolve
+    /// (there is no divergent second implementation).
     fn resolve_structural_fact_demand(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         instantiate_instantiation_refs: bool,
+        resolve_declaration_refs: bool,
     ) -> StructuralFactDemandOutcome {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
@@ -593,6 +639,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `PROPAGATED`), so the completeness survives even with NO
         // `RequestContext` installed.
         let mut visited = rustc_hash::FxHashSet::default();
+        // The declaration-keeping mode's OUTERMOST alias application the
+        // checker names, recorded as the chain resolves through it and
+        // printed when the chain settles on a type that alias names.
+        let mut named_alias_application: Option<SemanticNodeId> = None;
         // The loop's own exit classification: `None` = a stable (Complete)
         // stop; `Some(reasons)` = an operational truncation/fault.
         let exit_reasons: Option<PartialReasonSet> = loop {
@@ -601,20 +651,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // cannot read.
                 break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
             };
+            // The declaration-keeping mode prints a named declaration the
+            // way the checker does: an interface or class by its name, an
+            // alias application by its alias when the alias names the type
+            // it resolves to — each with its omitted defaulted arguments
+            // filled — and every other alias by what it resolves to.
+            let printed = if resolve_declaration_refs {
+                None
+            } else {
+                match data.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => Some((identity.clone(), None)),
+                    SemanticNodeData::InstantiationRef { base, args }
+                        if base.canonical_id.as_ref() != "__builtin__" =>
+                    {
+                        Some((base.clone(), Some(Arc::clone(args))))
+                    }
+                    _ => None,
+                }
+            };
+            let printed = printed.map(|(identity, args)| {
+                let kind = self.printed_declaration(&identity);
+                (identity, args, kind)
+            });
             // TERMINAL-BEFORE-FUSE: classify whether `n` is a residual
             // resolvable carrier BEFORE consulting the fuse, so a result that
             // reached its terminal structural body on exactly the last
             // permitted step is a stable stop, never a false partial. The
             // non-residual break also covers the peel's deliberate
-            // un-instantiated `InstantiationRef` stop.
-            let is_residual = match data.as_ref() {
-                SemanticNodeData::DeclRef { .. } => true,
-                SemanticNodeData::InstantiationRef { .. } => instantiate_instantiation_refs,
+            // un-instantiated `InstantiationRef` stop, and the
+            // declaration-keeping mode's stop at a declaration printed by
+            // its name or at a class-expression instance.
+            let is_residual = match (data.as_ref(), &printed) {
+                (_, Some((_, _, Some(PrintedDeclaration::Named)))) => false,
+                (_, Some((_, _, Some(_)))) => true,
+                (
+                    SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. },
+                    _,
+                ) => resolve_declaration_refs,
+                (SemanticNodeData::InstantiationRef { .. }, _) => instantiate_instantiation_refs,
                 _ => false,
             };
+            drop(data);
+            if let Some((identity, args, Some(kind))) = &printed {
+                let args = args.as_deref().unwrap_or_default();
+                match kind {
+                    PrintedDeclaration::Named => {
+                        n = self.declared_application(n, identity, args, context);
+                    }
+                    PrintedDeclaration::AliasNamed if named_alias_application.is_none() => {
+                        named_alias_application =
+                            Some(self.declared_application(n, identity, args, context));
+                    }
+                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasTransparent => {}
+                }
+            }
             if !is_residual {
                 break None;
             }
+            let Some(data) = self.graph().node_data(n) else {
+                break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
+            };
             if !visited.insert(n) {
                 // Residual-carrier cycle (`type MutA = MutB; type MutB = MutA`):
                 // the chain can never settle.
@@ -627,6 +724,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 break Some(reasons);
             }
             let resolved = match data.as_ref() {
+                // A class expression's instance resolves to the instance surface
+                // it carries — the body a `DeclRef` resolves to, already in hand.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => *surface,
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the `ScopeId { canonical_id, local_scope: None }` shape the
                 // canonical resolver issues).
@@ -728,6 +828,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
         }
+        // The alias names the type its application settled on only while
+        // that type is one the alias itself constructs; a union that
+        // collapsed to one member (`type U<T> = T | string` at `string`) or
+        // an intersection reduced to `never` is printed as itself.
+        if let Some(named) = named_alias_application {
+            if self.alias_names_settled_type(n) {
+                n = named;
+            }
+        }
         match completeness {
             ResultCompleteness::Complete => StructuralFactDemandOutcome::Complete(n),
             ResultCompleteness::Partial(reasons) => {
@@ -760,6 +869,139 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.fold_local_partial_completeness(reasons);
                 StructuralFactDemandOutcome::Partial(reasons)
             }
+        }
+    }
+
+    /// How the checker prints an application of the named declaration
+    /// `identity` — measured on the pinned TypeScript 7.0.2 through the
+    /// corpus's two-step wrapper:
+    ///
+    /// - an interface or class application is printed by its name
+    ///   (`GI` with `interface GI<T = number>` prints `GI<number>`);
+    /// - an alias whose declared body is a type the alias itself
+    ///   constructs — an object, function, mapped, array or tuple type, a
+    ///   union or an intersection, directly or through another such alias
+    ///   (`type G<U> = F<U[]>`) — is printed by the alias
+    ///   (`G<boolean>`, `Tup<number>`, `Fn<number>`);
+    /// - every other alias is not named by the alias: a conditional
+    ///   (`Cond` prints its selected branch), a utility application, a bare
+    ///   parameter (`type Lit<T> = T`), a primitive, or a reference to an
+    ///   interface (`type ToFace = Face` prints `Face`, while this demand
+    ///   resolves a bare alias reference through to the interface's
+    ///   body).
+    ///
+    /// `None` when the declaration's kind or body cannot be recovered.
+    fn printed_declaration(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<PrintedDeclaration> {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut current = identity.clone();
+        loop {
+            if !visited.insert(current.clone()) {
+                // An alias cycle names nothing.
+                return Some(PrintedDeclaration::AliasTransparent);
+            }
+            match self.prepared_decl_kind(&current)? {
+                TypeDeclKind::Interface | TypeDeclKind::Class => {
+                    return Some(if current == *identity {
+                        PrintedDeclaration::Named
+                    } else {
+                        PrintedDeclaration::AliasTransparent
+                    });
+                }
+                TypeDeclKind::Alias => {}
+            }
+            let mut body = self.declared_body_shape(&current)?;
+            let mut aliases = rustc_hash::FxHashSet::default();
+            while let Some(SemanticNodeData::Alias(target)) =
+                self.graph().node_data(body).as_deref()
+            {
+                if !aliases.insert(body) {
+                    return Some(PrintedDeclaration::AliasTransparent);
+                }
+                body = *target;
+            }
+            match self.graph().node_data(body).as_deref() {
+                Some(
+                    SemanticNodeData::Object(_)
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Union(_)
+                    | SemanticNodeData::Intersection(_),
+                ) => return Some(PrintedDeclaration::AliasNamed),
+                Some(
+                    SemanticNodeData::DeclRef { identity: inner }
+                    | SemanticNodeData::InstantiationRef { base: inner, .. },
+                ) if inner.canonical_id.as_ref() != "__builtin__" => current = inner.clone(),
+                _ => return Some(PrintedDeclaration::AliasTransparent),
+            }
+        }
+    }
+
+    /// The declaration's own unsubstituted body shape, through the
+    /// memoized locator provider every declaration body lowers through.
+    fn declared_body_shape(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<SemanticNodeId> {
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+        };
+        match self.lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                symbol: Arc::clone(&identity.decl_name),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        })) {
+            QueryResult::Value(body) => Some(body),
+            QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+        }
+    }
+
+    /// Whether a named alias application still names the type it settled
+    /// on: one of the constructed types the checker attaches an alias to.
+    fn alias_names_settled_type(&self, settled: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(settled).as_deref(),
+            Some(
+                SemanticNodeData::Object(_)
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Union(_)
+                    | SemanticNodeData::Intersection(_)
+            )
+        )
+    }
+
+    /// The application of `identity` the checker prints for `carrier`: its
+    /// supplied arguments followed by every omitted defaulted one
+    /// ([`Self::declared_application_arguments`]). The carrier itself when
+    /// nothing is omitted or the defaults cannot be recovered.
+    fn declared_application(
+        &self,
+        carrier: SemanticNodeId,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        match self.declared_application_arguments(identity, args, context) {
+            Some(complete) if complete.len() > args.len() => self.graph().intern_preserving_scope(
+                carrier,
+                SemanticNodeData::InstantiationRef {
+                    base: identity.clone(),
+                    args: complete,
+                },
+            ),
+            _ => carrier,
         }
     }
 

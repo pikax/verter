@@ -125,7 +125,7 @@ pub struct BinderInput {
 pub enum ResultInput {
     Declared {
         return_type: SemanticNodeId,
-        predicate_or_assertion: Option<SemanticNodeId>,
+        predicate_or_assertion: Option<crate::semantic_query::SignaturePredicate>,
     },
     Body {
         locator: u64,
@@ -269,9 +269,17 @@ pub fn publish_signature(
             predicate_or_assertion,
         } => SignatureResultRecipe::Declared {
             return_type: store.intern_type_token(return_type, None)?,
-            predicate_or_assertion: predicate_or_assertion
-                .map(|node| store.intern_type_token(node, None))
-                .transpose()?,
+            predicate_or_assertion: match predicate_or_assertion {
+                Some(predicate) => Some(super::records::PredicateEffect {
+                    subject: predicate.subject,
+                    asserts: predicate.asserts,
+                    ty: predicate
+                        .ty
+                        .map(|node| store.intern_type_token(node, None))
+                        .transpose()?,
+                }),
+                None => None,
+            },
         },
         ResultInput::Body { locator } => SignatureResultRecipe::Body {
             return_obligation_key: ReturnObligationKey {
@@ -586,8 +594,20 @@ fn find_matching(
     Ok(None)
 }
 
-/// Append `new` signatures to `existing`, skipping any signature-equivalent
+/// Append `new` signatures to `existing`, skipping any signature IDENTICAL
 /// to one already present (the first stays the representative).
+///
+/// Identity here INCLUDES the result: this is the checker's
+/// `appendSignatures`, which compares with `ignoreReturnTypes: false`. Two
+/// signatures that differ only in what they return are different overloads
+/// of the intersection and are both kept — `(() => A) & (() => B)` carries
+/// both, so conditional inference (`ReturnType`, `InstanceType`), which reads
+/// the LAST signature, answers `B`. Comparing parameters alone would collapse
+/// them onto the first and answer `A`. Signatures identical including the
+/// result still collapse.
+///
+/// Union synthesis is the opposite rule and deliberately does not use this:
+/// it matches arms by parameters and unions their results.
 pub fn append_signatures(
     store: &SignatureStore,
     types: &dyn DiscoveryTypes,
@@ -595,15 +615,7 @@ pub fn append_signatures(
     new: &[SignatureCandidate],
 ) -> Res<()> {
     for &sig in new {
-        if find_matching(
-            store,
-            types,
-            existing,
-            sig,
-            MatchOptions::EXACT_IGNORING_RETURNS,
-        )?
-        .is_none()
-        {
+        if find_matching(store, types, existing, sig, MatchOptions::EXACT)?.is_none() {
             existing.push(sig);
         }
     }
@@ -1109,6 +1121,10 @@ fn combine_union_signatures(
     Ok(Some(store.candidate(descriptor, left.provenance)?))
 }
 
+/// Whether a member's construct list is a MIXIN constructor: exactly one
+/// non-generic signature whose only parameter is an `any`-element array
+/// rest (`new (...args: any[]) => X`). A `this` receiver is not a
+/// parameter and does not take part (TypeScript's `isMixinConstructorType`).
 fn is_mixin_constructor(
     view: &SemanticReadView,
     types: &dyn DiscoveryTypes,
@@ -1116,8 +1132,8 @@ fn is_mixin_constructor(
 ) -> Res<bool> {
     let [only] = list else { return Ok(false) };
     let loaded = load(view, *only)?;
-    Ok(loaded.layout.parameters.is_empty()
-        && loaded.receiver.is_none()
+    Ok(loaded.space.binders.is_empty()
+        && loaded.layout.parameters.is_empty()
         && loaded.layout.rest.as_ref().is_some_and(|r| {
             r.kind == RestKind::Array && r.tail.is_empty() && types.is_any(r.slot.ty)
         }))
@@ -1126,10 +1142,19 @@ fn is_mixin_constructor(
 /// Intersection signatures for one kind. `members` are the per-member
 /// candidate lists in authored order.
 ///
-/// Call signatures concatenate with signature-equivalence dedup. Construct
-/// signatures do the same, except that when any member is a mixin
-/// constructor (`new (...args: any[]) => X`) every other member's construct
-/// signature is composed with the mixin returns (`IntersectionConstruct`).
+/// Call signatures concatenate, dropping only a signature IDENTICAL to one
+/// already present — result included ([`append_signatures`]); signatures
+/// that differ only in their result are distinct overloads and both stay.
+///
+/// Construct signatures follow TypeScript's mixin rule
+/// (`resolveIntersectionTypeMembers`): a member that is a mixin constructor
+/// (`new (...args: any[]) => X`) contributes NO construct signature of its
+/// own — its instance type is mixed into every other member's construct
+/// result instead (`IntersectionConstruct`, the results intersected in
+/// member order). When every constructor member is a mixin, the first one
+/// is not counted as a mixin, so it keeps its signature and the others mix
+/// into it: `typeof CtorB & typeof MixA` constructs `B & A` from `CtorB`'s
+/// parameters, and two mixins construct from the first one's.
 pub fn intersection_signatures(
     store: &SignatureStore,
     types: &dyn DiscoveryTypes,
@@ -1142,11 +1167,18 @@ pub fn intersection_signatures(
         for (i, list) in members.iter().enumerate() {
             mixin_flags[i] = is_mixin_constructor(&view, types, list)?;
         }
+        let constructor_count = members.iter().filter(|list| !list.is_empty()).count();
+        let mixins = mixin_flags.iter().filter(|f| **f).count();
+        if constructor_count > 0 && constructor_count == mixins {
+            if let Some(first) = mixin_flags.iter().position(|f| *f) {
+                mixin_flags[first] = false;
+            }
+        }
     }
     let mixin_count = mixin_flags.iter().filter(|f| **f).count();
     let mut out: Vec<SignatureCandidate> = Vec::new();
     for (index, list) in members.iter().enumerate() {
-        if list.is_empty() {
+        if list.is_empty() || mixin_flags[index] {
             continue;
         }
         let mapped: Vec<SignatureCandidate> = if mixin_count > 0 {

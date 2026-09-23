@@ -133,7 +133,7 @@ fn evaluate_deferred_has_no_iteration_cap_beyond_graph_size() {
 /// `PathWalker::walk_path` is iterative (worklist) and
 /// terminates on deeply nested acyclic unions without hitting a
 /// stack limit. Verified by public-API exercise — build a deeply
-/// nested chain of singleton unions via `NormalizeUnion` and project
+/// nested chain of singleton unions via `ReduceUnion` and project
 /// through it.
 #[test]
 fn walk_path_terminates_on_deeply_nested_acyclic_union() {
@@ -149,13 +149,14 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
         let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(i as f64)));
         let next_nodes: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
             std::sync::Arc::from(vec![current, literal].into_boxed_slice());
-        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
             members: next_nodes,
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         }) {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryOutput { value: id, .. },
             ) => current = id,
-            other => panic!("NormalizeUnion iteration {i} failed: {other:?}"),
+            other => panic!("ReduceUnion iteration {i} failed: {other:?}"),
         }
     }
     let empty_path: std::sync::Arc<[crate::semantic_query::PathSegment]> =
@@ -2373,18 +2374,26 @@ fn class_member_projection_uses_object_walker_arm() {
         walk_src.contains("SemanticNodeData::Object(surface)"),
         "walk.rs must carry the Object arm for member projection"
     );
-    // Negative: no parallel Class/Interface arms in the walker.
+    // Negative: no parallel Class/Interface arms in the walker. The arm
+    // is the VARIANT of that exact name; a longer variant name that merely
+    // starts with it (`ClassExpressionInstance`, which reads through to
+    // its Object surface) is not one.
+    let names_variant = |trimmed: &str, variant: &str| {
+        trimmed
+            .strip_prefix(variant)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    };
     for line in walk_src.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") {
             continue;
         }
         assert!(
-            !trimmed.starts_with("SemanticNodeData::Class"),
+            !names_variant(trimmed, "SemanticNodeData::Class"),
             "walk.rs must not carry a Class arm: `{line}`"
         );
         assert!(
-            !trimmed.starts_with("SemanticNodeData::Interface"),
+            !names_variant(trimmed, "SemanticNodeData::Interface"),
             "walk.rs must not carry an Interface arm: `{line}`"
         );
     }
@@ -3067,7 +3076,7 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
 }
 
 /// Normalization invariant: union / intersection normalization
-/// lives on dispatch via `NormalizeUnion` / `ReduceIntersection`.
+/// lives on dispatch via `ReduceUnion` / `ReduceIntersection`.
 #[test]
 fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     let host = host_for_relation_tests();
@@ -3078,10 +3087,10 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     // A single-element "union" should fold to the element itself.
     let members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a].into_boxed_slice());
-    let result =
-        dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
-            members: members.clone(),
-        });
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
+        members: members.clone(),
+        nullability: crate::semantic_query::NullabilityPolicy::Strict,
+    });
     match result {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
             value: id,
@@ -3097,8 +3106,11 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     // A multi-element union should produce a distinct interned Union node.
     let ab: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a, b].into_boxed_slice());
-    let ab_result = dispatch
-        .execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion { members: ab });
+    let ab_result =
+        dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ReduceUnion {
+            members: ab,
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
+        });
     match ab_result {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
             value: id,
@@ -4774,6 +4786,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let check = function(string_node, number_node);
@@ -4914,6 +4927,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
@@ -5548,6 +5562,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5619,6 +5634,7 @@ fn constructor_type_relates_and_binds_infer_return() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         });
         graph.intern_construct_twin_for_tests(signature)
     };
@@ -5704,6 +5720,7 @@ fn mapped_constructor_value_substitutes_per_key() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5798,6 +5815,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let ctor_pattern = graph.intern_construct_twin_for_tests(signature);
     // Inner: `(new (x: number) => any) extends new (x: infer P) => any ? P : never`.
@@ -5818,6 +5836,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let inner_check = graph.intern_construct_twin_for_tests(inner_check_sig);
     let inner = graph.intern_node(SemanticNodeData::Conditional {
@@ -5895,6 +5914,7 @@ fn signature_fixture_nodes(
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let construct = graph.intern_construct_twin_for_tests(call);
     (call, construct)
@@ -6110,6 +6130,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         })
     };
     let construct_obj = graph.intern_node(SemanticNodeData::Object(

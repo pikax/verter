@@ -25,7 +25,7 @@
 //!   `IndexedAccess { base, index, mode }` admission-canonicalise to the
 //!   length-1 `ProjectPath` form **before** memo hashing so sugar and
 //!   canonical share one warm entry and one in-flight wait graph.
-//! - `NormalizeUnion` / `ReduceIntersection` — structural dedup over the
+//! - `ReduceUnion` / `ReduceIntersection` — structural dedup over the
 //!   supplied members with stable ordering.
 //! - `KeyOf` / `MappedType` / `Conditional` — navigation operations that
 //!   walk the base node's shared-graph payload. Paths that do not reach a
@@ -107,6 +107,8 @@ pub(crate) mod query_error_disposition;
 pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
+#[cfg(test)]
+mod signature_predicate_tests;
 pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
@@ -125,6 +127,8 @@ pub(crate) mod flow_return_frame_seal_tests;
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_loop_completion_tests;
+#[cfg(test)]
+mod flow_return_null_policy_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_positional_tests;
 mod flow_return_products;
@@ -435,6 +439,23 @@ pub struct ProjectSemanticDispatch<'a> {
     /// key carries and the strict-family configuration the reducer
     /// branches on — two projections of the one effective option set.
     pub(super) relation_env: std::cell::OnceCell<dispatch_txn::RelationEnvironment>,
+    /// The relation environments of the answers currently being decided,
+    /// innermost last: a flow-return frame pushes the environment of its
+    /// function's OWN file for the length of its evaluation, so every
+    /// relation root it opens (return-arm subtype reduction, narrowing,
+    /// overload applicability) is keyed and decided under that file's
+    /// project options rather than the request's. Empty outside such a
+    /// frame, where [`Self::relation_environment`] falls back to the
+    /// request environment. Pushed and popped only through
+    /// [`RelationEnvironmentScope`].
+    pub(super) relation_env_scope:
+        std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    /// The relation environment of each file a flow-return frame has been
+    /// decided under in this dispatch — resolved once per file, like
+    /// [`Self::relation_env`] for the request, since every frame of a
+    /// function in that file asks again.
+    pub(super) relation_env_by_file:
+        std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -561,6 +582,40 @@ impl<'g> Drop for LexicalDemandScopeGuard<'g> {
     }
 }
 
+/// RAII scope of one entry on
+/// [`ProjectSemanticDispatch::relation_env_scope`]: the environment — and
+/// its strict-family configuration as the relation reducer's snapshot — is
+/// in force until the scope drops, which restores the outer snapshot
+/// (panic-safe).
+pub(super) struct RelationEnvironmentScope<'g> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+    txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    outer_strict: Option<dispatch_txn::StrictFamilyConfig>,
+}
+
+impl<'g> RelationEnvironmentScope<'g> {
+    pub(super) fn push(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[dispatch_txn::RelationEnvironment; 2]>>,
+        txn: &'g std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+        environment: dispatch_txn::RelationEnvironment,
+    ) -> Self {
+        stack.borrow_mut().push(environment);
+        let outer_strict = txn.borrow_mut().relation.strict.replace(environment.strict);
+        Self {
+            stack,
+            txn,
+            outer_strict,
+        }
+    }
+}
+
+impl<'g> Drop for RelationEnvironmentScope<'g> {
+    fn drop(&mut self) {
+        self.txn.borrow_mut().relation.strict = self.outer_strict;
+        self.stack.borrow_mut().pop();
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to a sealed request context.
     ///
@@ -589,6 +644,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
             relation_env: std::cell::OnceCell::new(),
+            relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_context(ctx),
@@ -683,10 +740,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 distributive: *distributive,
                 pending: pending.clone(),
             }),
-            // The normalize-query SUBJECT representation: the
-            // pre-normalization member list interned verbatim (the query's
+            // The reduce-query SUBJECT representation: the
+            // pre-reduction member list interned verbatim (the query's
             // subject must stay distinct from its canonical result).
-            SemanticQueryKey::NormalizeUnion { members } => {
+            SemanticQueryKey::ReduceUnion { members, .. } => {
                 graph.intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
                         members,
@@ -1588,7 +1645,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Build a dep-signature fragment that records only the project
     /// generation. Used by derived semantic operations (e.g. `Instantiate`,
-    /// `NormalizeUnion`) where no single canonical scope owns the result —
+    /// `ReduceUnion`) where no single canonical scope owns the result —
     /// dep signatures flow in through the warm memo hits of the bases the
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
@@ -2286,7 +2343,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //     entry and one in-flight wait graph.
         //   - `IndexedAccess { base, index, mode }` rewrites the same way to
         //     `ProjectPath { base, path: [Index(index)], mode }`.
-        //   - `NormalizeUnion` / `ReduceIntersection` get structural
+        //   - `ReduceUnion` / `ReduceIntersection` get structural
         //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
         //   - Symmetric `Relate` operands get the same ordering as typed
         //     relation callers before the family memo or wait graph sees them.
@@ -2330,8 +2387,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
-            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKey::ReduceUnion {
+                members,
+                nullability,
+            } => SemanticQueryKey::ReduceUnion {
                 members: canonicalize_node_list(self.graph(), &members),
+                nullability,
             },
             SemanticQueryKey::ReduceIntersection {
                 input,
@@ -2418,7 +2479,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the aggregate work-budget gate: the projection operators PLUS
         // `Instantiate` / `Conditional` (the generic-expansion-storm
         // kinds) and the demand-bearing `TypeOf`. Kinds outside that
-        // set (ResolveDecl, NormalizeUnion, …) bypass the early-exit —
+        // set (ResolveDecl, ReduceUnion, …) bypass the early-exit —
         // their cost is not what the work budget bounds.
         if !exact_same_path && semantic_query_counts_toward_projection_budget(&key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
@@ -2651,7 +2712,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     *distributive,
                     pending.clone(),
                 ),
-                SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
+                SemanticQueryKey::ReduceUnion {
+                    members,
+                    nullability,
+                } => self.build_reduce_union(members, *nullability),
                 SemanticQueryKey::ReduceIntersection {
                     input,
                     purpose,
@@ -3053,7 +3117,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(AuditEvent::SemanticQueryProjectPathWarm)
                     }
                 }
-                // ResolveDecl, NormalizeUnion, ReduceIntersection,
+                // ResolveDecl, ReduceUnion, ReduceIntersection,
                 // Relate, ResolveMacroPayload — not in the focused
                 // counter set.
                 _ => None,
@@ -4072,6 +4136,10 @@ mod broad_runtime_tests;
 #[cfg(test)]
 mod cycle_gate_tests;
 
+#[cfg(test)]
+mod base_signature_tests;
+#[cfg(test)]
+mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]

@@ -22,7 +22,8 @@ use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
     TSSignature, TSThisParameter, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
-    TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, UnaryOperator,
+    TSTypeParameterDeclaration, TSTypePredicate, TSTypePredicateName, TSTypeQuery,
+    TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
 
@@ -32,7 +33,8 @@ use verter_type_expr::{
     AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, FunctionSpans,
     IndexSignature, IndexSignatureSpans, MappedModifier, MemberSpans, MethodSignature, ObjectExpr,
     ObjectMember, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey, SpreadMember,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, UnknownValue, ValueRef,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate,
+    TypePredicateSubject, UnknownValue, ValueRef,
 };
 
 mod dependency_facts;
@@ -242,12 +244,81 @@ pub fn lower_ts_type_with_whole_query(
         // -- Intrinsic keyword --
         TSType::TSIntrinsicKeyword(_) => TypeExpr::named("intrinsic"),
 
+        // -- Type predicate: `x is T` / `asserts x [is T]` / `this is T` --
+        //
+        // Standing alone, a predicate annotation denotes the type TypeScript
+        // gives it (`getTypeFromTypeNode`): `void` for an assertion,
+        // `boolean` for a type predicate. A function-like node's return
+        // position reads it through [`lower_return_annotation`], which also
+        // keeps the predicate itself beside that return.
+        TSType::TSTypePredicate(predicate) => TypeExpr::Primitive(if predicate.asserts {
+            PrimitiveName::Void
+        } else {
+            PrimitiveName::Boolean
+        }),
+
         // -- Catch-all --
         _ => {
             let span = ts_type.span();
             TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(source, span)))
         }
     }
+}
+
+/// Lower a function-like node's authored RETURN annotation: the return type
+/// and, when the annotation is a type predicate (`x is T`, `asserts x is T`,
+/// `asserts x`, `this is T`, `asserts this [is T]`), the predicate that
+/// rides beside it. A predicate signature returns `boolean` (a type
+/// predicate) or `void` (an assertion) — TypeScript's own model — so the
+/// predicate never replaces the return.
+pub fn lower_return_annotation(
+    ts_type: &TSType<'_>,
+    source: &str,
+) -> (TypeExpr, Option<Arc<TypePredicate>>) {
+    match ts_type {
+        TSType::TSTypePredicate(predicate) => {
+            let predicate = lower_type_predicate(predicate, source);
+            (predicate.return_type(), Some(Arc::new(predicate)))
+        }
+        _ => (lower_ts_type(ts_type, source), None),
+    }
+}
+
+fn lower_type_predicate(predicate: &TSTypePredicate<'_>, source: &str) -> TypePredicate {
+    TypePredicate {
+        subject: match &predicate.parameter_name {
+            TSTypePredicateName::Identifier(name) => {
+                TypePredicateSubject::Parameter(Arc::from(name.name.as_str()))
+            }
+            TSTypePredicateName::This(_) => TypePredicateSubject::This,
+        },
+        asserts: predicate.asserts,
+        ty: predicate
+            .type_annotation
+            .as_ref()
+            .map(|annotation| Arc::new(lower_ts_type(&annotation.type_annotation, source))),
+    }
+}
+
+/// [`FunctionExpr::with_spans`] over an authored return annotation: the
+/// return lowers through [`lower_return_annotation`], so a predicate
+/// annotation keeps its predicate beside the `boolean` / `void` return.
+fn function_with_authored_return(
+    parameters: Vec<FunctionParam>,
+    return_annotation: Option<&TSType<'_>>,
+    type_parameters: Vec<TypeParam>,
+    spans: FunctionSpans,
+    source: &str,
+) -> FunctionExpr {
+    let (return_type, predicate) = match return_annotation {
+        Some(annotation) => {
+            let (return_type, predicate) = lower_return_annotation(annotation, source);
+            (Some(Arc::new(return_type)), predicate)
+        }
+        None => (None, None),
+    };
+    FunctionExpr::with_spans(parameters, return_type, type_parameters, spans)
+        .with_predicate(predicate)
 }
 
 fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExpr {
@@ -570,12 +641,9 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         }
         TSSignature::TSMethodSignature(method) => {
             let key = lower_property_key(&method.key, source);
-            let func = normalize_function_type_params(FunctionExpr::with_spans(
+            let func = normalize_function_type_params(function_with_authored_return(
                 lower_formal_parameters(&method.params, method.this_param.as_deref(), source),
-                method
-                    .return_type
-                    .as_ref()
-                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
+                method.return_type.as_ref().map(|rt| &rt.type_annotation),
                 method
                     .type_parameters
                     .as_ref()
@@ -588,6 +656,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                         .as_ref()
                         .map(|rt| rt.type_annotation.span().into()),
                 },
+                source,
             ));
             let spans = MemberSpans {
                 declaration: Some(method.span.into()),
@@ -599,11 +668,9 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
             ))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
-            let func = normalize_function_type_params(FunctionExpr::with_spans(
+            let func = normalize_function_type_params(function_with_authored_return(
                 lower_formal_parameters(&call.params, call.this_param.as_deref(), source),
-                call.return_type
-                    .as_ref()
-                    .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
+                call.return_type.as_ref().map(|rt| &rt.type_annotation),
                 call.type_parameters
                     .as_ref()
                     .map(|tp| lower_type_params(tp, source))
@@ -615,6 +682,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                         .as_ref()
                         .map(|rt| rt.type_annotation.span().into()),
                 },
+                source,
             ));
             Some(ObjectMember::CallSignature(func))
         }
@@ -718,12 +786,9 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
 }
 
 fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr {
-    normalize_function_type_params(FunctionExpr::with_spans(
+    normalize_function_type_params(function_with_authored_return(
         lower_formal_parameters(&func.params, func.this_param.as_deref(), source),
-        Some(Arc::new(lower_ts_type(
-            &func.return_type.type_annotation,
-            source,
-        ))),
+        Some(&func.return_type.type_annotation),
         func.type_parameters
             .as_ref()
             .map(|tp| lower_type_params(tp, source))
@@ -732,6 +797,7 @@ fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr 
             signature: Some(func.span.into()),
             return_type: Some(func.return_type.type_annotation.span().into()),
         },
+        source,
     ))
 }
 
@@ -837,8 +903,27 @@ fn normalize_function_type_params(mut func: FunctionExpr) -> FunctionExpr {
     func.return_type = func
         .return_type
         .map(|ret| Arc::new(normalize_type_parameter_refs(ret.as_ref(), &scope)));
+    func.predicate = normalize_predicate_type_params(func.predicate.as_deref(), &scope);
     func.type_parameters = scope;
     func
+}
+
+/// A predicate whose target names an in-scope type parameter (`x is T`)
+/// resolves that name to the binder, exactly as the return does.
+fn normalize_predicate_type_params(
+    predicate: Option<&TypePredicate>,
+    scope: &[TypeParam],
+) -> Option<Arc<TypePredicate>> {
+    predicate.map(|predicate| {
+        Arc::new(TypePredicate {
+            subject: predicate.subject.clone(),
+            asserts: predicate.asserts,
+            ty: predicate
+                .ty
+                .as_deref()
+                .map(|ty| Arc::new(normalize_type_parameter_refs(ty, scope))),
+        })
+    })
 }
 
 fn normalize_type_parameter_decls(type_parameters: Vec<TypeParam>) -> Vec<TypeParam> {
@@ -1128,6 +1213,10 @@ fn normalize_nested_function_type_params(func: &FunctionExpr, scope: &[TypeParam
         nested_scope,
         func.spans,
     )
+    .with_predicate(normalize_predicate_type_params(
+        func.predicate.as_deref(),
+        &combined_scope,
+    ))
 }
 
 // ---------------------------------------------------------------------------

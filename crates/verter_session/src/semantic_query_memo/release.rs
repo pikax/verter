@@ -74,6 +74,9 @@ pub struct SemanticReleaseReport {
     pub relation_proofs_released: usize,
     /// Co-discharged relate keys whose operands named a released node.
     pub relate_keys_released: usize,
+    /// Union member views (V8's per-store `union_views`) whose union or a
+    /// member was released.
+    pub union_views_released: usize,
     /// Shape-cache entries dropped by the owning store (see the type doc).
     pub shape_entries_released: usize,
 }
@@ -184,11 +187,28 @@ impl SemanticGraphStore {
         let (relate_keys_released, relation_proofs_released) = self.release_relation_tables(&dead);
         report.relate_keys_released = relate_keys_released;
         report.relation_proofs_released = relation_proofs_released;
+        report.union_views_released = self.release_union_views(&dead);
         // The edit-path drain already cleared these, but a publish that
         // raced the tombstone could have landed a mapping whose value names
         // a released node; clearing again after the tombstone closes it.
         self.clear_hash_cons_memos();
         report
+    }
+
+    /// Drop every resident union member view whose union, or any member,
+    /// was released. A view is keyed by the union's own node id, so a view of
+    /// a closed document's union could never be looked up again (the reload
+    /// mints a fresh union id) yet stayed resident, one per distinct union
+    /// the churn built; and its members would read as the released
+    /// placeholder to any holder. Views of live unions are untouched, so
+    /// the union order those unions were built with stays resident.
+    fn release_union_views(&self, dead: &FxHashSet<SemanticNodeId>) -> usize {
+        let mut views = self.union_views.lock();
+        let before = views.len();
+        views.retain(|key, members| {
+            !dead.contains(&key.union()) && !members.iter().any(|member| dead.contains(member))
+        });
+        before - views.len()
     }
 
     /// Drop every relate key whose operands name a released node, then

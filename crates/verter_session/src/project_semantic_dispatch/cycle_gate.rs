@@ -551,12 +551,14 @@ fn cycle_gate_body_contains_recursive_ref(
             SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
             } => {
                 for param in params.iter() {
                     stack.push(param.ty);
                 }
                 stack.push(*return_type);
+                stack.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::Conditional {
                 check,
@@ -697,6 +699,7 @@ fn cycle_gate_collect_ref_identities(
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 for param in params.iter() {
@@ -711,6 +714,7 @@ fn cycle_gate_collect_ref_identities(
                         stack.push(d);
                     }
                 }
+                stack.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::Conditional {
                 check,

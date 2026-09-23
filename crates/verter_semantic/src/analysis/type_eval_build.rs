@@ -50,9 +50,9 @@ use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
     IndexSignatureSpans, IndexedValueLiteralMode, LiteralValue, MemberSpans, MemberVisibility,
     MethodSignature, ObjectExpr, ObjectMember, ObjectMethodKind, PrimitiveName, TopLevelOwnerId,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate, ValueRef,
 };
-use verter_type_expr_oxc::{lower_property_key, lower_ts_type};
+use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts_type};
 
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
@@ -286,6 +286,9 @@ pub struct LoweredSignatureParts {
     /// recovery). An unannotated function's return is body-derived and names
     /// its served function position instead — never a body scan.
     pub return_type: Option<TypeExpr>,
+    /// The authored return's type predicate (`x is T`, `asserts x`, …),
+    /// beside a `boolean` / `void` [`Self::return_type`].
+    pub predicate: Option<Arc<TypePredicate>>,
     pub type_parameters: Vec<TypeParam>,
     /// Whether this signature is backed by an implementation body (vs. a
     /// bodiless overload / ambient declaration). Projection-time overload
@@ -1068,6 +1071,7 @@ fn member_signature_fact(
     let sig = LoweredSignatureParts {
         parameters: function.parameters.clone(),
         return_type: function.return_type.as_deref().cloned(),
+        predicate: function.predicate.clone(),
         type_parameters: function.type_parameters.clone(),
         has_implementation_body,
         // A member signature's authored return position is part of the member
@@ -1155,6 +1159,7 @@ fn object_shape_fact(
                         let sig = LoweredSignatureParts {
                             parameters: function.parameters.clone(),
                             return_type: function.return_type.as_deref().cloned(),
+                            predicate: function.predicate.clone(),
                             type_parameters: function.type_parameters.clone(),
                             has_implementation_body: true,
                             has_authored_return: false,
@@ -2426,7 +2431,8 @@ fn collect_named_class(
                         func.return_type.map(Arc::new),
                         func.type_parameters,
                         fn_spans,
-                    );
+                    )
+                    .with_predicate(func.predicate);
                     function_expr.flow_return = flow_identity.map(Box::new);
                     let mut signature = MethodSignature::with_key_visibility(
                         method_key,
@@ -2528,7 +2534,8 @@ fn collect_named_class(
                         func.return_type.map(Arc::new),
                         func.type_parameters,
                         fn_spans,
-                    );
+                    )
+                    .with_predicate(func.predicate);
                     function_expr.flow_return = flow_identity.map(Box::new);
                     let mut signature = MethodSignature::with_key_visibility(
                         lower_property_key(&method.key, source),
@@ -2607,6 +2614,7 @@ fn collect_named_class(
     let mut constructor_signature = ctor_sig.unwrap_or_else(|| LoweredSignatureParts {
         parameters: Vec::new(),
         return_type: Some(TypeExpr::named(name.clone())),
+        predicate: None,
         type_parameters: Vec::new(),
         has_implementation_body: true,
         has_authored_return: false,
@@ -3840,10 +3848,14 @@ fn extract_function_signature_with_budget(
     // The return carrier is AUTHORED-only: an unannotated function's return
     // is body-derived and names its served function position (the
     // whole-function producer answers it), never a body scan.
-    let return_type = func
-        .return_type
-        .as_ref()
-        .map(|return_type| lower_ts_type(&return_type.type_annotation, source));
+    let (return_type, predicate) = match func.return_type.as_ref() {
+        Some(return_type) => {
+            let (return_type, predicate) =
+                lower_return_annotation(&return_type.type_annotation, source);
+            (Some(return_type), predicate)
+        }
+        None => (None, None),
+    };
     let type_parameters = func
         .type_parameters
         .as_ref()
@@ -3853,6 +3865,7 @@ fn extract_function_signature_with_budget(
     Ok(LoweredSignatureParts {
         parameters,
         return_type,
+        predicate,
         type_parameters,
         has_implementation_body: func.body.is_some(),
         has_authored_return,
@@ -3898,8 +3911,12 @@ fn extract_arrow_signature_with_budget(
     // lowering answers it directly (there is no statement scan). A
     // block-bodied arrow's return is body-derived and names its served
     // function position instead.
+    let mut predicate = None;
     let return_type = if let Some(return_type) = &arrow.return_type {
-        Some(lower_ts_type(&return_type.type_annotation, source))
+        let (return_type, authored_predicate) =
+            lower_return_annotation(&return_type.type_annotation, source);
+        predicate = authored_predicate;
+        Some(return_type)
     } else if arrow.expression {
         arrow
             .body
@@ -3930,6 +3947,7 @@ fn extract_arrow_signature_with_budget(
     Ok(LoweredSignatureParts {
         parameters,
         return_type,
+        predicate,
         type_parameters,
         has_implementation_body: true,
         has_authored_return,
@@ -3949,6 +3967,7 @@ fn unavailable_function_signature(
     LoweredSignatureParts {
         parameters: lower_function_params_without_initializer_inference(params, this_param, source),
         return_type: None,
+        predicate: None,
         type_parameters,
         has_implementation_body,
         has_authored_return,
@@ -4003,7 +4022,8 @@ fn extract_object_literal(
                                     .as_ref()
                                     .map(|return_type| return_type.type_annotation.span().into()),
                             },
-                        ),
+                        )
+                        .with_predicate(signature.predicate),
                         false,
                         spans,
                     )
@@ -4656,12 +4676,15 @@ fn infer_expression_type_ctx_with_read_root(
                     .as_ref()
                     .map(|rt| rt.type_annotation.span().into()),
             };
-            Ok(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-                sig.parameters,
-                sig.return_type.map(Arc::new),
-                sig.type_parameters,
-                fn_spans,
-            ))))
+            Ok(TypeExpr::Function(Arc::new(
+                FunctionExpr::with_spans(
+                    sig.parameters,
+                    sig.return_type.map(Arc::new),
+                    sig.type_parameters,
+                    fn_spans,
+                )
+                .with_predicate(sig.predicate),
+            )))
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)
@@ -4860,19 +4883,26 @@ fn widen_literal_type_with_budget(
             }
             Ok(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
         }
-        TypeExpr::Function(function) => Ok(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-            function.parameters.clone(),
-            function
-                .return_type
-                .as_ref()
-                .map(|return_type| {
-                    widen_literal_type_with_budget(return_type.as_ref().clone(), budget, depth + 1)
+        TypeExpr::Function(function) => Ok(TypeExpr::Function(Arc::new(
+            FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| {
+                        widen_literal_type_with_budget(
+                            return_type.as_ref().clone(),
+                            budget,
+                            depth + 1,
+                        )
                         .map(Arc::new)
-                })
-                .transpose()?,
-            function.type_parameters.clone(),
-            function.spans,
-        )))),
+                    })
+                    .transpose()?,
+                function.type_parameters.clone(),
+                function.spans,
+            )
+            .with_predicate(function.predicate.clone()),
+        ))),
         // A bare constructor type (`new (...) => R`) carries the same
         // `FunctionExpr` payload as a function type, so its literal members
         // widen identically. Reconstruct as a `ConstructorType` so the
@@ -4897,7 +4927,8 @@ fn widen_literal_type_with_budget(
                     .transpose()?,
                 function.type_parameters.clone(),
                 function.spans,
-            ),
+            )
+            .with_predicate(function.predicate.clone()),
         ))),
         _ => Ok(expr),
     }
@@ -4926,8 +4957,8 @@ fn widen_object_member_with_budget(
                 widen_literal_type_with_budget(signature.value_type, budget, depth + 1)?;
             Ok(ObjectMember::IndexSignature(signature))
         }
-        ObjectMember::CallSignature(function) => {
-            Ok(ObjectMember::CallSignature(FunctionExpr::with_spans(
+        ObjectMember::CallSignature(function) => Ok(ObjectMember::CallSignature(
+            FunctionExpr::with_spans(
                 function.parameters,
                 function
                     .return_type
@@ -4943,10 +4974,11 @@ fn widen_object_member_with_budget(
                     .transpose()?,
                 function.type_parameters,
                 function.spans,
-            )))
-        }
-        ObjectMember::ConstructSignature(function) => {
-            Ok(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+            )
+            .with_predicate(function.predicate),
+        )),
+        ObjectMember::ConstructSignature(function) => Ok(ObjectMember::ConstructSignature(
+            FunctionExpr::with_spans(
                 function.parameters,
                 function
                     .return_type
@@ -4962,8 +4994,9 @@ fn widen_object_member_with_budget(
                     .transpose()?,
                 function.type_parameters,
                 function.spans,
-            )))
-        }
+            )
+            .with_predicate(function.predicate),
+        )),
         ObjectMember::Method(mut method) => {
             method.function = FunctionExpr::with_spans(
                 method.function.parameters,
@@ -4982,7 +5015,8 @@ fn widen_object_member_with_budget(
                     .transpose()?,
                 method.function.type_parameters,
                 method.function.spans,
-            );
+            )
+            .with_predicate(method.function.predicate);
             Ok(ObjectMember::Method(method))
         }
     }
@@ -5037,10 +5071,14 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             let key = lower_property_key(&method.key, source);
             let params =
                 lower_function_params(&method.params, method.this_param.as_deref(), source);
-            let return_type = method
-                .return_type
-                .as_ref()
-                .map(|rt| lower_ts_type(&rt.type_annotation, source));
+            let (return_type, predicate) = match method.return_type.as_ref() {
+                Some(rt) => {
+                    let (return_type, predicate) =
+                        lower_return_annotation(&rt.type_annotation, source);
+                    (Some(return_type), predicate)
+                }
+                None => (None, None),
+            };
             let type_parameters = method
                 .type_parameters
                 .as_ref()
@@ -5066,7 +5104,8 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                         return_type.map(Arc::new),
                         type_parameters,
                         fn_spans,
-                    ),
+                    )
+                    .with_predicate(predicate),
                     method.optional,
                     member_spans,
                 ),
@@ -5074,10 +5113,14 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let params = lower_function_params(&call.params, call.this_param.as_deref(), source);
-            let return_type = call
-                .return_type
-                .as_ref()
-                .map(|rt| lower_ts_type(&rt.type_annotation, source));
+            let (return_type, predicate) = match call.return_type.as_ref() {
+                Some(rt) => {
+                    let (return_type, predicate) =
+                        lower_return_annotation(&rt.type_annotation, source);
+                    (Some(return_type), predicate)
+                }
+                None => (None, None),
+            };
             let type_parameters = call
                 .type_parameters
                 .as_ref()
@@ -5090,12 +5133,15 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                     .as_ref()
                     .map(|rt| rt.type_annotation.span().into()),
             };
-            Some(ObjectMember::CallSignature(FunctionExpr::with_spans(
-                params,
-                return_type.map(Arc::new),
-                type_parameters,
-                fn_spans,
-            )))
+            Some(ObjectMember::CallSignature(
+                FunctionExpr::with_spans(
+                    params,
+                    return_type.map(Arc::new),
+                    type_parameters,
+                    fn_spans,
+                )
+                .with_predicate(predicate),
+            ))
         }
         TSSignature::TSIndexSignature(idx) => {
             let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
@@ -6066,18 +6112,21 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
         }
         Expression::FunctionExpression(function) => {
             let signature = extract_function_signature(function, source);
-            IndexedValueExpression::Value(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-                signature.parameters,
-                signature.return_type.map(Arc::new),
-                signature.type_parameters,
-                FunctionSpans {
-                    signature: Some(function.span.into()),
-                    return_type: function
-                        .return_type
-                        .as_ref()
-                        .map(|annotation| annotation.type_annotation.span().into()),
-                },
-            ))))
+            IndexedValueExpression::Value(TypeExpr::Function(Arc::new(
+                FunctionExpr::with_spans(
+                    signature.parameters,
+                    signature.return_type.map(Arc::new),
+                    signature.type_parameters,
+                    FunctionSpans {
+                        signature: Some(function.span.into()),
+                        return_type: function
+                            .return_type
+                            .as_ref()
+                            .map(|annotation| annotation.type_annotation.span().into()),
+                    },
+                )
+                .with_predicate(signature.predicate),
+            )))
         }
         unwrapped if value_type_derives_from_a_call(unwrapped) => {
             IndexedValueExpression::UnsupportedCall {

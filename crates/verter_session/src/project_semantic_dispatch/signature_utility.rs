@@ -191,7 +191,11 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// The signature a utility of `kind` infers from `subject`: the LAST
-    /// candidate of the shared signature list.
+    /// candidate of the shared signature list, in the node form every
+    /// node-based consumer reads — the authored node of a leaf candidate,
+    /// and the composed node of a composite one (a mixin construct
+    /// intersection's candidate has no authored node of its own; its
+    /// result is the intersection the kernel composed).
     pub(super) fn utility_inference_signature(
         &self,
         subject: SemanticNodeId,
@@ -200,7 +204,10 @@ impl ProjectSemanticDispatch<'_> {
         if !self.subject_infers_a_signature(subject) {
             return None;
         }
-        let signature = (*self.authored_candidates_of(subject, kind)?.last()?)?;
+        let signature = match self.shared_signature_nodes(subject, kind) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => *nodes.last()?,
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+        };
         match self.graph().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: node_kind, ..
@@ -300,14 +307,16 @@ impl ProjectSemanticDispatch<'_> {
                     Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
                     _ => return None,
                 };
-                // Free signature generics instantiate at `unknown`:
-                // `ReturnType<typeof id>` over `id<T>(x: T): T` is `unknown`.
-                Some(self.instantiate_free_signature_params_at_unknown(signature, return_type))
+                // Free signature generics instantiate at their base
+                // constraints: `ReturnType<typeof id>` over `id<T>(x: T): T`
+                // is `unknown`, over `id<T extends string>(x: T): T` it is
+                // `string`.
+                Some(self.instantiate_signature_params_at_base_constraints(signature, return_type))
             }
             SignatureUtilityProjection::ParameterTuple => {
                 let signature = inferred?;
                 let tuple = self.intern_function_params_tuple(signature)?;
-                Some(self.instantiate_free_signature_params_at_unknown(signature, tuple))
+                Some(self.instantiate_signature_params_at_base_constraints(signature, tuple))
             }
             // A signature with no authored `this` has none, which is
             // `unknown`; so does a subject with no signature to infer from.

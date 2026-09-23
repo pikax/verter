@@ -401,6 +401,7 @@ fn enumeration_forces_no_body_and_effects_only_reads_stay_shape_only() {
         ),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let object = callable(&d, vec![node], vec![]);
     let store = d.graph().signature_store();
@@ -674,73 +675,218 @@ fn intersection_dedups_by_signature_equivalence_in_authored_order() {
     assert_eq!(store.type_token_node(first_source).unwrap(), first);
 }
 
-/// A mixin constructor composes the other members' construct signatures
-/// with the mixin's instance type.
+/// Construct-signature intersections follow the checker's mixin rule
+/// (`resolveIntersectionTypeMembers`): a mixin constructor
+/// (`new (...args: any[]) => X`) contributes no construct signature of its
+/// own — its instance is mixed into every other member's result, in member
+/// order — and when every constructor is a mixin, the first one keeps its
+/// signature. Measured on TypeScript 7.0.2 over `interface A { a: 1 }`,
+/// `interface B { b: 2 }`, `declare const CtorB: new (s: string) => B`,
+/// `declare const MixA: new (...args: any[]) => A` and two mixins
+/// `M1` / `M2` over `A` / `B`:
+///
+/// | subject | `InstanceType` | `ConstructorParameters` |
+/// |---|---|---|
+/// | `typeof CtorB & typeof MixA` | `B & A` | `[s: string]` |
+/// | `typeof MixA & typeof CtorB` | `A & B` | `[s: string]` |
+/// | `typeof M1 & typeof M2` | `A & B` | `any[]` |
+///
+/// A GENERIC constructor is not a mixin: over `declare const G: new <T>(...args:
+/// any[]) => A`, `typeof G & typeof CtorB` keeps both signatures and
+/// `InstanceType` reads the last, `B`.
+///
+/// The signature utilities read the composed candidate through its node
+/// form: the candidate has no authored signature node of its own.
 #[test]
-fn mixin_constructor_intersection_composes_instance_types() {
+fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
+    use super::signature_utility::SignatureUtility;
+
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let string = prim(&d, PrimitiveKind::String);
     let any = prim(&d, PrimitiveKind::Any);
-    let mixin_instance = d.graph().intern_node(SemanticNodeData::Literal(
-        verter_type_expr::LiteralValue::String("mixin".into()),
+    let instance_a = d.graph().intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("A".into()),
     ));
-    let base_instance = d.graph().intern_node(SemanticNodeData::Literal(
-        verter_type_expr::LiteralValue::String("base".into()),
+    let instance_b = d.graph().intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("B".into()),
     ));
     let any_array = d.graph().intern_node(SemanticNodeData::Array {
         element: any,
         readonly: false,
     });
-    let mixin = signature(
+    let mixin = |name: &str, instance: SemanticNodeId| {
+        let construct = signature(
+            &d,
+            name,
+            0,
+            SignatureKind::Construct,
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("args")),
+                any_array,
+                false,
+                true,
+            )],
+            vec![],
+            instance,
+        );
+        callable(&d, vec![], vec![construct])
+    };
+    let ctor_b = callable(
         &d,
-        "Mixin",
-        0,
-        SignatureKind::Construct,
-        vec![FunctionParam::synthetic(
-            Some(Arc::from("args")),
-            any_array,
-            false,
-            true,
+        vec![],
+        vec![signature(
+            &d,
+            "CtorB",
+            0,
+            SignatureKind::Construct,
+            vec![param(string)],
+            vec![],
+            instance_b,
         )],
-        vec![],
-        mixin_instance,
     );
-    let base = signature(
+    let mix_a = mixin("MixA", instance_a);
+    let m1 = mixin("M1", instance_a);
+    let m2 = mixin("M2", instance_b);
+    let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
+    let store = d.graph().signature_store();
+    for (label, members, instances, rest_only) in [
+        (
+            "CtorB & MixA",
+            [ctor_b, mix_a],
+            [instance_b, instance_a],
+            false,
+        ),
+        (
+            "MixA & CtorB",
+            [mix_a, ctor_b],
+            [instance_a, instance_b],
+            false,
+        ),
+        ("M1 & M2", [m1, m2], [instance_a, instance_b], true),
+    ] {
+        let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                members.to_vec().into_boxed_slice(),
+            )),
+        ));
+        let list = candidates(
+            ready(discover(&d, intersection, SignatureKind::Construct)),
+            store,
+        );
+        assert_eq!(
+            list.len(),
+            1,
+            "{label}: a mixin constructor contributes no construct signature of its own"
+        );
+        assert!(
+            matches!(
+                recipe_of(store, list[0]),
+                SignatureResultRecipe::IntersectionConstruct { .. }
+            ),
+            "{label}: the kept signature is composed with the mixin instance"
+        );
+        {
+            let view = SemanticReadView::pin(store);
+            let descriptor = view.descriptor(list[0].signature).unwrap();
+            let template = view.template(descriptor.template).unwrap();
+            let shape = view.shape(template.input_shape).unwrap();
+            let layout = view.layout(shape.parameter_layout).unwrap();
+            assert_eq!(
+                (layout.parameters.len(), layout.rest.is_some()),
+                if rest_only { (0, true) } else { (1, false) },
+                "{label}: the parameters are the kept signature's"
+            );
+        }
+        let expected = d.intern_normalized_union_or_intersection(&instances, false);
+        let call = identity_substitution(store, list[0]);
+        assert_eq!(
+            read_return(&d, list[0], call),
+            Ok(expected),
+            "{label}: the instances intersect in member order"
+        );
+        assert_eq!(
+            d.resolve_signature_utility(SignatureUtility::InstanceType, intersection, context),
+            Some(expected),
+            "{label}: `InstanceType` reads the composed candidate"
+        );
+        let parameters = d
+            .resolve_signature_utility(
+                SignatureUtility::ConstructorParameters,
+                intersection,
+                context,
+            )
+            .unwrap_or_else(|| panic!("{label}: `ConstructorParameters` answers"));
+        if rest_only {
+            assert_eq!(
+                parameters, any_array,
+                "{label}: `ConstructorParameters` is the kept signature's rest array"
+            );
+        } else {
+            let elements = match d.graph().node_data(parameters).as_deref() {
+                Some(SemanticNodeData::Tuple { elements, .. }) => elements.to_vec(),
+                other => panic!("{label}: expected a parameter tuple, got {other:?}"),
+            };
+            assert_eq!(
+                elements
+                    .iter()
+                    .map(|element| (element.value, element.rest))
+                    .collect::<Vec<_>>(),
+                vec![(string, false)],
+                "{label}: `ConstructorParameters` is the kept signature's parameter list"
+            );
+        }
+    }
+
+    let binder = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("G"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let generic = callable(
         &d,
-        "Base",
-        0,
-        SignatureKind::Construct,
-        vec![param(string)],
         vec![],
-        base_instance,
+        vec![signature(
+            &d,
+            "G",
+            0,
+            SignatureKind::Construct,
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("args")),
+                any_array,
+                false,
+                true,
+            )],
+            vec![TypeParamDecl {
+                name: Arc::from("T"),
+                param: binder,
+                constraint: None,
+                default: None,
+                is_const: false,
+            }],
+            instance_a,
+        )],
     );
-    let members = [
-        callable(&d, vec![], vec![base]),
-        callable(&d, vec![], vec![mixin]),
-    ];
     let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
-            members.to_vec().into_boxed_slice(),
+            vec![generic, ctor_b].into_boxed_slice(),
         )),
     ));
-    let store = d.graph().signature_store();
-    let list = candidates(
-        ready(discover(&d, intersection, SignatureKind::Construct)),
-        store,
-    );
-    assert_eq!(list.len(), 2, "each member's constructor is composed");
-    assert!(matches!(
-        recipe_of(store, list[0]),
-        SignatureResultRecipe::IntersectionConstruct { .. }
-    ));
-    let call = identity_substitution(store, list[0]);
-    let node = read_return(&d, list[0], call).expect("constructor result reads");
-    let expected =
-        d.intern_normalized_union_or_intersection(&[base_instance, mixin_instance], false);
     assert_eq!(
-        node, expected,
-        "own instance first, then the mixin instance"
+        candidates(
+            ready(discover(&d, intersection, SignatureKind::Construct)),
+            store
+        )
+        .len(),
+        2,
+        "G & CtorB: a generic constructor is not a mixin, both signatures stay"
+    );
+    assert_eq!(
+        d.resolve_signature_utility(SignatureUtility::InstanceType, intersection, context),
+        Some(instance_b),
+        "G & CtorB: `InstanceType` reads the last signature"
     );
 }
 
@@ -1169,6 +1315,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
             ),
             signature_span: None,
             return_type_span: None,
+            predicate: None,
         });
         let store = d.graph().signature_store();
         let list = candidates(ready(discover(&d, node, SignatureKind::Call)), store);
@@ -1206,6 +1353,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
             return_carrier: SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span,
+            predicate: None,
         })
     };
     let first = authored_at(Some(verter_span::Span::new(1, 2)), string);

@@ -287,6 +287,13 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 drop(data);
                 self.discover(target)
             }
+            // A class expression's INSTANCE carries the signatures of its
+            // instance surface.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                let surface = *surface;
+                drop(data);
+                self.discover(surface)
+            }
             SemanticNodeData::MergedDecl { .. } => {
                 drop(data);
                 match self.dispatch().unwrap_identity_carrier_for_relation(node) {
@@ -547,7 +554,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         let Some(data) = graph.node_data(node) else {
             return unsettled();
         };
-        let (kind, params, type_parameters, occurrence, carrier, span) = match &*data {
+        let (kind, params, type_parameters, occurrence, carrier, span, predicate) = match &*data {
             SemanticNodeData::Signature {
                 kind,
                 params,
@@ -555,6 +562,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 occurrence,
                 return_carrier,
                 signature_span,
+                predicate,
                 ..
             } => (
                 *kind,
@@ -563,6 +571,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 occurrence.clone(),
                 return_carrier.clone(),
                 *signature_span,
+                *predicate,
             ),
             SemanticNodeData::DeferredCallable(callable) => {
                 let parts = callable.parts(&ResolveOverloadSetConsumer::witness());
@@ -572,6 +581,8 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                     Arc::clone(parts.type_parameters),
                     Some(parts.occurrence.clone()),
                     parts.return_carrier.clone(),
+                    None,
+                    // A body-derived return carries no authored predicate.
                     None,
                 )
             }
@@ -668,7 +679,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             crate::semantic_query::SignatureReturnCarrier::Declared(return_type) => {
                 ResultInput::Declared {
                     return_type: *return_type,
-                    predicate_or_assertion: None,
+                    predicate_or_assertion: predicate,
                 }
             }
             crate::semantic_query::SignatureReturnCarrier::Function(source) => ResultInput::Body {
@@ -889,9 +900,17 @@ impl ProjectSemanticDispatch<'_> {
             None
         };
         let effects = if demand.reads_effects() {
-            self.recipe_effects(types, &view, descriptor, call_substitution, &recipe)?
-                .map(|node| store.intern_type_token(node, None))
-                .transpose()?
+            match self.recipe_effects(types, &view, descriptor, call_substitution, &recipe)? {
+                Some(predicate) => Some(crate::signature_kernel::PredicateEffect {
+                    subject: predicate.subject,
+                    asserts: predicate.asserts,
+                    ty: predicate
+                        .ty
+                        .map(|node| store.intern_type_token(node, None))
+                        .transpose()?,
+                }),
+                None => None,
+            }
         } else {
             None
         };
@@ -916,15 +935,28 @@ impl ProjectSemanticDispatch<'_> {
         descriptor: SignatureDescriptorId,
         call: crate::signature_kernel::CallSubstitutionId,
         recipe: &SignatureResultRecipe,
-    ) -> Result<Option<SemanticNodeId>, DiscoveryError> {
+    ) -> Result<Option<crate::semantic_query::SignaturePredicate>, DiscoveryError> {
         match recipe {
             SignatureResultRecipe::Declared {
-                predicate_or_assertion: Some(token),
+                predicate_or_assertion: Some(effect),
                 ..
             } => {
-                let base = view.type_token_node(*token)?;
-                let map = self.composed_map(types.store, view, descriptor, call)?;
-                Ok(Some(self.substitute_canonical(base, &map)))
+                // The target composes through the same declaration + call
+                // maps as the return: `x is T` under `T := string` narrows
+                // to `string`.
+                let ty = match effect.ty {
+                    Some(token) => {
+                        let base = view.type_token_node(token)?;
+                        let map = self.composed_map(types.store, view, descriptor, call)?;
+                        Some(self.substitute_canonical(base, &map))
+                    }
+                    None => None,
+                };
+                Ok(Some(crate::semantic_query::SignaturePredicate {
+                    subject: effect.subject,
+                    asserts: effect.asserts,
+                    ty,
+                }))
             }
             SignatureResultRecipe::Declared {
                 predicate_or_assertion: None,
@@ -1533,6 +1565,8 @@ impl ProjectSemanticDispatch<'_> {
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span: None,
+            // A composite result recipe carries no predicate of its own.
+            predicate: None,
         }))
     }
 

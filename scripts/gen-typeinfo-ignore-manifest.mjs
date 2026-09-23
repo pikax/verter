@@ -2149,7 +2149,7 @@ const MECHANISM_TO_KEYS = new Map([
   ["LedgerCoverageGate", []],
   [
     "QueryValueDomainFoundation",
-    ["ResolveDecl", "TypeOf", "NormalizeUnion", "ReduceIntersection", "SignaturesOfType"],
+    ["ResolveDecl", "TypeOf", "ReduceUnion", "ReduceIntersection", "SignaturesOfType"],
   ],
   // The algebra closure owns ONE key of its own — the demand-scoped
   // truthiness-domain classifier. The normalization queries it closes
@@ -3057,7 +3057,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "Instantiate",
         "IndexedAccess",
         "KeyOf",
-        "NormalizeUnion",
+        "ReduceUnion",
         "LowerLocator",
       ],
       consumed_mechanisms: ["QueryValueDomainFoundation"],
@@ -3483,7 +3483,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "Instantiate",
         "IndexedAccess",
         "MappedType",
-        "NormalizeUnion",
+        "ReduceUnion",
         "ProjectPath",
         "TemplateLiteralReduce",
         "LowerLocator",
@@ -3668,7 +3668,7 @@ function consumedMechsForBlock(blockVar) {
 const KEY_OWNING_BLOCK = new Map([
   ["ResolveDecl", "U2QueryValueDomain"],
   ["TypeOf", "U2QueryValueDomain"],
-  ["NormalizeUnion", "U2QueryValueDomain"],
+  ["ReduceUnion", "U2QueryValueDomain"],
   ["ReduceIntersection", "U2QueryValueDomain"],
   // Shared signature discovery is value-domain substrate: the signature
   // utilities and call/construct resolution both read it.

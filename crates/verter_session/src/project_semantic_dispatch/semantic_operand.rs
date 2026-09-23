@@ -951,6 +951,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(child) => stack.push(*child),
+                // A class expression's instance surface can reach the outer
+                // binders of the declaration it is authored under.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     stack.extend(
                         composite
@@ -1016,6 +1019,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     stack.extend(params.iter().map(|param| param.ty));
@@ -1024,6 +1028,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.extend(parameter.constraint);
                         stack.extend(parameter.default);
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 // The unresolved carriers expose their structural type
                 // arguments only through the sanctioned single accessor;

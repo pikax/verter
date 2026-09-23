@@ -14,7 +14,7 @@ use rustc_hash::FxHashSet;
 use crate::{
     AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, LiteralValue,
     MappedModifier, ObjectMember, PrimitiveName, TupleElement, TypeAuthoredPropertyKey, TypeExpr,
-    TypeParam,
+    TypeParam, TypePredicateSubject,
 };
 
 /// A complete TypeScript display projection and the named type references
@@ -511,7 +511,27 @@ pub fn render_type_expr_display(
                 let Some(return_type) = function.return_type.as_deref() else {
                     return Err(TypeExprDisplayError::MissingFunctionReturnType);
                 };
-                work.push(Frame::Expr(return_type, Precedence::Lowest));
+                // A predicate signature prints its predicate in the return
+                // position (`x is T`, `asserts this`), never the `boolean` /
+                // `void` return it denotes.
+                match function.predicate.as_deref() {
+                    Some(predicate) => {
+                        if let Some(target) = predicate.ty.as_deref() {
+                            work.push(Frame::Expr(target, Precedence::Lowest));
+                            work.push(Frame::Text(" is "));
+                        }
+                        match &predicate.subject {
+                            TypePredicateSubject::Parameter(name) => {
+                                work.push(Frame::Borrowed(name));
+                            }
+                            TypePredicateSubject::This => work.push(Frame::Text("this")),
+                        }
+                        if predicate.asserts {
+                            work.push(Frame::Text("asserts "));
+                        }
+                    }
+                    None => work.push(Frame::Expr(return_type, Precedence::Lowest)),
+                }
                 work.push(Frame::Text(
                     if matches!(
                         style,

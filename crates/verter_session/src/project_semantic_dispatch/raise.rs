@@ -189,8 +189,12 @@ fn canonicalise_for_digest(
             path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(*mode),
         },
-        SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+        SemanticQueryKey::ReduceUnion {
+            members,
+            nullability,
+        } => SemanticQueryKey::ReduceUnion {
             members: Arc::clone(members),
+            nullability: *nullability,
         },
         SemanticQueryKey::ReduceIntersection {
             input,
@@ -280,7 +284,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::MappedType { .. } => "MappedType",
         SemanticQueryKey::Conditional { .. } => "Conditional",
         SemanticQueryKey::TypeOf { .. } => "TypeOf",
-        SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
+        SemanticQueryKey::ReduceUnion { .. } => "ReduceUnion",
         SemanticQueryKey::ReduceIntersection { .. } => "ReduceIntersection",
         SemanticQueryKey::ProjectObjectSpread { .. } => "ProjectObjectSpread",
         SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
@@ -820,6 +824,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Alias(target) => {
                 stack.push(ReduceFrame::descend(*target, parent_context));
             }
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                if !matches!(parent_context.mode, ProjectionMode::Navigate) {
+                    stack.push(ReduceFrame::descend(*surface, parent_context));
+                }
+            }
             // Composite shapes — push children ONLY under whole-surface
             // `Published(Expanded)`. Per-prop / structural-transit
             // parents skip composite descent (the parent is the demand
@@ -875,6 +884,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 if is_whole_surface_published(parent_context) {
@@ -889,6 +899,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         if let Some(d) = tp.default {
                             stack.push(ReduceFrame::descend(d, parent_context));
                         }
+                    }
+                    if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
+                        stack.push(ReduceFrame::descend(target, parent_context));
                     }
                 }
             }
@@ -1169,6 +1182,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(&(*target, context))
                 .copied()
                 .unwrap_or(*target),
+            // A class expression's instance is its name under `Navigate` (the
+            // shallow publication a `DeclRef` to a closed object keeps) and its
+            // reduced instance surface under `Expanded`.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                if matches!(mode, ProjectionMode::Navigate) {
+                    node
+                } else {
+                    state
+                        .mapping
+                        .get(&(*surface, context))
+                        .copied()
+                        .unwrap_or(*surface)
+                }
+            }
 
             // --- operator dispatches (context-aware via underlying key) ---
             SemanticNodeData::IndexedAccess { object, index } => {
@@ -1600,6 +1627,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => rebuild_function(
                 self,
                 node,
@@ -1611,6 +1639,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier.clone(),
                 *signature_span,
                 *return_type_span,
+                *predicate,
                 &state.mapping,
                 context,
             )
@@ -2016,10 +2045,18 @@ fn rebuild_function(
     return_carrier: crate::semantic_query::SignatureReturnCarrier,
     signature_span: Option<verter_span::Span>,
     return_type_span: Option<verter_span::Span>,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     let mut changed = false;
+    let new_predicate = predicate.map(|predicate| {
+        predicate.map_type(|target| {
+            let new_target = mapping.get(&(target, context)).copied().unwrap_or(target);
+            changed |= new_target != target;
+            new_target
+        })
+    });
     let new_params: Vec<crate::semantic_query::FunctionParam> = params
         .iter()
         .map(|p| {
@@ -2083,6 +2120,7 @@ fn rebuild_function(
             },
             signature_span,
             return_type_span,
+            predicate: new_predicate,
         },
     ))
 }
@@ -4129,6 +4167,11 @@ impl<'a> OpenWalk<'a> {
 
             // --- carriers we can follow one transparent hop ---
             SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target),
+            // A class expression's instance surface may reach the outer
+            // type parameters of the declaration it is authored under.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                self.node_is_open(ctx, *surface)
+            }
             SemanticNodeData::DeclRef { identity } => {
                 // For the outer-generic-reachability question a declaration
                 // reference cannot carry the mapper's outer generic
@@ -4203,12 +4246,16 @@ impl<'a> OpenWalk<'a> {
             SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
             } => {
                 (self.role.descend_value_surfaces()
                     || self.position == OperandPosition::ValueSensitive)
                     && (params.iter().any(|p| self.node_is_open(ctx, p.ty))
-                        || self.node_is_open(ctx, *return_type))
+                        || self.node_is_open(ctx, *return_type)
+                        || predicate
+                            .and_then(|predicate| predicate.ty)
+                            .is_some_and(|target| self.node_is_open(ctx, target)))
             }
             SemanticNodeData::Array { element, .. } => {
                 (self.role.descend_value_surfaces()

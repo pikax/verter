@@ -273,6 +273,7 @@ fn func_node(
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     })
 }
 
@@ -667,6 +668,7 @@ fn function_type_parameters_render_constraint_and_default() {
         }]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     // DISCRIMINATING: the name-only impl renders `<T>() => void`.
     assert_eq!(

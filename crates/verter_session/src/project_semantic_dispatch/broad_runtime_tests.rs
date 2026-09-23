@@ -127,8 +127,9 @@ fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
     );
 }
 
-/// Mutation recipe: recurse into an Object member/signature/keyspace after the
-/// terminal Object/Function facts are known. The 4,096 deliberately missing
+/// Mutation recipe: recurse into an Object member or keyspace after the
+/// terminal Object/Function facts are known (callability itself is read
+/// through signature discovery). The 4,096 deliberately missing
 /// member nodes then taint the read Partial (and make traversal scale with the
 /// nested surface), failing the constant-boundary classification assertion.
 #[test]
@@ -149,6 +150,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
@@ -166,10 +168,24 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         })
         .collect();
+    // Callability is read from signature discovery, which reads the signature
+    // node itself, so the construct signature is a real one; the members stay
+    // dangling, because classification must never descend into them.
+    let constructor = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Construct,
+        params: Arc::from([]),
+        return_type: leaf,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(leaf),
+        type_parameters: Arc::from([]),
+        signature_span: None,
+        return_type_span: None,
+        predicate: None,
+    });
     let object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(explosive_members.into_boxed_slice()),
         call_signatures: Arc::from([]),
-        construct_signatures: Arc::from([crate::semantic_query::SemanticNodeId(u64::MAX - 1)]),
+        construct_signatures: Arc::from([constructor]),
         index_signatures: Arc::from([]),
         keyspace: Some(array),
         has_index_signature: true,
@@ -177,7 +193,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     assert_eq!(
         classify(&ProjectSemanticDispatch::new(&host), object).kinds(),
         &[BroadRuntimeKind::Function, BroadRuntimeKind::Object],
-        "signature metadata classifies the object without reading member or signature bodies"
+        "signature discovery classifies the object without reading any member body"
     );
     let subject = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([

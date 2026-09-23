@@ -297,9 +297,10 @@ pub(crate) fn no_flow_slot_in_published_type_surface() {
 }
 
 /// The SFC whose callee is GENERIC: `ReturnType<typeof …>` is a signature
-/// UTILITY, so every free clause parameter instantiates at `unknown` —
-/// the whole-return route's policy, which the MEMBER route has to share
-/// or the two disagree about one callee.
+/// UTILITY, so every free clause parameter instantiates at its base
+/// constraint — `unknown` for this unconstrained `MG` — the whole-return
+/// route's policy, which the MEMBER route has to share or the two disagree
+/// about one callee.
 ///
 /// `MG` carries a DECLARED DEFAULT (`number`) precisely so the three
 /// candidate behaviours are distinguishable at the published surface:
@@ -366,5 +367,68 @@ fn return_type_member_of_generic_callee_publishes_the_utility_policy() {
          `Ref {{ name: \"MG\" }}` is the callee's own binder published as this \
          consumer's value, and `number` would be the CALL-site policy the utility \
          never gets"
+    );
+}
+
+/// The SFC whose generic callees are CONSTRAINED, one through a sibling
+/// clause parameter (`CB extends CA`): the member route reads the callee's
+/// base signature exactly as the whole-return route does.
+const CONSTRAINED_SFC: &str = r#"<script setup lang="ts">
+function myConstrained<MC extends number>(x: MC) {
+  return { m: x };
+}
+function myChained<CA extends string, CB extends CA>(a: CA, b: CB) {
+  return { m: b };
+}
+defineProps<{
+  mc: ReturnType<typeof myConstrained>['m'];
+  mch: ReturnType<typeof myChained>['m'];
+}>();
+</script>
+<template><div /></template>
+"#;
+
+/// `ReturnType<typeof constrainedCallee>['m']` publishes the member at the
+/// callee's BASE constraint, never `unknown`.
+///
+/// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict`, read through a
+/// deliberate `const x: null = …` assignment error, on this exact script):
+///
+/// ```text
+/// ReturnType<typeof myConstrained>['m'] : number
+/// ReturnType<typeof myChained>['m']     : string
+/// ```
+#[test]
+fn return_type_member_of_constrained_callee_publishes_the_base_constraint() {
+    let host = build_host(&[("/workspace/src/MyConstrained.vue", CONSTRAINED_SFC)]);
+
+    let (meta, _resolution) = host
+        .get_component_meta_with_resolution("/workspace/src/MyConstrained.vue")
+        .expect("constrained ReturnType-admission SFC must resolve");
+    let prop_type = |name: &str| {
+        let prop = meta
+            .props
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} prop present"));
+        crate::test_only::semantic_source_probe::shallow_type_expr(
+            &host,
+            "/workspace/src/MyConstrained.vue",
+            prop.publication
+                .result()
+                .selected_source()
+                .unwrap_or_else(|| panic!("{name} prop must publish a typed source")),
+        )
+        .unwrap_or_else(|| panic!("{name} prop's published source must shell-materialize"))
+    };
+    assert_eq!(
+        prop_type("mc"),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "`MC extends number` reads `MC` as `number`"
+    );
+    assert_eq!(
+        prop_type("mch"),
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "`CB extends CA extends string` reads `CB` as `string`"
     );
 }

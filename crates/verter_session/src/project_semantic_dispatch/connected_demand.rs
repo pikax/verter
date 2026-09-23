@@ -252,6 +252,13 @@ impl<'a> ConnectedDemandLedger<'a> {
         self.query_depth_limit.set(depth);
     }
 
+    /// The work units the last connected demand charged. Test-only: kept
+    /// after the demand ends, and reset when the next one enters.
+    #[cfg(test)]
+    pub(super) fn work_used_for_tests(&self) -> usize {
+        self.work_used.get()
+    }
+
     /// Fold `reason` into the sticky trip set and return the widened set.
     pub(super) fn record_trip(&self, reason: PartialReasonSet) -> PartialReasonSet {
         verter_debug_assert!(

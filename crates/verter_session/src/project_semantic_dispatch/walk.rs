@@ -468,6 +468,34 @@ enum ProgramShallowProjection {
     Failed,
 }
 
+/// Whether a NON-EMPTY projected path's terminal has a one-level surface
+/// for the Shallow terminal to synthesise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectedTerminalSurface {
+    /// An object-shaped terminal (object, intersection, merged
+    /// declaration, spread program, or a union of those): synthesise its
+    /// surface.
+    Structural,
+    /// A reference or deferred carrier (or a union reaching one, with no
+    /// surfaceless arm): synthesise the surface its body contributes, and
+    /// keep the carrier when that body contributes none.
+    Carrier,
+    /// A scalar, array, tuple, callable, binder or other surfaceless
+    /// terminal, or a union with such an arm: the terminal IS the
+    /// projection's answer.
+    Surfaceless,
+}
+
+/// What the Shallow terminal synthesis returns when no arm of the walk
+/// contributed a surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfacelessWalk {
+    /// The empty whole-surface projection's contract: an empty `Object`.
+    EmptySurface,
+    /// A projected carrier terminal: the terminal itself.
+    KeepTerminal,
+}
+
 /// Transient walker-internal surface representation. Not interned in the
 /// semantic graph — only the final merged surface is interned via
 /// `SemanticNodeData::Object` once synthesis completes.
@@ -2855,6 +2883,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
+                // A class expression's instance projects through its instance
+                // surface, exactly as a `DeclRef` projects through the
+                // declaration body it resolves to.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    current = *surface;
+                }
                 SemanticNodeData::Alias(target) => {
                     // Alias unwrap — emit AliasResolve edge and
                     // continue from the target. Cycle detection via
@@ -3316,7 +3350,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 current = self.present_terminal_member_carriers(current);
             }
         } else if matches!(self.mode(), ProjectionMode::Shallow) {
-            current = self.expand_empty_path_shallow_terminal_surface(current);
+            if !self.original_path_non_empty {
+                current = self.expand_empty_path_shallow_terminal_surface(current);
+            } else {
+                // A projected path's terminal is the MEMBER's own type, and a
+                // one-level surface is a view of it only when it has one: a
+                // scalar, array, tuple, callable or binder terminal is the
+                // answer itself (`{ a: 1 }['a']` is `1`, never the empty
+                // surface `{}` a surface synthesis over it would produce),
+                // and so is a union with such an arm. A reference or
+                // deferred carrier is expanded, but one whose body
+                // contributes no surface keeps the carrier.
+                current = match self.projected_terminal_surface(current) {
+                    ProjectedTerminalSurface::Structural => {
+                        self.expand_empty_path_shallow_terminal_surface(current)
+                    }
+                    ProjectedTerminalSurface::Carrier => {
+                        self.shallow_terminal_surface_or_self(current)
+                    }
+                    ProjectedTerminalSurface::Surfaceless => current,
+                };
+            }
         } else if matches!(self.mode(), ProjectionMode::Navigate) && self.original_path_non_empty {
             // Navigate terminal of a projected path: retry IDENTITY for an
             // unresolved-reference carrier (`BareRef` / `ImportType`) so a
@@ -4213,6 +4267,63 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &mut self,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
+        self.shallow_terminal_surface(node, SurfacelessWalk::EmptySurface)
+    }
+
+    /// The shallow surface of a projected path's CARRIER terminal (a
+    /// reference or deferred shell), or the carrier itself when nothing
+    /// its body reaches contributes a surface — `type S = string`
+    /// projected through `{ s: S }['s']` is the reference, not `{}`.
+    fn shallow_terminal_surface_or_self(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        self.shallow_terminal_surface(node, SurfacelessWalk::KeepTerminal)
+    }
+
+    /// Whether a projected path's terminal has a one-level surface to
+    /// synthesise (see [`ProjectedTerminalSurface`]). Syntactic over the
+    /// terminal's own node: a transparent `Alias` classifies its target,
+    /// a union classifies from its arms, and nothing is dispatched.
+    fn projected_terminal_surface(&self, node: SemanticNodeId) -> ProjectedTerminalSurface {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        let mut verdict = ProjectedTerminalSurface::Structural;
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                return ProjectedTerminalSurface::Surfaceless;
+            };
+            match &*data {
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Intersection(_)
+                | SemanticNodeData::MergedDecl { .. }
+                | SemanticNodeData::ObjectSpreadProgram(_) => {}
+                SemanticNodeData::Alias(target) => stack.push(*target),
+                SemanticNodeData::Union(arms) => stack.extend(arms.iter().copied()),
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
+                | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Conditional { .. }
+                | SemanticNodeData::IndexedAccess { .. } => {
+                    verdict = ProjectedTerminalSurface::Carrier;
+                }
+                _ => return ProjectedTerminalSurface::Surfaceless,
+            }
+        }
+        verdict
+    }
+
+    /// The one iterative synthesis behind both Shallow terminals; see
+    /// [`SurfacelessWalk`] for what a walk that contributed nothing
+    /// returns.
+    fn shallow_terminal_surface(
+        &mut self,
+        node: SemanticNodeId,
+        surfaceless: SurfacelessWalk,
+    ) -> SemanticNodeId {
         // Fast path: an already-materialised `Object` root needs no
         // synthesis. The root seed carries no member-role override, no
         // heritage overlay, and no provenance downgrade (those
@@ -4456,6 +4567,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 Frame::FlushIntersection {
                     buffer_id,
                     parent_target,
+                    node: intersection,
+                    heritage,
                 } => {
                     let mut arm_surfaces =
                         intersection_buffers.remove(&buffer_id).unwrap_or_default();
@@ -4477,6 +4590,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         );
                         self.dispatch.deposit_canonical_evidence(canonical_evidence);
                         merged
+                    };
+                    // A heritage overlay is an intersection NODE but not an
+                    // intersection TYPE: an interface/class inherits its
+                    // bases' signatures by concatenation (TypeScript's
+                    // `resolveObjectTypeMembers`), keeping identical ones the
+                    // intersection rule would collapse. It keeps the merge's
+                    // lists.
+                    let merged = if heritage {
+                        merged
+                    } else {
+                        merged.map(|surface| self.with_discovered_signatures(intersection, surface))
                     };
                     self.contribute_surface(
                         parent_target,
@@ -4572,10 +4696,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
 
         // Materialise the root contribution into a SurfaceView and
-        // intern it. Empty contribution → empty Object surface.
-        let surface_view = match root_contribution {
-            Some(surface) => surface_view_from_shallow(&surface),
-            None => empty_surface_view(),
+        // intern it. Empty contribution → empty Object surface, unless the
+        // caller keeps a surfaceless terminal as itself.
+        let surface_view = match (root_contribution, surfaceless) {
+            (Some(surface), _) => surface_view_from_shallow(&surface),
+            (None, SurfacelessWalk::EmptySurface) => empty_surface_view(),
+            (None, SurfacelessWalk::KeepTerminal) => return node,
         };
         self.graph()
             .intern_node(SemanticNodeData::Object(surface_view))
@@ -4721,6 +4847,90 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// child Visits + a flush frame onto the worklist (Intersection,
     /// Union, Mapped, InstantiationRef, Conditional, Alias).
     #[allow(clippy::too_many_arguments)]
+    /// Replace the call/construct entries of `surface` — the shallow merge of
+    /// `intersection`'s arms — with the signature-discovery authority's answer
+    /// for `intersection`.
+    ///
+    /// The merge keeps each arm's call/construct entries with identity dedup,
+    /// and drops a bare signature arm altogether. Those lists reach semantic
+    /// readers once the surface is interned as an object, so they must be the
+    /// kernel's (signature-equivalence dedup, result-aware overload identity,
+    /// constructor/mixin composition), never an alternative authority. A
+    /// surface with no signature entries over arms with none is returned as is.
+    /// When discovery does not settle, the surface keeps its presentation
+    /// lists: the discovery read already folded its partial rails, so the
+    /// answer this surface feeds is never admitted.
+    fn with_discovered_signatures(
+        &self,
+        intersection: SemanticNodeId,
+        surface: ShallowSurface,
+    ) -> ShallowSurface {
+        let has_signature_entries = surface.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ShallowSurfaceEntry::CallSignature(_) | ShallowSurfaceEntry::ConstructSignature(_)
+            )
+        });
+        let has_bare_callable_arm = match self.graph().node_data(intersection).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => arms.iter().any(|arm| {
+                matches!(
+                    self.graph().node_data(*arm).as_deref(),
+                    Some(
+                        SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_)
+                    )
+                )
+            }),
+            _ => false,
+        };
+        if !has_signature_entries && !has_bare_callable_arm {
+            return surface;
+        }
+        let Ok((calls, constructs)) = self.dispatch.shared_signature_buckets(intersection) else {
+            return surface;
+        };
+        let mut entries = Vec::with_capacity(surface.entries.len());
+        let mut calls_placed = false;
+        let mut constructs_placed = false;
+        for entry in surface.entries {
+            match entry {
+                ShallowSurfaceEntry::CallSignature(_) => {
+                    if !calls_placed {
+                        calls_placed = true;
+                        entries.extend(
+                            calls
+                                .iter()
+                                .copied()
+                                .map(ShallowSurfaceEntry::CallSignature),
+                        );
+                    }
+                }
+                ShallowSurfaceEntry::ConstructSignature(_) => {
+                    if !constructs_placed {
+                        constructs_placed = true;
+                        entries.extend(
+                            constructs
+                                .iter()
+                                .copied()
+                                .map(ShallowSurfaceEntry::ConstructSignature),
+                        );
+                    }
+                }
+                other => entries.push(other),
+            }
+        }
+        if !calls_placed {
+            entries.extend(calls.into_iter().map(ShallowSurfaceEntry::CallSignature));
+        }
+        if !constructs_placed {
+            entries.extend(
+                constructs
+                    .into_iter()
+                    .map(ShallowSurfaceEntry::ConstructSignature),
+            );
+        }
+        ShallowSurface::from_entries(entries, surface.keyspace)
+    }
+
     fn visit_shallow_node(
         &mut self,
         cur: SemanticNodeId,
@@ -4813,6 +5023,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 work.push(Frame::FlushIntersection {
                     buffer_id,
                     parent_target: target,
+                    node: cur,
+                    heritage: heritage_overlay_body,
                 });
                 if !arms.is_empty() {
                     work.push(Frame::VisitArmAt {
@@ -5249,6 +5461,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     provenance_override: Some(
                         crate::semantic_query::SurfaceProvenanceContext::Structural,
                     ),
+                });
+            }
+            // A class expression's instance contributes its instance surface —
+            // the body a `DeclRef` arm resolves to, already in hand.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                let surface = *surface;
+                drop(data);
+                work.push(Frame::Visit {
+                    node: surface,
+                    target,
+                    member_role_override,
+                    heritage_overlay_body,
+                    provenance_override,
                 });
             }
             SemanticNodeData::DeclRef { identity } => {
@@ -6510,6 +6735,12 @@ enum Frame {
     FlushIntersection {
         buffer_id: usize,
         parent_target: BufferTarget,
+        /// The intersection whose arms the buffer merges: its signature
+        /// entries are the discovery authority's answer for this node.
+        node: SemanticNodeId,
+        /// Whether the intersection is an interface/class body's heritage
+        /// overlay rather than an intersection type.
+        heritage: bool,
     },
     FlushUnion {
         buffer_id: usize,
@@ -7042,6 +7273,28 @@ fn merge_value_nodes_recursive(
             }
         }
     }
+    // A contributor carrying CALL or CONSTRUCT signatures makes this a
+    // CALLABLE intersection, and callable merging is the signature
+    // kernel's authority — `SignaturesOfType` over an `Intersection`
+    // node routes to `signature_kernel::discovery::intersection_signatures`,
+    // which dedups by signature EQUIVALENCE and composes mixin
+    // constructors. The local surface merge below only concatenates
+    // signature NODES with identity dedup: a weaker duplicate of that
+    // authority, and exactly the "standalone callable merging" §15 of
+    // `docs/arch/signature-kernel.md` retires. Route a callable
+    // intersection to the ordered `Intersection` carrier below instead,
+    // so the kernel answers it and no second producer exists.
+    //
+    // Only the contributors' OWN surfaces are classified — a member
+    // whose VALUE is callable (`{ f: () => void } & { x: 1 }`) does not
+    // make the intersection callable and still merges here.
+    if all_objects
+        && values
+            .iter()
+            .any(|value| value_may_contribute_call_signatures(graph, *value))
+    {
+        all_objects = false;
+    }
     if all_objects {
         let opt_surfaces: Vec<Option<ShallowSurface>> =
             shallow_surfaces.into_iter().map(Some).collect();
@@ -7162,6 +7415,7 @@ pub(super) fn value_may_contribute_call_signatures(
             }
             // Transparent carriers / composites — classify what they carry.
             SemanticNodeData::Alias(inner) => stack.push(*inner),
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
             composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                 let arms = composite.composite_members().expect("composite arm");
                 stack.extend(arms.iter().copied());
@@ -7418,8 +7672,10 @@ impl UnionMemberAccum {
             // disposition boundary.
             values => {
                 let composite =
-                    crate::project_semantic_dispatch::canonical_algebra::canonical_union(
-                        graph, values,
+                    crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                        graph,
+                        values,
+                        crate::semantic_query::NullabilityPolicy::Strict,
                     );
                 evidence.absorb(composite.evidence);
                 composite.node
@@ -8326,6 +8582,121 @@ mod overload_carrier_exclusion_tests {
             }
             other => panic!("expected the order-preserving intersection carrier, got {other:?}"),
         }
+    }
+
+    /// The same contract for BARE callable objects — the case the alias
+    /// twin above cannot reach, because an `Alias` is not an `Object` and
+    /// so never entered the all-objects surface merge in the first place.
+    ///
+    /// Two arms contribute member `m` as a plain callable `Object` each.
+    /// Merging their SURFACES would concatenate the call-signature nodes
+    /// with identity dedup and publish ONE object carrying both — a second
+    /// producer of callable intersections beside the signature kernel,
+    /// with weaker rules (no signature-equivalence dedup, no mixin
+    /// composition). `docs/arch/signature-kernel.md` §15 retires that
+    /// standalone callable merging: the value must stay an ordered
+    /// `Intersection` carrier so `SignaturesOfType` answers it through
+    /// `signature_kernel::discovery::intersection_signatures`.
+    #[test]
+    fn bare_callable_objects_stay_a_kernel_owned_intersection_carrier() {
+        let graph = SemanticGraphStore::new();
+        let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
+            graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                vec![SurfaceEntry::CallSignature(ret)],
+                None,
+                false,
+            )))
+        };
+        let object_a = callable_object(ret_a);
+        let object_b = callable_object(ret_b);
+        let arm = |value| {
+            Some(ShallowSurface::from_entries(
+                vec![super::ShallowSurfaceEntry::Member(value_member("m", value))],
+                None,
+            ))
+        };
+        let mut evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let merged = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[arm(object_a), arm(object_b)],
+            &mut evidence,
+        )
+        .expect("two live arms merge");
+        let value = merged
+            .members
+            .iter()
+            .find(|m| m.string_name() == Some("m"))
+            .expect("member m survives")
+            .value;
+        match graph.node_data(value).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => {
+                assert_eq!(
+                    arms.as_ref(),
+                    &[object_a, object_b],
+                    "authored contribution order is the overload order"
+                );
+            }
+            Some(SemanticNodeData::Object(view)) => panic!(
+                "the walker merged the callable arms into ONE surface carrying {} call \
+                 signatures — that is the standalone callable merging §15 retires; the \
+                 signature kernel must own it",
+                view.call_signatures.len()
+            ),
+            other => panic!("expected the order-preserving intersection carrier, got {other:?}"),
+        }
+    }
+
+    /// The narrowing must not divert EVERY object intersection: two
+    /// contributors that carry no call or construct signature of their own
+    /// still merge into ONE surface, as `{ a: 1 } & { b: 2 }` always has.
+    /// Only a callable contributor belongs to the signature kernel.
+    #[test]
+    fn non_callable_object_values_still_merge_into_one_surface() {
+        let graph = SemanticGraphStore::new();
+        let keyspace = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        // Two DISTINCT plain surfaces (distinct keyspaces keep them from
+        // interning to one node), neither carrying a signature entry.
+        let value_a = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![],
+            Some(keyspace),
+            false,
+        )));
+        let value_b = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+            vec![],
+            None,
+            false,
+        )));
+        assert_ne!(value_a, value_b, "the fixture needs two distinct surfaces");
+        let arm = |value| {
+            Some(ShallowSurface::from_entries(
+                vec![super::ShallowSurfaceEntry::Member(value_member("m", value))],
+                None,
+            ))
+        };
+        let mut evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let merged = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[arm(value_a), arm(value_b)],
+            &mut evidence,
+        )
+        .expect("two live arms merge");
+        let value = merged
+            .members
+            .iter()
+            .find(|m| m.string_name() == Some("m"))
+            .expect("member m survives")
+            .value;
+        assert!(
+            matches!(
+                graph.node_data(value).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "two NON-callable object values still merge into one surface"
+        );
     }
 
     /// Mint one UNRESOLVED reference carrier of `kind` naming `name`. None

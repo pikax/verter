@@ -3846,6 +3846,81 @@ fn staged_flow_proof(
     .expect("a clean re-staged value mints a proof")
 }
 
+/// A completed member marked reusable answers a later demand on its
+/// transaction with its proven value, and REPLAYS what its evaluation read
+/// into the scopes live at the demanding site — the fact into the live
+/// tracer, the canonical self-root onto the live build frame, and the
+/// canonical-evidence epoch — so a build that consumes the reused value
+/// is rooted exactly as if it had re-evaluated it.
+#[test]
+fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
+        let value = flow_result_value(dispatch, key.clone());
+        // Unpublished, as a member queued behind its machinery root is.
+        dispatch.graph().evict_family_for_tests(&query);
+        let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/ws/replayed.ts".to_string(),
+            hash: [5; 16],
+        };
+        let root: crate::semantic_query_memo::ObservedGraphSelfRoot =
+            (Arc::from("/ws/replayed.ts"), [6; 16]);
+        dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .flow
+            .completed_members
+            .push(super::dispatch_txn::CompletedFlowReturnMember {
+                key: key.clone(),
+                result: staged_flow_proof(&key, value.clone()),
+                inline_flight: None,
+                self_roots: Vec::new(),
+                materialized: crate::semantic_query::demand::MaterializedSet::default(),
+                reuse: Some(super::dispatch_txn::FlowMemberReuse {
+                    reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                        facts: Arc::from(vec![fact.clone()]),
+                        non_cacheable: false,
+                    },
+                    observed_self_roots: vec![root.clone()],
+                    canonical_evidence_deposited: true,
+                }),
+            });
+        let epoch = dispatch.canonical_evidence_epoch.get();
+        let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+        let (step, read_set) = host
+            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                dispatch.execute_flow_return(key.clone())
+            });
+        let observed = frame.finish();
+        match step {
+            crate::semantic_query::FlowReturnStep::Complete(result) => assert_eq!(
+                result.return_type(),
+                value.return_type(),
+                "the demand is answered with the member's proven value"
+            ),
+            other => panic!("a reusable member answers Complete, got {other:?}"),
+        }
+        let crate::resolver_core::FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+            panic!("the live tracer seals a cacheable signature");
+        };
+        assert!(
+            signature.contains(&fact),
+            "the recorded fact reaches the live tracer: {signature:?}"
+        );
+        assert!(
+            observed.observed_self_roots.contains(&root),
+            "the recorded self-root reaches the live build frame"
+        );
+        assert_ne!(
+            dispatch.canonical_evidence_epoch.get(),
+            epoch,
+            "the recorded canonical evidence advances the epoch"
+        );
+    });
+}
+
 /// One PUBLIC-API demand: a fresh top-level dispatch per call, exactly as
 /// an external `SemanticQueryApi` consumer issues it.
 fn scc_public_demand(
@@ -5861,8 +5936,9 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
                 .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
                     crate::semantic_query::PrimitiveKind::Number,
                 ));
-        let _ = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+        let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         });
 
         // The pending typed-gap roots: a typed refusal, never a graph or

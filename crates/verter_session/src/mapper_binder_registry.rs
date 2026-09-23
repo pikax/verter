@@ -545,6 +545,15 @@ fn hash_function_expr<'a, H: Hasher>(
     } else {
         0u8.hash(hasher);
     }
+    // Trailing, present only on a predicate signature, so every
+    // predicate-less function keeps its hash.
+    if let Some(predicate) = func.predicate.as_deref() {
+        predicate.subject.hash(hasher);
+        (predicate.asserts as u8).hash(hasher);
+        if let Some(target) = predicate.ty.as_deref() {
+            worklist.push(target);
+        }
+    }
 }
 
 fn hash_recursive_conditional_frame<'a, H: Hasher>(

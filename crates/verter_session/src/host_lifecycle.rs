@@ -877,6 +877,7 @@ impl VerterHost {
                 .semantic_graph()
                 .relation_proof_count(),
             relate_keys: self.project_type_store.semantic_graph().relate_key_count(),
+            union_views: self.project_type_store.semantic_graph().union_view_count(),
             shape_cache_entries: self.project_type_store.shape_cache_db().live_count(),
             flow_graphs: self.project_type_store.flow_slice().graphs_entry_count(),
             flow_hash_entries: self

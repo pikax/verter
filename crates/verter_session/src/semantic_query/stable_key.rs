@@ -9,14 +9,11 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
-
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
-    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
-    QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceEntry, SurfaceMember,
+    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, NullabilityPolicy, OptionalityMod,
+    PredicateSubject, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
+    SemanticNodeId, SignatureKind, SurfaceEntry, SurfaceMember,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::CompilerIntrinsicTypeOp;
@@ -74,6 +71,7 @@ pub mod subtag {
     pub const SIGNATURE: u8 = 8;
     pub const OBJECT: u8 = 9;
     pub const MERGED_DECL: u8 = 10;
+    pub const CLASS_EXPRESSION_INSTANCE: u8 = 11;
     pub const TYPE_PARAM: u8 = 1;
     pub const INFER: u8 = 2;
     pub const INFER_REF: u8 = 3;
@@ -263,7 +261,8 @@ fn primitive_subtag(kind: PrimitiveKind) -> u8 {
 
 fn origin_tag(category: CompositeOriginCategory) -> u8 {
     match category {
-        CompositeOriginCategory::Canonical => 1,
+        CompositeOriginCategory::Canonical(NullabilityPolicy::Strict) => 1,
+        CompositeOriginCategory::Canonical(NullabilityPolicy::Erased) => 8,
         CompositeOriginCategory::CanonicalUnproven => 2,
         CompositeOriginCategory::AuthoredShell => 3,
         CompositeOriginCategory::OrderedCarrier => 4,
@@ -613,6 +612,25 @@ fn encode_data(
                 encode_child(graph, *arg, seen, &mut enc, depth);
             }
         }
+        // The class identity is the authored position (file, owner, offset);
+        // the printed name and qualifier ride along, and the instance
+        // surface descends as a child, so two instantiations of one class
+        // expression stay distinct.
+        SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            enc.header(category::AUTHORED, subtag::CLASS_EXPRESSION_INSTANCE);
+            enc.str(&identity.canonical_id);
+            encode_owner(&mut enc, identity.owner);
+            enc.u32(identity.offset);
+            enc.str(&identity.name);
+            match &identity.qualifier {
+                None => enc.u8(0),
+                Some(qualifier) => {
+                    enc.u8(1);
+                    enc.str(qualifier);
+                }
+            }
+            encode_child(graph, *surface, seen, &mut enc, depth);
+        }
         SemanticNodeData::MergedDecl { contributors } => {
             enc.header(category::AUTHORED, subtag::MERGED_DECL);
             enc.u16(contributors.len() as u16);
@@ -629,6 +647,7 @@ fn encode_data(
             return_carrier: _,
             signature_span: _,
             return_type_span: _,
+            predicate,
         } => {
             enc.header(category::AUTHORED, subtag::SIGNATURE);
             enc.u8(match kind {
@@ -659,6 +678,27 @@ fn encode_data(
                 Some(occ) => {
                     enc.u8(1);
                     enc.bytes(&format!("{occ:?}").into_bytes());
+                }
+            }
+            // The predicate is a trailing section, present only on a
+            // predicate signature: every predicate-less signature keeps its
+            // key bytes, and a predicate key extends that prefix, so the two
+            // never collide.
+            if let Some(predicate) = predicate {
+                match predicate.subject {
+                    PredicateSubject::This => enc.u8(1),
+                    PredicateSubject::Parameter(index) => {
+                        enc.u8(2);
+                        enc.u32(index);
+                    }
+                }
+                enc.bool(predicate.asserts);
+                match predicate.ty {
+                    None => enc.u8(0),
+                    Some(ty) => {
+                        enc.u8(1);
+                        encode_child(graph, ty, seen, &mut enc, depth);
+                    }
                 }
             }
         }
@@ -965,6 +1005,9 @@ pub fn canonicalize_union_members(
         .map(|&id| (stable_key_for_node(graph, id), id))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if graph.union_order_reversed() {
+        keyed.reverse();
+    }
     // Admission-time convergence is ORDER only: structurally equal but
     // arena-distinct members stay — the build's budgeted comparator owns
     // the collapse and its discard-evidence discipline.
@@ -972,36 +1015,32 @@ pub fn canonicalize_union_members(
     keyed.into_iter().map(|(_, id)| id).collect()
 }
 
-struct UnionViewTable {
-    by_key: FxHashMap<SemanticUnionMembersKey, Arc<[SemanticNodeId]>>,
-}
-
-fn union_view_table() -> &'static Mutex<UnionViewTable> {
-    static TABLE: std::sync::OnceLock<Mutex<UnionViewTable>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        Mutex::new(UnionViewTable {
-            by_key: FxHashMap::default(),
-        })
-    })
+/// Order a union's members by the `VerterStableV1` stable key — THE union
+/// order. Every union construction sorts through here, so the one order has
+/// one site (and one test-only counterfactual, a store that reverses it).
+pub fn sort_union_members_by_stable_key(
+    graph: &SemanticGraphStore,
+    members: &mut [SemanticNodeId],
+) {
+    sort_by_stable_key(graph, members);
+    if graph.union_order_reversed() {
+        members.reverse();
+    }
 }
 
 /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
+/// Views live in the store whose arena the union's id indexes.
 pub fn semantic_union_members(
     graph: &SemanticGraphStore,
     union: SemanticNodeId,
     ctx: &SemanticContext,
 ) -> Arc<[SemanticNodeId]> {
     let key = SemanticUnionMembersKey::from_context(union, ctx);
-    {
-        let table = union_view_table().lock();
-        if let Some(view) = table.by_key.get(&key) {
-            return Arc::clone(view);
-        }
+    if let Some(view) = graph.union_view(&key) {
+        return view;
     }
     let view = build_union_view(graph, union);
-    let mut table = union_view_table().lock();
-    table.by_key.entry(key).or_insert_with(|| Arc::clone(&view));
-    view
+    graph.keep_union_view(key, &view)
 }
 
 fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[SemanticNodeId]> {

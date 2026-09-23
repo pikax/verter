@@ -1014,7 +1014,7 @@ export type FlowDegradationTag = "GapGuardNarrowing" | "GapNominalRelation" | "G
  * that inner variant, so every distinct no-value reason keeps its own
  * wire spelling.
  */
-export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" | "UnsupportedInvokedClosureEffect" | "UnsupportedWith" | "UnsupportedModuleDeclaration" | "Unresolved" | "EmptyCycle" | "UnmodeledDemandPoint" | "CallNotCallable" | "CallNoApplicableOverload" | "CallUndecidable" | "CallBudget" | "BudgetDepthExceeded" | "BudgetWorkExceeded" | "UnstableState";
+export type FlowFailureTag = "Missing" | "UnsupportedLoop" | "UnsupportedJump" | "UnsupportedInvokedClosureEffect" | "UnsupportedWith" | "UnsupportedModuleDeclaration" | "Unresolved" | "EmptyCycle" | "UnmodeledDemandPoint" | "CallNotCallable" | "CallNoApplicableOverload" | "CallUndecidable" | "CallBudget" | "BudgetDepthExceeded" | "BudgetWorkExceeded" | "UnstableState" | "Cancelled";
 
 /**
  * Why a flow-return request was not a clean, complete value.
@@ -2517,7 +2517,7 @@ indexed_ready_built: boolean, };
  * `#[non_exhaustive]` + `Other` catchall future-proofs against new
  * semantic-node-data variants without breaking the audit.
  */
-export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Conditional" | "Union" | "Intersection" | "Tuple" | "Object" | "Array" | "Primitive" | "TypeParam" | "Opaque" | "IndexedAccess" | "KeyOf" | "TypeOf" | "Mapped" | "TemplateLiteral" | "NormalizeUnion" | "ReduceIntersection" | { "Other": {
+export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Conditional" | "Union" | "Intersection" | "Tuple" | "Object" | "Array" | "Primitive" | "TypeParam" | "Opaque" | "IndexedAccess" | "KeyOf" | "TypeOf" | "Mapped" | "TemplateLiteral" | "ReduceUnion" | "ReduceIntersection" | { "Other": {
 /**
  * Name of the unrecognized variant — preserved verbatim for
  * human inspection.

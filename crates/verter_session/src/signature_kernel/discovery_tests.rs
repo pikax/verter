@@ -6,8 +6,9 @@ use std::collections::BTreeSet;
 use crate::semantic_query::{IncompleteReason, SemanticNodeId};
 
 use super::discovery::{
-    publish_signature, signatures_identical, union_signatures, BinderInput, DiscoveryError,
-    DiscoveryTypes, MatchOptions, ParamInput, ResultInput, SignatureInput,
+    intersection_signatures, publish_signature, signatures_identical, union_signatures,
+    BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput, ResultInput,
+    SignatureInput,
 };
 use super::lifetime::SignatureStore;
 use super::positional::SlotTypeFacts;
@@ -254,4 +255,115 @@ fn repeated_arm_contributors_are_retained() {
     let out = union_signatures(&store, &types, &[vec![a], vec![a]]).unwrap();
     assert_eq!(out.len(), 1);
     assert_ne!(out[0], a);
+}
+
+/// Types whose identity is token equality and whose forced return is each
+/// candidate's DECLARED return, registered as the candidate is published.
+struct DeclaredReturns<'s> {
+    store: &'s SignatureStore,
+    returns: RefCell<Vec<(SignatureCandidate, TypeToken)>>,
+}
+
+impl DeclaredReturns<'_> {
+    fn declared(&self, source: u64, param: u64, ret: u64) -> SignatureCandidate {
+        let candidate = sig(self.store, source, param, ret);
+        let token = self
+            .store
+            .intern_type_token(SemanticNodeId(ret), None)
+            .unwrap();
+        self.returns.borrow_mut().push((candidate, token));
+        candidate
+    }
+}
+
+impl SlotTypeFacts for DeclaredReturns<'_> {
+    fn accepts_void(&self, _: TypeToken) -> bool {
+        false
+    }
+}
+
+impl DiscoveryTypes for DeclaredReturns<'_> {
+    fn identical(
+        &self,
+        a: TypeToken,
+        b: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<bool> {
+        Some(a == b)
+    }
+    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
+        members.first().copied()
+    }
+    fn map_binders(
+        &self,
+        ty: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<TypeToken> {
+        Some(ty)
+    }
+    fn unknown(&self) -> Option<TypeToken> {
+        self.store
+            .intern_type_token(SemanticNodeId(9_000), None)
+            .ok()
+    }
+    fn any(&self) -> Option<TypeToken> {
+        self.store
+            .intern_type_token(SemanticNodeId(9_001), None)
+            .ok()
+    }
+    fn is_any(&self, _: TypeToken) -> bool {
+        false
+    }
+    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason> {
+        self.returns
+            .borrow()
+            .iter()
+            .find(|(known, _)| known == candidate)
+            .map(|(_, token)| *token)
+            .ok_or(IncompleteReason::UnresolvedObligation)
+    }
+}
+
+/// An intersection keeps overloads that differ ONLY in their result.
+///
+/// Measured on the pinned TypeScript 7.0.2 checker: with `fa: () => A` and
+/// `fb: () => B`, `ReturnType<typeof fa & typeof fb>` is `B` and
+/// `InstanceType<typeof CtorA & typeof CtorB>` is `B` — both signatures
+/// survive and conditional inference reads the LAST. The checker's
+/// `appendSignatures` compares with `ignoreReturnTypes: false`. Deduplicating
+/// on parameters alone collapses the pair onto the first signature and
+/// answers `A` instead.
+///
+/// The other half of the same rule: two signatures identical INCLUDING their
+/// result still collapse (`ReturnType<typeof fa & typeof fa2>` with both
+/// `() => A` is `A`), and the first one stays the representative.
+#[test]
+fn intersection_keeps_signatures_that_differ_only_in_their_result() {
+    let store = SignatureStore::new();
+    let types = DeclaredReturns {
+        store: &store,
+        returns: RefCell::new(Vec::new()),
+    };
+    let (param, returns_a, returns_b) = (100, 200, 201);
+    let fa = types.declared(1, param, returns_a);
+    let fb = types.declared(2, param, returns_b);
+    let fa_again = types.declared(3, param, returns_a);
+
+    assert_eq!(
+        intersection_signatures(&store, &types, SignatureKind::Call, &[vec![fa], vec![fb]])
+            .unwrap(),
+        vec![fa, fb],
+        "signatures that differ only in their result are distinct overloads, in authored order"
+    );
+    assert_eq!(
+        intersection_signatures(
+            &store,
+            &types,
+            SignatureKind::Call,
+            &[vec![fa], vec![fa_again]]
+        )
+        .unwrap(),
+        vec![fa],
+        "signatures identical including their result collapse onto the first"
+    );
 }

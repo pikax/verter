@@ -227,6 +227,7 @@ impl SemanticGraphStore {
             return_carrier,
             signature_span,
             return_type_span,
+            predicate,
         } = data.as_ref()
         else {
             panic!("construct twin source must be a Signature node");
@@ -240,6 +241,7 @@ impl SemanticGraphStore {
             return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
             return_type_span: *return_type_span,
+            predicate: *predicate,
         })
     }
 

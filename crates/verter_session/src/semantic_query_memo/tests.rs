@@ -378,6 +378,7 @@ fn intern_span_participates_in_identity() {
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
+        predicate: None,
     };
     let id_a = store.intern_node(mk(10));
     let id_a_again = store.intern_node(mk(10));
@@ -10708,12 +10709,14 @@ mod prepared_identity_bijection {
                     ),
                 },
             ),
-            SemanticQueryKeyTag::NormalizeUnion => (
-                SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKeyTag::ReduceUnion => (
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 2]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
-                SemanticQueryKey::NormalizeUnion {
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 3]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
@@ -11110,7 +11113,9 @@ mod prepared_identity_bijection {
                 project_identity: h16(0),
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-                policy: crate::semantic_query::FlowReturnPolicy {},
+                policy: crate::semantic_query::FlowReturnPolicy {
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
@@ -12072,4 +12077,54 @@ fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_b
         previous_base = Some(a_obj);
     }
     let _ = roots_a;
+}
+
+/// A union member view (the per-store `union_views` cache) is released with
+/// its union: a view of a closed document's union is keyed by a union id the
+/// reload never mints again, so the close drops it, while a view whose union
+/// is live stays resident and is served unchanged.
+///
+/// Discriminating: without the sweep the view count grew by one per distinct
+/// union the churn built and never came back, and a stale holder could read
+/// released members through the resident view.
+#[test]
+fn release_canonical_drops_the_union_views_of_the_closed_document() {
+    use crate::semantic_query::composite::{CompositeList, UnionKind};
+    use crate::semantic_query::stable_key::semantic_union_members;
+    use crate::semantic_query::SemanticContext;
+
+    let store = SemanticGraphStore::new();
+    let ctx = SemanticContext::production();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (a_param, _, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 1, shared);
+    let union_of = |canonical: &str, member: SemanticNodeId| {
+        store.intern_node_with_scope(
+            SemanticNodeData::Union(CompositeList::<UnionKind>::authored_shell(Arc::from([
+                member, shared,
+            ]))),
+            release_file_scope(canonical, 1),
+        )
+    };
+    let a_union = union_of("/w/a.ts", a_param);
+    let b_union = union_of("/w/b.ts", b_param);
+    let _ = semantic_union_members(&store, a_union, &ctx);
+    let b_view = semantic_union_members(&store, b_union, &ctx);
+    assert_eq!(
+        store.union_view_count(),
+        2,
+        "one resident view per union built"
+    );
+
+    let report = store.release_canonical("/w/a.ts");
+    assert_eq!(report.union_views_released, 1, "{report:?}");
+    assert_eq!(store.union_view_count(), 1);
+    assert!(
+        Arc::ptr_eq(&semantic_union_members(&store, b_union, &ctx), &b_view),
+        "the live union's view stays resident and is served unchanged"
+    );
+    assert!(
+        !store.node_is_live(a_union),
+        "the closed document's union is released"
+    );
 }

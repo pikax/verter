@@ -275,6 +275,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Instantiating the outer type parameters of the declaration a
+            // class expression is authored under substitutes into its
+            // instance surface; the class identity is unchanged.
+            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+                let (sub, changed) =
+                    self.substitute_with_change_tracking(*surface, parameter_node, arg);
+                if !changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            surface: sub,
+                        },
+                    ),
+                    true,
+                )
+            }
             // Substitution is a composite CONSTRUCTION site (the ruling's
             // "substitution and post-substitution finalization" inclusion
             // arm): a CHANGED union routes through the canonical authority
@@ -891,6 +911,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => {
                 // Signature-local TypeParams need no spelling-based stop:
                 // legitimate outer references carry an exact InferRef;
@@ -913,6 +934,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let (sub_return, return_changed) =
                     self.substitute_with_change_tracking(*return_type, parameter_node, arg);
                 any_changed |= return_changed;
+                // A generic predicate instantiates with the signature:
+                // `x is T` at `T := string` narrows to `string`.
+                let sub_predicate = predicate.map(|predicate| {
+                    predicate.map_type(|target| {
+                        let (sub, changed) =
+                            self.substitute_with_change_tracking(target, parameter_node, arg);
+                        any_changed |= changed;
+                        sub
+                    })
+                });
                 let mut new_type_parameters = Vec::with_capacity(type_parameters.len());
                 for tp in type_parameters.iter() {
                     let new_constraint = match tp.constraint {
@@ -997,6 +1028,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // Substitution preserves the signature's OXC spans.
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
+                            predicate: sub_predicate,
                         },
                     ),
                     true,
@@ -1219,6 +1251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -1233,6 +1266,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     for arg in args.iter() {
@@ -1333,6 +1367,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
                 }
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
@@ -1428,6 +1465,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -1442,6 +1480,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 // Unresolved carriers (`BareRef` / `TypeOf` / `ImportType`)
                 // descend into their structural `type_args` exactly as

@@ -3219,9 +3219,10 @@ fn optional_parameter_target(
     // (`T | undefined`) routes through the one authority (which also
     // flattens a union-typed `T`); the evidence threads to the caller's
     // disposition boundary.
-    let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+    let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
         graph,
         &[param.ty, undefined],
+        crate::semantic_query::NullabilityPolicy::Strict,
     );
     evidence.absorb(composite.evidence);
     composite.node
