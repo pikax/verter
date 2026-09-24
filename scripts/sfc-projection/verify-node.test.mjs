@@ -21,6 +21,7 @@ import {
   STP15_MANDATORY_CASES,
   STP16_MANDATORY_CASES,
   STP17_MANDATORY_CASES,
+  STP18_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
   assertCheckCounts,
   assertCleanTwin,
@@ -1310,6 +1311,41 @@ test("STP17 verify: attribute operations and consumer channels on both engines",
     // A handler typed for a looser channel still fails the declared
     // callback prop instead of passing through an attrs object.
     assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2322));
+    assert.equal(run.hover, "number", JSON.stringify(run));
+    assert.ok(run.definition, JSON.stringify(run));
+  }
+  assert.equal(result.incremental, "fresh");
+});
+
+test("STP18 node manifest is runnable without STP1 mandatory cases", () => {
+  const node = loadNodeManifest(REPO_ROOT, "tests/sfc-projection/STP18/manifest.json");
+  assert.equal(node.errors.length, 0, JSON.stringify(node.errors));
+  for (const id of STP18_MANDATORY_CASES) {
+    assert.ok(node.manifest.mandatoryCases.includes(id), `missing ${id}`);
+  }
+  assert.ok(!node.manifest.mandatoryCases.includes("STP1-harness"));
+});
+
+test("STP18 verify: one inference transaction per use on both engines", async () => {
+  const result = await verifyNode({
+    repoRoot: REPO_ROOT,
+    node: "STP18",
+    engine: "all",
+    requireAll: true,
+    json: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual([...STP18_MANDATORY_CASES].sort(), [...result.mandatoryCases].sort());
+  for (const id of STP18_MANDATORY_CASES) {
+    assert.ok(selectedCaseIds(result).includes(id), `missing selected case ${id}`);
+  }
+  assert.equal(result.harnessRuns.length, 2);
+  for (const run of result.harnessRuns) {
+    assert.equal(run.positiveDiagnostics.length, 0, JSON.stringify(run));
+    // A collected listener contradicting the specialized payload is a
+    // customer diagnostic at its validation check.
+    assert.ok(run.negativeDiagnostics.some((diag) => diag.code === 2322));
+    // Slot props read the use's own specialization (T = Row).
     assert.equal(run.hover, "number", JSON.stringify(run));
     assert.ok(run.definition, JSON.stringify(run));
   }
