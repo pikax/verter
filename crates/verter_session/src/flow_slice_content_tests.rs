@@ -1224,12 +1224,13 @@ fn ternary_return_guard(node: &SliceContent) -> SliceGuard {
 /// is T`) or a formal parameter (`x is typeof y`) — is instantiated by the
 /// CALL: the checker binds `T` to the argument's `string | number` (a
 /// tautology here), never to the owner scope's unrelated `type T =
-/// number`. This half performs no call-site inference, and the caller's
-/// environment cannot resolve such a target, so the predicate channel
-/// refuses it: the control test lowers behind the typed gap and nothing
-/// is certified, for the guard spelling and the `asserts x is T`
-/// statement spelling alike. A generic callee whose target is closed over
-/// the module scope (`x is string`) keeps its guard.
+/// number`. The caller's environment cannot resolve such a target, so
+/// the closed-predicate channel never mints it: the test lowers as a
+/// [`SliceGuard::CallPredicate`] the evaluator resolves through the
+/// call's own instantiated signature, and nothing is certified. The
+/// `asserts x is T` statement spelling has no such route and lowers
+/// behind the typed gap. A generic callee whose target is closed over the
+/// module scope (`x is string`) keeps its guard.
 #[test]
 fn predicate_target_over_callee_bindings_never_resolves_in_the_caller_environment() {
     const CALLER: &str = "function f(x: string | number) { if (isSame(x)) return x; return false }";
@@ -1246,10 +1247,14 @@ fn predicate_target_over_callee_bindings_never_resolves_in_the_caller_environmen
             "a call-instantiated predicate target is never minted as a guard \
              (`{callee}`): {node:?}"
         );
+        assert!(
+            matches!(if_guard(&node), SliceGuard::CallPredicate { .. }),
+            "the call's own signature carries the predicate (`{callee}`): {node:?}"
+        );
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "the control test gaps (`{callee}`): {node:?}"
+            0,
+            "the control test is modeled (`{callee}`): {node:?}"
         );
         assert!(
             node.decided_above_call_spans.is_empty(),
@@ -1453,11 +1458,12 @@ fn region_guard_gap_count(region: &SliceRegion) -> usize {
 /// `type T` / `class T`, a local value under a `typeof y` root) would
 /// rebind to the WRONG declaration: `isNum(x): x is T` over `type T =
 /// number` narrows `number | string` to `number` in the checker, and to
-/// the caller's `T extends number` here. The channel refuses every such
-/// target — guard and `asserts` spellings alike — and the position takes
-/// the typed gap. A caller binding an UNRELATED name, or a value-only
-/// local of the same name (a `const T` never shadows a type), keeps the
-/// guard.
+/// the caller's `T extends number` here. The closed-predicate channel
+/// never mints such a target: the guard spelling lowers as a
+/// [`SliceGuard::CallPredicate`] whose target the evaluator reads from
+/// the callee's own signature, and the `asserts` spelling takes the
+/// typed gap. A caller binding an UNRELATED name, or a value-only local
+/// of the same name (a `const T` never shadows a type), keeps the guard.
 #[test]
 fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environment() {
     const PRELUDE: &str = "export {};\ntype T = number;\nconst y = 1;\n\
@@ -1492,10 +1498,14 @@ fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environmen
             0,
             "{case}: a target the caller frame rebinds is never minted as a guard: {node:?}"
         );
+        assert!(
+            matches!(if_guard(&node), SliceGuard::CallPredicate { .. }),
+            "{case}: the call's own signature carries the predicate: {node:?}"
+        );
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "{case}: the control test gaps: {node:?}"
+            0,
+            "{case}: the control test is modeled: {node:?}"
         );
         assert!(
             node.decided_above_call_spans.is_empty(),
@@ -1516,8 +1526,8 @@ fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environmen
     );
     assert_eq!(
         region_guard_gap_count(&nested.body),
-        1,
-        "the nested control test gaps: {enclosing:?}"
+        0,
+        "the nested control test reads the callee's own signature: {enclosing:?}"
     );
     assert!(
         enclosing.decided_above_call_spans.is_empty(),
@@ -2960,10 +2970,6 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { const k = \"string\"; if (typeof x === k) { return x } return 0 }",
         ),
         (
-            "a loose equality against a represented reference",
-            "export {};\nfunction f(x: string | null) { if (x == null) { return 0 } return x }",
-        ),
-        (
             "an `in` test whose key is not a literal",
             "export {};\nfunction f(x: { a: number } | { b: number }) { const k = \"a\"; if (k in x) { return x } return 0 }",
         ),
@@ -3043,12 +3049,10 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
 
     // TypeScript preserves a narrowing FACT through a `const` alias, so
     // the truthiness of the alias is not the whole narrowing: the alias
-    // re-establishes whatever its initializer decided. The initializer
-    // classification is syntactic — a call is included because a
-    // predicate callee is indistinguishable from any other at this
-    // altitude — and a `let` / `var` alias is NOT preserved by the
-    // checker, so it stays silent.
-    let alias_gapped = [
+    // re-establishes whatever its initializer decided, and the guard
+    // carries that fact beside the alias's own truthiness. A `let` /
+    // `var` alias is NOT preserved by the checker, so it stays silent.
+    let alias_modeled = [
         (
             "a `const` alias of a predicate call",
             "function f(x: string | number) { const c = isString(x); if (c) { return x } return 0 }",
@@ -3074,12 +3078,12 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const { kind } = x; if (kind === \"a\") { return x } return 0 }",
         ),
     ];
-    for (case, source) in alias_gapped {
+    for (case, source) in alias_modeled {
         let node = content_for(&format!("{IS_STRING}{source}"), "f");
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "{case}: the aliased narrowing fact takes the typed gap: {node:?}"
+            0,
+            "{case}: the aliased narrowing fact is modeled: {node:?}"
         );
     }
 
@@ -3096,6 +3100,10 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         (
             "the modeled literal-equality guard",
             "export {};\nfunction f(x: 1 | 2) { if (x === 1) { return x } return 0 }",
+        ),
+        (
+            "the modeled loose equality against `null`",
+            "export {};\nfunction f(x: string | null) { if (x == null) { return 0 } return x }",
         ),
         (
             "the modeled `in` guard",

@@ -119,6 +119,11 @@ pub fn compute_flow_slice_hash(
                 buf.push(1);
                 fold_u32(&mut buf, id.index() as u32);
             }
+            SliceOrigin::Parameter(id) => {
+                buf.push(b'O');
+                buf.push(2);
+                fold_u32(&mut buf, id.index() as u32);
+            }
         }
     }
 

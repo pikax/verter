@@ -46,7 +46,10 @@ fn menu_like_props_surface_keeps_expected_controls() {
     }
     assert_ref(&props["items"].ty, "ConcreteMenuItems");
     assert_ref(&props["ui"].ty, "MenuUi");
-    assert_expr_contains_primitive(&props["multiple"].ty, PrimitiveName::Boolean);
+    // `multiple?: M & boolean` with `M = true`: `true & boolean` reduces to
+    // the literal, so TS7 reads the member as `true` (`p.multiple` is
+    // `true | undefined`).
+    assert_boolean_literal(&props["multiple"].ty, true);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 

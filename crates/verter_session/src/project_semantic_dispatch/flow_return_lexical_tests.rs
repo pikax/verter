@@ -5392,7 +5392,7 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 /// ctArrow:         () => number
 /// ```
 ///
-/// Four rows carry a recorded, PRE-EXISTING divergence from that oracle,
+/// Four rows carry a recorded divergence from that oracle,
 /// none of them introduced or removed here, all of them shape-level and
 /// none of them a leak:
 ///
@@ -5407,8 +5407,10 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 ///   `intern_normalized_union_or_intersection` sorts and dedups but does
 ///   not flatten a union arm.
 /// - `ctObjEmpty` publishes `2 | {}` where the checker's subtype
-///   reduction collapses it to `{}`; `ctIdent` publishes `boolean | 2`
-///   where the checker narrows the consequent to `true`.
+///   reduction collapses it to `{}`.
+///
+/// `ctIdent` matches: the truthiness test narrows the `boolean`
+/// consequent to `true`.
 ///
 /// Mutation recipe: dispositioning `ObjectExpression` as
 /// `ValueDescent::Leaf` in the classifier flips every object row to a
@@ -5445,7 +5447,7 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // (fingerprint, exact) order, not authored order.
         ("ctObjEmpty", "{}|2"),
         ("ctArray", "number[]"),
-        ("ctIdent", "boolean|2"),
+        ("ctIdent", "true|2"),
         ("ctNull", "null|1"),
         ("ctArrow", "()=>number"),
     ] {
@@ -5472,6 +5474,7 @@ fn shape_of(ty: &TypeExpr) -> String {
             }
         }
         TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => format!("\"{s}\""),
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(value)) => value.to_string(),
         TypeExpr::Primitive(name) => format!("{name:?}").to_lowercase(),
         // A nested union arm is PARENTHESISED: the substrate does not
         // flatten one, and a spelling that silently joined it would hide

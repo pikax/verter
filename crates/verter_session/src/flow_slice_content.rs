@@ -813,12 +813,42 @@ pub enum SliceGuard {
         /// guard application against exactly this span.
         call: verter_span::Span,
     },
+    /// `callee(a, b)` / `receiver.callee(a)` whose callee is not a closed
+    /// same-file predicate: the evaluator resolves the call's signature
+    /// (the checker's `getEffectsSignature`) and narrows the argument —
+    /// or, for a `this is T` predicate, the receiver — its type
+    /// predicate names, when that argument is a narrowable reference. A
+    /// resolved signature with no type predicate narrows nothing.
+    CallPredicate {
+        /// The callee VALUE, lowered like any other expression.
+        callee: Box<SliceExpr>,
+        /// The authored call occurrence the executor resolves.
+        site: SliceCallSite,
+        /// The narrowable reference each positional argument is, if any.
+        arguments: Arc<[Option<SliceNarrowSubject>]>,
+        /// The narrowable reference the member call's receiver is, if any.
+        receiver: Option<SliceNarrowSubject>,
+        /// Whether this is the negative reading.
+        negated: bool,
+    },
     /// A conjunction: every fact applies at once.
     And(Arc<[SliceGuard]>),
     /// A disjunction: the positive reading unions each disjunct's
     /// positive narrow; the negated reading applies every negation.
     Or(Arc<[SliceGuard]>),
+    /// Facts over DISTINCT references read under the SAME polarity — a
+    /// test of an alias narrows the alias itself and, independently, the
+    /// references its initializer names (the checker narrows each
+    /// reference on its own). Both readings apply every part; negation
+    /// negates each part.
+    Both(Arc<[SliceGuard]>),
 }
+
+/// How many levels of aliased conditions the checker inlines when it
+/// narrows a reference through a `const` alias (`narrowType`'s
+/// `inlineLevel < 5`): a test of an alias reaches through at most this
+/// many alias initializers.
+const ALIAS_INLINE_LIMIT: usize = 5;
 
 /// The single returned expression of a function the checker may infer a
 /// type predicate for, read as a test over the function's parameters.
@@ -859,7 +889,16 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
         | SliceGuard::Instanceof { subject, .. }
         | SliceGuard::TypePredicate { subject, .. }
         | SliceGuard::In { subject, .. } => visitor(subject),
-        SliceGuard::And(parts) | SliceGuard::Or(parts) => {
+        SliceGuard::CallPredicate {
+            arguments,
+            receiver,
+            ..
+        } => {
+            for subject in arguments.iter().flatten().chain(receiver.iter()) {
+                visitor(subject);
+            }
+        }
+        SliceGuard::And(parts) | SliceGuard::Or(parts) | SliceGuard::Both(parts) => {
             for part in parts.iter() {
                 collect_guard_subjects(part, visitor);
             }
@@ -1043,6 +1082,16 @@ pub enum SliceExpr {
     /// the substrate cannot type keeps its typed gap and degrades.
     Awaited {
         operand: Box<SliceExpr>,
+    },
+    /// A `!x` — the operand lowered through its own arm. Its value is the
+    /// checker's: `false` when the operand's type can only be truthy,
+    /// `true` when it can only be falsy, `boolean` otherwise; a FRESH
+    /// literal, so a lone return widens it at the join.
+    Not {
+        operand: Box<SliceExpr>,
+        /// Whether the position widens the fresh literal on the spot — a
+        /// `let` / `var` initializer or an object member.
+        widen: bool,
     },
     Gap(crate::semantic_query::FlowGap),
     /// A read (or call) of a name the frame's lexical authority resolves
@@ -2108,6 +2157,7 @@ pub(crate) fn build_flow_slice_content(
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
         predicate_guard_call_spans: FxHashSet::default(),
+        non_narrowing_call_spans: FxHashSet::default(),
         predicate_parameters: predicate_parameters(
             declared_return.is_some(),
             skeleton,
@@ -2117,6 +2167,9 @@ pub(crate) fn build_flow_slice_content(
         ),
         control_test_gap: false,
         narrowing_alias_locals: FxHashSet::default(),
+        alias_conditions: rustc_hash::FxHashMap::default(),
+        discriminant_aliases: rustc_hash::FxHashMap::default(),
+        alias_inline_budget: ALIAS_INLINE_LIMIT,
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
         active_guard_bindings: Vec::new(),
@@ -2240,28 +2293,40 @@ fn predicate_parameters(
         return None;
     };
     site.argument?;
-    let assigned = |binding: SkeletonBindingId| {
-        let runtime = bindings.canonical_local(binding);
-        skeleton.writes.iter().any(|write| {
-            write.path.is_empty()
-                && matches!(write.binding, Some(FlowBindingRef::Local(local))
-                    if bindings.canonical_local(local) == runtime)
-        }) || entry
-            .descendant_writes
-            .iter()
-            .filter_map(|identity| bindings.local(identity))
-            .any(|local| bindings.canonical_local(local) == runtime)
-    };
     let parameters: Vec<u32> = params
         .iter()
         .enumerate()
         .filter(|(_, param)| !param.rest && param.name.is_some() && param.destructured.is_empty())
         .filter_map(|(ordinal, param)| {
             let binding = param.binding?;
-            (!assigned(binding)).then(|| u32::try_from(ordinal).ok())?
+            (!binding_is_assigned(skeleton, bindings, Some(entry), binding))
+                .then(|| u32::try_from(ordinal).ok())?
         })
         .collect();
     (!parameters.is_empty()).then(|| Arc::from(parameters.into_boxed_slice()))
+}
+
+/// Whether anything in the function whose `skeleton` this is ever writes
+/// `binding` whole — an assignment or update in its own body, or a write
+/// from a nested closure (`entry`'s descendant writes).
+fn binding_is_assigned(
+    skeleton: &FunctionBodySkeleton,
+    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    entry: Option<&FunctionProgramEntry>,
+    binding: SkeletonBindingId,
+) -> bool {
+    let runtime = bindings.canonical_local(binding);
+    skeleton.writes.iter().any(|write| {
+        write.path.is_empty()
+            && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                if bindings.canonical_local(local) == runtime)
+    }) || entry.is_some_and(|entry| {
+        entry
+            .descendant_writes
+            .iter()
+            .filter_map(|identity| bindings.local(identity))
+            .any(|local| bindings.canonical_local(local) == runtime)
+    })
 }
 
 /// Whether the retained program carries top-level MODULE syntax: an
@@ -2904,6 +2969,10 @@ fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
         // fold and the per-arm rule below still apply unchanged, so two
         // awaited fresh arms keep `1 | 2`.
         Expression::AwaitExpression(awaited) => expression_freshness(&awaited.argument),
+        // `!x` is the checker's FRESH `true` / `false` (or `boolean`).
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            SliceFreshness::Fresh
+        }
         Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
             expression_freshness(&conditional.consequent),
             expression_freshness(&conditional.alternate),
@@ -4380,6 +4449,10 @@ struct Lowerer<'a> {
     /// control-position recorder neither certifies them decided-above nor
     /// gaps them.
     predicate_guard_call_spans: FxHashSet<verter_span::Span>,
+    /// The authored call spans in a test position that hand the callee no
+    /// reference the checker could narrow: provably non-narrowing whatever
+    /// the callee, so the control-position recorder certifies them.
+    non_narrowing_call_spans: FxHashSet<verter_span::Span>,
     /// The parameters a type predicate inferred from the body may name —
     /// `Some` only for a function the checker may infer one for (see
     /// [`ReturnPredicateTest`]). Its single return reads its argument as a
@@ -4410,6 +4483,20 @@ struct Lowerer<'a> {
     /// only for `const` / `using` declarations, since the checker does
     /// not preserve an aliased condition through a reassignable binding.
     narrowing_alias_locals: FxHashSet<Arc<str>>,
+    /// The ALIASED CONDITIONS of this frame: per eligible `const` alias,
+    /// its initializer read as a guard, indexed by how many FURTHER alias
+    /// inlines the reading may still make (the checker inlines at most
+    /// [`ALIAS_INLINE_LIMIT`] levels); `None` for a reading this
+    /// vocabulary cannot express. Every fact in a reading lands on a
+    /// CONSTANT reference or narrows nothing.
+    alias_conditions:
+        rustc_hash::FxHashMap<FlowBindingRef, [Option<SliceGuard>; ALIAS_INLINE_LIMIT]>,
+    /// The ALIASED DISCRIMINANTS of this frame: a `const k = u.kind` or
+    /// `const { kind: k } = u` alias, with the member reference it names.
+    discriminant_aliases: rustc_hash::FxHashMap<FlowBindingRef, SliceNarrowSubject>,
+    /// How many alias inlines the guard classification in progress may
+    /// still make.
+    alias_inline_budget: usize,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
     active_guard_bindings: Vec<SkeletonBindingId>,
@@ -6096,6 +6183,7 @@ impl Lowerer<'_> {
                 assertion_subject_roots.iter().any(|(_, root)| {
                     matches!(self.classify_occurrence(*root), NameBinding::Param(_))
                 }) && !self.predicate_guard_call_spans.contains(span)
+                    && !self.non_narrowing_call_spans.contains(span)
                     && !callee.as_ref().is_some_and(|(name, callee_span)| {
                         matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
                             && self
@@ -6193,7 +6281,7 @@ impl Lowerer<'_> {
             // Answering `Unexpressible` here would degrade the very tests
             // that rail proves silent and destroy the certification.
             Expression::CallExpression(call) => match self.lower_predicate_guard(call) {
-                SliceGuard::None => GuardDisposition::NoNarrowing,
+                SliceGuard::None => self.classify_call_predicate(call),
                 guard => GuardDisposition::modeled(guard),
             },
             // The test's VALUE is one of the branches; this half carries
@@ -6268,6 +6356,9 @@ impl Lowerer<'_> {
     /// narrow produces. See [`unwrap_reference_transparent`].
     fn classify_truthiness_guard(&mut self, expression: &Expression<'_>) -> GuardDisposition {
         let reference = unwrap_reference_transparent(expression);
+        if let Some(disposition) = self.classify_aliased_condition(reference) {
+            return disposition;
+        }
         match self.narrow_subject_of(reference) {
             Some(subject) => {
                 if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
@@ -6292,6 +6383,165 @@ impl Lowerer<'_> {
                 }
             },
         }
+    }
+
+    /// A call whose callee is not a closed same-file predicate, read as a
+    /// [`SliceGuard::CallPredicate`]: the evaluator resolves its signature
+    /// and applies the predicate, if any, to the argument (or receiver) it
+    /// names. The checker narrows only a reference the call hands over as
+    /// it is (`isMatchingReference`: through parentheses and `!`, never
+    /// through `as` or `satisfies`), so a call handing no such reference
+    /// provably narrows nothing and the control-position rail certifies
+    /// it. A reference this half cannot carry (a computed or optional
+    /// access, an assignment or a sequence), a spread argument or a callee
+    /// form this half cannot lower as a value leaves the predicate's
+    /// argument unknown, so the test is unexpressible. A modeled call is
+    /// evidence-backed at guard application.
+    fn classify_call_predicate(
+        &mut self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+    ) -> GuardDisposition {
+        // A closed same-file callee whose return is not a predicate is
+        // the control-position rail's own certificate.
+        if let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) {
+            if matches!(self.classify_occurrence(callee.span), NameBinding::Free)
+                && self
+                    .closed_callee_declaration(callee.name.as_str())
+                    .is_some_and(|function| {
+                        ResultIndependentPosition::ControlTest
+                            .certifies_closed_return(function.return_type.as_deref())
+                    })
+            {
+                return GuardDisposition::NoNarrowing;
+            }
+        }
+        let mut unrepresented = false;
+        let receiver = match unwrap_parenthesized(&call.callee) {
+            Expression::StaticMemberExpression(member) => {
+                let receiver = self.narrow_subject_of(&member.object);
+                unrepresented |=
+                    receiver.is_none() && self.argument_may_match_a_reference(&member.object);
+                receiver
+            }
+            Expression::PrivateFieldExpression(member) => {
+                unrepresented |= self.argument_may_match_a_reference(&member.object);
+                None
+            }
+            _ => None,
+        };
+        let mut spread = false;
+        let arguments: Arc<[Option<SliceNarrowSubject>]> = call
+            .arguments
+            .iter()
+            .map(|argument| match argument.as_expression() {
+                Some(expression) => {
+                    let subject = self.narrow_subject_of(expression);
+                    unrepresented |=
+                        subject.is_none() && self.argument_may_match_a_reference(expression);
+                    subject
+                }
+                None => {
+                    spread = true;
+                    None
+                }
+            })
+            .collect();
+        if unrepresented {
+            return GuardDisposition::Unexpressible;
+        }
+        if receiver.is_none() && arguments.iter().all(Option::is_none) {
+            self.non_narrowing_call_spans.insert(call.span.into());
+            return GuardDisposition::NoNarrowing;
+        }
+        let callee_is_reference = matches!(
+            unwrap_parenthesized(&call.callee),
+            Expression::Identifier(_) | Expression::StaticMemberExpression(_)
+        );
+        if spread || call.optional || !callee_is_reference {
+            return GuardDisposition::Unexpressible;
+        }
+        // A callee rooted at a name this frame does not bind is read in
+        // the owner scope, where its checker-visible signature set is
+        // exactly what the resolver serves only for a module's own
+        // unexported binding: a script's globals merge across files, a
+        // namespace block binds the name before the top level, and an
+        // exported binding takes further overloads from any augmenting
+        // `declare module` block.
+        if let Some(root) = chain_root_identifier(&call.callee) {
+            if matches!(self.classify_occurrence(root.span), NameBinding::Free)
+                && (!self.module_scope
+                    || self.namespace_owned
+                    || self.top_level_name_is_exported(root.name.as_str())
+                    || self.top_level_declaration_is_exported(root.name.as_str()))
+            {
+                return GuardDisposition::Unexpressible;
+            }
+        }
+        let callee = self.lower_expr(&call.callee, ExprMode::Return);
+        self.predicate_guard_call_spans.insert(call.span.into());
+        GuardDisposition::modeled(SliceGuard::CallPredicate {
+            callee: Box::new(callee),
+            site: call_site(call),
+            arguments,
+            receiver,
+            negated: false,
+        })
+    }
+
+    /// Whether a call argument (or receiver) the subject lowering cannot
+    /// carry may still be a reference the checker matches — `this`, a
+    /// computed, private or optional access rooted at a modeled slot, or
+    /// an assignment or sequence whose value is one.
+    fn argument_may_match_a_reference(&self, expression: &Expression<'_>) -> bool {
+        match unwrap_reference_transparent(expression) {
+            Expression::AssignmentExpression(_) | Expression::ThisExpression(_) => true,
+            Expression::SequenceExpression(sequence) => {
+                sequence.expressions.last().is_some_and(|last| {
+                    self.narrow_subject_of(last).is_some()
+                        || self.argument_may_match_a_reference(last)
+                })
+            }
+            other => !matches!(self.narrow_destination_of(other), NarrowDestination::Absent),
+        }
+    }
+
+    /// The binding a bare identifier names, when it is a frame local.
+    fn alias_binding_of(&self, expression: &Expression<'_>) -> Option<FlowBindingRef> {
+        let Expression::Identifier(identifier) = unwrap_reference_transparent(expression) else {
+            return None;
+        };
+        self.binding_at(identifier.span)
+    }
+
+    /// A test of an ALIASED CONDITION (`const isStr = typeof x ===
+    /// "string"; if (isStr) …`): the alias narrows itself, and the checker
+    /// inlines its initializer (`narrowType`, up to
+    /// [`ALIAS_INLINE_LIMIT`] levels deep) to narrow the constant
+    /// references that initializer names. `None` when `reference` is no
+    /// aliased condition.
+    fn classify_aliased_condition(
+        &mut self,
+        reference: &Expression<'_>,
+    ) -> Option<GuardDisposition> {
+        let binding = self.alias_binding_of(reference)?;
+        let readings = self.alias_conditions.get(&binding)?;
+        let inlined = match self.alias_inline_budget.checked_sub(1) {
+            Some(index) => readings[index].clone(),
+            None => Some(SliceGuard::None),
+        };
+        let Some(inlined) = inlined else {
+            return Some(GuardDisposition::Unexpressible);
+        };
+        let own = self
+            .narrow_subject_of(reference)
+            .map(|subject| SliceGuard::Truthy {
+                subject,
+                negated: false,
+            })
+            .unwrap_or(SliceGuard::None);
+        Some(GuardDisposition::modeled(SliceGuard::Both(Arc::from(
+            vec![own, inlined].into_boxed_slice(),
+        ))))
     }
 
     /// The binary-operator guard forms: strict (in)equality — including
@@ -6324,6 +6574,34 @@ impl Lowerer<'_> {
                 for (subject_side, literal_side) in
                     [(&binary.left, &binary.right), (&binary.right, &binary.left)]
                 {
+                    // An ALIASED DISCRIMINANT (`const k = u.kind`, `const {
+                    // kind } = u`) compares the member it names: the
+                    // checker narrows the member's parent through it
+                    // (`getCandidateDiscriminantPropertyAccess`), beside
+                    // the alias itself.
+                    if let Some(member) = self
+                        .alias_binding_of(subject_side)
+                        .and_then(|binding| self.discriminant_aliases.get(&binding).cloned())
+                    {
+                        if let Some(literal) = guard_literal_of(literal_side, self.source) {
+                            let own = self
+                                .narrow_subject_of(subject_side)
+                                .map(|subject| SliceGuard::EqLiteral {
+                                    subject,
+                                    literal: literal.clone(),
+                                    negated,
+                                })
+                                .unwrap_or(SliceGuard::None);
+                            let aliased = SliceGuard::EqLiteral {
+                                subject: member,
+                                literal,
+                                negated,
+                            };
+                            return GuardDisposition::modeled(SliceGuard::Both(Arc::from(
+                                vec![own, aliased].into_boxed_slice(),
+                            )));
+                        }
+                    }
                     let Some(subject) = self.narrow_subject_of(subject_side) else {
                         continue;
                     };
@@ -6345,11 +6623,47 @@ impl Lowerer<'_> {
                 }
                 self.classify_unexpressible_comparison(binary)
             }
-            // Loose (in)equality is a narrowing operator with its own
-            // semantics — `x == null` selects BOTH nullish arms — which
-            // this vocabulary does not carry, so it never lowers through
-            // the strict literal relation.
+            // Loose (in)equality against `null` or `undefined` selects BOTH
+            // nullish arms (the checker's `EQUndefinedOrNull` facts), so it
+            // lowers as the disjunction of the two strict relations — its
+            // negation, by De Morgan, their conjunction. Any other loose
+            // relation coerces its operands and stays unexpressible.
             BinaryOperator::Equality | BinaryOperator::Inequality => {
+                for (subject_side, literal_side) in
+                    [(&binary.left, &binary.right), (&binary.right, &binary.left)]
+                {
+                    let Some(subject) = self.narrow_subject_of(subject_side) else {
+                        continue;
+                    };
+                    if !matches!(
+                        guard_literal_of(literal_side, self.source),
+                        Some(SliceGuardLiteral::Null | SliceGuardLiteral::Undefined)
+                    ) {
+                        continue;
+                    }
+                    if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
+                        return GuardDisposition::Unexpressible;
+                    }
+                    let either = or_guard(
+                        SliceGuard::EqLiteral {
+                            subject: subject.clone(),
+                            literal: SliceGuardLiteral::Null,
+                            negated: false,
+                        },
+                        SliceGuard::EqLiteral {
+                            subject,
+                            literal: SliceGuardLiteral::Undefined,
+                            negated: false,
+                        },
+                    );
+                    return GuardDisposition::modeled(
+                        if matches!(binary.operator, BinaryOperator::Inequality) {
+                            negate_guard(either)
+                        } else {
+                            either
+                        },
+                    );
+                }
                 self.classify_unexpressible_comparison(binary)
             }
             BinaryOperator::Instanceof => {
@@ -6616,6 +6930,190 @@ impl Lowerer<'_> {
         for name in names {
             self.narrowing_alias_locals.insert(Arc::from(name));
         }
+        match &declarator.id {
+            BindingPattern::BindingIdentifier(id) => {
+                let Some(binding) = self
+                    .bindings
+                    .declaration_at_span(self.rebase(id.span))
+                    .map(FlowBindingRef::Local)
+                else {
+                    return;
+                };
+                // `const k = u.kind` aliases the DISCRIMINANT `u.kind`.
+                if let Some(member) = self
+                    .narrow_subject_of(init)
+                    .filter(|member| !member.path.is_empty())
+                {
+                    if matches!(
+                        unwrap_reference_transparent(init),
+                        Expression::StaticMemberExpression(_)
+                    ) {
+                        self.discriminant_aliases.insert(binding, member);
+                        return;
+                    }
+                }
+                // Any other initializer is an aliased CONDITION, read once
+                // per remaining inline budget.
+                let saved = self.alias_inline_budget;
+                let readings: [Option<SliceGuard>; ALIAS_INLINE_LIMIT] =
+                    std::array::from_fn(|budget| {
+                        self.alias_inline_budget = budget;
+                        match self.classify_guard(init) {
+                            GuardDisposition::Modeled(guard) => {
+                                self.over_constant_references(*guard)
+                            }
+                            GuardDisposition::NoNarrowing => Some(SliceGuard::None),
+                            GuardDisposition::Unexpressible => None,
+                        }
+                    });
+                self.alias_inline_budget = saved;
+                self.alias_conditions.insert(binding, readings);
+            }
+            // `const { kind } = u` / `const { kind: k } = u` alias the
+            // discriminant `u.kind`.
+            BindingPattern::ObjectPattern(object) => {
+                let Some(source) = self.narrow_subject_of(init) else {
+                    return;
+                };
+                for property in &object.properties {
+                    if property.computed {
+                        continue;
+                    }
+                    let key = match &property.key {
+                        oxc_ast::ast::PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+                        oxc_ast::ast::PropertyKey::StringLiteral(literal) => literal.value.as_str(),
+                        _ => continue,
+                    };
+                    let BindingPattern::BindingIdentifier(id) = &property.value else {
+                        continue;
+                    };
+                    let Some(binding) = self
+                        .bindings
+                        .declaration_at_span(self.rebase(id.span))
+                        .map(FlowBindingRef::Local)
+                    else {
+                        continue;
+                    };
+                    let mut path: Vec<Arc<str>> = source.path.to_vec();
+                    path.push(Arc::from(key));
+                    self.discriminant_aliases.insert(
+                        binding,
+                        SliceNarrowSubject {
+                            root: source.root.clone(),
+                            path: Arc::from(path.into_boxed_slice()),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `guard` with every fact on a reference the checker does not narrow
+    /// through an alias (`isConstantReference`) replaced by "no narrowing":
+    /// only a `const`, and a parameter or `let` / `var` local nothing ever
+    /// assigns (a closure's write included), is narrowed through an
+    /// aliased condition. `None` when a fact lands on a member reference —
+    /// narrowed through an alias only when READONLY, which this lowering
+    /// cannot see.
+    fn over_constant_references(&self, guard: SliceGuard) -> Option<SliceGuard> {
+        let compose = |this: &Self, parts: &Arc<[SliceGuard]>| -> Option<Arc<[SliceGuard]>> {
+            parts
+                .iter()
+                .map(|part| this.over_constant_references(part.clone()))
+                .collect::<Option<Vec<_>>>()
+                .map(|parts| Arc::from(parts.into_boxed_slice()))
+        };
+        let subject = match &guard {
+            SliceGuard::None => return Some(guard),
+            SliceGuard::And(parts) => return compose(self, parts).map(SliceGuard::And),
+            SliceGuard::Or(parts) => return compose(self, parts).map(SliceGuard::Or),
+            SliceGuard::Both(parts) => return compose(self, parts).map(SliceGuard::Both),
+            SliceGuard::Typeof { subject, .. }
+            | SliceGuard::Truthy { subject, .. }
+            | SliceGuard::EqLiteral { subject, .. }
+            | SliceGuard::Instanceof { subject, .. }
+            | SliceGuard::In { subject, .. }
+            | SliceGuard::TypePredicate { subject, .. } => subject,
+            // Each reference a call predicate may narrow must itself be
+            // constant; a non-constant one is dropped from the guard.
+            SliceGuard::CallPredicate {
+                callee,
+                site,
+                arguments,
+                receiver,
+                negated,
+            } => {
+                let keep = |this: &Self, subject: &Option<SliceNarrowSubject>| {
+                    subject.as_ref().and_then(|subject| {
+                        (subject.path.is_empty() && this.is_constant_root(&subject.root))
+                            .then(|| subject.clone())
+                    })
+                };
+                if arguments
+                    .iter()
+                    .chain(std::iter::once(receiver))
+                    .any(|subject| subject.as_ref().is_some_and(|s| !s.path.is_empty()))
+                {
+                    return None;
+                }
+                return Some(SliceGuard::CallPredicate {
+                    callee: callee.clone(),
+                    site: *site,
+                    arguments: arguments
+                        .iter()
+                        .map(|subject| keep(self, subject))
+                        .collect(),
+                    receiver: keep(self, receiver),
+                    negated: *negated,
+                });
+            }
+        };
+        // A one-segment discriminant narrows the ROOT reference; every
+        // other member path narrows the member reference itself.
+        let root_only = subject.path.is_empty()
+            || (subject.path.len() == 1 && matches!(guard, SliceGuard::EqLiteral { .. }));
+        if !root_only {
+            return None;
+        }
+        Some(if self.is_constant_root(&subject.root) {
+            guard
+        } else {
+            SliceGuard::None
+        })
+    }
+
+    /// Whether a narrowable root is a constant reference: a `const`, or
+    /// a parameter or `let` / `var` local nothing ever assigns.
+    fn is_constant_root(&self, root: &SliceNarrowRoot) -> bool {
+        match root {
+            SliceNarrowRoot::Param { binding, .. } => !self.binding_is_assigned(*binding),
+            SliceNarrowRoot::Local {
+                binding: FlowBindingRef::Local(binding),
+                ..
+            } => match self.skeleton.binding(*binding).kind {
+                SkeletonBindingKind::Const => true,
+                SkeletonBindingKind::Let | SkeletonBindingKind::Var => {
+                    !self.binding_is_assigned(*binding)
+                }
+                _ => false,
+            },
+            SliceNarrowRoot::Local { .. } => false,
+        }
+    }
+
+    /// Whether anything in this function ever writes the whole binding —
+    /// an assignment, an update, or a nested closure's write (the
+    /// checker's `isSymbolAssigned`).
+    fn binding_is_assigned(&self, binding: SkeletonBindingId) -> bool {
+        binding_is_assigned(
+            self.skeleton,
+            self.bindings,
+            self.index
+                .get(self.bindings.function())
+                .map(|entry| entry.entry()),
+            binding,
+        )
     }
 
     /// Whether a declarator initializer is a form the checker can bind a
@@ -6904,6 +7402,39 @@ impl Lowerer<'_> {
             },
             Statement::TSExportAssignment(export) => names_binding(&export.expression),
             _ => false,
+        })
+    }
+
+    /// Whether an `export`-modified top-level declaration of any kind — a
+    /// variable, a class, an enum, a namespace — binds `name`: its value
+    /// is on the export surface, where augmentation can reach it.
+    fn top_level_declaration_is_exported(&self, name: &str) -> bool {
+        use oxc_ast::ast::Declaration;
+        self.program.body.iter().any(|statement| {
+            let Statement::ExportNamedDeclaration(export) = statement else {
+                return false;
+            };
+            match &export.declaration {
+                Some(Declaration::VariableDeclaration(variables)) => {
+                    variables.declarations.iter().any(|declarator| {
+                        declarator
+                            .id
+                            .get_binding_identifiers()
+                            .iter()
+                            .any(|identifier| identifier.name.as_str() == name)
+                    })
+                }
+                Some(Declaration::ClassDeclaration(class)) => {
+                    class.id.as_ref().is_some_and(|id| id.name.as_str() == name)
+                }
+                Some(Declaration::TSEnumDeclaration(declaration)) => {
+                    declaration.id.name.as_str() == name
+                }
+                Some(Declaration::TSModuleDeclaration(declaration)) => {
+                    declaration.id.name().as_str() == name
+                }
+                _ => false,
+            }
         })
     }
 
@@ -7565,6 +8096,19 @@ impl Lowerer<'_> {
             Expression::AwaitExpression(awaited) => SliceExpr::Awaited {
                 operand: Box::new(self.lower_expr(&awaited.argument, mode)),
             },
+            // `!x`: the operand keeps its top-level literal — `!""` is
+            // `true` — so it lowers in the literal-preserving mode.
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+                SliceExpr::Not {
+                    operand: Box::new(self.lower_expr(&unary.argument, ExprMode::Return)),
+                    widen: matches!(
+                        mode,
+                        ExprMode::BindingInit {
+                            preserve_literal: false
+                        }
+                    ),
+                }
+            }
             Expression::CallExpression(call)
                 if matches!(
                     unwrap_parenthesized(&call.callee),
@@ -8232,6 +8776,10 @@ impl Lowerer<'_> {
                 (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
                     leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
                 ),
+                (true, SliceExpr::Not { operand, .. }) => SliceExpr::Not {
+                    operand,
+                    widen: true,
+                },
                 // The member slot's widening reaches INTO a branch join:
                 // a ternary member's fresh literal arm is the member's
                 // fresh literal, and tsc widens it at the property
@@ -8246,6 +8794,10 @@ impl Lowerer<'_> {
                                 SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
                                     verter_semantic::analysis::type_eval_build::widen_shallow_literal,
                                 )),
+                                SliceExpr::Not { operand, .. } => SliceExpr::Not {
+                                    operand: operand.clone(),
+                                    widen: true,
+                                },
                                 other => other.clone(),
                             })
                             .collect::<Vec<_>>()
@@ -9149,7 +9701,10 @@ impl Lowerer<'_> {
                         })
                     };
                     let certified = match mode {
-                        CertificationMode::Strict => closed_non_narrowing(position),
+                        CertificationMode::Strict => {
+                            self.non_narrowing_call_spans.contains(&span)
+                                || closed_non_narrowing(position)
+                        }
                         CertificationMode::ValueFree => {
                             let frame_subject =
                                 assertion_subject_roots.iter().any(|(_name, span)| {
@@ -10088,6 +10643,19 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             negated: !negated,
             call,
         },
+        SliceGuard::CallPredicate {
+            callee,
+            site,
+            arguments,
+            receiver,
+            negated,
+        } => SliceGuard::CallPredicate {
+            callee,
+            site,
+            arguments,
+            receiver,
+            negated: !negated,
+        },
         SliceGuard::And(parts) => SliceGuard::Or(Arc::from(
             parts
                 .iter()
@@ -10096,6 +10664,13 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
                 .into_boxed_slice(),
         )),
         SliceGuard::Or(parts) => SliceGuard::And(Arc::from(
+            parts
+                .iter()
+                .map(|part| negate_guard(part.clone()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
+        SliceGuard::Both(parts) => SliceGuard::Both(Arc::from(
             parts
                 .iter()
                 .map(|part| negate_guard(part.clone()))

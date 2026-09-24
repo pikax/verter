@@ -1000,6 +1000,65 @@ fn canonicalize(
                 base & primitives == 0
             });
         }
+        // 3a. `true | false` IS `boolean` — the checker's `boolean` is that
+        //     very union, so the pair folds to the primitive (at the first
+        //     literal's position) in display and identity alike.
+        let is_bool_literal = |member: SemanticNodeId, value: bool| {
+            graph.node_data(member).as_deref()
+                == Some(&SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+        };
+        if arms.iter().any(|arm| is_bool_literal(*arm, true))
+            && arms.iter().any(|arm| is_bool_literal(*arm, false))
+        {
+            let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+            let mut folded = false;
+            arms.retain_mut(|arm| {
+                if !is_bool_literal(*arm, true) && !is_bool_literal(*arm, false) {
+                    return true;
+                }
+                if folded {
+                    return false;
+                }
+                folded = true;
+                *arm = boolean;
+                true
+            });
+            if let [only] = arms.as_slice() {
+                return CanonicalComposite {
+                    node: *only,
+                    evidence,
+                };
+            }
+        }
+    }
+
+    // 3b. Intersection literal absorption, mirroring the checker's
+    //     `removeRedundantSupertypes`: a base primitive beside a literal of
+    //     that base adds no constraint (`"a" & string` is `"a"`).
+    if !is_union {
+        let base_of = |member: SemanticNodeId| match graph.node_data(member).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::String(_))) => Some(PrimitiveKind::String),
+            Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => Some(PrimitiveKind::Number),
+            Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => Some(PrimitiveKind::BigInt),
+            Some(SemanticNodeData::Literal(LiteralValue::Boolean(_))) => {
+                Some(PrimitiveKind::Boolean)
+            }
+            _ => None,
+        };
+        let literal_bases: Vec<PrimitiveKind> =
+            arms.iter().filter_map(|arm| base_of(*arm)).collect();
+        if !literal_bases.is_empty() {
+            arms.retain(|arm| match graph.node_data(*arm).as_deref() {
+                Some(SemanticNodeData::Primitive(kind)) => !literal_bases.contains(kind),
+                _ => true,
+            });
+            if let [only] = arms.as_slice() {
+                return CanonicalComposite {
+                    node: *only,
+                    evidence,
+                };
+            }
+        }
     }
 
     // 4. Structural `T | T = T` / `T & T = T` — two tiers, both

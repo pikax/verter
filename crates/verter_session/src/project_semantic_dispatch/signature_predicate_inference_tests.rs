@@ -20,8 +20,8 @@ use crate::types::HostConfig;
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 use crate::VerterHost;
 
-const STRICT_ROOT: &str = "/strict";
-const LOOSE_ROOT: &str = "/loose";
+pub(super) const STRICT_ROOT: &str = "/strict";
+pub(super) const LOOSE_ROOT: &str = "/loose";
 
 /// One host carrying two projects that differ ONLY in `strictNullChecks`.
 fn two_policy_host() -> VerterHost {
@@ -59,7 +59,7 @@ fn identity(canonical: &str, symbol: &str) -> verter_type_expr::facts::FlowFunct
 }
 
 /// A host whose two projects both hold `source` as `main.ts`.
-fn host_with(source: &str) -> VerterHost {
+pub(super) fn host_with(source: &str) -> VerterHost {
     let host = two_policy_host();
     for root in [STRICT_ROOT, LOOSE_ROOT] {
         crate::u6_flow_shape_corpus_tests::upsert(
@@ -75,7 +75,7 @@ fn host_with(source: &str) -> VerterHost {
 /// The whole-return answer of `symbol` in `root`'s copy through the public
 /// audited flow-return boundary: its degradation and the live node, handed
 /// to `read` while the graph is pinned.
-fn observe<R>(
+pub(super) fn observe<R>(
     host: &VerterHost,
     root: &str,
     symbol: &str,
@@ -98,7 +98,7 @@ fn observe<R>(
 
 /// `symbol`'s answer in `root` is COMPLETE and is the checker's `printed`
 /// function type — predicate included, or its absence.
-fn assert_prints(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
+pub(super) fn assert_prints(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
     let expected = checker_syntax::parse(printed).expect("checker print parses");
     observe(host, root, symbol, |dispatch, degradation, node| {
         assert!(
@@ -112,7 +112,7 @@ fn assert_prints(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
 /// `function`'s OWN answer in `root` DEGRADES: the checker may infer a
 /// predicate the flow lane cannot compute, so no predicate-less signature
 /// publishes complete.
-fn assert_degrades(host: &VerterHost, root: &str, function: &str) {
+pub(super) fn assert_degrades(host: &VerterHost, root: &str, function: &str) {
     observe(host, root, function, |dispatch, degradation, node| {
         assert!(
             degradation.is_some(),
@@ -124,7 +124,7 @@ fn assert_degrades(host: &VerterHost, root: &str, function: &str) {
 
 /// `function`'s OWN answer in `root` is complete: a wrapper reading the
 /// function's signature does not inherit the function's own degradation.
-fn assert_complete(host: &VerterHost, root: &str, function: &str) {
+pub(super) fn assert_complete(host: &VerterHost, root: &str, function: &str) {
     observe(host, root, function, |dispatch, degradation, node| {
         assert!(
             degradation.is_none(),
@@ -147,7 +147,7 @@ fn lone_signature(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) 
 /// `symbol`'s answer in `root` is complete and carries exactly the
 /// predicate of the checker's `printed` function type (or none) beside a
 /// `boolean` return. Its parameter types are not compared.
-fn assert_predicate(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
+pub(super) fn assert_predicate(host: &VerterHost, root: &str, symbol: &str, printed: &str) {
     use checker_syntax::{CheckerPredicate, CheckerPredicateSubject, CheckerType};
     let CheckerType::Function {
         predicate: expected,
@@ -444,6 +444,26 @@ const INFERS: &[(&str, &str, &str)] = &[
         "(x: { a: string; } | { b: number; }) => x is { a: string; }",
         "(x: { a: string; } | { b: number; }) => x is { a: string; }",
     ),
+    (
+        "looseNull",
+        "(x: string | null | undefined) => x is null | undefined",
+        "(x: string) => boolean",
+    ),
+    (
+        "hasKind",
+        "(x: Foo | Bar | number) => x is Bar",
+        "(x: Foo | Bar | number) => x is Bar",
+    ),
+    (
+        "orIn",
+        "(x: Foo | Bar | number) => x is number | Foo",
+        "(x: Foo | Bar | number) => x is number | Foo",
+    ),
+    (
+        "viaLocal",
+        "(x: unknown) => x is string",
+        "(x: unknown) => x is string",
+    ),
 ];
 
 /// Every measured inference, in both null policies.
@@ -455,6 +475,7 @@ fn an_unannotated_boolean_return_infers_the_checker_type_predicate() {
         assert_complete(&host, STRICT_ROOT, name);
         assert_complete(&host, LOOSE_ROOT, name);
         assert_prints(&host, STRICT_ROOT, &format!("sig_{name}"), strict);
+        assert_prints(&host, LOOSE_ROOT, &format!("sig_{name}"), loose);
         assert_predicate(&host, LOOSE_ROOT, &format!("sig_{name}"), loose);
     }
 }
@@ -498,8 +519,8 @@ fn inference_declines_wherever_the_checker_declines() {
         for root in [STRICT_ROOT, LOOSE_ROOT] {
             assert_complete(&host, root, name);
             assert_predicate(&host, root, &format!("sig_{name}"), printed);
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
         }
-        assert_prints(&host, STRICT_ROOT, &format!("sig_{name}"), printed);
     }
     // An implicit return: `boolean | undefined` under strict null checks,
     // and still no predicate where the loose join erases to `boolean`.
@@ -539,27 +560,18 @@ fn a_returned_function_value_infers_its_own_predicate() {
 
 /// A returned test the guard vocabulary cannot read DEGRADES a `boolean`
 /// return rather than publishing it predicate-less. Measured on 7.0.2:
-/// `Array.isArray(x)` over `string | string[]` is `x is string[]`, a call
-/// handing the parameter to an EXPORTED same-file guard (whose signature
-/// set this file cannot close) is `x is Foo`, `x == null` is `x is null |
-/// undefined`, `typeof x === "object" && "s" in x` over `Foo | Bar |
-/// number` is `x is Bar` and `typeof x === "number" || "n" in x` over it
-/// is `x is number | Foo` (a `typeof` test does not classify interface
-/// arms), an aliased condition `const r = typeof x === "string"; return
-/// r` is `x is string`, and `x === y` over two parameters is `boolean` — a
-/// reference comparison this vocabulary does not carry either way.
+/// `Array.isArray(x)` over `string | string[]` is `x is string[]` — a
+/// call whose callee value (the lib's `Array`, which this host does not
+/// declare) does not resolve; a call handing the parameter to an EXPORTED
+/// same-file guard is `x is Foo`, but an exported function takes further
+/// overloads from any augmenting `declare module` block, which the served
+/// signature set does not carry; and `x === y` over two parameters is
+/// `boolean`, a reference comparison this vocabulary does not carry
+/// either way.
 #[test]
 fn an_unreadable_returned_test_degrades_the_boolean_return() {
     let host = host_with(SOURCE);
-    for name in [
-        "isArr",
-        "wrapExported",
-        "looseNull",
-        "hasKind",
-        "orIn",
-        "viaLocal",
-        "eqParams",
-    ] {
+    for name in ["isArr", "wrapExported", "eqParams"] {
         assert_degrades(&host, STRICT_ROOT, name);
     }
 }

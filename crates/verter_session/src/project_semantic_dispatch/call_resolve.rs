@@ -1779,7 +1779,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let clause_len = inputs.len();
         for (position, input) in inputs.into_iter().enumerate() {
             let bound = if !input.candidates.is_empty() {
-                self.relation_combine_candidates(&input.candidates, input.variance)
+                match input.variance {
+                    VariancePhase::Covariant => self
+                        .call_common_supertype(&input.candidates)
+                        .unwrap_or_else(|| {
+                            self.relation_combine_candidates(&input.candidates, input.variance)
+                        }),
+                    _ => self.relation_combine_candidates(&input.candidates, input.variance),
+                }
             } else {
                 uninferred_positions.push(position);
                 defaults
@@ -2843,6 +2850,114 @@ impl<'a> ProjectSemanticDispatch<'a> {
             })
             .collect();
         any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings))
+    }
+
+    /// A call's covariant inference from several candidates (the checker's
+    /// `getCommonSupertype` in `getCovariantInference`): the leftmost
+    /// candidate no later one is a supertype of, with each candidate's
+    /// `null` / `undefined` set aside under `strictNullChecks` and added
+    /// back to the answer — `takes(u)` over `((x: unknown) => x is A) |
+    /// ((x: unknown) => x is B)` infers `A`, where a conditional type's
+    /// `infer` unions its candidates. Literals of one base primitive
+    /// union (`"a" | "b"`). `None` — the union the caller falls back to
+    /// — when a candidate is an anonymous object, array or tuple type (the
+    /// checker first unions object and array LITERAL candidates, a
+    /// provenance the node does not carry) or a subtype relation is
+    /// undecided.
+    fn call_common_supertype(&self, candidates: &[SemanticNodeId]) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let mut ordered: Vec<SemanticNodeId> = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if !ordered.iter().any(|kept| {
+                crate::semantic_query::stable_key::provably_equal(graph, *kept, *candidate)
+            }) {
+                ordered.push(*candidate);
+            }
+        }
+        if let [only] = ordered.as_slice() {
+            return Some(*only);
+        }
+        let strict = self.relation_strict_config().strict_null_checks;
+        let is_nullish = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        let mut nullish: Vec<SemanticNodeId> = Vec::new();
+        let mut primary: Vec<SemanticNodeId> = Vec::with_capacity(ordered.len());
+        for candidate in &ordered {
+            let arms: Vec<SemanticNodeId> = match graph.node_data(*candidate).as_deref() {
+                Some(SemanticNodeData::Union(arms)) => arms.iter().copied().collect(),
+                _ => vec![*candidate],
+            };
+            if arms.iter().any(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(
+                        SemanticNodeData::Object(_)
+                            | SemanticNodeData::Array { .. }
+                            | SemanticNodeData::Tuple { .. }
+                            | SemanticNodeData::ObjectSpreadProgram(_)
+                    )
+                )
+            }) {
+                return None;
+            }
+            if strict && arms.iter().any(|arm| is_nullish(*arm)) {
+                let kept: Vec<SemanticNodeId> = arms
+                    .iter()
+                    .copied()
+                    .filter(|arm| !is_nullish(*arm))
+                    .collect();
+                nullish.extend(arms.iter().copied().filter(|arm| is_nullish(*arm)));
+                if kept.is_empty() {
+                    continue;
+                }
+                primary.push(self.intern_normalized_union_or_intersection(&kept, true));
+            } else {
+                primary.push(*candidate);
+            }
+        }
+        let literal_base = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => Some(std::mem::discriminant(value)),
+            _ => None,
+        };
+        let supertype = match primary.as_slice() {
+            [] => None,
+            [first, rest @ ..]
+                if literal_base(*first).is_some()
+                    && rest
+                        .iter()
+                        .all(|other| literal_base(*other) == literal_base(*first)) =>
+            {
+                Some(self.intern_normalized_union_or_intersection(&primary, true))
+            }
+            [first, rest @ ..] => {
+                let mut supertype = *first;
+                for candidate in rest {
+                    match self.execute_relate_pair_kind(
+                        supertype,
+                        *candidate,
+                        crate::semantic_query::RelationKind::Subtype,
+                    ) {
+                        RelationStep::Assignable { .. } => supertype = *candidate,
+                        RelationStep::NotAssignable => {}
+                        _ => return None,
+                    }
+                }
+                Some(supertype)
+            }
+        };
+        let mut members: Vec<SemanticNodeId> = supertype.into_iter().collect();
+        members.extend(nullish);
+        match members.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            _ => Some(self.intern_normalized_union_or_intersection(&members, true)),
+        }
     }
 
     pub(super) fn call_inference_candidate(

@@ -3641,27 +3641,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target_signature: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let mut alternatives: Vec<_> = source_signatures
+        let alternatives: Vec<_> = source_signatures
             .iter()
             .map(|source| (*source, target_signature))
             .collect();
         if self.infers_from_last_source_signature(target_signature) {
-            alternatives.reverse();
+            return self.relate_overloads_inferring_from_last(
+                &alternatives,
+                bindings,
+                InferPosition::Covariant,
+            );
         }
         self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
     }
 
+    /// An overloaded source against an inferring signature target
+    /// (`inferFromSignatures`): only the source's LAST signature infers.
+    /// It is related first and keeps its deposits when it holds; any
+    /// other overload then decides assignability alone, its deposits
+    /// rolled back — `((x: unknown) => x is A) & ((x: unknown) => false)`
+    /// is assignable to `(x: unknown) => x is S` and infers nothing, so
+    /// `S` is `unknown`.
+    fn relate_overloads_inferring_from_last(
+        &self,
+        alternatives: &[(SemanticNodeId, SemanticNodeId)],
+        bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+    ) -> RelationResult {
+        let Some(((last_source, last_target), rest)) = alternatives.split_last() else {
+            return RelationResult::NotAssignable;
+        };
+        let mut any_unknown = false;
+        let checkpoint = self.relation_session_checkpoint();
+        let bindings_len = bindings.len();
+        match self.relate_member(*last_source, *last_target, bindings, position) {
+            result @ RelationResult::Assignable { .. } => return result,
+            RelationResult::Unknown => any_unknown = true,
+            RelationResult::NotAssignable => {}
+        }
+        self.relation_session_rollback(&checkpoint);
+        bindings.truncate(bindings_len);
+        for (source, target) in rest {
+            let checkpoint = self.relation_session_checkpoint();
+            let result = self.relate_member(*source, *target, bindings, position);
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+            match result {
+                RelationResult::Assignable { .. } => return assignable(bindings),
+                RelationResult::Unknown => any_unknown = true,
+                RelationResult::NotAssignable => {}
+            }
+        }
+        if any_unknown {
+            RelationResult::Unknown
+        } else {
+            RelationResult::NotAssignable
+        }
+    }
+
     /// Whether relating an overloaded source to `target` infers the
-    /// target's `infer` sites: the checker's `inferFromSignatures` reads
-    /// the source's LAST signature, so `(() => A) & (() => B)` against
-    /// `() => infer R` infers `B` and `((x: unknown) => x is A) & ((x:
-    /// unknown) => x is B)` against `(x: any) => x is infer U` infers `B`.
-    /// The overloads are then tried last first.
+    /// target's `infer` sites or a call's type parameters: the checker's
+    /// `inferFromSignatures` reads the source's LAST signature, so `(() =>
+    /// A) & (() => B)` against `() => infer R` infers `B`, `((x: unknown)
+    /// => x is A) & ((x: unknown) => x is B)` against `(x: any) => x is
+    /// infer U` infers `B`, and the same source handed to `takes<S>(g: (x:
+    /// unknown) => x is S)` infers `S` as `B`. The overloads are then
+    /// tried last first.
     fn infers_from_last_source_signature(&self, target: SemanticNodeId) -> bool {
         self.relation_session_active()
-            && self
+            && (matches!(
+                self.graph().node_data(target).as_deref(),
+                Some(SemanticNodeData::Signature { .. })
+            ) || self
                 .relation_pattern_info(target)
-                .is_some_and(|pattern| pattern.shape == InferPatternShape::Function)
+                .is_some_and(|pattern| pattern.shape == InferPatternShape::Function))
     }
 
     /// Recover the input of an exact homomorphic mapped target. The only
@@ -5972,6 +6025,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.expand_pair(s, t, bindings, &mut work, &mut results);
                     }
                 }
+                RelateWork::Arm(s, t) => {
+                    if self.relation_eval_requires_canonical_frame(s, t)
+                        || self.arm_pair_names_a_declaration_carrier(s, t)
+                    {
+                        results.push(self.relate_member(s, t, bindings, InferPosition::Covariant));
+                    } else {
+                        self.expand_pair(s, t, bindings, &mut work, &mut results);
+                    }
+                }
                 RelateWork::ReduceAnd(n) => {
                     let combined = reduce_and_from_results(&mut results, n);
                     results.push(combined);
@@ -6034,6 +6096,78 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         (source_data.typeof_nominal_identity().is_some() && is_decl_carrier(&target_data))
             || (target_data.typeof_nominal_identity().is_some() && is_decl_carrier(&source_data))
+    }
+
+    /// Whether a REQUIRED string-keyed property of the object `target` is
+    /// proven absent from every member of an intersection source — the
+    /// one refutation of the intersection's combined structure a
+    /// member-wise read can give (`{ a } & { b }` has no `c`).
+    fn intersection_lacks_a_required_property(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+    ) -> bool {
+        let graph = self.graph();
+        let Some(target_data) = graph.node_data(target) else {
+            return false;
+        };
+        let SemanticNodeData::Object(target_surface) = &*target_data else {
+            return false;
+        };
+        let member_surfaces: Option<Vec<SurfaceView>> = members
+            .iter()
+            .map(|member| {
+                let concrete = match self.unwrap_identity_carrier_for_relation(*member) {
+                    IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                    IdentityCarrierUnwrap::Unresolvable => return None,
+                };
+                match graph.node_data(concrete).as_deref() {
+                    Some(SemanticNodeData::Object(surface))
+                        if !surface.has_known_index_signature()
+                            && surface.index_signatures.is_empty() =>
+                    {
+                        Some(surface.clone())
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let Some(member_surfaces) = member_surfaces else {
+            return false;
+        };
+        target_surface.positive_members().iter().any(|property| {
+            !property.optional
+                && matches!(
+                    &property.key,
+                    crate::semantic_query::AuthoredPropertyKey::String(name)
+                        if member_surfaces.iter().all(|surface| matches!(
+                            surface.project_string_key(name),
+                            crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                        ))
+                )
+        })
+    }
+
+    /// Whether either side of a composite arm pair is a declaration
+    /// carrier (a `DeclRef` / `InstantiationRef` / an unexpanded
+    /// declaration placeholder) the inline deferred gate would answer
+    /// `Unknown` for.
+    fn arm_pair_names_a_declaration_carrier(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        let graph = self.graph();
+        [source, target].into_iter().any(|node| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(
+                    SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                )
+            )
+        })
     }
 
     /// Expand a single relate pair into direct result(s) or sub-work
@@ -6495,17 +6629,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
             let members = members.members_arc();
+            // No single member relating is not a refutation against a
+            // structured object target: the checker then relates the
+            // intersection's COMBINED properties (`K & { s }` has every
+            // property of `{ k; s }`), which no member-wise read decides.
+            let structured_target = matches!(
+                &*target_data,
+                SemanticNodeData::Object(surface) if !surface.positive_members().is_empty()
+            );
             drop(source_data);
             drop(target_data);
-            let mut alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
-            if self.infers_from_last_source_signature(target) {
-                alternatives.reverse();
-            }
-            results.push(self.relate_pair_alternatives(
-                &alternatives,
-                bindings,
-                InferPosition::Covariant,
-            ));
+            let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
+            let result = if self.infers_from_last_source_signature(target) {
+                self.relate_overloads_inferring_from_last(
+                    &alternatives,
+                    bindings,
+                    InferPosition::Covariant,
+                )
+            } else {
+                self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
+            };
+            results.push(match result {
+                RelationResult::NotAssignable
+                    if structured_target
+                        && members.len() > 1
+                        && !self.intersection_lacks_a_required_property(&members, target) =>
+                {
+                    RelationResult::Unknown
+                }
+                result => result,
+            });
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*target_data {
@@ -8082,6 +8235,13 @@ enum RelateWork {
     Expand(SemanticNodeId, SemanticNodeId),
     /// Evaluate `(source, target)`.
     Eval(SemanticNodeId, SemanticNodeId),
+    /// Evaluate one ARM of a union source or an intersection target.
+    /// Every arm of the other two composite forms (a union target's
+    /// alternatives, an intersection source's) already relates through the
+    /// member authority, whose identity unwrap decides a declaration
+    /// carrier; an arm pair naming one takes that authority too, and every
+    /// other arm expands inline like [`Self::Eval`].
+    Arm(SemanticNodeId, SemanticNodeId),
     /// Pop `n` prior results, AND them, push one combined result.
     ReduceAnd(u32),
 }
@@ -8128,7 +8288,7 @@ fn distribute_and<F>(
     let mut forward: Vec<RelateWork> = Vec::with_capacity(n + 1);
     for m in members.iter() {
         let (s, t) = pairer(m);
-        forward.push(RelateWork::Eval(s, t));
+        forward.push(RelateWork::Arm(s, t));
     }
     if n > 1 {
         forward.push(RelateWork::ReduceAnd(n as u32));

@@ -63,6 +63,17 @@ use verter_semantic::analysis::flow::{
     FlowBindingMap, FlowBindingRef as FlowProductSubject, FunctionBodySkeleton, SkeletonBindingId,
 };
 
+/// The combinations [`ProjectSemanticDispatch::distribute_intersection`]
+/// distributes before it keeps the undistributed intersection.
+const INTERSECTION_DISTRIBUTION_CAP: usize = 64;
+
+/// A distributed intersection and whether one combination's collapse was
+/// left undecided (kept, as a superset).
+pub(super) struct DistributedIntersection {
+    pub(super) node: SemanticNodeId,
+    pub(super) undecided: bool,
+}
+
 /// The consumer outcome of one sealed function-return demand
 /// ([`ProjectSemanticDispatch::execute_function_return_source`]).
 ///
@@ -780,23 +791,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     node
                 }
             }
+            // An object's member values and its call and construct
+            // signatures (a function declaration's `typeof` surface) were
+            // built under the same policy.
             Some(SemanticNodeData::Object(surface)) => {
-                let mut members = surface.positive_members().to_vec();
                 let mut changed = false;
-                for member in &mut members {
-                    let value =
-                        self.erase_nullable_members_within(member.value, nullability, erased);
-                    changed |= value != member.value;
-                    member.value = value;
-                }
+                let entries: Vec<crate::semantic_query::SurfaceEntry> = surface
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        use crate::semantic_query::SurfaceEntry;
+                        let mut erase = |id: SemanticNodeId, changed: &mut bool| {
+                            let rebuilt =
+                                self.erase_nullable_members_within(id, nullability, erased);
+                            *changed |= rebuilt != id;
+                            rebuilt
+                        };
+                        match entry {
+                            SurfaceEntry::Member(member) => {
+                                let mut member = member.clone();
+                                member.value = erase(member.value, &mut changed);
+                                SurfaceEntry::Member(member)
+                            }
+                            SurfaceEntry::CallSignature(signature) => {
+                                SurfaceEntry::CallSignature(erase(*signature, &mut changed))
+                            }
+                            SurfaceEntry::ConstructSignature(signature) => {
+                                SurfaceEntry::ConstructSignature(erase(*signature, &mut changed))
+                            }
+                            SurfaceEntry::IndexSignature(index) => {
+                                SurfaceEntry::IndexSignature(index.clone())
+                            }
+                        }
+                    })
+                    .collect();
                 if changed {
                     graph.intern_preserving_scope(
                         node,
-                        SemanticNodeData::Object(
-                            surface
-                                .clone()
-                                .with_positive_members(Arc::from(members.into_boxed_slice())),
-                        ),
+                        SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                            entries,
+                            surface.keyspace,
+                            surface.has_known_index_signature(),
+                        )),
                     )
                 } else {
                     node
@@ -870,6 +906,182 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         erased.insert(node, result);
         result
+    }
+
+    /// The checker's intersection of `factors` when one of them is a union
+    /// (`getIntersectionType`): each factor contributes its union ARMS (a
+    /// non-union factor is its one arm), and the intersection DISTRIBUTES
+    /// — `(A | B) & C` is `(A & C) | (B & C)` — each combination reduced
+    /// on its own. A combination the relation authority proves collapses
+    /// (`{ kind: "a" } & { kind: "b" }`), and under `strictNullChecks` a
+    /// `null` / `undefined` arm beside an object type, leaves the union.
+    /// The undistributed `origin` intersection stays the union's display
+    /// ORIGIN when distributing grew the constituent count, so the result
+    /// prints as the checker prints it. An `ordered` intersection (one
+    /// whose members may carry call signatures, where member order is
+    /// overload order) keeps every combination, and the origin, in factor
+    /// order. `None` when the combinations exceed
+    /// [`INTERSECTION_DISTRIBUTION_CAP`].
+    pub(super) fn distribute_intersection(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+        ordered: bool,
+    ) -> Option<DistributedIntersection> {
+        use super::relation::ComparabilityVerdict;
+        let combinations = factors
+            .iter()
+            .try_fold(1usize, |count, arms| count.checked_mul(arms.len()))?;
+        if combinations == 0 || combinations > INTERSECTION_DISTRIBUTION_CAP {
+            return None;
+        }
+        let graph = self.graph();
+        let nullish = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        let object_type = |node: SemanticNodeId| {
+            let concrete = match self.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+            };
+            match graph.node_data(concrete).as_deref() {
+                Some(SemanticNodeData::Object(surface)) => !surface.closed().is_empty(),
+                Some(
+                    SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. },
+                ) => true,
+                _ => false,
+            }
+        };
+        // Without `strictNullChecks` the checker never built a nullable arm
+        // beside another into the factor's union at all.
+        let erased: Vec<Vec<SemanticNodeId>>;
+        let factors = if nullability.is_strict() {
+            factors
+        } else {
+            erased = factors
+                .iter()
+                .map(|arms| {
+                    let kept: Vec<SemanticNodeId> =
+                        arms.iter().copied().filter(|arm| !nullish(*arm)).collect();
+                    if kept.is_empty() {
+                        arms.clone()
+                    } else {
+                        kept
+                    }
+                })
+                .collect();
+            &erased
+        };
+        let combinations: usize = factors.iter().map(Vec::len).product();
+        let mut undecided = false;
+        let mut parts: Vec<SemanticNodeId> = Vec::new();
+        let mut combination: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
+        for mut index in 0..combinations {
+            combination.clear();
+            for arms in factors {
+                combination.push(arms[index % arms.len()]);
+                index /= arms.len();
+            }
+            let mut collapses = false;
+            'pairs: for (position, left) in combination.iter().enumerate() {
+                for right in &combination[position + 1..] {
+                    if left == right {
+                        continue;
+                    }
+                    if nullability.is_strict()
+                        && ((nullish(*left) && object_type(*right))
+                            || (nullish(*right) && object_type(*left)))
+                    {
+                        collapses = true;
+                        break 'pairs;
+                    }
+                    match self.nodes_comparable(*left, *right) {
+                        ComparabilityVerdict::Disjoint(proof)
+                            if proof.checker_reduces_intersection_to_never() =>
+                        {
+                            collapses = true;
+                            break 'pairs;
+                        }
+                        ComparabilityVerdict::Undecided => undecided = true,
+                        _ => {}
+                    }
+                }
+            }
+            if !collapses {
+                parts.push(self.intern_intersection_members(&combination, ordered));
+            }
+        }
+        let origin_count: usize = origin
+            .iter()
+            .map(|node| self.constituent_count(*node))
+            .sum();
+        let distributed: usize = parts.iter().map(|part| self.constituent_count(*part)).sum();
+        let node = if parts.is_empty() {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        } else if distributed > origin_count
+            && parts.iter().any(|part| {
+                matches!(
+                    graph.node_data(*part).as_deref(),
+                    Some(SemanticNodeData::Intersection(_))
+                )
+            })
+        {
+            self.intern_intersection_members(origin, ordered)
+        } else {
+            self.intern_normalized_union(&parts, nullability)
+        };
+        Some(DistributedIntersection { node, undecided })
+    }
+
+    /// One intersection of `members`: canonical, or, when `ordered`, the
+    /// first occurrence of each member in order as an order-preserving
+    /// carrier (a lone survivor is itself).
+    fn intern_intersection_members(
+        &self,
+        members: &[SemanticNodeId],
+        ordered: bool,
+    ) -> SemanticNodeId {
+        if !ordered {
+            return self.intern_normalized_union_or_intersection(members, false);
+        }
+        let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+        for member in members {
+            if !kept.contains(member) {
+                kept.push(*member);
+            }
+        }
+        match kept.as_slice() {
+            [only] => *only,
+            _ => self.graph().intern_node(SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                    kept.into_boxed_slice(),
+                )),
+            )),
+        }
+    }
+
+    /// The checker's `getConstituentCount`: a union or intersection counts
+    /// its members (recursively, `boolean` being `true | false`), any
+    /// other type one.
+    pub(super) fn constituent_count(&self, node: SemanticNodeId) -> usize {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => {
+                arms.iter().map(|arm| self.constituent_count(*arm)).sum()
+            }
+            Some(SemanticNodeData::Intersection(arms)) => {
+                arms.iter().map(|arm| self.constituent_count(*arm)).sum()
+            }
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 2,
+            _ => 1,
+        }
     }
 
     /// The env-bearing function slot identity for one served function
@@ -9922,6 +10134,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 fact
             }
+            SliceGuard::CallPredicate {
+                callee,
+                site,
+                arguments,
+                receiver,
+                negated,
+            } => {
+                let (fact, consumption) = self.narrow_by_call_predicate(
+                    callee,
+                    *site,
+                    arguments,
+                    receiver.as_ref(),
+                    *negated == positive,
+                );
+                match consumption {
+                    PredicateNarrowConsumption::NotConsumed => {}
+                    PredicateNarrowConsumption::Decided | PredicateNarrowConsumption::Undecided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: site.span(),
+                            relations_decided: matches!(
+                                consumption,
+                                PredicateNarrowConsumption::Decided
+                            ),
+                        });
+                    }
+                }
+                fact
+            }
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
             // symmetry the lowering's `!` uses). A later conjunct that
@@ -9948,6 +10188,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 return;
             }
+            // Facts over distinct references: each applies under the same
+            // reading.
+            SliceGuard::Both(parts) => {
+                for part in parts.iter() {
+                    self.apply_guard_scoped(part, positive);
+                }
+                return;
+            }
         };
         match fact {
             GuardNarrowing::Unchanged => {}
@@ -9958,11 +10206,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// The union-of-facts reading of a disjunction: each disjunct's
-    /// narrow is computed against the SAME starting overlay, and a
-    /// subject narrowed by every disjunct lands the union of the
-    /// per-disjunct narrows. A subject some disjunct leaves unnarrowed
-    /// contributes its ORIGINAL type to that union — which is the
-    /// original type, so no narrow is established for it.
+    /// narrow is computed against the starting overlay as the operands
+    /// before it LEFT it — `a || b` is true through `a`, or through `b`
+    /// once `a` is false, exactly as the checker narrows the right operand
+    /// by the left's other edge — and a subject narrowed by every disjunct
+    /// lands the union of the per-disjunct narrows. A subject some
+    /// disjunct leaves unnarrowed contributes its ORIGINAL type to that
+    /// union — which is the original type, so no narrow is established
+    /// for it.
     fn apply_guard_union(
         &mut self,
         parts: &[crate::flow_slice_content::SliceGuard],
@@ -9974,8 +10225,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SemanticNodeId,
             )>,
         > = Vec::with_capacity(parts.len());
-        for part in parts.iter() {
+        for (index, part) in parts.iter().enumerate() {
             let mark = self.narrowing_snapshot();
+            for earlier in &parts[..index] {
+                self.apply_guard_scoped(earlier, !positive);
+            }
             self.apply_guard_scoped(part, positive);
             let applied = self.narrowings_since(&mark);
             self.restore_narrowings(mark);
@@ -10317,17 +10571,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if is_any || !self.nullability.is_strict() {
                 return Some(TopTypeofEdge::Kept);
             }
-            let kept = match removed {
-                PrimitiveKind::Undefined => PrimitiveKind::Null,
-                _ => PrimitiveKind::Undefined,
-            };
-            let members = [
-                self.dispatch
-                    .graph()
-                    .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view())),
-                primitive(self, kept),
-            ];
-            return Some(TopTypeofEdge::Implied(self.union(&members)));
+            return Some(TopTypeofEdge::Implied(self.unknown_without(&[removed])));
         }
         Some(match kind {
             SliceTypeofKind::String => {
@@ -10403,9 +10647,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::semantic_query::LiteralValue::BigInt(_) => Some(SliceTypeofKind::BigInt),
                 crate::semantic_query::LiteralValue::Boolean(_) => Some(SliceTypeofKind::Boolean),
             },
+            // An object type with a call or construct signature is a
+            // function at run time (the checker's `isFunctionObjectType`).
             Some(SemanticNodeData::Object(surface)) => {
                 if surface.closed().is_empty() {
                     None
+                } else if !surface.call_signatures.is_empty()
+                    || !surface.construct_signatures.is_empty()
+                {
+                    Some(SliceTypeofKind::Function)
                 } else {
                     Some(SliceTypeofKind::Object)
                 }
@@ -10417,7 +10667,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // A template-literal type denotes only strings, whatever its
             // placeholders resolve to.
             Some(SemanticNodeData::TemplateLiteral { .. }) => Some(SliceTypeofKind::String),
-            _ => None,
+            // A named arm — an interface, a class instance, an alias —
+            // classifies by the structure it denotes, settled through the
+            // same identity-carrier unwrap the truthiness and relation
+            // readers use; one it cannot settle stays unclassified.
+            _ => match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete)
+                    if concrete != arm
+                        && !matches!(
+                            self.dispatch.graph().node_data(concrete).as_deref(),
+                            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+                        ) =>
+                {
+                    return self.arm_typeof_class(concrete, kind);
+                }
+                _ => None,
+            },
         };
         match classified {
             Some(observed) if observed == kind => ArmGuardClass::Match,
@@ -10506,6 +10771,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ArmFilter::Unchanged => {}
             }
         }
+        // A TOP subject no arm filter can split: `any` narrows on neither
+        // edge, and `unknown` is `{}` on the truthy edge under
+        // `strictNullChecks` (the checker's `{} | null | undefined` split
+        // keeps only `{}` there) and itself on the falsy edge.
+        if let Some(is_any) = self.top_subject(subject) {
+            if undecided {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            if is_any || negated || !self.nullability.is_strict() {
+                return GuardNarrowing::Unchanged;
+            }
+            let node = self.unknown_without(&[PrimitiveKind::Null, PrimitiveKind::Undefined]);
+            return GuardNarrowing::Narrowed(subject.clone(), node);
+        }
+        // `boolean` is `true | false` to the checker, so a truthiness test
+        // splits it: `true` on the truthy edge, `false` on the falsy one.
+        if let Some(fact) = self.narrow_boolean_by_truthiness(subject, negated) {
+            if undecided {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            return fact;
+        }
         let fact = self.narrow_arms_by(subject, |this, arm| {
             Some(match this.arm_truthiness_edge(arm, negated) {
                 crate::semantic_query::TruthinessInhabitance::Yes => true,
@@ -10538,6 +10829,95 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// guessed.
     ///
     /// [`ClassifyTruthinessDomain`]: crate::semantic_query::SemanticQueryKey::ClassifyTruthinessDomain
+    /// A truthiness narrow of a subject that carries a `boolean` arm, with
+    /// that arm read as `true | false`; `None` when no arm is `boolean`. An
+    /// undecidable arm stays on the tested edge and degrades.
+    fn narrow_boolean_by_truthiness(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        negated: bool,
+    ) -> Option<GuardNarrowing> {
+        use crate::semantic_query::TruthinessInhabitance;
+        let current = self.subject_current_node(subject)?;
+        let arms = self.enumerated_union_arms_or_self(current);
+        let graph = self.dispatch.graph();
+        let is_boolean = |arm: &SemanticNodeId| {
+            graph.node_data(*arm).as_deref()
+                == Some(&SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+        };
+        if !arms.iter().any(is_boolean) {
+            return None;
+        }
+        let mut survivors = Vec::with_capacity(arms.len() + 1);
+        let mut dropped = false;
+        for arm in arms {
+            if is_boolean(&arm) {
+                survivors.push(graph.intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::Boolean(!negated),
+                )));
+                dropped = true;
+                continue;
+            }
+            match self.arm_truthiness_edge(arm, negated) {
+                TruthinessInhabitance::No => dropped = true,
+                TruthinessInhabitance::Yes => survivors.push(arm),
+                TruthinessInhabitance::Undecided => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                    survivors.push(arm);
+                }
+            }
+        }
+        if !dropped {
+            return Some(GuardNarrowing::Unchanged);
+        }
+        let node = self.union(&survivors);
+        Some(GuardNarrowing::Narrowed(subject.clone(), node))
+    }
+
+    /// The type of `!operand` (the checker's `checkPrefixUnaryExpression`):
+    /// `false` when the operand's type has only truthy inhabitants, `true`
+    /// when it has only falsy ones, `boolean` otherwise — a top type
+    /// included; with `strictNullChecks` off only an all-falsy operand
+    /// keeps a literal ([`Self::arm_truthiness_edge`]). An undecidable
+    /// operand answers `boolean` behind the typed guard gap.
+    fn logical_not_of(&mut self, operand: SemanticNodeId) -> SemanticNodeId {
+        use crate::semantic_query::TruthinessInhabitance;
+        let graph = self.dispatch.graph();
+        let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        if matches!(
+            graph.node_data(operand).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
+            ))
+        ) {
+            return boolean;
+        }
+        let mut truthy = TruthinessInhabitance::No;
+        let mut falsy = TruthinessInhabitance::No;
+        for arm in self.enumerated_union_arms_or_self(operand) {
+            truthy = truthy.or(self.arm_truthiness_edge(arm, false));
+            falsy = falsy.or(self.arm_truthiness_edge(arm, true));
+        }
+        let literal = |value: bool| {
+            graph.intern_node(SemanticNodeData::Literal(
+                crate::semantic_query::LiteralValue::Boolean(value),
+            ))
+        };
+        match (truthy, falsy) {
+            (TruthinessInhabitance::Yes, TruthinessInhabitance::No) => literal(false),
+            (TruthinessInhabitance::No, TruthinessInhabitance::Yes) => literal(true),
+            (TruthinessInhabitance::Undecided, _) | (_, TruthinessInhabitance::Undecided) => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                boolean
+            }
+            _ => boolean,
+        }
+    }
+
     fn arm_truthiness_edge(
         &mut self,
         arm: SemanticNodeId,
@@ -10551,7 +10931,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let domain = self.dispatch.classify_truthiness_domain_read(settled).value;
         if negated {
-            domain.falsy
+            // With `strictNullChecks` off a type that can be truthy can
+            // also be `null` / `undefined`: its falsy bucket is inhabited.
+            if self.nullability.is_strict() {
+                domain.falsy
+            } else {
+                domain.falsy.or(domain.truthy)
+            }
         } else {
             domain.truthy
         }
@@ -10581,8 +10967,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(literal_ty) = guard_literal_type_expr(literal) else {
             return GuardNarrowing::Unchanged;
         };
+        let nullish = matches!(
+            literal,
+            crate::flow_slice_content::SliceGuardLiteral::Null
+                | crate::flow_slice_content::SliceGuardLiteral::Undefined
+        );
+        // With `strictNullChecks` off every type already holds `null` and
+        // `undefined`, so a comparison against either narrows nothing
+        // (the checker's `narrowTypeByEquality` returns the type as is).
+        if nullish && !self.nullability.is_strict() {
+            return GuardNarrowing::Unchanged;
+        }
         let literal_node = self.lower_body_type(&literal_ty);
         if subject.path.is_empty() {
+            if let Some(top) = self.top_subject(subject) {
+                return self.narrow_top_by_literal(subject, top, literal, literal_node, negated);
+            }
             // An arm whose relation to the literal the oracle cannot
             // decide (a deferred form such as a template-literal arm)
             // stays possible on BOTH edges and degrades the result: the
@@ -10734,6 +11134,65 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ArmFilter::Unchanged => GuardNarrowing::Unchanged,
             }
         }
+    }
+
+    /// Whether `subject` currently reads a TOP type — `Some(true)` for
+    /// `any`, `Some(false)` for `unknown` — which no arm filter can split.
+    fn top_subject(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+    ) -> Option<bool> {
+        let current = self.subject_current_node(subject)?;
+        match self.dispatch.graph().node_data(current).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => Some(true),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// `unknown` split as the checker splits it for a nullish test under
+    /// `strictNullChecks`: `{} | null | undefined` with `removed`'s arm
+    /// dropped (`{} | undefined` past `!== null`, `{} | null` past
+    /// `!== undefined`, `{}` past both).
+    fn unknown_without(&self, removed: &[PrimitiveKind]) -> SemanticNodeId {
+        let graph = self.dispatch.graph();
+        let mut members =
+            vec![graph.intern_node(SemanticNodeData::Object(super::walk::empty_surface_view()))];
+        for kind in [PrimitiveKind::Null, PrimitiveKind::Undefined] {
+            if !removed.contains(&kind) {
+                members.push(graph.intern_node(SemanticNodeData::Primitive(kind)));
+            }
+        }
+        self.union(&members)
+    }
+
+    /// An equality test over a TOP subject (`narrowTypeByEquality`): `any`
+    /// narrows on neither edge. `unknown` reads the compared literal on
+    /// the positive edge, and on the negated edge stays `unknown` unless
+    /// the literal is nullish, which removes that arm of the checker's
+    /// `{} | null | undefined` split (the nullish case only reaches here
+    /// under `strictNullChecks`).
+    fn narrow_top_by_literal(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        is_any: bool,
+        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        literal_node: SemanticNodeId,
+        negated: bool,
+    ) -> GuardNarrowing {
+        use crate::flow_slice_content::SliceGuardLiteral;
+        if is_any {
+            return GuardNarrowing::Unchanged;
+        }
+        if !negated {
+            return GuardNarrowing::Narrowed(subject.clone(), literal_node);
+        }
+        let removed = match literal {
+            SliceGuardLiteral::Null => PrimitiveKind::Null,
+            SliceGuardLiteral::Undefined => PrimitiveKind::Undefined,
+            _ => return GuardNarrowing::Unchanged,
+        };
+        GuardNarrowing::Narrowed(subject.clone(), self.unknown_without(&[removed]))
     }
 
     /// The surviving arms of an equality narrow against a literal, with
@@ -11873,6 +12332,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // authority's disjointness PROOF. An undecided verdict is a typed
         // gap, never a guessed direction.
         use super::relation::ComparabilityVerdict;
+        let consumption = if reverse.is_none() {
+            Consumption::Undecided
+        } else {
+            Consumption::Decided
+        };
+        // The checker's intersection DISTRIBUTES over a union subject
+        // (`(A | B) & C` is `(A & C) | (B & C)`), each arm reduced on its
+        // own.
+        if arms.len() > 1 {
+            if let Some(distributed) = self.dispatch.distribute_intersection(
+                &[arms.clone(), vec![candidate]],
+                &[current, candidate],
+                self.nullability,
+                false,
+            ) {
+                if distributed.undecided {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::NominalRelation,
+                    ));
+                }
+                return (Some(distributed.node), consumption);
+            }
+        }
         let comparable = self.comparable(current, candidate);
         if matches!(comparable, ComparabilityVerdict::Undecided) {
             self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -11882,12 +12364,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // An undecided REVERSE relation leaves the choice between the
         // candidate narrow and the intersection fallback unproven: the
         // value keeps the checker's intersection rule, the relation
-        // obligation stays unclaimed.
-        let consumption = if reverse.is_none() {
-            Consumption::Undecided
-        } else {
-            Consumption::Decided
-        };
+        // obligation stays unclaimed (`consumption` above).
         let ComparabilityVerdict::Disjoint(ref proof) = comparable else {
             let intersection = self
                 .dispatch
@@ -11949,6 +12426,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         }
         let target_node = self.lower_body_type(target.ty());
+        self.narrow_to_predicate_node(subject, target_node, negated)
+    }
+
+    /// [`Self::narrow_to_predicate_target_consuming`] over an already
+    /// resolved target type.
+    fn narrow_to_predicate_node(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        target_node: SemanticNodeId,
+        negated: bool,
+    ) -> (GuardNarrowing, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
         if self.subject_current_node(subject).is_none() {
             return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         }
@@ -11985,6 +12474,131 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
             ArmFilter::Unchanged => GuardNarrowing::Unchanged,
         };
+        (fact, consumption)
+    }
+
+    /// The narrow a call's TYPE PREDICATE establishes (the checker's
+    /// `narrowTypeByCallExpression`): the call's signature — its only
+    /// non-generic call signature, else the executor's selected overload,
+    /// instantiated — names a parameter (or the receiver) whose argument,
+    /// when it is a narrowable reference, narrows to the predicate's
+    /// target. An assertion, a signature with no predicate, and a
+    /// predicate about a reference this frame cannot narrow establish
+    /// nothing; a call the executor cannot decide degrades.
+    fn narrow_by_call_predicate(
+        &mut self,
+        callee: &crate::flow_slice_content::SliceExpr,
+        site: crate::flow_slice_content::SliceCallSite,
+        arguments: &[Option<crate::flow_slice_content::SliceNarrowSubject>],
+        receiver: Option<&crate::flow_slice_content::SliceNarrowSubject>,
+        negated: bool,
+    ) -> (GuardNarrowing, PredicateNarrowConsumption) {
+        let undecided = |this: &mut Self| {
+            this.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+            (
+                GuardNarrowing::Unchanged,
+                PredicateNarrowConsumption::NotConsumed,
+            )
+        };
+        let Positional::Value(callee) = self.eval_expr(callee) else {
+            return undecided(self);
+        };
+        let signature = match self
+            .dispatch
+            .shared_signature_nodes(callee, crate::semantic_query::SignatureKind::Call)
+        {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                match nodes.as_slice() {
+                    [] => {
+                        return (
+                            GuardNarrowing::Unchanged,
+                            PredicateNarrowConsumption::NotConsumed,
+                        )
+                    }
+                    [only]
+                        if matches!(
+                            self.dispatch.graph().node_data(*only).as_deref(),
+                            Some(SemanticNodeData::Signature { type_parameters, .. })
+                                if type_parameters.is_empty()
+                        ) =>
+                    {
+                        *only
+                    }
+                    _ => match self.resolve_call_step(callee, site) {
+                        Some(super::call_resolve::ResolveCallStep::Complete(
+                            crate::semantic_query::ResolvedCallResult::Selected {
+                                selected_signature,
+                                ..
+                            },
+                        )) => selected_signature,
+                        Some(super::call_resolve::ResolveCallStep::Complete(
+                            crate::semantic_query::ResolvedCallResult::DynamicAny { .. },
+                        )) => {
+                            return (
+                                GuardNarrowing::Unchanged,
+                                PredicateNarrowConsumption::NotConsumed,
+                            )
+                        }
+                        _ => return undecided(self),
+                    },
+                }
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
+                return undecided(self)
+            }
+        };
+        let (predicate, occurrence) = match self.dispatch.graph().node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                predicate,
+                occurrence,
+                ..
+            }) => (*predicate, occurrence.clone()),
+            _ => (None, None),
+        };
+        // Another file's function DECLARATION is an export (or a global),
+        // and an augmenting `declare module` / `declare global` block can
+        // add overloads the served signature set does not carry.
+        if occurrence.is_some_and(|occurrence| {
+            let function = &occurrence.function;
+            matches!(
+                function.function_part,
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
+            ) && function.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value
+                && function.anchor.canonical_id.as_ref() != self.canonical
+        }) {
+            return undecided(self);
+        }
+        let Some(crate::semantic_query::SignaturePredicate {
+            subject,
+            asserts: false,
+            ty: Some(target),
+        }) = predicate
+        else {
+            return (
+                GuardNarrowing::Unchanged,
+                PredicateNarrowConsumption::Decided,
+            );
+        };
+        let reference = match subject {
+            crate::semantic_query::PredicateSubject::Parameter(index) => {
+                arguments.get(index as usize).cloned().flatten()
+            }
+            crate::semantic_query::PredicateSubject::This => receiver.cloned(),
+        };
+        let Some(reference) = reference else {
+            return (
+                GuardNarrowing::Unchanged,
+                PredicateNarrowConsumption::Decided,
+            );
+        };
+        // No planned relation obligation covers this call, so a narrow
+        // the relation authority could not decide is the answer's own gap.
+        let (fact, consumption) = self.narrow_to_predicate_node(&reference, target, negated);
+        if matches!(consumption, PredicateNarrowConsumption::Undecided) {
+            return undecided(self);
+        }
         (fact, consumption)
     }
 
@@ -15175,6 +15789,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
             }
+            crate::flow_slice_content::SliceExpr::Not { operand, widen } => {
+                match self.eval_expr(operand) {
+                    Positional::Value(node) => {
+                        let value = self.logical_not_of(node);
+                        Positional::Value(if *widen {
+                            widen_literal_node(self.dispatch, value)
+                        } else {
+                            value
+                        })
+                    }
+                    Positional::Hold => Positional::Hold,
+                    Positional::Unmodeled => Positional::Unmodeled,
+                }
+            }
             crate::flow_slice_content::SliceExpr::Gap(gap) => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
                 Positional::Unmodeled
@@ -15389,42 +16017,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             })
     }
 
-    /// The call-executor route of one authored call: overload selection
-    /// and argument-driven clause inference are the executor's
-    /// applicability machinery, so this rail re-reads the authored call
-    /// from the retained snapshot (argument expressions and explicit type
-    /// arguments are parse facts, never re-derived), mints the
-    /// content-free key, and folds the typed outcome back into the
-    /// frame's vocabulary — a completed, already-instantiated return
-    /// through the callee gate's named no-transfer constructor, an
-    /// SCC back-edge as a hold, a typed refusal as the
-    /// `UnrepresentableCallee` degradation this rail already defines for
-    /// a callee it cannot represent.
-    fn eval_call_via_resolve_call(
+    /// Resolve one authored call through the call executor: the key the
+    /// executor route mints from the retained snapshot (argument
+    /// expressions, explicit type arguments and the receiver evaluated in
+    /// this frame), executed. `None` when the call cannot be keyed — an
+    /// unindexed call, or an argument this substrate cannot type.
+    fn resolve_call_step(
         &mut self,
         callee: SemanticNodeId,
         site: crate::flow_slice_content::SliceCallSite,
-    ) -> Option<Positional<CallValue>> {
-        let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
-            return Some(self.degraded_unrepresentable_callee());
-        };
+    ) -> Option<super::call_resolve::ResolveCallStep> {
+        let serve = self
+            .dispatch
+            .ctx
+            .ensure_indexed_ready_serve(self.canonical)?;
         let memo = serve.indexed.shallow_state.decl_bodies();
-        let Some(indexed) = memo.indexed_call_expression_at(site.span()) else {
-            return Some(self.degraded_unrepresentable_callee());
-        };
+        let indexed = memo.indexed_call_expression_at(site.span())?;
         let call = &indexed.call;
         let mut args = Vec::with_capacity(call.args.len());
         for (ordinal, argument) in call.args.iter().enumerate() {
-            let Some(root) = indexed.argument_roots.get(ordinal) else {
-                return Some(self.degraded_unrepresentable_callee());
-            };
+            let root = indexed.argument_roots.get(ordinal)?;
             let binding = self.indexed_argument_binding(*root);
             let Some(ty) = self.eval_indexed_call_argument(&argument.expression, &binding) else {
                 // An argument this substrate cannot type leaves
                 // applicability without its evidence: the executor
                 // refuses as surely, and degrading here is the same
                 // typed marker with one less hop.
-                return Some(self.degraded_unrepresentable_callee());
+                return None;
             };
             // A read of a WIDENING-literal `const` is a FRESH literal
             // source exactly as a bare literal argument is (the checker
@@ -15454,14 +16073,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {
-            let Some(node) = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
+            let node = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
                 self.canonical,
                 self.owner,
                 argument,
                 crate::semantic_query::ProjectionMode::Navigate,
-            ) else {
-                return Some(self.degraded_unrepresentable_callee());
-            };
+            )?;
             explicit_type_args.push(node);
         }
         // A member call's receiver rides the key: `.call` / `.apply`
@@ -15469,14 +16086,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // lowering the callee came from, evaluated in the same scope.
         let receiver = match call.receiver.as_deref() {
             Some(receiver) => {
-                let Some(root) = indexed.receiver_root else {
-                    return Some(self.degraded_unrepresentable_callee());
-                };
+                let root = indexed.receiver_root?;
                 let receiver_binding = self.indexed_argument_binding(root);
-                match self.eval_indexed_call_argument(receiver, &receiver_binding) {
-                    Some(node) => Some(node),
-                    None => return Some(self.degraded_unrepresentable_callee()),
-                }
+                Some(self.eval_indexed_call_argument(receiver, &receiver_binding)?)
             }
             None => None,
         };
@@ -15493,7 +16105,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
-        let step = self.dispatch.execute_resolve_call(key);
+        Some(self.dispatch.execute_resolve_call(key))
+    }
+
+    /// The call-executor route of one authored call: overload selection
+    /// and argument-driven clause inference are the executor's
+    /// applicability machinery, so this rail re-reads the authored call
+    /// from the retained snapshot (argument expressions and explicit type
+    /// arguments are parse facts, never re-derived), mints the
+    /// content-free key, and folds the typed outcome back into the
+    /// frame's vocabulary — a completed, already-instantiated return
+    /// through the callee gate's named no-transfer constructor, an
+    /// SCC back-edge as a hold, a typed refusal as the
+    /// `UnrepresentableCallee` degradation this rail already defines for
+    /// a callee it cannot represent.
+    fn eval_call_via_resolve_call(
+        &mut self,
+        callee: SemanticNodeId,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> Option<Positional<CallValue>> {
+        let Some(step) = self.resolve_call_step(callee, site) else {
+            return Some(self.degraded_unrepresentable_callee());
+        };
         match step {
             super::call_resolve::ResolveCallStep::Complete(result) => {
                 // Fresh-literal provenance: a call that closed on a FRESH

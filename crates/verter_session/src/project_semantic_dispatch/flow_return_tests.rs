@@ -6570,16 +6570,16 @@ fn foreign_flow_value_provenance_is_rejected() {
 
 /// A call in an `if`/ternary TEST is a narrowing CONTROL: when the
 /// callee is a same-file OVERLOADED type predicate, signature selection
-/// decides which predicate target narrows, and this substrate performs
-/// no overload/applicability resolution for the guard channel. Taking
-/// the first declaration's target narrows WRONG (`pred`'s first overload
-/// says `x is string` where the checker selects `x is number`), and
-/// certifying that call as decided-above would launder the wrong narrow
-/// warm. Required: the overloaded predicate establishes NO narrow (both
-/// arms keep the unnarrowed parameter), and the demand finalizes
-/// unproven — zero candidates, never warm.
+/// decides which predicate target narrows. Taking the first
+/// declaration's target narrows WRONG (`pred`'s first overload says `x
+/// is string`), so the guard reads the predicate of the overload the
+/// call executor SELECTS: `(x: string)` does not accept `string |
+/// number`, the second overload's `x is number` narrows, and
+/// `makeProps` returns `number | false` (measured on 7.0.2). The call's
+/// evidence is recorded at guard application, so the demand proves and
+/// warms.
 #[test]
-fn overloaded_same_file_predicate_never_self_certifies_control_call() {
+fn overloaded_same_file_predicate_narrows_through_the_selected_overload() {
     const PRED_CANONICAL: &str = "/ws/overloaded-predicate.ts";
     const PRED_FIXTURE: &str = r#"
 function pred(x: string): x is string;
@@ -6618,9 +6618,9 @@ export function makeProps(x: string | number) {
              consequent — the number arm survives, got {expr:?}"
         );
         assert!(
-            has_primitive(verter_type_expr::PrimitiveName::String),
-            "no narrow is established at all for an overloaded predicate, \
-             got {expr:?}"
+            !has_primitive(verter_type_expr::PrimitiveName::String),
+            "the selected overload's `x is number` narrows the string arm \
+             away, got {expr:?}"
         );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
@@ -6640,9 +6640,8 @@ export function makeProps(x: string | number) {
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "an overloaded predicate call in a control test carries no \
-             evaluator evidence and must never warm"
+            1,
+            "the selected overload's narrow is evidence-backed and warms"
         );
     });
 }
@@ -6797,6 +6796,52 @@ fn assert_control_callee_gaps_unwarmed(
     );
 }
 
+/// Assert that `name`'s control call narrows through the callee's own
+/// resolved signature: the join carries `false` and exactly the
+/// `present` primitive arms, none of the `absent` ones, is complete, and
+/// warms.
+fn assert_control_callee_narrows_warm(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    present: &[verter_type_expr::PrimitiveName],
+    absent: &[verter_type_expr::PrimitiveName],
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    let has = |primitive: verter_type_expr::PrimitiveName| {
+        arms.iter()
+            .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive))
+    };
+    for primitive in present {
+        assert!(
+            has(*primitive),
+            "{name}: the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    for primitive in absent {
+        assert!(
+            !has(*primitive),
+            "{name}: the {primitive:?} arm is narrowed away, got {expr:?}"
+        );
+    }
+    assert_eq!(result.degradation(), None, "{name}: the narrow is complete");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        1,
+        "{name}: the evidence-backed control call warms"
+    );
+}
+
 /// Assert that a class-evaluation-time WRITE to a frame binding never
 /// seals the unnarrowed superset warm: the join keeps BOTH arms of the
 /// unnarrowed `string | number` parameter, the demand carries the typed
@@ -6941,6 +6986,45 @@ declare module "./main" {
     });
 }
 
+/// An IMPORTED function guard is another module's export, and a `declare
+/// module` block in any file adds overloads to it: here `augment.ts`
+/// puts `x is string` ahead of the module's own `x is number`, so
+/// `pick` returns `string | false` on 7.0.2. The served signature set
+/// does not carry an augmenting overload, so the guard never narrows
+/// through the module's own declaration: the demand keeps the unnarrowed
+/// join, carries the typed gap, and holds zero candidates.
+#[test]
+fn imported_function_guard_never_narrows_past_its_augmentations() {
+    const GUARDS_CANONICAL: &str = "/ws/import-merge/guards.ts";
+    const GUARDS_FIXTURE: &str = r#"
+export function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+"#;
+    const AUG_CANONICAL: &str = "/ws/import-merge/augment.ts";
+    const AUG_FIXTURE: &str = r#"
+import "./guards";
+declare module "./guards" {
+  export function isNum(x: string | number): x is string;
+}
+"#;
+    const MAIN_CANONICAL: &str = "/ws/import-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+import { isNum } from "./guards";
+export function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, GUARDS_CANONICAL, GUARDS_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+    });
+}
+
 /// A NAMESPACE-OWNED call site binds its bare callee through the
 /// enclosing block's scope first — the block-local `check` / `isNum`
 /// shadow the module-scope declarations of the same name, exactly as the
@@ -7022,8 +7106,8 @@ function makeTop(x: string | number) {
 /// and the predicate is a tautology, so `f` returns `string | number |
 /// boolean`. Resolving `T` through the CALLER's environment binds the
 /// unrelated owner-scope alias `type T = number` and narrows `string`
-/// away. The demand keeps the unnarrowed join, carries the typed gap, and
-/// holds zero candidates.
+/// away. The guard reads the predicate of the signature the call executor
+/// instantiates, so both arms survive, complete and warm.
 #[test]
 fn generic_predicate_target_never_resolves_in_the_caller_environment() {
     const CANONICAL: &str = "/ws/generic-predicate/main.ts";
@@ -7041,7 +7125,17 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            &[
+                verter_type_expr::PrimitiveName::String,
+                verter_type_expr::PrimitiveName::Number,
+            ],
+            &[],
+        );
     });
 }
 
@@ -7953,9 +8047,9 @@ fn assert_instanceof_class_arms_gap_unwarmed(
 /// number` is assignable to a type parameter, the target itself is
 /// assignable to the subject, so the narrow becomes `T` and `f` publishes
 /// `T | boolean` where the checker says `number | boolean` — complete and
-/// warm. The channel refuses a target the caller frame rebinds: the
-/// demand keeps the unnarrowed join, carries the typed gap, and holds
-/// zero candidates.
+/// warm. The guard reads the predicate from the callee's own signature,
+/// whose `T` is the module alias: the join is the checker's `number |
+/// false`, complete and warm.
 #[test]
 fn generic_caller_binder_never_captures_a_predicate_target() {
     const CANONICAL: &str = "/ws/caller-binder-predicate/main.ts";
@@ -7973,7 +8067,14 @@ function f<T extends number>(x: string | number, _t: T) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            &[verter_type_expr::PrimitiveName::Number],
+            &[verter_type_expr::PrimitiveName::String],
+        );
     });
 }
 
@@ -10973,17 +11074,32 @@ fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
     );
 }
 
+/// `L & K` is assignable to `L` and `L` is not assignable to the
+/// intersection (it lacks `k`), so the reunion absorbs the intersection
+/// arm: `makeProps` returns `L` on 7.0.2, complete.
+#[test]
+fn flow_return_reunion_absorbs_an_intersection_arm_into_its_supertype() {
+    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(degradation, None, "the decided reduction is complete");
+    assert!(
+        matches!(&expr, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"),
+        "the intersection arm is absorbed into `L`: {expr:?}"
+    );
+}
+
 /// An arm pair the relation authority cannot decide leaves the reduction
 /// UNFINISHED: every arm survives, the typed nominal-relation gap rides
 /// the result, and the result is `ReturnOnly` — never a guessed
 /// absorption promoted warm.
 ///
-/// `L & K` is assignable to `L`, so the pair IS an admitted reduction
-/// candidate; the reverse direction (`L` against the intersection) is the
-/// judgement the authority does not give.
+/// `L & T["x"]` is assignable to `L`, so the pair IS an admitted reduction
+/// candidate; the reverse direction (`L` against the intersection, whose
+/// `T["x"]` arm is an indexed access deferred on `T`) is the judgement the
+/// authority does not give. The checker answers `L` on 7.0.2.
 #[test]
 fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warms() {
-    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let script = "class L { readonly l = \"l\" }\nfunction makeProps<T extends { x: L }>(a: L & T[\"x\"], b: L, c: boolean) { if (c) { return a } return b }";
     let (expr, degradation) = flow_expr_for_script(script);
     assert_eq!(
         degradation,

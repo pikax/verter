@@ -925,6 +925,7 @@ fn require_retained_selection_of_bound_graph(
     let origins_in_range = selection.origins().iter().all(|origin| match origin {
         SliceOrigin::Return(site) => site.index() < bundle.skeleton.return_sites.len(),
         SliceOrigin::Expr(site) => site.index() < bundle.skeleton.expr_sites.len(),
+        SliceOrigin::Parameter(binding) => binding.index() < bundle.skeleton.bindings.len(),
     });
     if !origins_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
