@@ -7049,8 +7049,9 @@ fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
 /// tsc 7.0.2: `Chain['next']` is `Chain` and `Chain['next']['v']` is
 /// `number`. The flow lane publishes the authored annotation; a consumer
 /// that reduces it (the corpus lane's structural-fact demand) used to read
-/// a miss at the self-reference. Under that expanded demand
-/// `Chain['next']` now reduces to `Chain`'s own surface, `next` the
+/// a miss at the self-reference. The printing demand keeps the
+/// declaration by its name, as the checker prints it; the fully resolving
+/// demand reduces `Chain['next']` to `Chain`'s own surface, `next` the
 /// self-reference and `v` a `number`.
 #[test]
 fn an_indexed_access_of_a_self_reference_is_the_declaration() {
@@ -7060,15 +7061,48 @@ fn an_indexed_access_of_a_self_reference_is_the_declaration() {
     assert_eq!(raised, number());
     let (data, raised) = reduced_annotation_in(&host, SELF_REFERENCE, "indexedNext");
     assert!(
-        matches!(&data, SemanticNodeData::Object(_)),
-        "`Chain['next']` reduces to `Chain`'s surface, got {data:?}"
+        matches!(&data, SemanticNodeData::DeclRef { identity } if identity.decl_name.as_ref() == "Chain"),
+        "`Chain['next']` prints `Chain`, got {data:?}"
     );
-    assert_eq!(projected_member(&raised, "v"), &number());
     assert!(
-        matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
-            | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
-        "`next` is the self-reference, got {raised:?}"
+        matches!(&raised, TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+        "`Chain['next']` raises to `Chain`, got {raised:?}"
     );
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, SELF_REFERENCE, "indexedNext");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("indexedNext must produce a value");
+        };
+        let node = dispatch
+            .normalize_node_for_structural_fact_demand(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .expect("the resolving demand completes");
+        let raised = host
+            .project_node_to_type_expr_for_test(node)
+            .expect("the surface raises");
+        assert!(
+            matches!(
+                dispatch.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "the resolving demand reduces `Chain['next']` to `Chain`'s surface, got {raised:?}"
+        );
+        assert_eq!(projected_member(&raised, "v"), &number());
+        assert!(
+            matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
+                | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+            "`next` is the self-reference, got {raised:?}"
+        );
+    });
 }
 
 // ──────────────────────────────────────────────────────────────────────
