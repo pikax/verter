@@ -246,7 +246,13 @@ change; never weaken the test.
    declaration's group before an earlier one's, and a signature whose
    parameter is WRITTEN as a literal type (`FunctionParam::declared_literal`,
    carried through instantiation) before the rest. No call site orders
-   candidates itself.
+   candidates itself. A function VALUE merged from several declarations is
+   minted the same way by `build_typeof` (`prepared_signature_groups`,
+   `merged_declaration_signatures_node`): a namespace member declared in
+   several blocks, a global function declared in several `declare global`
+   blocks, and a global function declared in several files (one arm per
+   file, in declaration precedence order). A file's own top-level overloads
+   are ONE declaration.
 
 ## Related skills
 

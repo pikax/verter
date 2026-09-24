@@ -40,21 +40,23 @@ const POS_CANONICAL: &str = "/ws/flow-positional.ts";
 /// discriminator: a fix that merely stops fabricating a value, without
 /// making the position local, deletes it.
 const POS_FIXTURE: &str = r#"
-export class Box { readonly tag = "box"; }
-// A tagged template is a call form the substrate has no arm for — the
-// unmodelled position every row below places.
-export declare function box(strings: TemplateStringsArray): Box;
+// `notDeclared` is declared nowhere, so every call of it is TS2304
+// ("Cannot find name"): the checker types the call with its error type,
+// which is recovery for a program that does not type-check rather than
+// the semantics of one. The flow-return lane models well-typed programs,
+// so such a call is outside its scope — the unmodelled position every row
+// below places, by design rather than as a gap to close.
 
 // ── B-F1: one unmodelled member inside an object literal ─────────────
 export function objectWithUnmodeledCall() {
-  return { label: "x", made: box`b` };
+  return { label: "x", made: notDeclared() };
 }
 
 // The byte-equivalent local-binding spelling — already survived at HEAD
 // through `FailedBindingInitializer`, and is the control that proves the
 // disposition must not depend on where the evaluator was standing.
 export function objectWithUnmodeledLocal() {
-  const b = box`b`;
+  const b = notDeclared();
   return { label: "x", made: b };
 }
 
@@ -67,10 +69,11 @@ export function objectWithUnmodeledBinding() {
 // ── B-F2: an array element at a call position ────────────────────────
 //
 // Both composites survive: the OBJECT and the array inside it, whose
-// `` box`b` `` element alone carries the marker beside the modelled
-// `"s"` one (tsgo: `{ label: string; made: (string | Box)[] }`).
+// call element alone carries the marker beside the modelled `"s"` one
+// (tsgo: `{ label: string; made: any[] }`, the error type absorbing the
+// element union).
 export function arrayWithUnmodeledCall() {
-  return { label: "x", made: ["s", box`b`] };
+  return { label: "x", made: ["s", notDeclared()] };
 }
 
 // ── A-F2 / A-F3: the residual warm-fabricated-`any` call forms ───────
@@ -262,12 +265,13 @@ fn is_unresolved_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 /// A composite with ONE unmodelled member keeps every member it DID
 /// model, marks the unmodelled one, and warms nothing.
 ///
-/// This is B-F1 at the evaluator boundary. The checker's answer for
-/// `objectWithUnmodeledCall` is `{ label: string; made: Box }`; the
-/// substrate has no arm for the tagged template `` box`b` ``, so
-/// `made` is the typed unresolved marker — never a fabricated `any`,
-/// which is indistinguishable from an authored one at every downstream
-/// gate, and never a discarded composite.
+/// This is B-F1 at the evaluator boundary. The checker answers
+/// `objectWithUnmodeledCall` with `{ label: string; made: any }`, the
+/// `any` being its error type for the TS2304 call `notDeclared()`; the
+/// lane does not model a program that does not type-check, so `made` is
+/// the typed unresolved marker — never a fabricated `any`, which is
+/// indistinguishable from an authored one at every downstream gate, and
+/// never a discarded composite.
 ///
 /// Mutation recipe: routing the unmodelled position back through a
 /// frame-level `Err` collapses the whole object and the `label`
@@ -278,7 +282,7 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
     for (name, reason) in [
         (
             "objectWithUnmodeledCall",
-            FlowReturnDegradation::UnmodeledPosition,
+            FlowReturnDegradation::UnrepresentableCallee,
         ),
         (
             "objectWithUnmodeledBinding",
@@ -330,7 +334,7 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
 
     // `arrayWithUnmodeledCall` — the ARRAY survives too: its element is
     // `string | MARKER`, the modelled `"s"` element kept beside the marked
-    // `` box`b` `` one.
+    // call one.
     let outcome = evaluate(&host, POS_CANONICAL, "arrayWithUnmodeledCall")
         .expect("arrayWithUnmodeledCall must produce a value");
     with_dispatch(&host, |dispatch| {
@@ -354,7 +358,7 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
     });
     assert_eq!(
         outcome.degradation,
-        Some(FlowReturnDegradation::UnmodeledPosition)
+        Some(FlowReturnDegradation::UnrepresentableCallee)
     );
     assert_eq!(outcome.candidates, 0);
 

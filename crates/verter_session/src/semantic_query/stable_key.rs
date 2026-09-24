@@ -414,6 +414,13 @@ fn encode_data(
         SemanticNodeData::Opaque(err) => {
             enc.header(category::INTRINSIC, subtag::OPAQUE);
             encode_query_error(&mut enc, err);
+            // A recursive back-edge names the instantiation it stands for.
+            if let QueryError::RecursiveRef { args, .. } = err {
+                enc.u16(args.len() as u16);
+                for arg in args.iter() {
+                    encode_child(graph, *arg, seen, &mut enc, depth);
+                }
+            }
         }
         SemanticNodeData::IntrinsicApplication { op, args } => {
             enc.header(category::SYNTHETIC, subtag::INTRINSIC_APP);
@@ -970,7 +977,7 @@ fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
-        QueryError::RecursiveRef { name } => enc.str(name),
+        QueryError::RecursiveRef { name, .. } => enc.str(name),
         QueryError::Other(s) => enc.str(s),
         QueryError::DeclPlaceholder {
             canonical_id,

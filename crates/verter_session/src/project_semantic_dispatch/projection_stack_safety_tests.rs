@@ -413,7 +413,12 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
-    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    // A leaf that is not an inert structure, so the projection walks every
+    // array level above it (an array of primitives is its own projection
+    // and would cost one step).
+    let leaf = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::Miss,
+    ));
     let mut root = leaf;
     const ARRAY_DEPTH: usize = 4;
     // bounded-loop: fixed finite work-boundary fixture depth.
@@ -513,7 +518,7 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     assert!(matches!(
         graph.node_data(outcome.node).as_deref(),
         Some(SemanticNodeData::Opaque(
-            crate::semantic_query::QueryError::RecursiveRef { name }
+            crate::semantic_query::QueryError::RecursiveRef { name, .. }
         )) if name.as_ref() == "Recursive"
     ));
     assert_eq!(memo.get(&(recursive, context)), Some(&outcome.node));

@@ -305,6 +305,7 @@ fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::RecursiveRef {
             name: Arc::from("Self"),
+            args: std::sync::Arc::from([]),
         },
     ));
     let late_write = program(
@@ -1704,6 +1705,7 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::RecursiveRef {
             name: Arc::from("Self"),
+            args: std::sync::Arc::from([]),
         },
     ));
     let cyclic = program(

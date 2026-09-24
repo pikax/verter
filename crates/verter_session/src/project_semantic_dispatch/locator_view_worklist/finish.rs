@@ -638,6 +638,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
                 ) {
                     rebuild(projected_args)
+                } else if self.is_instantiate_active(
+                    base.canonical_id.as_ref(),
+                    base.owner,
+                    base.decl_name.as_ref(),
+                ) {
+                    // An application of the declaration an enclosing
+                    // `build_instantiate` frame is still materialising is its
+                    // recursive back-edge, recording the instantiation it
+                    // stands for — the same rule as a 0-arg `DeclRef`.
+                    self.recursive_ref_sentinel(base, projected_args)
                 } else {
                     match self.execute_type_node(SemanticQueryKey::Instantiate(
                         crate::semantic_query::InstantiateKey::new(

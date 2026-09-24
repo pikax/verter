@@ -1343,6 +1343,10 @@ pub(super) enum PositionalArgument {
         /// non-union is its own single arm, and an all-nullish type is the
         /// empty list.
         non_nullish_arms: Vec<SemanticNodeId>,
+        /// The position is optional and its type therefore includes
+        /// `undefined` beside `ty` (an optional parameter under
+        /// `strictNullChecks`).
+        includes_undefined: bool,
     },
 }
 
@@ -1350,8 +1354,9 @@ pub(super) enum PositionalArgument {
 /// any semantics is dispatched over them.
 struct RawPositional {
     receiver: Option<SemanticNodeId>,
-    /// `None` when the candidate declares nothing at the position.
-    argument: Option<SemanticNodeId>,
+    /// `None` when the candidate declares nothing at the position; else the
+    /// declared type and whether its optionality adds `undefined`.
+    argument: Option<(SemanticNodeId, bool)>,
 }
 
 /// One shared candidate's positional read.
@@ -1617,9 +1622,10 @@ impl ProjectSemanticDispatch<'_> {
                 receiver: raw.receiver,
                 argument: match raw.argument {
                     None => PositionalArgument::Absent,
-                    Some(ty) => PositionalArgument::Type {
+                    Some((ty, includes_undefined)) => PositionalArgument::Type {
                         ty,
                         non_nullish_arms: self.non_nullish_arms(ty),
+                        includes_undefined,
                     },
                 },
             })
@@ -1687,7 +1693,7 @@ impl ProjectSemanticDispatch<'_> {
                 let argument = match positional.type_at(position) {
                     TypeAt::Absent => None,
                     TypeAt::One(slot) => match view.type_token_node(slot.ty) {
-                        Ok(node) => Some(node),
+                        Ok(node) => Some((node, slot.optionality.includes_undefined)),
                         Err(_) => {
                             failed = true;
                             break;
