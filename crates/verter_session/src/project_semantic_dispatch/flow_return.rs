@@ -12511,6 +12511,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ) else {
             return GuardNarrowing::Unchanged;
         };
+        // `any` and `unknown` narrow to the instance type on the true edge
+        // (`getNarrowedType` answers the candidate for either) and keep
+        // themselves on the false one.
+        if let Some(current) = self.subject_current_node(subject) {
+            if matches!(
+                self.dispatch.graph().node_data(current).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Any | PrimitiveKind::Unknown
+                ))
+            ) {
+                return if negated {
+                    GuardNarrowing::Unchanged
+                } else {
+                    GuardNarrowing::Narrowed(subject.clone(), instance)
+                };
+            }
+        }
         let instance_identity = self.node_class_identity(instance);
         // The tested class's own heritage reading, taken ONCE for the
         // whole guard application: every arm's derivation question
@@ -12876,6 +12893,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
+        // `any` carries every key and absorbs the `Record` it would
+        // intersect: the checker leaves it as it is on both edges.
+        if matches!(
+            self.dispatch.graph().node_data(current).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+        ) {
+            return GuardNarrowing::Unchanged;
+        }
         let arms = self.enumerated_union_arms_or_self(current);
         let presences: Vec<InArmPresence> = arms
             .iter()
@@ -13135,6 +13160,154 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .0
     }
 
+    /// The constraint a bare type-parameter node reads as in a narrow
+    /// (`getBaseConstraintOfType`, `unknown` when it declares none), or
+    /// `None` for any other node.
+    fn type_param_constraint(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                Some(constraint.unwrap_or_else(|| {
+                    self.dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    /// `source` is assignable to `target` for a guard's narrow. A type
+    /// parameter reads as its constraint, and only `never`, `any` or the
+    /// parameter itself is assignable to a bare type parameter — the
+    /// checker's reading of an instantiable type in `getNarrowedType`; an
+    /// intersection one of whose members is a type parameter is
+    /// assignable when some member is. Every other pair asks the shared
+    /// relation authority ([`Self::assignable`]).
+    fn narrowing_assignable(&self, source: SemanticNodeId, target: SemanticNodeId) -> Option<bool> {
+        let mut source = source;
+        let mut visited: Vec<SemanticNodeId> = Vec::new();
+        while let Some(constraint) = self.type_param_constraint(source) {
+            if source == target {
+                return Some(true);
+            }
+            if visited.contains(&source) {
+                // A circular constraint names no type to read.
+                return None;
+            }
+            visited.push(source);
+            source = constraint;
+        }
+        if source == target {
+            return Some(true);
+        }
+        if self.type_param_constraint(target).is_some() {
+            return Some(matches!(
+                self.dispatch.graph().node_data(source).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Never | PrimitiveKind::Any
+                ))
+            ));
+        }
+        let members = match self.dispatch.graph().node_data(source).as_deref() {
+            Some(SemanticNodeData::Intersection(members))
+                if members
+                    .iter()
+                    .any(|member| self.type_param_constraint(*member).is_some()) =>
+            {
+                Some(members.to_vec())
+            }
+            _ => None,
+        };
+        if let Some(members) = members {
+            let mut undecided = false;
+            for member in members {
+                match self.narrowing_assignable(member, target) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => undecided = true,
+                }
+            }
+            if undecided {
+                return None;
+            }
+        }
+        self.assignable(source, target)
+    }
+
+    /// Whether `node` is the global `Object` or `Function` interface: the
+    /// declaration the project's lib environment gives that name, or the
+    /// builtin `Function` carrier.
+    fn is_global_object_or_function(&self, node: SemanticNodeId) -> bool {
+        let identity = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(SemanticNodeData::InstantiationRef { base, args }) if args.is_empty() => {
+                base.clone()
+            }
+            _ => return false,
+        };
+        let name = identity.decl_name.as_ref();
+        if !matches!(name, "Object" | "Function") {
+            return false;
+        }
+        if self.dispatch.is_function_global_identity(&identity) {
+            return true;
+        }
+        let Some(project) = self
+            .dispatch
+            .project_stable_key_for_canonical(self.canonical)
+        else {
+            return false;
+        };
+        let Some(hit) = self.dispatch.ctx.lookup_ambient_symbol(project, name) else {
+            return false;
+        };
+        self.dispatch
+            .ctx
+            .record_ambient_dependency(self.canonical, hit.virtual_id.as_ref());
+        hit.virtual_id == identity.canonical_id
+    }
+
+    /// The narrow of a subject with a type-parameter arm to `candidate`
+    /// once no arm is assignable to it (`getNarrowedType`'s instantiable
+    /// reading): the candidate when it is assignable to one of the other
+    /// arms; otherwise each type-parameter arm whose constraint admits the
+    /// candidate narrows to their intersection (`T & C`) and every other
+    /// arm drops; with no such arm, the whole subject intersects the
+    /// candidate, which the checker never reduces over a type parameter.
+    fn narrow_generic_to_candidate(
+        &mut self,
+        current: SemanticNodeId,
+        arms: &[SemanticNodeId],
+        candidate: SemanticNodeId,
+    ) -> (Option<SemanticNodeId>, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
+        let mut intersections: Vec<SemanticNodeId> = Vec::new();
+        for arm in arms {
+            match self.type_param_constraint(*arm) {
+                Some(constraint) => match self.narrowing_assignable(candidate, constraint) {
+                    Some(true) => intersections.push(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&[*arm, candidate], false),
+                    ),
+                    Some(false) => {}
+                    None => return (None, Consumption::Undecided),
+                },
+                None => match self.narrowing_assignable(candidate, *arm) {
+                    Some(true) => return (Some(candidate), Consumption::Decided),
+                    Some(false) => {}
+                    None => return (None, Consumption::Undecided),
+                },
+            }
+        }
+        if !intersections.is_empty() {
+            return (Some(self.union(&intersections)), Consumption::Decided);
+        }
+        let intersection = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&[current, candidate], false);
+        (Some(intersection), Consumption::Decided)
+    }
+
     /// The checker's narrow of `current` to a `candidate` type — the
     /// positive edge of a type predicate, and the reconciliation of a
     /// standing guard fact with a value refined under it. Keeps
@@ -13154,7 +13327,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let arms = self.enumerated_union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
-            match self.assignable(*arm, candidate) {
+            match self.narrowing_assignable(*arm, candidate) {
                 Some(true) => survivors.push(*arm),
                 Some(false) => {}
                 None => return (None, Consumption::Undecided),
@@ -13166,6 +13339,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             let node = self.union(&survivors);
             return (Some(node), Consumption::Decided);
+        }
+        if arms
+            .iter()
+            .any(|arm| self.type_param_constraint(*arm).is_some())
+        {
+            return self.narrow_generic_to_candidate(current, &arms, candidate);
         }
         let reverse = self.assignable(candidate, current);
         if reverse == Some(true) {
@@ -13283,13 +13462,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         negated: bool,
     ) -> (GuardNarrowing, PredicateNarrowConsumption) {
         use PredicateNarrowConsumption as Consumption;
-        if self.subject_current_node(subject).is_none() {
+        let Some(current) = self.subject_current_node(subject) else {
             return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
+        };
+        // `any` narrows to the target on the true edge and keeps itself on
+        // the false one (`getNarrowedType` answers the candidate for `any`
+        // and removes nothing from it) — except that the checker never
+        // narrows `any` to the global `Object` or `Function`
+        // (`narrowTypeByTypePredicate`).
+        if matches!(
+            self.dispatch.graph().node_data(current).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+        ) {
+            if negated {
+                return (GuardNarrowing::Unchanged, Consumption::Decided);
+            }
+            // A target name nothing resolved could be the global `Object`
+            // or `Function`: the narrow is not decided.
+            if matches!(
+                self.dispatch.graph().node_data(target_node).as_deref(),
+                Some(SemanticNodeData::BareRef(_))
+            ) {
+                return (GuardNarrowing::Unchanged, Consumption::Undecided);
+            }
+            if self.is_global_object_or_function(target_node) {
+                return (GuardNarrowing::Unchanged, Consumption::Decided);
+            }
+            return (
+                GuardNarrowing::Narrowed(subject.clone(), target_node),
+                Consumption::Decided,
+            );
         }
         if !negated {
-            let current = self
-                .subject_current_node(subject)
-                .expect("the subject answered just above");
             let (narrowed, consumption) = self.narrow_node_to_candidate(current, target_node);
             let fact = match narrowed {
                 Some(node) => GuardNarrowing::Narrowed(subject.clone(), node),
@@ -13299,7 +13503,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         let mut undecided = false;
         let fact = self.narrow_arms_by(subject, |this, arm| {
-            match this.assignable(arm, target_node) {
+            match this.narrowing_assignable(arm, target_node) {
                 Some(kept) => Some(kept != negated),
                 None => {
                     undecided = true;

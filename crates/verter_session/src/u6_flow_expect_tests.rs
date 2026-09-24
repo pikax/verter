@@ -5844,14 +5844,10 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
     }
 }
 
-/// A union arm the graph cannot classify against a runtime guard test
-/// (`any`, `unknown` under `instanceof`) stays possible on BOTH edges of
-/// the test: the checker narrows such an arm, so dropping it fabricates a
-/// dead branch and loses that branch's return contributor from a result
-/// then certified complete and warm. The sound public outcome is the
-/// retained superset carrying the typed `FlowGap::GuardNarrowing`
-/// degradation — `ReturnOnly`, two cold computes, zero warm candidates —
-/// while a classified arm keeps its exact, warm, gap-free narrow. A
+/// A top type under a runtime guard narrows as the checker narrows it,
+/// exact and warm: `instanceof` takes `unknown` or `any` to the instance
+/// type on the positive edge (`getNarrowedType` answers the candidate for
+/// a top type; measured, 7.0.2 `--strict`: `C | 0` for both), and a
 /// `typeof` test classifies a top arm: the checker substitutes the
 /// kind's implied type for `unknown` / `any` on the positive edge (`any`
 /// stays `any` under `"object"`) and keeps the arm on the negated one,
@@ -5861,7 +5857,7 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
 /// under `"object"`, `any` for `any` under `"object"`, `{} | null` under
 /// `!== "undefined"`).
 #[test]
-fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
+fn top_types_under_a_runtime_guard_narrow_like_the_checker() {
     struct Case {
         id: &'static str,
         script: &'static str,
@@ -5927,20 +5923,20 @@ fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
             warm: true,
         },
         Case {
-            id: "guard_unclassified_instanceof_unknown",
+            id: "guard_instanceof_unknown_positive",
             script: "class C { m(): number { return 1; } }\nexport function f(x: unknown) { if (x instanceof C) return x; return 0; }",
             checker: "C | 0",
-            rendered: "unknown",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(DeclRef(C) | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
-            id: "guard_unclassified_instanceof_any",
+            id: "guard_instanceof_any_positive",
             script: "class C { m(): number { return 1; } }\nexport function f(x: any) { if (x instanceof C) return x; return 0; }",
             checker: "C | 0",
-            rendered: "any",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(DeclRef(C) | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             id: "guard_classified_union_control",

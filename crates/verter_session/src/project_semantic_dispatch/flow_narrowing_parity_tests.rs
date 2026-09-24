@@ -597,18 +597,19 @@ const CALL_PREDICATE_ROWS: &[(&str, &str, &str)] = &[
 /// narrows nothing.
 ///
 /// A predicate over a member narrows the member, not a union parent
-/// through it (`c17`). Three calls degrade: `isFoo(o["x"])` narrows the
-/// element access (`c14` is `Foo`) and `isFoo(o?.x)` the optional
-/// chain's root (`c18` is `{ x: Foo | Bar; }`), references this half does
-/// not carry, and `g(x)` over a type parameter (`c15` is `T & T[]`)
-/// asks a relation the authority does not decide.
+/// through it (`c17`); `g(x)` over a type parameter narrows it through its
+/// constraint (`c15` is `T & T[]`, pinned by
+/// [`a_type_parameter_narrows_through_its_constraint`]). Two calls degrade: `isFoo(o["x"])`
+/// narrows the element access (`c14` is `Foo`) and `isFoo(o?.x)` the
+/// optional chain's root (`c18` is `{ x: Foo | Bar; }`), references this
+/// half does not carry.
 #[test]
 fn a_call_to_a_predicate_signature_narrows_its_argument() {
     check_rows(CALL_PREDICATES, CALL_ROWS);
     check_predicate_rows(CALL_PREDICATES, CALL_PREDICATE_ROWS);
     let host = host_with(CALL_PREDICATES);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for function in ["c14", "c15", "c18"] {
+        for function in ["c14", "c18"] {
             super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
         }
     }
@@ -1152,13 +1153,18 @@ export function j2(v: unknown) { return JSON.stringify(v); }
 export function n1(n: unknown) { return Number.isFinite(n); }
 export function n2(x: unknown) { if (Number.isFinite(x)) return x; throw 0; }
 export function sig_l3() { return l3; }
+export function l4(x: any) { return Array.isArray(x); }
+export function l5<T>(x: T | T[]) { return Array.isArray(x); }
+export function sig_l4() { return l4; }
+export function sig_l5() { return l5; }
 "#;
 
 /// A free `Array`, `Object`, `Math`, `JSON` or `Number` is the GLOBAL
 /// VALUE the project's lib environment declares (`declare var Array:
 /// ArrayConstructor;`), read through that declaration: its members'
 /// signatures answer calls, and `Array.isArray`'s `arg is any[]` narrows
-/// both edges and is the predicate a returned call infers. Measured on
+/// both edges and is the predicate a returned call infers, over `any`
+/// (`x is any[]`) and a type parameter (`x is T[]`) too. Measured on
 /// 7.0.2 against the full lib, identically without `strictNullChecks`;
 /// the host registers the lib's own declarations of these values.
 #[test]
@@ -1184,6 +1190,15 @@ fn a_lib_global_value_reads_its_lib_declaration() {
         let predicate = "(x: string | string[]) => x is string[]";
         assert_prints(&host, root, "sig_l3", predicate);
         assert_predicate(&host, root, "sig_l3", predicate);
+        let predicate = "(x: any) => x is any[]";
+        assert_prints(&host, root, "sig_l4", predicate);
+        assert_predicate(&host, root, "sig_l4", predicate);
+        assert_renders(
+            &host,
+            root,
+            "sig_l5",
+            "{ (Union(TypeParam(T) | Array(TypeParam(T)))) => x is Array(TypeParam(T)) }",
+        );
     }
 }
 
@@ -1256,4 +1271,192 @@ fn a_write_through_a_type_assertion_neither_assigns_nor_narrows() {
         ("s6", "string", "string"),
     ];
     check_rows(ASSERTED_WRITES, &rows);
+}
+
+/// `symbol`'s answer in `root` is COMPLETE and renders as `rendered` — the
+/// pin for a checker answer over a type parameter, which the checker print
+/// grammar spells as a name.
+fn assert_renders(host: &crate::VerterHost, root: &str, symbol: &str, rendered: &str) {
+    super::signature_predicate_inference_tests::observe(
+        host,
+        root,
+        symbol,
+        |dispatch, degradation, node| {
+            let measured = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                dispatch, node, 0,
+            );
+            assert!(
+                degradation.is_none() && measured == rendered,
+                "`{symbol}` in {root} renders `{rendered}`; measured `{measured}` (degradation \
+                 {degradation:?})"
+            );
+        },
+    );
+}
+
+const TOP_TYPE_GUARDS: &str = r#"
+export class Cls { c = 1 }
+export interface Foo { kind: "foo"; n: number }
+declare function isFoo(x: unknown): x is Foo;
+declare function isFn(x: unknown): x is Function;
+export function y01(x: any) { return isFoo(x); }
+export function y02(x: any) { return x instanceof Cls; }
+export function y03(x: any) { return "a" in x; }
+export function y11(x: any) { if (isFoo(x)) { return x; } throw 0; }
+export function y12(x: any) { if (!isFoo(x)) { return x; } throw 0; }
+export function y13(x: any) { if (x instanceof Cls) { return x; } throw 0; }
+export function y14(x: any) { if (!(x instanceof Cls)) { return x; } throw 0; }
+export function y15(x: any) { if ("a" in x) { return x; } throw 0; }
+export function y16(x: unknown) { if (x instanceof Cls) { return x; } throw 0; }
+export function y17(x: unknown) { if (!(x instanceof Cls)) { return x; } throw 0; }
+export function y19(x: any) { if (isFn(x)) { return x; } throw 0; }
+export function y21(x: unknown) { return x instanceof Cls; }
+"#;
+
+/// `any` narrows to a type predicate's target and to an `instanceof`
+/// test's instance type on the true edge and keeps itself on the false
+/// one (`getNarrowedType` answers the candidate for a top type), except
+/// that the checker never narrows it to the global `Function`
+/// (`narrowTypeByTypePredicate`); `unknown` narrows the same way under
+/// `instanceof`; an `in` test leaves `any` as it is. Measured on 7.0.2,
+/// identically without `strictNullChecks`, each function's `.d.ts` line
+/// the row's answer.
+#[test]
+fn a_top_type_narrows_to_a_predicate_or_instance_target() {
+    let rows = [
+        ("y11", "Foo", "Foo"),
+        ("y12", "any", "any"),
+        ("y13", "Cls", "Cls"),
+        ("y14", "any", "any"),
+        ("y15", "any", "any"),
+        ("y16", "Cls", "Cls"),
+        ("y17", "unknown", "unknown"),
+        ("y19", "any", "any"),
+    ];
+    check_rows(TOP_TYPE_GUARDS, &rows);
+    let predicates = [
+        ("y01", "(x: any) => x is Foo"),
+        ("y02", "(x: any) => x is Cls"),
+        ("y03", "(x: any) => boolean"),
+        ("y21", "(x: unknown) => x is Cls"),
+    ];
+    let mut source = String::from(TOP_TYPE_GUARDS);
+    for (name, _) in &predicates {
+        source.push_str(&format!(
+            "export function sig_{name}() {{ return {name}; }}\n"
+        ));
+    }
+    let host = host_with(&source);
+    for (name, printed) in predicates {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
+            assert_predicate(&host, root, &format!("sig_{name}"), printed);
+        }
+    }
+}
+
+const GENERIC_GUARDS: &str = r#"
+export interface Foo { kind: "foo"; n: number }
+declare function isFoo(x: unknown): x is Foo;
+declare function isArr(x: any): x is any[];
+declare function isStr(x: unknown): x is string;
+export function g01<T>(x: T | Foo) { return isFoo(x); }
+export function g01v<T>(x: T | Foo) { if (isFoo(x)) { return x; } throw 0; }
+export function g01e<T>(x: T | Foo) { if (!isFoo(x)) { return x; } throw 0; }
+export function g02<T>(x: T | T[]) { if (isArr(x)) { return x; } throw 0; }
+export function g03<T>(x: T | T[]) { if (!isArr(x)) { return x; } throw 0; }
+export function g02p<T>(x: T | T[]) { return isArr(x); }
+export function g04<T>(x: T) { return isArr(x); }
+export function g05<T>(x: T) { if (isArr(x)) { return x; } throw 0; }
+export function g05e<T>(x: T) { if (!isArr(x)) { return x; } throw 0; }
+export function g06<T extends string | number[]>(x: T) { return isArr(x); }
+export function g07<T extends string | number[]>(x: T) { if (isArr(x)) { return x; } throw 0; }
+export function g07e<T extends string | number[]>(x: T) { if (!isArr(x)) { return x; } throw 0; }
+export function g08<T extends object>(x: T) { if (isFoo(x)) { return x; } throw 0; }
+export function g09<T extends Foo>(x: T) { return isFoo(x); }
+export function g09v<T extends Foo>(x: T) { if (isFoo(x)) { return x; } throw 0; }
+export function g11<T extends string | number>(x: T) { if (isStr(x)) { return x; } throw 0; }
+export function g11p<T extends string | number>(x: T) { return isStr(x); }
+export function g12<T>(x: T | string) { if (isStr(x)) { return x; } throw 0; }
+export function g12e<T>(x: T | string) { if (!isStr(x)) { return x; } throw 0; }
+export function g13<T extends string>(x: T | number) { if (isStr(x)) { return x; } throw 0; }
+export function g14<T>(x: T | undefined) { if (isFoo(x)) { return x; } throw 0; }
+export function c15<T>(x: T, g: (v: unknown) => v is T[]) { if (g(x)) return x; throw 0; }
+"#;
+
+/// A predicate narrows a type parameter through its constraint
+/// (`getNarrowedType`'s instantiable reading): an arm assignable to the
+/// target survives (`T[]` under `x is any[]`; a `T extends Foo` under `x
+/// is Foo`, unchanged there, so no predicate is inferred); failing that
+/// the target itself when another arm admits it (`string` from `T |
+/// string`); failing that each type-parameter arm whose constraint admits
+/// the target becomes their intersection (`T & any[]`, `T & Foo` beside a
+/// dropped `undefined`); and the false edge keeps what is not assignable
+/// to the target. Measured on 7.0.2, identically without
+/// `strictNullChecks` (each function's `.d.ts` line): `g01v` `Foo`, `g01e`
+/// `T`, `g02` `T[]`, `g03` `T`, `g05` and `g07` `T & any[]`, `g05e` and
+/// `g07e` `T`, `g08` `T & Foo`, `g09v` `T`, `g11` `T & string`, `g12`
+/// `string`, `g12e` `T`, `g13` `T`, `g14` `T & Foo`, `c15` `T & T[]`; the
+/// predicates `x is Foo` (`g01`), `x is T[]` (`g02p`), `x is T & any[]`
+/// (`g04`, `g06`), `x is T & string` (`g11p`) and none for `g09`. The
+/// print grammar spells a type parameter as a name, so the rows pin the
+/// rendered node.
+#[test]
+fn a_type_parameter_narrows_through_its_constraint() {
+    let rows = [
+        ("g01v", "DeclRef(Foo)"),
+        ("g01e", "TypeParam(T)"),
+        ("g02", "Array(TypeParam(T))"),
+        ("g03", "TypeParam(T)"),
+        ("g05", "Intersection(TypeParam(T) & Array(any))"),
+        ("g05e", "TypeParam(T)"),
+        ("g07", "Intersection(TypeParam(T) & Array(any))"),
+        ("g07e", "TypeParam(T)"),
+        ("g08", "Intersection(TypeParam(T) & DeclRef(Foo))"),
+        ("g09v", "TypeParam(T)"),
+        ("g11", "Intersection(TypeParam(T) & string)"),
+        ("g12", "string"),
+        ("g12e", "TypeParam(T)"),
+        ("g13", "TypeParam(T)"),
+        ("g14", "Intersection(TypeParam(T) & DeclRef(Foo))"),
+        ("c15", "Intersection(TypeParam(T) & Array(TypeParam(T)))"),
+    ];
+    let predicates = [
+        (
+            "g01",
+            "{ (Union(TypeParam(T) | DeclRef(Foo))) => x is DeclRef(Foo) }",
+        ),
+        (
+            "g02p",
+            "{ (Union(TypeParam(T) | Array(TypeParam(T)))) => x is Array(TypeParam(T)) }",
+        ),
+        (
+            "g04",
+            "{ (TypeParam(T)) => x is Intersection(TypeParam(T) & Array(any)) }",
+        ),
+        (
+            "g06",
+            "{ (TypeParam(T)) => x is Intersection(TypeParam(T) & Array(any)) }",
+        ),
+        ("g09", "{ (TypeParam(T)) => boolean }"),
+        (
+            "g11p",
+            "{ (TypeParam(T)) => x is Intersection(TypeParam(T) & string) }",
+        ),
+    ];
+    let mut source = String::from(GENERIC_GUARDS);
+    for (name, _) in &predicates {
+        source.push_str(&format!(
+            "export function sig_{name}() {{ return {name}; }}\n"
+        ));
+    }
+    let host = host_with(&source);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, rendered) in rows {
+            assert_renders(&host, root, function, rendered);
+        }
+        for (function, rendered) in predicates {
+            assert_renders(&host, root, &format!("sig_{function}"), rendered);
+        }
+    }
 }

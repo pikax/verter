@@ -7698,6 +7698,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(identity)
     }
 
+    /// Whether `identity` is the builtin-sentinel `Function` carrier the
+    /// lowering fast path interns for an unshadowed global `Function`
+    /// reference.
+    pub(super) fn is_function_global_identity(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        matches!(
+            self.runtime_nominal_identity(identity),
+            Some(crate::intrinsic_registry::RuntimeNominal::Function)
+        )
+    }
+
     /// Whether `identity` is the builtin-sentinel `Promise` carrier
     /// identity the lowering fast path interns for an unshadowed global
     /// `Promise<...>` reference.
