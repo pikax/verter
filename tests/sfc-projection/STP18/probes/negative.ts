@@ -1,5 +1,5 @@
 // Negative parent probe for the STP18 component-use products. Everything
-// from the `__VerterUseConstructor` declaration on is the component-use
+// from the `__VerterUseOpenArgs` declaration on is the component-use
 // product rendered from the template below (pinned by the Rust test
 // `probe_fixtures_are_the_rendered_products`).
 //
@@ -25,14 +25,20 @@ declare function log(value: string): void;
 declare function count(value: number): void;
 declare const handlers: { onChange?: (value: number) => void } | undefined;
 
-declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: P & Record<string, unknown>) => I;
+type __VerterUseOpenArgs<A> = A extends readonly any[] ? (number extends A["length"] ? (0 extends 1 & A[number] ? true : false) : false) : false;
+type __VerterUseContract<C> = C extends abstract new (...args: infer A) => infer I ? (__VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : C) : C) : unknown;
+type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P) & Record<string, unknown>;
+type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };
+declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;
+declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;
+declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X>;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
 type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;
 type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;
 type __VerterUseModel<I, K extends PropertyKey> = NonNullable<__VerterUseProp<I, K>> extends (value: infer V, ...rest: any[]) => any ? V : unknown;
-const __VerterUse_9d2b62cd64d42047 = new (__VerterUseConstructor(Table))({ "rows": (rows), "project": ((row) => row.name), "kind": "list", "onChange": (log) });
+const __VerterUse_9d2b62cd64d42047 = new (__VerterUseComponent(Table, __VerterUseConstructor(Table)))({ "rows": (rows), "project": ((row) => row.name), "kind": "list", "onChange": (log) });
 const __VerterUse_9d2b62cd64d42047_check0: __VerterUseListener<typeof __VerterUse_9d2b62cd64d42047, "onChange"> = (count);
-const __VerterUse_5caed740157a2dee = new (__VerterUseConstructor(Table))({ "rows": (rows), "project": ((row) => row.name), "kind": "list" });
+const __VerterUse_5caed740157a2dee = new (__VerterUseComponent(Table, __VerterUseConstructor(Table)))({ "rows": (rows), "project": ((row) => row.name), "kind": "list" });
 const __VerterUse_5caed740157a2dee_check0: __VerterUseListener<typeof __VerterUse_5caed740157a2dee, "onChangeOnce", "onChange"> = (count);
-const __VerterUse_116e8eb456753747 = new (__VerterUseConstructor(Table))({ "rows": (rows), "project": ((row) => row.name), "kind": "list", "onChange": (log) });
+const __VerterUse_116e8eb456753747 = new (__VerterUseComponent(Table, __VerterUseConstructor(Table)))({ "rows": (rows), "project": ((row) => row.name), "kind": "list", "onChange": (log) });
 const __VerterUse_116e8eb456753747_check0: __VerterUseListener<typeof __VerterUse_116e8eb456753747, "onChange"> = (handlers?.onChange);
