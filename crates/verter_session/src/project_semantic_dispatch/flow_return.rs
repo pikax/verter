@@ -6388,14 +6388,17 @@ fn expression_write_tree(
             SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
                 walk(operand, out)
             }
-            SliceExpr::Call(SliceCall::Nested(function_value), _) => {
-                walk(function_value, out);
-            }
-            SliceExpr::Call(
-                SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee),
-                _,
-            ) => {
-                walk(callee, out);
+            SliceExpr::Call(call, _, arguments) => {
+                match call {
+                    SliceCall::Nested(function_value) => walk(function_value, out),
+                    SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee) => {
+                        walk(callee, out)
+                    }
+                    _ => {}
+                }
+                for argument in arguments.iter() {
+                    walk(argument, out);
+                }
             }
             _ => {}
         }
@@ -14415,7 +14418,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         node: SemanticNodeId,
     ) -> Option<&FreshCallReturn> {
         match expr {
-            crate::flow_slice_content::SliceExpr::Call(_, site) => {
+            crate::flow_slice_content::SliceExpr::Call(_, site, _) => {
                 let span = site.span();
                 self.call_fresh_literal_returns
                     .iter()
@@ -17727,13 +17730,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // type-parameter clause, so no arm below can hand a callee's
             // return back to this frame untouched by accident — only by
             // asking for `own_frame_binder` by name.
-            crate::flow_slice_content::SliceExpr::Call(call, site) => {
+            crate::flow_slice_content::SliceExpr::Call(call, site, arguments) => {
                 // A call is a throw point: an enclosing `try`'s catch /
                 // finally can be entered from HERE, with the state as it
                 // stands BEFORE the call (an enclosing write has not
                 // applied yet — exactly the checker's antecedent).
                 self.capture_throw_point();
-                match self.eval_call(call, *site) {
+                match self.eval_call(call, *site, arguments) {
                     Positional::Value(value) => Positional::Value(value.into_node()),
                     Positional::Hold => Positional::Hold,
                     Positional::Unmodeled => Positional::Unmodeled,
@@ -18013,6 +18016,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         callee: SemanticNodeId,
         site: crate::flow_slice_content::SliceCallSite,
+        arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Option<Positional<CallValue>> {
         let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
             return Some(self.degraded_unrepresentable_callee());
@@ -18028,7 +18032,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return Some(self.degraded_unrepresentable_callee());
             };
             let binding = self.indexed_argument_binding(*root);
-            let Some(ty) = self.eval_indexed_call_argument(&argument.expression, &binding) else {
+            // An argument that is itself a call evaluates through this
+            // frame's call carrier, against the frame's bindings: a hold
+            // on its callee holds this call too.
+            let evaluated = match (&argument.expression, arguments.get(ordinal)) {
+                (verter_type_expr::IndexedValueExpression::Call(_), Some(lowered)) => {
+                    match self.eval_expr(lowered) {
+                        Positional::Value(node) => Some(node),
+                        Positional::Hold => return Some(Positional::Hold),
+                        Positional::Unmodeled => None,
+                    }
+                }
+                _ => self.eval_indexed_call_argument(&argument.expression, &binding),
+            };
+            let Some(ty) = evaluated else {
                 // An argument this substrate cannot type leaves
                 // applicability without its evidence: the executor
                 // refuses as surely, and degrading here is the same
@@ -18174,10 +18191,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         call: &crate::flow_slice_content::SliceCall,
         site: crate::flow_slice_content::SliceCallSite,
+        arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Positional<CallValue> {
         let undecided_before = self.dispatch.dispatch_txn.borrow().call.undecided_relations;
         let degradation_before = self.degradation;
-        let value = self.eval_call_value(call, site);
+        let value = self.eval_call_value(call, site, arguments);
         // A call whose evaluation minted the frame's FIRST degradation
         // did not decide its occurrence (an already-degraded frame never
         // seals, so evidence accuracy past the first degradation cannot
@@ -18207,6 +18225,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         call: &crate::flow_slice_content::SliceCall,
         site: crate::flow_slice_content::SliceCallSite,
+        arguments: &crate::flow_slice_content::SliceCallArguments,
     ) -> Positional<CallValue> {
         let graph = self.dispatch.graph();
         match call {
@@ -18334,7 +18353,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // this rail would publish without it — there is no
                     // lone-signature read to fall back to.
                     return self
-                        .eval_call_via_resolve_call(callee, site)
+                        .eval_call_via_resolve_call(callee, site, arguments)
                         .unwrap_or_else(|| self.degraded_unrepresentable_callee());
                 }
                 let source = prepared.as_ref().and_then(|prepared| {
@@ -18399,7 +18418,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     && (site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
                 {
                     if let Some(callee) = self.direct_callee_value_node(target) {
-                        if let Some(value) = self.eval_call_via_resolve_call(callee, site) {
+                        if let Some(value) =
+                            self.eval_call_via_resolve_call(callee, site, arguments)
+                        {
                             return value;
                         }
                     }
@@ -18594,7 +18615,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
-                    if let Some(value) = self.eval_call_via_resolve_call(node, site) {
+                    if let Some(value) = self.eval_call_via_resolve_call(node, site, arguments) {
                         return value;
                     }
                     if overloaded {
@@ -18736,7 +18757,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // nothing that worked can regress. An undecided executor
                 // (`None`) keeps the rail's own read below.
                 if frame_rooted {
-                    if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                    if let Some(value) =
+                        self.eval_call_via_resolve_call(callee_node, site, arguments)
+                    {
                         return value;
                     }
                 }
@@ -18750,7 +18773,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
-                    if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                    if let Some(value) =
+                        self.eval_call_via_resolve_call(callee_node, site, arguments)
+                    {
                         return value;
                     }
                     if overloaded {
@@ -18782,7 +18807,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         None => read,
                     };
                 }
-                if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;
                 }
                 self.call_return_of_callee_node(callee_node, site)
@@ -18800,7 +18825,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
-                self.eval_call_via_resolve_call(constructor, site)
+                self.eval_call_via_resolve_call(constructor, site, arguments)
                     .unwrap_or_else(|| self.degraded_unrepresentable_callee())
             }
             crate::flow_slice_content::SliceCall::TaggedTemplate(tag) => {
@@ -18821,7 +18846,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Ok((call_sigs, construct_sigs))
                             if call_sigs.len() + construct_sigs.len() > 1
                     );
-                    if let Some(value) = self.eval_call_via_resolve_call(tag, site) {
+                    if let Some(value) = self.eval_call_via_resolve_call(tag, site, arguments) {
                         return value;
                     }
                     if overloaded {

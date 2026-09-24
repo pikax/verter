@@ -1204,8 +1204,10 @@ pub enum SliceExpr {
     /// The [`SliceCallSite`] rides on the variant rather than inside
     /// [`SliceCall`] because it is what EVERY form needs and no form
     /// owns: the callee's clause resolves against the CALL, not against
-    /// the way the callee was reached.
-    Call(SliceCall, SliceCallSite),
+    /// the way the callee was reached. So do the call's
+    /// [`SliceCallArguments`]: its arguments that are themselves calls,
+    /// lowered in this frame so they evaluate against its bindings.
+    Call(SliceCall, SliceCallSite, SliceCallArguments),
     /// An expression the leaf lowering cannot represent (its `any`
     /// fallback), including a call with an unrepresentable callee.
     SemanticAny,
@@ -1584,6 +1586,40 @@ fn authored_call_site(
         has_explicit_type_arguments,
         span,
     )
+}
+
+/// The arguments of one call that are themselves calls, lowered in the
+/// calling frame, by argument ordinal.
+///
+/// A call's arguments are otherwise parse facts its call sink re-reads
+/// from the retained snapshot and types as values. An argument that is
+/// itself a call is different: its callee, its own arguments and the
+/// bindings they read belong to THIS frame — `id(c(x))` reads the frame's
+/// `x` — so the sink evaluates it through the frame's own call carrier,
+/// as the checker checks an argument expression in the scope it appears
+/// in. Empty when no argument is a call. An immediately invoked function
+/// and a spread element are never lowered here; the sink types them as
+/// it types any other argument.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SliceCallArguments(Arc<[Option<SliceExpr>]>);
+
+impl SliceCallArguments {
+    /// A call none of whose arguments is lowered in the frame.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The frame-lowered argument at `ordinal`, when it is a call.
+    #[must_use]
+    pub fn get(&self, ordinal: usize) -> Option<&SliceExpr> {
+        self.0.get(ordinal).and_then(Option::as_ref)
+    }
+
+    /// Every frame-lowered argument, in argument order.
+    pub fn iter(&self) -> impl Iterator<Item = &SliceExpr> {
+        self.0.iter().flatten()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8754,6 +8790,232 @@ impl<'a> Lowerer<'a> {
             .then_some(SliceStatement::ThrowPoint)
     }
 
+    /// The call carrier of one call expression that is not an immediately
+    /// invoked function — its callee resolved through the frame's one
+    /// lexical binding authority, then the file-level callee rails. Its
+    /// frame-lowered arguments are attached by [`Self::with_call_arguments`].
+    fn lower_call_expression(
+        &mut self,
+        expr: &Expression<'_>,
+        call: &oxc_ast::ast::CallExpression<'_>,
+        mode: ExprMode,
+    ) -> SliceExpr {
+        if let Expression::Identifier(callee) = &call.callee {
+            let name = callee.name.as_str();
+            // ONE lexical binding authority (the frame's
+            // skeleton), then the file-level callee rails.
+            match self.classify_occurrence(callee.span) {
+                // A hoisted nested function declaration shadows
+                // every outer same-name callee; exact recovery of
+                // its own return is not implemented (fail closed).
+                NameBinding::NestedFunction => {
+                    return SliceExpr::Call(
+                        SliceCall::LocalFunctionShadow,
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    )
+                }
+                NameBinding::Unmodeled => return SliceExpr::UnmodeledBinding,
+                // A parameter or local SHADOWS the file-level
+                // declaration: the call goes through the binding's
+                // signature, never a flow obligation edge.
+                NameBinding::Param(ordinal) => {
+                    return SliceExpr::Call(
+                        SliceCall::OnBinding {
+                            binding: match self.binding_at(callee.span) {
+                                Some(binding) => binding,
+                                None => return SliceExpr::UnmodeledBinding,
+                            },
+                            param: Some(ordinal),
+                            name: Arc::from(name),
+                            captured: false,
+                        },
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    )
+                }
+                NameBinding::Local(param) => {
+                    return SliceExpr::Call(
+                        SliceCall::OnBinding {
+                            binding: match self.binding_at(callee.span) {
+                                Some(binding) => binding,
+                                None => return SliceExpr::UnmodeledBinding,
+                            },
+                            param,
+                            name: Arc::from(name),
+                            captured: false,
+                        },
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    )
+                }
+                NameBinding::Captured => {
+                    return SliceExpr::Call(
+                        SliceCall::OnBinding {
+                            binding: match self.binding_at(callee.span) {
+                                Some(binding) => binding,
+                                None => return SliceExpr::UnmodeledBinding,
+                            },
+                            param: None,
+                            name: Arc::from(name),
+                            captured: true,
+                        },
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    )
+                }
+                NameBinding::Free => {}
+            }
+            // A bare-identifier call to the function itself — a
+            // direct same-slot recursion hold.
+            if Some(name) == self.self_name {
+                return SliceExpr::Call(
+                    SliceCall::DirectSelf,
+                    call_site(call),
+                    SliceCallArguments::none(),
+                );
+            }
+            // A bare-identifier callee the function index resolves
+            // EXACTLY (same-file served function position, the
+            // trailing implementation of its overload group) is a
+            // Flow obligation edge — the fixed point's mutual
+            // recursion discharges through it.
+            if let Some(direct) = self
+                .direct_calls
+                .iter()
+                .find(|direct| direct.span == call.span.into())
+            {
+                return SliceExpr::Call(
+                    SliceCall::Direct(direct.target.clone()),
+                    call_site(call),
+                    SliceCallArguments::none(),
+                );
+            }
+        }
+        // A `this.m()` callee: the member of the frame's receiver —
+        // an object literal's own method is a direct call of it.
+        if let (Some(this), Expression::StaticMemberExpression(member)) =
+            (self.this.clone(), unwrap_parenthesized(&call.callee))
+        {
+            if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
+                (&this, this_member_path(member).as_deref())
+            {
+                return match self.object_this_member(name) {
+                    Some(ObjectThisMember::Method(target)) => SliceExpr::Call(
+                        SliceCall::Direct(target),
+                        call_site(call),
+                        SliceCallArguments::none(),
+                    ),
+                    _ => SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression),
+                };
+            }
+            if let Some(path) = this_member_path(member) {
+                return SliceExpr::Call(
+                    SliceCall::Member {
+                        receiver: Box::new(SliceExpr::This(this)),
+                        member: Arc::from(path.into_boxed_slice()),
+                    },
+                    call_site(call),
+                    SliceCallArguments::none(),
+                );
+            }
+        }
+        // A `super.m()` callee root: the base member resolves
+        // through the heritage surface. A heritage this half
+        // cannot lower keeps the rail below.
+        if let Some(member) = super_callee_static_path(&call.callee) {
+            if let Some(carrier) = self.lower_super_call_on_heritage(&member, call, mode) {
+                return carrier;
+            }
+        }
+        // The SAME root-identifier gate the leaf path takes: a
+        // non-identifier callee rooted at a frame binding
+        // (`localObj.m()`) resolves in owner scope exactly like a
+        // bare read would, so it is gated here too.
+        match self.leaf_type(expr, mode) {
+            LeafLowering::Unmodeled => SliceExpr::UnreducedCallValue,
+            // The callee could not be represented at all (an
+            // `obj[k]()` computed-member callee, say): the leaf
+            // answered a bare `any`. This IS a call with no
+            // structural arm, so it takes the same fail-closed
+            // verdict the classifier gives every other one —
+            // publishing the `any` was a fabricated value at a
+            // call position, warm and clean.
+            LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::UnreducedCallValue,
+            LeafLowering::Free(ty) => SliceExpr::Call(
+                SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr)),
+                call_site(call),
+                SliceCallArguments::none(),
+            ),
+            LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
+                inner: Box::new(SliceExpr::Call(
+                    SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr)),
+                    call_site(call),
+                    SliceCallArguments::none(),
+                )),
+                shadowed,
+            },
+        }
+    }
+
+    /// Attach `arguments`' frame-lowered calls to the call carrier
+    /// `lowered` (through a frame-shadow wrapper). A position that lowered
+    /// to anything but a call carrier has no call sink to read them.
+    fn with_call_arguments(
+        &mut self,
+        lowered: SliceExpr,
+        arguments: &[oxc_ast::ast::Argument<'_>],
+        mode: ExprMode,
+    ) -> SliceExpr {
+        match lowered {
+            SliceExpr::Call(call, site, _) => {
+                SliceExpr::Call(call, site, self.lower_call_arguments(arguments, mode))
+            }
+            SliceExpr::FrameShadowed { inner, shadowed } => SliceExpr::FrameShadowed {
+                inner: Box::new(self.with_call_arguments(*inner, arguments, mode)),
+                shadowed,
+            },
+            lowered => lowered,
+        }
+    }
+
+    /// The [`SliceCallArguments`] of one call's `arguments`: each argument
+    /// that is itself a call (through parentheses), lowered through this
+    /// frame's call carrier. An immediately invoked function, a spread
+    /// element and every other argument stay with the call sink's own
+    /// reading.
+    fn lower_call_arguments(
+        &mut self,
+        arguments: &[oxc_ast::ast::Argument<'_>],
+        mode: ExprMode,
+    ) -> SliceCallArguments {
+        let is_call =
+            |argument: &oxc_ast::ast::Argument<'_>| {
+                argument.as_expression().map(unwrap_parenthesized).is_some_and(|argument| {
+                matches!(argument, Expression::CallExpression(call)
+                    if !matches!(
+                        unwrap_parenthesized(&call.callee),
+                        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
+                    ))
+            })
+            };
+        if !arguments.iter().any(is_call) {
+            return SliceCallArguments::none();
+        }
+        let lowered: Vec<Option<SliceExpr>> = arguments
+            .iter()
+            .map(
+                |argument| match argument.as_expression().map(unwrap_parenthesized) {
+                    Some(expression @ Expression::CallExpression(_)) if is_call(argument) => {
+                        Some(self.lower_expr(expression, mode))
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        SliceCallArguments(Arc::from(lowered.into_boxed_slice()))
+    }
+
     /// Lower one expression. Parameter and in-scope local identifiers
     /// become dedicated carriers, a nested function value becomes its own
     /// frame, and a bare-identifier call to the function itself becomes
@@ -8860,165 +9122,36 @@ impl<'a> Lowerer<'a> {
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
-                SliceExpr::Call(SliceCall::Nested(Box::new(function)), call_site(call))
+                SliceExpr::Call(
+                    SliceCall::Nested(Box::new(function)),
+                    call_site(call),
+                    SliceCallArguments::none(),
+                )
             }
             // A `new` expression: the constructor is a flow value of this
             // frame, and the construction resolves at the evaluator's one
             // call sink. Its arguments are parse facts the sink re-reads
-            // from the retained snapshot, exactly like a call's.
-            Expression::NewExpression(new) => SliceExpr::Call(
-                SliceCall::Construct(Box::new(self.lower_expr(&new.callee, mode))),
-                construct_site(new),
-            ),
+            // from the retained snapshot, exactly like a call's, except
+            // the ones that are calls themselves.
+            Expression::NewExpression(new) => {
+                let constructor = self.lower_expr(&new.callee, mode);
+                SliceExpr::Call(
+                    SliceCall::Construct(Box::new(constructor)),
+                    construct_site(new),
+                    self.lower_call_arguments(&new.arguments, mode),
+                )
+            }
             // A tagged template calls its tag: the tag is a flow value of
             // this frame, and the call resolves at the same sink, with the
             // template strings as its first argument.
             Expression::TaggedTemplateExpression(tagged) => SliceExpr::Call(
                 SliceCall::TaggedTemplate(Box::new(self.lower_expr(&tagged.tag, mode))),
                 tagged_template_site(tagged),
+                SliceCallArguments::none(),
             ),
             Expression::CallExpression(call) => {
-                if let Expression::Identifier(callee) = &call.callee {
-                    let name = callee.name.as_str();
-                    // ONE lexical binding authority (the frame's
-                    // skeleton), then the file-level callee rails.
-                    match self.classify_occurrence(callee.span) {
-                        // A hoisted nested function declaration shadows
-                        // every outer same-name callee; exact recovery of
-                        // its own return is not implemented (fail closed).
-                        NameBinding::NestedFunction => {
-                            return SliceExpr::Call(SliceCall::LocalFunctionShadow, call_site(call))
-                        }
-                        NameBinding::Unmodeled => return SliceExpr::UnmodeledBinding,
-                        // A parameter or local SHADOWS the file-level
-                        // declaration: the call goes through the binding's
-                        // signature, never a flow obligation edge.
-                        NameBinding::Param(ordinal) => {
-                            return SliceExpr::Call(
-                                SliceCall::OnBinding {
-                                    binding: match self.binding_at(callee.span) {
-                                        Some(binding) => binding,
-                                        None => return SliceExpr::UnmodeledBinding,
-                                    },
-                                    param: Some(ordinal),
-                                    name: Arc::from(name),
-                                    captured: false,
-                                },
-                                call_site(call),
-                            )
-                        }
-                        NameBinding::Local(param) => {
-                            return SliceExpr::Call(
-                                SliceCall::OnBinding {
-                                    binding: match self.binding_at(callee.span) {
-                                        Some(binding) => binding,
-                                        None => return SliceExpr::UnmodeledBinding,
-                                    },
-                                    param,
-                                    name: Arc::from(name),
-                                    captured: false,
-                                },
-                                call_site(call),
-                            )
-                        }
-                        NameBinding::Captured => {
-                            return SliceExpr::Call(
-                                SliceCall::OnBinding {
-                                    binding: match self.binding_at(callee.span) {
-                                        Some(binding) => binding,
-                                        None => return SliceExpr::UnmodeledBinding,
-                                    },
-                                    param: None,
-                                    name: Arc::from(name),
-                                    captured: true,
-                                },
-                                call_site(call),
-                            )
-                        }
-                        NameBinding::Free => {}
-                    }
-                    // A bare-identifier call to the function itself — a
-                    // direct same-slot recursion hold.
-                    if Some(name) == self.self_name {
-                        return SliceExpr::Call(SliceCall::DirectSelf, call_site(call));
-                    }
-                    // A bare-identifier callee the function index resolves
-                    // EXACTLY (same-file served function position, the
-                    // trailing implementation of its overload group) is a
-                    // Flow obligation edge — the fixed point's mutual
-                    // recursion discharges through it.
-                    if let Some(direct) = self
-                        .direct_calls
-                        .iter()
-                        .find(|direct| direct.span == call.span.into())
-                    {
-                        return SliceExpr::Call(
-                            SliceCall::Direct(direct.target.clone()),
-                            call_site(call),
-                        );
-                    }
-                }
-                // A `this.m()` callee: the member of the frame's receiver —
-                // an object literal's own method is a direct call of it.
-                if let (Some(this), Expression::StaticMemberExpression(member)) =
-                    (self.this.clone(), unwrap_parenthesized(&call.callee))
-                {
-                    if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
-                        (&this, this_member_path(member).as_deref())
-                    {
-                        return match self.object_this_member(name) {
-                            Some(ObjectThisMember::Method(target)) => {
-                                SliceExpr::Call(SliceCall::Direct(target), call_site(call))
-                            }
-                            _ => {
-                                SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
-                            }
-                        };
-                    }
-                    if let Some(path) = this_member_path(member) {
-                        return SliceExpr::Call(
-                            SliceCall::Member {
-                                receiver: Box::new(SliceExpr::This(this)),
-                                member: Arc::from(path.into_boxed_slice()),
-                            },
-                            call_site(call),
-                        );
-                    }
-                }
-                // A `super.m()` callee root: the base member resolves
-                // through the heritage surface. A heritage this half
-                // cannot lower keeps the rail below.
-                if let Some(member) = super_callee_static_path(&call.callee) {
-                    if let Some(carrier) = self.lower_super_call_on_heritage(&member, call, mode) {
-                        return carrier;
-                    }
-                }
-                // The SAME root-identifier gate the leaf path takes: a
-                // non-identifier callee rooted at a frame binding
-                // (`localObj.m()`) resolves in owner scope exactly like a
-                // bare read would, so it is gated here too.
-                match self.leaf_type(expr, mode) {
-                    LeafLowering::Unmodeled => SliceExpr::UnreducedCallValue,
-                    // The callee could not be represented at all (an
-                    // `obj[k]()` computed-member callee, say): the leaf
-                    // answered a bare `any`. This IS a call with no
-                    // structural arm, so it takes the same fail-closed
-                    // verdict the classifier gives every other one —
-                    // publishing the `any` was a fabricated value at a
-                    // call position, warm and clean.
-                    LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::UnreducedCallValue,
-                    LeafLowering::Free(ty) => SliceExpr::Call(
-                        SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr)),
-                        call_site(call),
-                    ),
-                    LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                        inner: Box::new(SliceExpr::Call(
-                            SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr)),
-                            call_site(call),
-                        )),
-                        shadowed,
-                    },
-                }
+                let lowered = self.lower_call_expression(expr, call, mode);
+                self.with_call_arguments(lowered, &call.arguments, mode)
             }
             // A sequence whose LAST operand is its structural value
             // provider: a NARROWABLE REFERENCE (`(touch(), u)`) or a CALL
@@ -9532,6 +9665,7 @@ impl<'a> Lowerer<'a> {
                 static_side: heritage_access.static_side,
             },
             call_site(call),
+            SliceCallArguments::none(),
         );
         Some(if shadowed.is_empty() {
             call_expr
@@ -9966,6 +10100,7 @@ impl<'a> Lowerer<'a> {
             Some(ObjectThisMember::Getter(target)) => SliceExpr::Call(
                 SliceCall::Direct(target),
                 SliceCallSite::new(0, false, false, span.into()),
+                SliceCallArguments::none(),
             ),
             _ => return gap,
         };

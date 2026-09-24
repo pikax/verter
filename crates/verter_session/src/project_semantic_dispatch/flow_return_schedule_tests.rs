@@ -510,35 +510,50 @@ fn a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack() {
     assert_tagged_value(&second, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
 }
 
-/// The second request's answer for `second` over a warm chain of `levels`
-/// local-arrow levels: whether it answered, its partial rails, and how many
-/// warm candidates it admitted — with the first request's `witness`.
-fn warm_local_chain_second(levels: usize) -> (Outcome, bool, bool, PartialReasonSet, usize) {
-    on_stack(8 << 20, move || {
-        let mut source = local_arrow_chain(levels);
-        source.push_str(&format!(
-            "export function second(v: boolean) {{ return l{}(v); }}\n",
-            levels - 1
-        ));
-        let host = host_with(&[(PATH, source.as_str())]);
-        let warm = with_dispatch(&host, |dispatch| {
-            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
-        });
-        with_dispatch(&host, |dispatch| {
-            let key = key_of(dispatch, PATH, "second");
-            let read = dispatch
-                .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-            let candidates = dispatch
-                .graph()
-                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
-            (
-                warm,
-                matches!(read.value, QueryResult::Value(_)),
-                read.result_is_partial && read.cache_suppress,
-                read.partial_reasons,
-                candidates,
-            )
-        })
+/// The second request over a warm chain of `levels` local-arrow levels —
+/// the first request evaluates `witness`, the second `second(v: boolean)`,
+/// with the schedule on or off for the second request: the first request's
+/// answer, the second's value (projected only when it is one), whether it
+/// ended partial and suppressed, its partial rails, how many warm
+/// candidates it admitted, and the connected work it charged.
+struct WarmSecond {
+    warm: Outcome,
+    value: Option<Outcome>,
+    partial: bool,
+    reasons: PartialReasonSet,
+    candidates: usize,
+    work: usize,
+}
+
+fn warm_local_chain_second(levels: usize, scheduled: bool) -> WarmSecond {
+    let mut source = local_arrow_chain(levels);
+    source.push_str(&format!(
+        "export function second(v: boolean) {{ return l{}(v); }}\n",
+        levels - 1
+    ));
+    let host = host_with(&[(PATH, source.as_str())]);
+    let warm = with_dispatch(&host, |dispatch| {
+        eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+    });
+    let _recursive = (!scheduled).then(disable_flow_return_schedule_for_tests);
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, PATH, "second");
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        let work = dispatch.connected_demand.work_used_for_tests();
+        let candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        let value =
+            matches!(read.value, QueryResult::Value(_)).then(|| eval_key_on(&host, dispatch, key));
+        WarmSecond {
+            warm,
+            value,
+            partial: read.result_is_partial && read.cache_suppress,
+            reasons: read.partial_reasons,
+            candidates,
+            work,
+        }
     })
 }
 
@@ -548,10 +563,10 @@ fn warm_local_chain_second(levels: usize) -> (Outcome, bool, bool, PartialReason
 /// `CONNECTED_QUERY_DEPTH_LIMIT`, partial and never admitted.
 ///
 /// The witness is a new instantiation of a warm chain whose every level
-/// calls the next through a local arrow function: the schedule reads a
-/// forwarded instantiation only through a direct call, so each level nests
-/// one evaluation natively. Below the bound (16 levels) it answers; past
-/// it (256 levels, which without the bound overflows the 8 MiB production
+/// calls the next through a local arrow function, evaluated with the
+/// schedule off, so each level nests one evaluation natively with no query
+/// boundary between them. Below the bound (16 levels) it answers; past it
+/// (256 levels, which without the bound overflows the 8 MiB production
 /// worker stack in an unoptimized build) it is refused, typed.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, `--strict`): `second(v: boolean)`
@@ -559,13 +574,22 @@ fn warm_local_chain_second(levels: usize) -> (Outcome, bool, bool, PartialReason
 /// refusal is a typed gap, not an answer.
 #[test]
 fn an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal() {
-    let (warm, answered, partial, reasons, candidates) = warm_local_chain_second(16);
-    assert_tagged_value(&warm, &[number(), string()]);
+    let short = on_stack(8 << 20, || warm_local_chain_second(16, false));
+    assert_tagged_value(&short.warm, &[number(), string()]);
     assert!(
-        answered && !partial && candidates == 1,
-        "a 16-level chain stays within the bound and answers: {reasons:?}"
+        short.value.is_some() && !short.partial && short.candidates == 1,
+        "a 16-level chain stays within the bound and answers: {:?}",
+        short.reasons
     );
-    let (warm, answered, partial, reasons, candidates) = warm_local_chain_second(256);
+    let WarmSecond {
+        warm,
+        value,
+        partial,
+        reasons,
+        candidates,
+        ..
+    } = on_stack(8 << 20, || warm_local_chain_second(256, false));
+    let answered = value.is_some();
     assert_tagged_value(&warm, &[number(), string()]);
     assert!(
         !answered && partial && candidates == 0,
@@ -575,5 +599,407 @@ fn an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal() {
     assert!(
         reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
         "the refusal is the depth rail's: {reasons:?}"
+    );
+}
+
+/// A chain whose every level wraps its callee's call in a generic `id`:
+/// `cN<T>(x: T) { return id(c(N-1)(x)); }` — each level's callee is called
+/// inside another call's argument.
+fn nested_argument_chain(levels: usize) -> String {
+    let mut source = "function id<T>(x: T) { return x; }\n\
+                      function c0<T>(x: T) { return { v: x, tag: \"c\" as const }; }\n"
+        .to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function c{level}<T>(x: T) {{ return id(c{}(x)); }}\n",
+            level - 1
+        ));
+    }
+    source.push_str(&format!(
+        "export function witness(v: number | string) {{ return c{}(v); }}\n",
+        levels - 1
+    ));
+    source
+}
+
+/// A chain whose every level reads its callee's return through a TYPE
+/// position: `tN(x: number) { let r!: ReturnType<typeof t(N-1)>; return r; }`.
+fn type_position_chain(levels: usize) -> String {
+    let mut source =
+        "function t0(x: number) { return { v: x, tag: \"c\" as const }; }\n".to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function t{level}(x: number) {{ let r!: ReturnType<typeof t{}>; return r; }}\n",
+            level - 1
+        ));
+    }
+    source.push_str(&format!(
+        "export function witness(v: number) {{ return t{}(v); }}\n",
+        levels - 1
+    ));
+    source
+}
+
+/// One cold read of a function: whether its answer, reduced to the
+/// altitude the checker prints at, is the checker's print; whether it ended
+/// partial; its partial rails; the warm candidates it admitted; and the
+/// connected work the evaluation charged before any reduction.
+struct ColdRead {
+    printed: Result<(), String>,
+    partial: bool,
+    reasons: PartialReasonSet,
+    candidates: usize,
+    work: usize,
+}
+
+/// Read `name` cold and compare its answer with the checker's print
+/// `expected` through the shared checker-syntax projection.
+fn cold_read(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    path: &str,
+    name: &str,
+    expected: &str,
+) -> ColdRead {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    let key = key_of(dispatch, path, name);
+    let read =
+        dispatch.execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+    let work = dispatch.connected_demand.work_used_for_tests();
+    let candidates = dispatch
+        .graph()
+        .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+    let printed = match &read.value {
+        QueryResult::Value(SemanticQueryValue::FlowReturn(result))
+            if result.degradation().is_none() =>
+        {
+            let reduced = dispatch
+                .normalize_node_keeping_declaration_refs_for_tests(
+                    result.return_type(),
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                )
+                .into_complete_node();
+            let parsed = checker_syntax::parse(expected)
+                .unwrap_or_else(|error| panic!("`{expected}` must parse: {error}"));
+            match reduced {
+                Some(node) if checker_syntax::matches_node(dispatch, node, &parsed, 0) => Ok(()),
+                Some(node) => Err(format!(
+                    "`{name}`: expected `{expected}`, measured `{}`",
+                    render_node(dispatch, node, 0)
+                )),
+                None => Err(format!("`{name}`: the reduction did not complete")),
+            }
+        }
+        other => Err(format!("`{name}` answered no clean value: {other:?}")),
+    };
+    ColdRead {
+        printed,
+        partial: read.result_is_partial,
+        reasons: read.partial_reasons,
+        candidates,
+        work,
+    }
+}
+
+/// `name` in a fresh host holding `source` alone, read cold.
+fn cold_read_of(source: &str, name: &str, expected: &str) -> ColdRead {
+    let host = host_with(&[(PATH, source)]);
+    with_dispatch(&host, |dispatch| cold_read(dispatch, PATH, name, expected))
+}
+
+/// A clean, warm-admitted answer equal to the checker's print.
+#[track_caller]
+fn assert_answers_as_the_checker(read: &ColdRead) {
+    if let Err(message) = &read.printed {
+        panic!("{message} (rails: {:?})", read.reasons);
+    }
+    assert!(
+        !read.partial && read.candidates == 1,
+        "a clean, admitted answer (partial: {}, candidates: {}, rails: {:?})",
+        read.partial,
+        read.candidates,
+        read.reasons
+    );
+}
+
+/// The connected work one more level adds to a chain at each of `levels`.
+fn work_per_level(chain: ChainSource, expected: &str, levels: &[usize]) -> Vec<usize> {
+    levels
+        .iter()
+        .map(|&levels| {
+            let shorter = cold_read_of(&chain(levels), "witness", expected);
+            let longer = cold_read_of(&chain(levels + 1), "witness", expected);
+            assert_answers_as_the_checker(&shorter);
+            assert_answers_as_the_checker(&longer);
+            longer.work - shorter.work
+        })
+        .collect()
+}
+
+/// The smallest connected-query depth cap under which a chain's witness
+/// answers the checker's print.
+fn depth_answering(source: &str, expected: &str) -> u16 {
+    (1..=MAX_CONNECTED_QUERY_DEPTH)
+        .find(|&depth| {
+            let host = host_with(&[(PATH, source)]);
+            with_dispatch(&host, |dispatch| {
+                dispatch.set_connected_limits_for_tests(MAX_CONNECTED_PROJECTION_WORK, depth);
+                cold_read(dispatch, PATH, "witness", expected)
+                    .printed
+                    .is_ok()
+            })
+        })
+        .expect("the witness answers under the production depth cap")
+}
+
+/// `witness` over `source`, read cold under the connected-query depth cap
+/// `depth`.
+fn witness_under_depth(source: &str, expected: &str, depth: u16) -> ColdRead {
+    let host = host_with(&[(PATH, source)]);
+    with_dispatch(&host, |dispatch| {
+        dispatch.set_connected_limits_for_tests(MAX_CONNECTED_PROJECTION_WORK, depth);
+        cold_read(dispatch, PATH, "witness", expected)
+    })
+}
+
+/// A call nested inside another call's argument is evaluated in the frame
+/// it is written in: its callee, its own arguments and the bindings they
+/// read are the frame's, and its value takes the frame's call carrier.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`, identical under all four `strictNullChecks` x
+/// `noImplicitAny` settings):
+///
+/// | function | declared return |
+/// |---|---|
+/// | `witness` over the four-level `id(c(N-1)(x))` chain | `{ v: string \| number; tag: "c"; }` |
+/// | `nested(v: number \| string)` = `id(id(id(c0(v))))` | `{ v: string \| number; tag: "c"; }` |
+/// | `w1()` = `id(g())`, `g()` returning `"a"` | `string` |
+/// | `w2()` = `id(gc())`, `gc()` returning `"a" as const` | `"a"` |
+/// | `w3(n: number)` = `id(h(n))`, `h` returning `"a"` or `"b"` | `"a" \| "b"` |
+/// | `w4()` = `const r = id(g()); return r;` | `string` |
+/// | `w5(n: number)` = `pair(num(n), id(n))` | `{ a: number; b: number; }` |
+/// | `w6(s: string)` = `id(id(id(s)))` | `string` |
+/// | `w7(n?: number)` = `id(num(n ?? 1))` | `number` |
+///
+/// Evaluated in the file's owner scope instead, the frame's `x`, `v`, `n`
+/// and `s` are unbound, so `v` answered a semantic miss.
+#[test]
+fn a_call_in_another_calls_argument_evaluates_in_its_own_frame() {
+    assert_answers_as_the_checker(&cold_read_of(
+        &nested_argument_chain(4),
+        "witness",
+        "{ v: string | number; tag: \"c\"; }",
+    ));
+    const SOURCE: &str = "\
+function id<T>(x: T) { return x; }\n\
+function pair<A, B>(a: A, b: B) { return { a, b }; }\n\
+function c0<T>(x: T) { return { v: x, tag: \"c\" as const }; }\n\
+function g() { return \"a\"; }\n\
+function gc() { return \"a\" as const; }\n\
+function h(n: number) { return n > 0 ? \"a\" : \"b\"; }\n\
+function num(n: number) { return n; }\n\
+export function nested(v: number | string) { return id(id(id(c0(v)))); }\n\
+export function w1() { return id(g()); }\n\
+export function w2() { return id(gc()); }\n\
+export function w3(n: number) { return id(h(n)); }\n\
+export function w4() { const r = id(g()); return r; }\n\
+export function w5(n: number) { return pair(num(n), id(n)); }\n\
+export function w6(s: string) { return id(id(id(s))); }\n\
+export function w7(n?: number) { return id(num(n ?? 1)); }\n";
+    for (name, expected) in [
+        ("nested", "{ v: string | number; tag: \"c\"; }"),
+        ("w1", "string"),
+        ("w2", "\"a\""),
+        ("w3", "\"a\" | \"b\""),
+        ("w4", "string"),
+        ("w5", "{ a: number; b: number; }"),
+        ("w6", "string"),
+        ("w7", "number"),
+    ] {
+        assert_answers_as_the_checker(&cold_read_of(SOURCE, name, expected));
+    }
+}
+
+/// A 200-level chain whose every edge is a call inside another call's
+/// argument answers on the default test stack, under the connected-query
+/// depth cap a three-level chain needs: the schedule evaluates each
+/// argument's callee bottom-up, exactly as it does a direct call's.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings): `witness` is `{ v: string | number; tag:
+/// "c"; }` over the 200-level chain.
+///
+/// Left to the recursive path, each level nests two connected queries and
+/// the depth guard refuses the chain from twelve levels.
+#[test]
+fn a_200_level_nested_argument_chain_answers_on_the_default_stack() {
+    let expected = "{ v: string | number; tag: \"c\"; }";
+    let depth = depth_answering(&nested_argument_chain(3), expected);
+    assert_answers_as_the_checker(&witness_under_depth(
+        &nested_argument_chain(200),
+        expected,
+        depth,
+    ));
+}
+
+/// The nested-argument chain's connected work is linear in its length: one
+/// more level costs the same at 16, 64 and 200 levels.
+///
+/// Oracle: as for
+/// [`a_200_level_nested_argument_chain_answers_on_the_default_stack`], at
+/// every length.
+#[test]
+fn a_nested_argument_chain_costs_the_same_work_per_level() {
+    let per_level = work_per_level(
+        nested_argument_chain,
+        "{ v: string | number; tag: \"c\"; }",
+        &[16, 64, 200],
+    );
+    assert!(
+        per_level.windows(2).all(|pair| pair[0] == pair[1]),
+        "work per level: {per_level:?}"
+    );
+}
+
+/// A 200-level chain whose every edge reads the callee's return through a
+/// TYPE position (`let r!: ReturnType<typeof t(N-1)>`) answers on the
+/// default test stack, under the connected-query depth cap a three-level
+/// chain needs: the schedule evaluates the function a type position's
+/// `typeof` names bottom-up, as it does a callee.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings): `witness` is `{ v: number; tag: "c"; }` over
+/// the 200-level chain.
+///
+/// Left to type lowering, each level nests two connected queries and the
+/// depth guard refuses the chain from thirteen levels.
+#[test]
+fn a_200_level_type_position_chain_answers_on_the_default_stack() {
+    let expected = "{ v: number; tag: \"c\"; }";
+    let depth = depth_answering(&type_position_chain(3), expected);
+    assert_answers_as_the_checker(&witness_under_depth(
+        &type_position_chain(200),
+        expected,
+        depth,
+    ));
+}
+
+/// The queries a cold read of `witness` over `source` dispatches, by kind.
+fn dispatched_queries(source: &str) -> std::collections::BTreeMap<&'static str, usize> {
+    use crate::project_semantic_dispatch::raise::{enable_dispatch_trace_for_test, DISPATCH_TRACE};
+    let host = host_with(&[(PATH, source)]);
+    with_dispatch(&host, |dispatch| {
+        let _trace = enable_dispatch_trace_for_test();
+        let read = cold_read(dispatch, PATH, "witness", "{ v: number; tag: \"c\"; }");
+        assert_answers_as_the_checker(&read);
+        DISPATCH_TRACE.with(|trace| {
+            let mut counts = std::collections::BTreeMap::new();
+            for kind in trace.borrow().iter() {
+                *counts.entry(*kind).or_insert(0) += 1;
+            }
+            counts
+        })
+    })
+}
+
+/// The type-position chain lowers each level's `typeof` once: one more
+/// level adds the same queries — one `TypeOf` and the `LowerLocator` it
+/// lowers the function through — at 16, 64 and 200 levels, and the
+/// schedule evaluates each level's return once, before the level that
+/// reads it.
+///
+/// The chain's connected WORK is not linear: each level's `LowerLocator`
+/// projects the function type `typeof` names, and that type's return is
+/// the level below's `ReturnType<…>` carrier, whose argument is that
+/// level's function type in turn. The view projection walks the whole
+/// nested carrier chain beneath it — a walk that grows by one level per
+/// level (about 1.5·N² units at N levels: 60,498 at 200, and the work rail
+/// refuses the chain, typed, from 418 levels). The checker resolves a
+/// `ReturnType` of a closed function type eagerly, so its chain stays
+/// flat; this is the published-carrier representation's cost, not the
+/// schedule's.
+///
+/// Oracle: as for
+/// [`a_200_level_type_position_chain_answers_on_the_default_stack`], at
+/// every length.
+#[test]
+fn a_type_position_chain_dispatches_the_same_queries_per_level() {
+    let per_level: Vec<std::collections::BTreeMap<&'static str, usize>> = [16, 64, 200]
+        .into_iter()
+        .map(|levels| {
+            let shorter = dispatched_queries(&type_position_chain(levels));
+            let longer = dispatched_queries(&type_position_chain(levels + 1));
+            longer
+                .iter()
+                .map(|(kind, count)| (*kind, count - shorter.get(kind).copied().unwrap_or(0)))
+                .collect()
+        })
+        .collect();
+    assert!(
+        per_level.windows(2).all(|pair| pair[0] == pair[1]),
+        "queries per level: {per_level:?}"
+    );
+}
+
+/// A new instantiation of a warm 200-level chain whose every level calls
+/// the next through a local arrow function answers on the default test
+/// stack: the arrow's parameter is annotated with the level's own binder,
+/// so the schedule reads the instantiation each level demands from the
+/// signatures, as it does for a direct call that forwards its binder.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings, over the same 200-level chain): `witness` is
+/// `{ v: string | number; tag: "c"; }` and `second(v: boolean)` is `{ v:
+/// boolean; tag: "c"; }`.
+///
+/// Left to the recursive path, each level nests one evaluation natively
+/// and the nesting bound refuses the chain from 24 levels.
+#[test]
+fn a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack() {
+    let second = warm_local_chain_second(200, true);
+    assert_tagged_value(&second.warm, &[number(), string()]);
+    let Some(value) = &second.value else {
+        panic!(
+            "the second instantiation answers no value (rails: {:?})",
+            second.reasons
+        );
+    };
+    assert_tagged_value(value, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
+    assert!(
+        !second.partial && second.candidates == 1,
+        "a clean, admitted answer (rails: {:?})",
+        second.reasons
+    );
+}
+
+/// A new instantiation of a warm local-arrow chain costs connected work
+/// linear in the chain's length: one more level costs the same at 16, 64
+/// and 200 levels.
+///
+/// Oracle: as for
+/// [`a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack`],
+/// at every length.
+#[test]
+fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level() {
+    let work = |levels: usize| {
+        let second = warm_local_chain_second(levels, true);
+        let Some(value) = &second.value else {
+            panic!(
+                "the {levels}-level instantiation answers no value (rails: {:?})",
+                second.reasons
+            );
+        };
+        assert_tagged_value(value, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
+        second.work
+    };
+    let per_level: Vec<usize> = [16, 64, 200]
+        .into_iter()
+        .map(|levels| work(levels + 1) - work(levels))
+        .collect();
+    assert!(
+        per_level.windows(2).all(|pair| pair[0] == pair[1]),
+        "work per level: {per_level:?}"
     );
 }

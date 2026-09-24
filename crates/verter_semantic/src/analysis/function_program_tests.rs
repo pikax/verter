@@ -1514,3 +1514,59 @@ fn class_evaluation_occurrences_are_indexed_without_promoting_static_locals() {
         "static-block locals never enter the function's runtime inventory"
     );
 }
+
+/// Every bare `typeof name` in a frame's type positions is recorded with
+/// the position that reads it — the parameter list, a declarator's
+/// annotation (named by the declared binding), or a type an expression
+/// carries — and resolves through the frame's lexical scope like any other
+/// value-space name. A parameter annotated with a bare type reference
+/// records the name it spells.
+#[test]
+fn type_positions_record_their_typeof_names_and_bare_parameter_annotations() {
+    let source = r#"
+function f() { return 1; }
+function g() { return "g"; }
+function h() { return true; }
+export function reader<T>(p: ReturnType<typeof f>, q: T, r: T[]) {
+  let a!: ReturnType<typeof g>;
+  const local = 1;
+  let b!: typeof local;
+  const { c } = { c: true } as { c: ReturnType<typeof h> };
+  const inner = (y: ReturnType<typeof f>) => y;
+  return [a, b, c, p, q, r, inner];
+}
+"#;
+    let index = index_of(source);
+    let entry = entry_of(&index, "reader");
+    let at = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        verter_span::Span::new(start, start + 1)
+    };
+    let queries: Vec<(&str, FunctionTypeQueryPosition, bool)> = entry
+        .type_queries
+        .iter()
+        .map(|query| {
+            (
+                query.name.as_ref(),
+                query.position,
+                matches!(query.binding, FunctionReferenceBinding::Free),
+            )
+        })
+        .collect();
+    assert_eq!(
+        queries,
+        vec![
+            ("f", FunctionTypeQueryPosition::Parameter, true),
+            ("g", FunctionTypeQueryPosition::Declarator(at("a!")), true),
+            ("local", FunctionTypeQueryPosition::Declarator(at("b!")), false),
+            ("h", FunctionTypeQueryPosition::Expression, true),
+        ],
+        "the frame's type positions in source order; a nested function's own signature belongs to its own frame"
+    );
+    let annotations: Vec<Option<&str>> = entry
+        .params
+        .iter()
+        .map(|param| param.annotation_reference.as_deref())
+        .collect();
+    assert_eq!(annotations, vec![None, Some("T"), None]);
+}

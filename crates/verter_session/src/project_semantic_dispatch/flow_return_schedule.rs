@@ -30,7 +30,13 @@
 //!   the call rails resolve to a function with a body-derived return: the
 //!   direct-call rail's same-file target, or the function the file's owner
 //!   scope resolves the name to through its imports, as the rail lowering
-//!   `typeof callee` resolves it. Each key is minted by the one key
+//!   `typeof callee` resolves it. A call inside another call's argument is
+//!   one the body evaluates when every call around it resolves through the
+//!   call executor, which evaluates its arguments in the frame. A bare
+//!   `typeof name` in a type position the evaluation reads — the frame's
+//!   parameter list, the annotation of a binding whose value the slice
+//!   selects, a type a selected expression carries — demands `name`'s
+//!   return exactly as a call does. Each key is minted by the one key
 //!   construction the rails and the signature lowering share. An
 //!   instantiated frame demands what its uninstantiated frame's call
 //!   resolution demanded, under the instantiation's arguments. When that
@@ -38,11 +44,11 @@
 //!   recorded as it made them and are carried over by binder name — the
 //!   mapping the instantiated frame's binder environment applies. When its
 //!   answer was already warm, the instantiation is read from the two
-//!   signatures the call executor reads, for a call that forwards the
-//!   frame's own binders. A call nested inside another call's arguments,
-//!   a call no rail resolves to a named function, an instantiation of any
-//!   other shape, and every demand made through a type position are left
-//!   to the body, which evaluates them recursively exactly as before.
+//!   signatures the call executor reads, for a call — by the frame or by a
+//!   function value it composes — that forwards the frame's own binders.
+//!   A call no rail resolves to a named function, an argument of any other
+//!   call, and an instantiation of any other shape are left to the body,
+//!   which evaluates them recursively exactly as before.
 //! - **Cycles stay with the SCC machinery.** A callee whose discovered
 //!   closure reaches a frame in flight, an open member of a pending
 //!   component, or an entry below it on the explicit stack is never
@@ -78,15 +84,16 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowCallee, FlowEffect, FlowExprRole, FlowSliceIR};
-use verter_semantic::analysis::flow::FrameSpan;
+use verter_semantic::analysis::flow::{FrameSpan, NameMeaning};
 use verter_semantic::analysis::function_program::{
     FunctionBindingKind, FunctionEffectCallee, FunctionProgramEntry, FunctionProgramIndex,
-    FunctionProgramKey, FunctionReferenceBinding,
+    FunctionProgramKey, FunctionReferenceBinding, FunctionTypeQueryPosition,
 };
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 
 use super::super::dispatch_txn::{CheckerDispatchTransaction, ObligationIdentity};
 use super::super::{BuildLocalTaintGuard, ProjectSemanticDispatch};
+use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::semantic_query::{FlowReturnKey, FlowReturnStep, SemanticNodeData, SemanticNodeId};
 
 /// The schedule's transaction-local session state (see the module
@@ -187,11 +194,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let scope = FlowScheduleScope {
             txn: &self.dispatch_txn,
         };
-        // A body that makes no call demands no callee return. A completed
+        // A body that makes no call and reads no `typeof` in a type
+        // position demands no callee return. A completed
         // member is reusable only when its evaluation's reads were
         // recorded, which takes a live tracer: without one, every scheduled
         // evaluation would be thrown away.
-        if makes_calls(entry)
+        if demands_callees(entry)
             && flow_return_schedule_enabled()
             && crate::resolver_core::resolver_context::fact_tracer_installed()
         {
@@ -405,7 +413,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(entry) = frame_entry(&index, key) else {
             return Vec::new();
         };
-        if !makes_calls(entry) {
+        if !demands_callees(entry) {
             return Vec::new();
         }
         let flow_slice = self.ctx.project_type_store().flow_slice();
@@ -447,27 +455,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for call in &calls {
             push_unique(&mut out, self.flow_return_key_for(&call.identity));
         }
+        self.push_type_query_callees(frame, entry, lowered, &mut out);
         // A function value the slice selects is composed where it sits: its
         // body's return is evaluated inside this frame, calls and all.
         let canonical = frame.function.declaration_slot.defining_canonical.as_ref();
         let anchor = entry.span.start;
+        let mut composed: Vec<(&FunctionProgramEntry, Vec<NamedCall>)> = Vec::new();
         for nested in entry.nested_captures.iter() {
             let relative = FrameSpan::rebase(anchor, nested.span);
             let selected = lowered.exprs.iter().any(|expression| {
                 expression.role == FlowExprRole::Value && expression.span.contains(relative)
             });
+            let Some(value) = index.get(&nested.function).map(|matched| matched.entry()) else {
+                continue;
+            };
             if selected {
-                self.push_composed_value_callees(
-                    canonical,
-                    entry,
-                    index,
-                    &nested.function,
-                    &mut out,
-                );
+                let calls = self.composed_value_calls(canonical, entry, value);
+                for call in &calls {
+                    push_unique(&mut out, self.flow_return_key_for(&call.identity));
+                }
+                composed.push((value, calls));
             }
         }
         if !is_uninstantiated(frame) && !self.push_logged_instantiations(frame, entry, &mut out) {
-            self.push_forwarded_instantiations(frame, entry, &calls, &mut out);
+            self.push_forwarded_instantiations(frame, entry, &calls, &composed, &mut out);
         }
         out
     }
@@ -477,7 +488,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// bare-identifier callee that is the direct-call rail's same-file
     /// target, or that the file's owner scope resolves — through its
     /// imports — to a function whose return is body-derived, exactly as
-    /// the rail lowering `typeof callee` resolves it.
+    /// the rail lowering `typeof callee` resolves it. A call inside
+    /// another call's argument counts when the body evaluates it (see
+    /// [`Self::call_is_evaluated`]).
     fn frame_calls(
         &self,
         frame: &FlowReturnKey,
@@ -511,8 +524,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             let span = span.to_absolute(anchor);
             if lowered.expr(*site).role != FlowExprRole::Value
-                || nested_in_another_call(span, &every_call)
                 || !callee_is_free(entry, name, span)
+                || !self.call_is_evaluated(
+                    canonical,
+                    slot.owner,
+                    &mut scope_payload,
+                    entry,
+                    span,
+                    &every_call,
+                )
             {
                 continue;
             }
@@ -521,14 +541,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(direct) if direct.target == entry.key => continue,
                 Some(direct) => self.direct_callee_identity(canonical, &direct.target),
                 None => {
-                    let payload = scope_payload.get_or_insert_with(|| {
-                        self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-                            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                                &bundle, slot.owner,
-                            )
-                        })
-                    });
-                    self.resolved_callee_identity(canonical, slot.owner, payload.as_ref(), name)
+                    let payload = self.scope_payload(canonical, slot.owner, &mut scope_payload);
+                    self.resolved_callee_identity(canonical, slot.owner, payload, name)
                 }
             };
             if let Some(identity) = identity {
@@ -540,6 +554,148 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         out
+    }
+
+    /// The callee returns `frame`'s body demands through TYPE positions:
+    /// each bare `typeof name` its evaluation lowers — in the frame's
+    /// parameter list, in the annotation of a binding whose value the
+    /// slice selects, or in a type a selected expression carries — whose
+    /// name is free in the frame and which the owner scope resolves, as the
+    /// type lowering resolves `typeof name`, to a function whose return is
+    /// body-derived. `ReturnType<typeof f>` reads `f`'s return exactly as
+    /// a call of `f` does.
+    fn push_type_query_callees(
+        &self,
+        frame: &FlowReturnKey,
+        entry: &FunctionProgramEntry,
+        lowered: &FlowSliceIR,
+        out: &mut Vec<FlowReturnKey>,
+    ) {
+        let slot = &frame.function.declaration_slot;
+        let canonical = slot.defining_canonical.as_ref();
+        let anchor = entry.span.start;
+        let mut scope_payload = None;
+        for query in entry.type_queries.iter() {
+            if !matches!(query.binding, FunctionReferenceBinding::Free) {
+                continue;
+            }
+            let read = match query.position {
+                FunctionTypeQueryPosition::Parameter => true,
+                FunctionTypeQueryPosition::Declarator(binding) => {
+                    let binding = FrameSpan::rebase(anchor, binding);
+                    lowered
+                        .slots
+                        .iter()
+                        .any(|slot| slot.value_selected && slot.span == binding)
+                }
+                FunctionTypeQueryPosition::Expression => {
+                    let position = FrameSpan::rebase(anchor, query.span);
+                    lowered.exprs.iter().any(|expression| {
+                        expression.role == FlowExprRole::Value && expression.span.contains(position)
+                    })
+                }
+            };
+            if !read {
+                continue;
+            }
+            let payload = self.scope_payload(canonical, slot.owner, &mut scope_payload);
+            if let Some(identity) =
+                self.resolved_callee_identity(canonical, slot.owner, payload, &query.name)
+            {
+                push_unique(out, self.flow_return_key_for(&identity));
+            }
+        }
+    }
+
+    /// The owner scope's declaration payload, built on first use.
+    fn scope_payload<'p>(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        payload: &'p mut Option<Option<DeclarationScopePayload>>,
+    ) -> Option<&'p DeclarationScopePayload> {
+        payload
+            .get_or_insert_with(|| {
+                self.ctx
+                    .prepared_decl_bundle(canonical)
+                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, owner))
+            })
+            .as_ref()
+    }
+
+    /// Whether the body evaluates the call at `span` for its value, given
+    /// that its own position is a value position: a call no other call
+    /// encloses, or a direct argument of an enclosing call that is itself
+    /// evaluated and whose call sink evaluates its arguments — a free,
+    /// bare-identifier callee whose unannotated declaration is generic or
+    /// overloaded, which the call rails resolve through the call executor.
+    /// A call in a callee expression, and an argument of any other call,
+    /// is left to the body.
+    fn call_is_evaluated(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        scope_payload: &mut Option<Option<DeclarationScopePayload>>,
+        entry: &FunctionProgramEntry,
+        span: verter_span::Span,
+        every_call: &[verter_span::Span],
+    ) -> bool {
+        let mut span = span;
+        loop {
+            let Some(enclosing) = every_call
+                .iter()
+                .filter(|outer| **outer != span && contains(**outer, span))
+                .min_by_key(|outer| outer.end - outer.start)
+                .copied()
+            else {
+                return true;
+            };
+            let Some(site) = entry.call_sites.iter().find(|site| site.span == enclosing) else {
+                return false;
+            };
+            let direct_argument = site
+                .args
+                .iter()
+                .any(|argument| !argument.spread && argument.point == span.start);
+            let FunctionEffectCallee::Identifier(name) = &site.callee else {
+                return false;
+            };
+            if !direct_argument || !callee_is_free(entry, name, enclosing) {
+                return false;
+            }
+            let prepared = match &site.target {
+                Some(target) => self.ctx.prepared_value_decl_return_only(
+                    canonical,
+                    target.declaration.owner,
+                    target.declaration.name.as_ref(),
+                ),
+                None => {
+                    let payload = self.scope_payload(canonical, owner, scope_payload);
+                    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                        self.ctx, canonical, owner, payload, name,
+                    )
+                    .and_then(|root| {
+                        self.ctx.prepared_value_decl_return_only(
+                            root.canonical_id.as_ref(),
+                            root.owner,
+                            root.symbol_name.as_ref(),
+                        )
+                    })
+                }
+            };
+            let evaluates_arguments = prepared.is_some_and(|prepared| {
+                !annotated(&prepared)
+                    && (prepared.signatures.len() > 1
+                        || prepared
+                            .signatures
+                            .iter()
+                            .any(|signature| !signature.type_parameters.is_empty()))
+            });
+            if !evaluates_arguments {
+                return false;
+            }
+            span = enclosing;
+        }
     }
 
     /// Record that the innermost evaluating flow frame demanded the
@@ -650,28 +806,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// signatures both functions already have — the same ones the call
     /// executor reads — for a call that FORWARDS the frame's binders.
     ///
-    /// The call's every argument is a bare read of one of the frame's
-    /// parameters declared as one of the frame's own type parameters,
-    /// which the instantiated frame binds to that parameter's argument;
-    /// the callee's every parameter is declared as one of its own
-    /// unconstrained type parameters, and every type parameter is declared
-    /// by a parameter whose arguments all agree. Inference then fixes each
-    /// callee binder to exactly the forwarded argument — the instantiation
-    /// the executor demands. Every other shape, a parameter
-    /// the body writes, and a callee or frame whose uninstantiated answer
-    /// is not already in hand (reading its signature would evaluate it)
-    /// are left to the body.
+    /// The call is made by the frame's body or by a function value it
+    /// composes (`const f = (y: T) => g(y)`), and its every argument is a
+    /// bare read of a parameter declared as one of the frame's own type
+    /// parameters, which the instantiated frame binds to that parameter's
+    /// argument: a parameter of the frame, as its signature declares it,
+    /// or a parameter of the composed value annotated with the binder's
+    /// name where no clause of the value and no type declared in the frame
+    /// around it takes that name. The callee's every parameter is declared
+    /// as one of its own unconstrained type parameters, and every type
+    /// parameter is declared by a parameter whose arguments all agree.
+    /// Inference then fixes each callee binder to exactly the forwarded
+    /// argument — the instantiation the executor demands. Every other
+    /// shape, a parameter written anywhere, and a callee or frame whose
+    /// uninstantiated answer is not already in hand (reading its signature
+    /// would evaluate it) are left to the body.
     fn push_forwarded_instantiations(
         &self,
         frame: &FlowReturnKey,
         entry: &FunctionProgramEntry,
         calls: &[NamedCall],
+        composed: &[(&FunctionProgramEntry, Vec<NamedCall>)],
         out: &mut Vec<FlowReturnKey>,
     ) {
         let slot = &frame.function.declaration_slot;
         let canonical = slot.defining_canonical.as_ref();
         let own = uninstantiated(frame);
-        if calls.is_empty() || !self.is_answered(&own) {
+        let readers = calls
+            .iter()
+            .map(|call| (entry, call))
+            .chain(
+                composed
+                    .iter()
+                    .flat_map(|(value, calls)| calls.iter().map(move |call| (*value, call))),
+            )
+            .collect::<Vec<_>>();
+        if readers.is_empty() || !self.is_answered(&own) {
             return;
         }
         let Some(own_signature) =
@@ -686,10 +856,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         };
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
-        // The image of the frame parameter a bare argument read names: its
-        // declared binder's argument in this instantiation.
-        let forwarded =
-            |argument: &verter_type_expr::IndexedValueCallArg,
+        // The frame's own lexical structure, read only when a composed
+        // value's annotation names a binder: a type the frame declares
+        // around the value takes the name before the frame's clause does.
+        let mut skeleton = None;
+        let mut frame_declares_type = |name: &str, value: &FunctionProgramEntry| -> bool {
+            let skeleton = skeleton.get_or_insert_with(|| {
+                self.flow_slice_demand_site(frame).ok().and_then(|site| {
+                    self.ctx
+                        .project_type_store()
+                        .flow_slice()
+                        .skeleton_for(&site.slice_key_function, self.ctx)
+                })
+            });
+            let Some(skeleton) = skeleton.as_ref() else {
+                return true;
+            };
+            skeleton.name_id(name).is_some_and(|name| {
+                let region = skeleton
+                    .innermost_region_containing(FrameSpan::rebase(entry.span.start, value.span));
+                skeleton.declares_meaning_in_scope(name, region, NameMeaning::Type)
+            })
+        };
+        // The image of the parameter a bare argument read in `reader`
+        // names: its declared binder's argument in this instantiation.
+        let mut forwarded =
+            |reader: &FunctionProgramEntry,
+             argument: &verter_type_expr::IndexedValueCallArg,
              root: &verter_semantic::analysis::type_eval_build::IndexedValueReadRoot|
              -> Option<SemanticNodeId> {
                 let verter_type_expr::IndexedValueExpression::Value(
@@ -708,7 +901,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return None;
                 };
                 let binding =
-                    entry
+                    reader
                         .references
                         .iter()
                         .find_map(|reference| match &reference.binding {
@@ -722,22 +915,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             _ => None,
                         })?;
                 if binding.kind != FunctionBindingKind::Param
-                    || binding.defining_function != entry.key
-                    || parameter_written(entry, binding)
+                    || entry.descendant_writes.contains(binding)
                 {
                     return None;
                 }
-                let ordinal = entry.params.iter().position(|param| {
-                    param.name.as_deref() == Some(name.as_str()) && !param.rest
-                })?;
-                let declared = own_signature.params.get(ordinal)?;
-                let binder = own_signature
-                    .type_parameters
-                    .iter()
-                    .position(|param| param.param == declared.ty)?;
+                let binder = if binding.defining_function == entry.key {
+                    if parameter_written(entry, binding) {
+                        return None;
+                    }
+                    let ordinal = entry.params.iter().position(|param| {
+                        param.name.as_deref() == Some(name.as_str()) && !param.rest
+                    })?;
+                    let declared = own_signature.params.get(ordinal)?;
+                    own_signature
+                        .type_parameters
+                        .iter()
+                        .position(|param| param.param == declared.ty)?
+                } else if binding.defining_function == reader.key {
+                    if parameter_written(reader, binding)
+                        || reader.descendant_writes.contains(binding)
+                    {
+                        return None;
+                    }
+                    let annotated = reader
+                        .params
+                        .iter()
+                        .find(|param| param.name.as_deref() == Some(name.as_str()) && !param.rest)?
+                        .annotation_reference
+                        .as_deref()?;
+                    if reader
+                        .type_parameters
+                        .iter()
+                        .any(|param| param.name.as_ref() == annotated)
+                        || frame_declares_type(annotated, reader)
+                    {
+                        return None;
+                    }
+                    entry
+                        .type_parameters
+                        .iter()
+                        .position(|param| param.name.as_ref() == annotated)?
+                } else {
+                    return None;
+                };
                 frame.normalized_type_args.get(binder).copied()
             };
-        for call in calls {
+        for (reader, call) in readers {
             let generic = self.flow_return_key_for(&call.identity);
             if !self.is_answered(&generic) {
                 continue;
@@ -776,7 +999,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let image = if param.rest || argument.spread {
                     None
                 } else {
-                    forwarded(argument, root)
+                    forwarded(reader, argument, root)
                 };
                 match (binder, image) {
                     (Some(binder), Some(image))
@@ -870,18 +1093,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             || self.graph().has_flow_return_candidate(key)
     }
 
-    /// The direct callees of one composed function value's return sites.
-    fn push_composed_value_callees(
+    /// The direct calls of one composed function value's return sites
+    /// whose callee's return is body-derived.
+    fn composed_value_calls(
         &self,
         canonical: &str,
         frame: &FunctionProgramEntry,
-        index: &FunctionProgramIndex,
-        value: &FunctionProgramKey,
-        out: &mut Vec<FlowReturnKey>,
-    ) {
-        let Some(value) = index.get(value).map(|matched| matched.entry()) else {
-            return;
-        };
+        value: &FunctionProgramEntry,
+    ) -> Vec<NamedCall> {
+        let mut out = Vec::new();
         let every_call: Vec<verter_span::Span> =
             value.effects.iter().map(|effect| effect.span).collect();
         for effect in value.effects.iter() {
@@ -914,9 +1134,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             }
             if let Some(identity) = self.direct_callee_identity(canonical, &direct.target) {
-                push_unique(out, self.flow_return_key_for(&identity));
+                out.push(NamedCall {
+                    span: effect.span,
+                    name: Arc::clone(name),
+                    identity,
+                });
             }
         }
+        out
     }
 
     /// The return position the direct-call rail demands for `target` when
@@ -980,7 +1205,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        scope_payload: Option<&DeclarationScopePayload>,
         name: &str,
     ) -> Option<FlowFunctionReturnIdentity> {
         let root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
@@ -1049,9 +1274,10 @@ fn annotated(
     )
 }
 
-/// Whether the body makes any call, in its own frame or a composed one.
-fn makes_calls(entry: &FunctionProgramEntry) -> bool {
-    !(entry.effects.is_empty() && entry.nested_captures.is_empty())
+/// Whether the body can demand a callee return: it makes a call, in its
+/// own frame or a composed one, or reads a `typeof` in a type position.
+fn demands_callees(entry: &FunctionProgramEntry) -> bool {
+    !(entry.effects.is_empty() && entry.nested_captures.is_empty() && entry.type_queries.is_empty())
 }
 
 /// Whether the callee identifier of the call at `span` is FREE in `entry`:
