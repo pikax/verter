@@ -1770,6 +1770,18 @@ impl ShallowFileState {
         self.decl_bodies.augmentation_value_decl(scope, name)
     }
 
+    /// Lease-aware demand of one augmentation-scoped VALUE symbol under an
+    /// exact lexical owner.
+    pub(crate) fn augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> crate::decl_body_memo::DemandOutcome<LoweredValueDecl> {
+        self.decl_bodies
+            .augmentation_value_decl_outcome_in(scope, owner, name)
+    }
+
     pub(crate) fn classify_dependency_paths(
         &self,
         declaration_owner: TopLevelOwnerId,

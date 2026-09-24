@@ -2193,6 +2193,12 @@ pub enum ResolvedCallResult {
         /// listed constituent, and a `const` initializer records them as
         /// the binding's widening membership.
         fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
+        /// The diagnostic the checker reports when NO candidate applies
+        /// and this is its error-recovery candidate
+        /// (`getCandidateForOverloadFailure`): the call's value is then
+        /// the checker's recovery answer, never a silent success. `None`
+        /// for an applicable winner.
+        recovery_diagnostic: Option<CheckerDiagnostic>,
     },
     /// The callee is genuine dynamic `any` — a COMPLETE result, not a
     /// fallback.

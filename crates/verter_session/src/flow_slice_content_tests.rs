@@ -1025,7 +1025,9 @@ fn control_callee_certification_requires_provable_module_local_closure() {
     );
 
     // A module whose callees are EXPORTED (declaration spelling and
-    // specifier spelling): augmentable, so neither closure is provable.
+    // specifier spelling): augmentable, so neither closure is certified
+    // locally — both control calls resolve through the export's value,
+    // which merges every augmenting block, and take no gap.
     for exported in [
         format!("export {PREDICATE}\nexport {BOOLEAN}\n{BODY}"),
         format!("{PREDICATE}\n{BOOLEAN}\nexport {{ isStr, check as verify }};\n{BODY}"),
@@ -1039,8 +1041,8 @@ fn control_callee_certification_requires_provable_module_local_closure() {
         );
         assert_eq!(
             gap_count(&node),
-            2,
-            "both control tests gap for exported callees: {exported}"
+            0,
+            "both control tests resolve through the exported callees' values: {exported}"
         );
         assert!(
             node.decided_above_call_spans.is_empty(),
@@ -2965,12 +2967,12 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         "export {};\nfunction isString(x: unknown): x is string { return true }\n";
     let gapped = [
         (
-            "a strict equality against a represented local",
-            "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; if (x === k) { return x } return 0 }",
+            "an equality whose reference operand is a member path",
+            "export {};\nfunction f(x: { kind: \"a\" } | { kind: \"b\" }, y: \"a\") { if (x.kind === y) { return x } return 0 }",
         ),
         (
-            "a strict equality between two parameters",
-            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x === y) { return x } return 0 }",
+            "an equality against a call's value",
+            "export {};\ndeclare function g(): \"a\";\nfunction f(x: \"a\" | \"b\") { if (x === g()) { return x } return 0 }",
         ),
         (
             "a `typeof` compared against a represented local",
@@ -3111,6 +3113,18 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         (
             "the modeled loose equality against `null`",
             "export {};\nfunction f(x: string | null) { if (x == null) { return 0 } return x }",
+        ),
+        (
+            "the modeled strict equality against a represented local",
+            "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; if (x === k) { return x } return 0 }",
+        ),
+        (
+            "the modeled strict equality between two parameters",
+            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x === y) { return x } return 0 }",
+        ),
+        (
+            "the modeled loose equality against a literal",
+            "export {};\nfunction f(x: string | number) { if (x == 1) { return x } return 0 }",
         ),
         (
             "the modeled `in` guard",
@@ -5073,7 +5087,7 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
     assert_eq!(guard_gap_count(&modeled), 0, "{modeled:?}");
 
     let unexpressible = content_for(
-        "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; return x === k ? x : 0 }",
+        "export {};\nfunction f(x: { k: \"a\" } | { k: \"b\" }) { const k = \"a\"; return x.k === k ? x : 0 }",
         "f",
     );
     let guard = ternary_return_guard(&unexpressible);
@@ -5159,7 +5173,7 @@ fn loop_test_consults_the_guard_classifier_for_both_a_modeled_and_an_unexpressib
 #[test]
 fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_arm_or_clause() {
     let if_node = content_for(
-        "export {};\nfunction f(x: \"a\" | \"b\") { let n = 0; const k = \"a\"; if (x === k) { return x; } return n; }",
+        "export {};\nfunction f(x: { k: \"a\" } | { k: \"b\" }) { let n = 0; const k = \"a\"; if (x.k === k) { return x; } return n; }",
         "f",
     );
     let statements = &if_node.body.statements;

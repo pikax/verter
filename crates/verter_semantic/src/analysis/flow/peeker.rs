@@ -186,8 +186,12 @@ impl SliceDemand {
     /// value that is not an object literal may be a type predicate over
     /// any identifier parameter nothing reassigns
     /// (`getTypePredicateFromBody`), so each such parameter is an origin
-    /// too ([`SliceOrigin::Parameter`]). A parameter a closure captures
-    /// is left out: this frame does not see what the closure writes.
+    /// too ([`SliceOrigin::Parameter`]). "Nothing" is the checker's
+    /// `isSymbolAssigned`: this frame's own whole writes and every
+    /// assignment a nested callable makes
+    /// ([`FunctionBodySkeleton::closure_assignments`]). A closure that
+    /// only reads the parameter, or writes one of its members, leaves it
+    /// an origin.
     #[must_use]
     pub fn for_return_projection(skeleton: &FunctionBodySkeleton, path: &[Arc<str>]) -> Self {
         let mut origins: Vec<SliceOrigin> = (0..skeleton.return_sites.len())
@@ -205,15 +209,12 @@ impl SliceDemand {
                 ))
             );
         if may_infer_predicate {
-            let reassigned_or_captured =
+            let reassigned =
                 |binding: SkeletonBindingId| {
                     let local = super::FlowBindingRef::Local(binding);
                     skeleton.writes.iter().any(|write| {
                         write.path.is_empty() && write.binding.as_ref() == Some(&local)
-                    }) || skeleton
-                        .expr_sites
-                        .iter()
-                        .any(|site| site.capture_bindings.contains(&local))
+                    }) || skeleton.closure_assignments.contains(&binding)
                 };
             origins.extend(
                 skeleton
@@ -225,7 +226,7 @@ impl SliceDemand {
                     })
                     .filter_map(|(index, _)| u32::try_from(index).ok())
                     .map(SkeletonBindingId::from_index)
-                    .filter(|binding| !reassigned_or_captured(*binding))
+                    .filter(|binding| !reassigned(*binding))
                     .map(SliceOrigin::Parameter),
             );
         }

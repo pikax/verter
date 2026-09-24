@@ -967,6 +967,7 @@ fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
                 crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand => 2,
                 crate::semantic_query::CheckerDiagnosticOperation::AsyncReturnPayload => 3,
+                crate::semantic_query::CheckerDiagnosticOperation::CallResolution => 4,
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),

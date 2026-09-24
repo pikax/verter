@@ -6940,14 +6940,13 @@ function pick(x: string | number) {
 /// A MODULE file's EXPORTED function is augmentable: a `declare module
 /// "./main"` block in any file merges further call signatures into the
 /// export symbol, and the checker resolves even the SAME-FILE call of an
-/// `export`-modified declaration through that merged symbol. The
-/// augmenter here adds a predicate overload to both exported callees.
-/// The lowering context cannot enumerate augmenters, so an exported
-/// callee is never a certified control call and never a selected
-/// predicate: both demands keep the unnarrowed join, carry the typed
-/// gap, and hold zero candidates.
+/// `export`-modified declaration through that merged symbol, trying the
+/// augmenting block's overloads first. Here the augmenter adds a predicate
+/// overload to both exported callees: `make` returns `number | false` and
+/// `pick` `string | false` on 7.0.2, each narrowed by the augmenting
+/// predicate, complete and warm.
 #[test]
-fn exported_module_function_control_callee_never_self_certifies() {
+fn exported_module_function_control_callee_resolves_through_its_augmentations() {
     const MAIN_CANONICAL: &str = "/ws/module-merge/main.ts";
     const MAIN_FIXTURE: &str = r#"
 export function check(x: string | number): boolean {
@@ -6981,20 +6980,34 @@ declare module "./main" {
     upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
     upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
-        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "make",
+            &[verter_type_expr::PrimitiveName::Number],
+            &[verter_type_expr::PrimitiveName::String],
+        );
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "pick",
+            &[verter_type_expr::PrimitiveName::String],
+            &[verter_type_expr::PrimitiveName::Number],
+        );
     });
 }
 
 /// An IMPORTED function guard is another module's export, and a `declare
 /// module` block in any file adds overloads to it: here `augment.ts`
-/// puts `x is string` ahead of the module's own `x is number`, so
-/// `pick` returns `string | false` on 7.0.2. The served signature set
-/// does not carry an augmenting overload, so the guard never narrows
-/// through the module's own declaration: the demand keeps the unnarrowed
-/// join, carries the typed gap, and holds zero candidates.
+/// adds `x is string` beside the module's own `x is number`, and the
+/// checker tries the augmenting (later) declaration first, so `pick`
+/// returns `string | false` on 7.0.2 — whatever order the files load in.
+/// The served value is the merged overload set, so the guard narrows
+/// through the augmenting predicate, complete and warm.
 #[test]
-fn imported_function_guard_never_narrows_past_its_augmentations() {
+fn imported_function_guard_narrows_through_its_augmentations() {
     const GUARDS_CANONICAL: &str = "/ws/import-merge/guards.ts";
     const GUARDS_FIXTURE: &str = r#"
 export function isNum(x: string | number): x is number {
@@ -7021,7 +7034,50 @@ export function pick(x: string | number) {
     upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
     upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "pick",
+            &[verter_type_expr::PrimitiveName::String],
+            &[verter_type_expr::PrimitiveName::Number],
+        );
+    });
+}
+
+/// A call to an EXPORTED function reads the export's merged overload set
+/// whichever file makes it: `augment.ts` adds `conv(x: string): 1` beside
+/// the module's own `conv(x: string): number`, and the checker tries the
+/// augmenting declaration first, so `viaCall` (in the module) and
+/// `viaImport` (importing it) both return `1` on 7.0.2, complete.
+#[test]
+fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
+    const MAIN_CANONICAL: &str = "/ws/call-merge/main.ts";
+    const MAIN_FIXTURE: &str = "export function conv(x: string): number { return 1; }\n\
+                                export function viaCall(x: string) { return conv(x); }\n";
+    const AUG_CANONICAL: &str = "/ws/call-merge/augment.ts";
+    const AUG_FIXTURE: &str = "import \"./main\";\n\
+                               declare module \"./main\" {\n  export function conv(x: string): 1;\n}\n";
+    const USE_CANONICAL: &str = "/ws/call-merge/use.ts";
+    const USE_FIXTURE: &str = "import { conv } from \"./main\";\n\
+                               export function viaImport(x: string) { return conv(x); }\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    upsert_ts(&host, USE_CANONICAL, USE_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        for (canonical, name) in [(MAIN_CANONICAL, "viaCall"), (USE_CANONICAL, "viaImport")] {
+            let result = flow_result_value(dispatch, whole_return_key(dispatch, canonical, name));
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            assert_eq!(
+                expr,
+                verter_type_expr::TypeExpr::number_literal(1.0),
+                "{name}: the augmenting overload answers first"
+            );
+            assert_eq!(result.degradation(), None, "{name}: the call is complete");
+        }
     });
 }
 

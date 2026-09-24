@@ -72,6 +72,97 @@ pub(super) fn host_with(source: &str) -> VerterHost {
     host
 }
 
+/// The lib file the lib-environment tests register.
+const LIB_FILE: &str = "lib.values.d.ts";
+
+/// The pinned lib's own declarations of the global values the
+/// lib-environment tests read (`lib.es5.d.ts` and `lib.es2015.core.d.ts`),
+/// each interface narrowed to the members read.
+const LIB_VALUES: &str = r#"
+interface ArrayLike<T> {
+    readonly length: number;
+    readonly [n: number]: T;
+}
+interface ArrayConstructor {
+    isArray(arg: any): arg is any[];
+    from<T>(arrayLike: ArrayLike<T>): T[];
+    from<T, U>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
+    of<T>(...items: T[]): T[];
+}
+declare var Array: ArrayConstructor;
+interface ObjectConstructor {
+    keys(o: object): string[];
+}
+declare var Object: ObjectConstructor;
+interface Math {
+    readonly PI: number;
+    max(...values: number[]): number;
+}
+declare var Math: Math;
+interface JSON {
+    parse(text: string, reviver?: (this: any, key: string, value: any) => any): any;
+    stringify(value: any, replacer?: (this: any, key: string, value: any) => any, space?: string | number): string;
+    stringify(value: any, replacer?: (number | string)[] | null, space?: string | number): string;
+}
+declare var JSON: JSON;
+interface NumberConstructor {
+    isFinite(number: unknown): boolean;
+}
+declare var Number: NumberConstructor;
+"#;
+
+/// [`host_with`] whose two projects each register [`LIB_VALUES`] as their
+/// lib environment.
+pub(super) fn host_with_lib(source: &str) -> VerterHost {
+    let host = host_with(source);
+    let workspace = host.workspace();
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        let project = host
+            .resolve_project_for_canonical(&format!("{root}/main.ts"))
+            .expect("the fixture file belongs to its project");
+        verter_workspace::WorkspaceAccess::register_ambient_lib(
+            workspace.as_ref(),
+            verter_workspace::AmbientLibSpec {
+                project_id: Some(project),
+                canonical_id: Arc::from(LIB_FILE),
+                source: Arc::from(LIB_VALUES),
+            },
+        )
+        .expect("the lib registers against its project");
+        let key = verter_workspace::WorkspaceRead::project_stable_key(workspace.as_ref(), project)
+            .expect("the project has a stable key");
+        let virtual_id = verter_workspace::ambient_virtual_canonical_id(key, LIB_FILE);
+        let _ = host
+            .upsert(crate::types::UpsertRequest {
+                canonical_id: None,
+                input_id: virtual_id.to_string(),
+                source: Arc::from(LIB_VALUES),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("the lib serves");
+    }
+    host
+}
+
+/// The checker diagnostics riding `symbol`'s whole-return answer in
+/// `root`'s copy.
+pub(super) fn checker_diagnostics(
+    host: &VerterHost,
+    root: &str,
+    symbol: &str,
+) -> Vec<crate::semantic_query::CheckerDiagnostic> {
+    let carrier = host.get_flow_return_type_with_audit(
+        &identity(&format!("{root}/main.ts"), symbol),
+        ReturnProjectionDemand::whole_return(),
+    );
+    carrier
+        .as_result()
+        .unwrap_or_else(|error| panic!("`{symbol}` in {root} produced no value: {error:?}"))
+        .checker_diagnostics()
+        .to_vec()
+}
+
 /// The whole-return answer of `symbol` in `root`'s copy through the public
 /// audited flow-return boundary: its degradation and the live node, handed
 /// to `read` while the graph is pinned.
@@ -259,6 +350,8 @@ export function isArr(x: string | string[]) { return Array.isArray(x); }
 export function looseNull(x: string | null | undefined) { return x == null; }
 export function viaLocal(x: unknown) { const r = typeof x === "string"; return r; }
 export function eqParams(x: string, y: string) { return x === y; }
+export function closureRead(x: unknown) { const g = () => x; return typeof x === "string"; }
+export function closureMemberWrite(x: { a: number } | string) { const g = () => { if (typeof x === "object") x.a = 1; }; return typeof x === "string"; }
 export function nestedArrow() { return (x: string | number) => typeof x === "number"; }
 export function nestedFn() { return function (x: Foo | Bar) { return x.kind === "bar"; }; }
 export function nestedMulti() { return (x: unknown) => { if (x) return true; return typeof x === "string"; }; }
@@ -464,6 +557,25 @@ const INFERS: &[(&str, &str, &str)] = &[
         "(x: unknown) => x is string",
         "(x: unknown) => x is string",
     ),
+    // A call to an EXPORTED same-file guard resolves through the export's
+    // value, whose augmentations (none here) would merge into it.
+    (
+        "wrapExported",
+        "(x: unknown) => x is Foo",
+        "(x: unknown) => x is Foo",
+    ),
+    // A closure that only reads the parameter, or writes one of its
+    // members, does not assign it.
+    (
+        "closureRead",
+        "(x: unknown) => x is string",
+        "(x: unknown) => x is string",
+    ),
+    (
+        "closureMemberWrite",
+        "(x: { a: number; } | string) => x is string",
+        "(x: { a: number; } | string) => x is string",
+    ),
 ];
 
 /// Every measured inference, in both null policies.
@@ -509,6 +621,7 @@ const DECLINES: &[(&str, &str)] = &[
     ("literalTrue", "(x: unknown) => boolean"),
     ("annotated", "(x: unknown) => boolean"),
     ("noParams", "() => boolean"),
+    ("eqParams", "(x: string, y: string) => boolean"),
 ];
 
 #[test]
@@ -561,19 +674,12 @@ fn a_returned_function_value_infers_its_own_predicate() {
 /// A returned test the guard vocabulary cannot read DEGRADES a `boolean`
 /// return rather than publishing it predicate-less. Measured on 7.0.2:
 /// `Array.isArray(x)` over `string | string[]` is `x is string[]` — a
-/// call whose callee value (the lib's `Array`, which this host does not
-/// declare) does not resolve; a call handing the parameter to an EXPORTED
-/// same-file guard is `x is Foo`, but an exported function takes further
-/// overloads from any augmenting `declare module` block, which the served
-/// signature set does not carry; and `x === y` over two parameters is
-/// `boolean`, a reference comparison this vocabulary does not carry
-/// either way.
+/// call whose callee value (the lib's `Array`, which this host registers
+/// no lib to declare) does not resolve.
 #[test]
 fn an_unreadable_returned_test_degrades_the_boolean_return() {
     let host = host_with(SOURCE);
-    for name in ["isArr", "wrapExported", "eqParams"] {
-        assert_degrades(&host, STRICT_ROOT, name);
-    }
+    assert_degrades(&host, STRICT_ROOT, "isArr");
 }
 
 /// The inferred predicate is a real part of the signature: the relation

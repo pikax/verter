@@ -992,7 +992,7 @@ impl DeclBodyMemo {
             .into_option()
     }
 
-    fn augmentation_value_decl_outcome_in(
+    pub(crate) fn augmentation_value_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -2637,11 +2637,44 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
+        self.transient_value_parts_for(contributors.to_vec(), name, None)
+    }
+
+    /// Augmentation-scoped sibling of [`Self::transient_value_parts_in`]:
+    /// the function declarations one `declare module` / `declare global`
+    /// block contributes to a value, GROUP-ordered like a file-scope
+    /// overload group.
+    pub(crate) fn transient_augmentation_value_parts_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientValueParts> {
+        let Some(contributors) = self
+            .header_index
+            .augmentation_value_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_value_parts_for(contributors.to_vec(), name, Some(scope))
+    }
+
+    /// Shared lease-only VALUE-part re-lowering over the demanded symbol's
+    /// contributing statements. `aug_scope` selects the
+    /// augmentation-scoped declarations; `None` reads the file-scope ones.
+    fn transient_value_parts_for(
+        &self,
+        contributors: Vec<verter_semantic::analysis::decl_headers::DeclHeaderContributor>,
+        name: &str,
+        aug_scope: Option<&AugmentationScopeKind>,
+    ) -> DemandOutcome<TransientValueParts> {
         let Some(service) = self.service.as_ref() else {
             return DemandOutcome::Ready(None);
         };
         self.ensure_lease();
         let name = name.to_string();
+        let aug_scope = aug_scope.cloned();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -2661,7 +2694,27 @@ impl DeclBodyMemo {
                 } else {
                     lower_statement_parts(stmt, source)
                 };
-                for decl in &parts.value_decls {
+                let (value_decls, type_decls): (Vec<_>, Vec<_>) = match aug_scope.as_ref() {
+                    None => (
+                        parts.value_decls.iter().collect(),
+                        parts.type_decls.iter().collect(),
+                    ),
+                    Some(scope) => (
+                        parts
+                            .aug_value_decls
+                            .iter()
+                            .filter(|(part_scope, _)| part_scope == scope)
+                            .map(|(_, decl)| decl)
+                            .collect(),
+                        parts
+                            .aug_type_decls
+                            .iter()
+                            .filter(|(part_scope, _)| part_scope == scope)
+                            .map(|(_, decl)| decl)
+                            .collect(),
+                    ),
+                };
+                for decl in value_decls {
                     if decl.name != name {
                         continue;
                     }
@@ -2679,7 +2732,7 @@ impl DeclBodyMemo {
                 // `class K<T>` constructor shape references `T`) ride the
                 // SAME statements' type-side parts — union them first-seen
                 // by name so the deref binds the class's own binder shells.
-                for decl in &parts.type_decls {
+                for decl in type_decls {
                     if decl.name != name {
                         continue;
                     }

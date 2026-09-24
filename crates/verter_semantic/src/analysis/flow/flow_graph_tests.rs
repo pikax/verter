@@ -870,6 +870,7 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
         return_sites: Arc::from([]),
         yield_sites: Arc::from([]),
         writes: Arc::from([]),
+        closure_assignments: Arc::from([]),
     };
     let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
     for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {

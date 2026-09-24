@@ -525,7 +525,31 @@ impl DeclBodyMemo {
                             &aug.path,
                         )
                     }
-                    LocatorSymbolSpace::Value | LocatorSymbolSpace::Namespace => {
+                    // A function declaration the block contributes to a
+                    // value: its signatures navigate exactly as a
+                    // file-scope overload group's do.
+                    LocatorSymbolSpace::Value => {
+                        if matches!(
+                            aug.path.first(),
+                            Some(TypeBodyPathStep::TypeParamBound { .. })
+                        ) {
+                            return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+                        }
+                        let parts = transient_outcome(self.transient_augmentation_value_parts_in(
+                            &scope_kind,
+                            aug.anchor.owner,
+                            aug.anchor.symbol.as_ref(),
+                        ))?;
+                        let (expr, lexical_root) =
+                            navigate_value_parts(&parts, &aug.path, &aug.anchor)?;
+                        Ok(DerefedAuthoredBody {
+                            shape: DerefedBodyShape::Single(expr),
+                            lexical_root,
+                            type_parameters: parts.type_parameters.clone(),
+                            visibility: TypeParamVisibility::Body,
+                        })
+                    }
+                    LocatorSymbolSpace::Namespace => {
                         Err(LocatorBodyDerefError::AugmentationBodySpaceUnrouted)
                     }
                 }

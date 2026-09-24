@@ -737,6 +737,12 @@ pub struct FunctionBodySkeleton {
     pub yield_sites: Arc<[SkeletonExprSiteId]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
+    /// The bindings this frame declares that a nested callable ASSIGNS
+    /// whole, at any depth ([`FunctionProgramEntry::descendant_assignments`]).
+    /// With the whole-binding entries of [`Self::writes`] it is every
+    /// assignment the checker's `isSymbolAssigned` reads; a closure that
+    /// only reads a binding, or writes one of its members, adds nothing.
+    pub closure_assignments: Arc<[SkeletonBindingId]>,
 }
 
 /// The authored kind of one function body — the `async` and `generator`
@@ -1115,6 +1121,12 @@ fn prepare_function_body_skeleton(
     let mut bindings =
         FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
     bindings.prepare_occurrences(entry)?;
+    skeleton.closure_assignments = entry
+        .descendant_assignments
+        .iter()
+        .filter_map(|identity| bindings.local(identity))
+        .collect::<Vec<_>>()
+        .into();
     for (ordinal, binding) in Arc::make_mut(&mut skeleton.bindings).iter_mut().enumerate() {
         binding.runtime_binding = binding
             .kind
@@ -2148,6 +2160,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             return_sites: Arc::from(self.return_sites.into_boxed_slice()),
             yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
+            closure_assignments: Arc::from([]),
         }
     }
 }

@@ -619,6 +619,11 @@ pub struct FunctionProgramEntry {
     /// Variables declared by this frame that any descendant callable writes.
     /// Intervening local bindings retain their own identities and are excluded.
     pub descendant_writes: Arc<[FlowBindingIdentity]>,
+    /// The subset of [`Self::descendant_writes`] a descendant callable
+    /// ASSIGNS whole — an assignment, an update or a destructuring target,
+    /// never a member write. With this frame's own whole writes it is
+    /// every assignment the checker's `isSymbolAssigned` reads.
+    pub descendant_assignments: Arc<[FlowBindingIdentity]>,
     /// Own and transitively nested captured reads, excluding this frame's locals.
     pub captured_reads: Arc<[FunctionCapturedRead]>,
     /// Immediate child creation sites and their retained read-path dependencies.
@@ -1150,6 +1155,8 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
     let lexical_scopes: Vec<_> = entries.iter().map(LexicalScopeIndex::build).collect();
     let mut descendant_writes = vec![Vec::new(); entries.len()];
     let mut descendant_seen = vec![rustc_hash::FxHashSet::default(); entries.len()];
+    let mut descendant_assignments = vec![Vec::new(); entries.len()];
+    let mut assignment_seen = vec![rustc_hash::FxHashSet::default(); entries.len()];
     for index in 0..entries.len() {
         // The enclosing frame chain, innermost first.
         let mut chain: Vec<usize> = Vec::new();
@@ -1191,7 +1198,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
         }
         for write in Arc::make_mut(&mut entries[index].writes) {
             for target in Arc::make_mut(&mut write.targets) {
-                let FunctionWriteTarget::Binding { reference, .. } = target else {
+                let FunctionWriteTarget::Binding { reference, kind } = target else {
                     continue;
                 };
                 reference.binding = resolve(&reference.name, reference.span);
@@ -1201,6 +1208,11 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
                         let defining = position_of[&identity.defining_function];
                         if descendant_seen[defining].insert(identity.binding_slot) {
                             descendant_writes[defining].push(identity.clone());
+                        }
+                        if *kind == FunctionWriteKind::Whole
+                            && assignment_seen[defining].insert(identity.binding_slot)
+                        {
+                            descendant_assignments[defining].push(identity.clone());
                         }
                     }
                 }
@@ -1217,8 +1229,13 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
             .collect();
         entries[index].captures = CanonicalCaptureIdentity(Arc::from(captures.into_boxed_slice()));
     }
-    for (entry, writes) in entries.iter_mut().zip(descendant_writes) {
+    for ((entry, writes), assignments) in entries
+        .iter_mut()
+        .zip(descendant_writes)
+        .zip(descendant_assignments)
+    {
         entry.descendant_writes = writes.into();
+        entry.descendant_assignments = assignments.into();
     }
 }
 
@@ -3368,6 +3385,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             return_sites: Arc::from(return_sites.into_boxed_slice()),
             writes: Arc::from(writes.into_boxed_slice()),
             descendant_writes: Arc::from([]),
+            descendant_assignments: Arc::from([]),
             captured_reads: Arc::from([]),
             nested_captures: Arc::from([]),
             effects: Arc::from(effects.into_boxed_slice()),

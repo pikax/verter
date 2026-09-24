@@ -1130,6 +1130,59 @@ impl PreparedValueDeclCache {
         self.slots.len()
     }
 
+    /// Prepare an augmentation-scoped VALUE contribution: its function
+    /// signatures, in the file's value-space name environment (the same
+    /// per-owner base every value declaration of the file shares).
+    fn prepare_augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedDeclOutcome<PreparedValueDecl> {
+        let lowered = match self
+            .state
+            .augmentation_value_decl_outcome_in(scope, owner, symbol_name)
+        {
+            DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+            DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+            DemandOutcome::Ready(Some(lowered)) => lowered,
+        };
+        let name_resolution = match self
+            .name_resolution_bases
+            .get(&owner)
+            .and_then(|cell| cell.get())
+        {
+            Some(base) => Arc::clone(base),
+            None => match build_value_name_resolution_base(
+                &self.canonical_id,
+                self.state.as_ref(),
+                owner,
+                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+                &self.import_canonicalization,
+                &self.interner,
+            ) {
+                Ok(base) => Arc::new(base),
+                Err(failure) => return PreparedDeclOutcome::Failed(failure),
+            },
+        };
+        let mut prepared = PreparedValueDecl::new(
+            ResolvedRootIdentity::new_in_owner(
+                Arc::clone(&self.canonical_id),
+                owner,
+                self.interner.intern(symbol_name),
+            ),
+            lowered.kind,
+        );
+        prepared.type_annotation = lowered.type_annotation.clone();
+        prepared.signatures = lowered.signatures.clone();
+        prepared.name_resolution = name_resolution;
+        let hash_u64 =
+            u64::from_le_bytes(self.state.whole_hash[..8].try_into().unwrap_or_default());
+        prepared.cache_deps.defining_file =
+            Some((self.canonical_id.as_ref().to_string(), hash_u64));
+        PreparedDeclOutcome::Ready(Some(prepared))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
@@ -1314,6 +1367,32 @@ impl PreparedDeclBundle {
     ) -> PreparedDeclOutcome<PreparedTypeDecl> {
         self.prepared_type_decls
             .prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
+    }
+
+    /// Prepare the function declarations one augmentation block contributes
+    /// to a value, against the same pinned state and value-space name
+    /// environment as this bundle's own value declarations.
+    pub(crate) fn prepare_augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedDeclOutcome<PreparedValueDecl> {
+        self.prepared_value_decls
+            .prepare_augmentation_value_decl_outcome_in(scope, owner, symbol_name)
+    }
+
+    /// Plain result-shaped sibling of
+    /// [`Self::prepare_augmentation_value_decl_outcome_in`] for locator
+    /// replay.
+    pub(crate) fn prepare_augmentation_value_decl_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<Option<PreparedValueDecl>, PreparationFailure> {
+        self.prepare_augmentation_value_decl_outcome_in(scope, owner, symbol_name)
+            .into_result()
     }
 
     /// Plain result-shaped sibling for locator replay. Lease misses retain the

@@ -1359,10 +1359,10 @@
         "pubFn": 16,
         "pubFnTestHooks": 0,
         "pubCrateFn": 11,
-        "pubType": 40,
+        "pubType": 41,
         "pubCrateMod": 1,
         "inlinePubMod": 0,
-        "pubStructField": 72
+        "pubStructField": 74
       },
       "authority": [
         {

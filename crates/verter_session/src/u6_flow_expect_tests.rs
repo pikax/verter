@@ -740,18 +740,101 @@ pub(crate) struct LaneMeasurement {
 }
 
 pub(crate) fn make_audit_host() -> Arc<VerterHost> {
-    Arc::new(VerterHost::new_standalone_with_scheduler_config(
+    make_audit_host_with_lib("/wb", "")
+}
+
+/// [`make_audit_host`] whose files under `root` belong to one strict
+/// project with `lib` registered as that project's lib environment (the
+/// standalone host, with no project and no lib, when `lib` is empty).
+pub(crate) fn make_audit_host_with_lib(root: &str, lib: &str) -> Arc<VerterHost> {
+    host_with_lib_environment(
         HostConfig {
             analysis_level: crate::types::AnalysisLevel::Full,
             audit_enabled: true,
             footprint_capture: false,
             ..HostConfig::default()
         },
-        verter_scheduler::scheduler::SchedulerConfig {
-            cpu_threads: 1,
-            ..verter_scheduler::scheduler::SchedulerConfig::default()
+        root,
+        lib,
+    )
+}
+
+/// The lib file a lib-environment host registers.
+const LIB_ENVIRONMENT_FILE: &str = "lib.d.ts";
+
+/// A single-threaded host under `config`. With a non-empty `lib`, the
+/// files under `root` belong to one project compiled `--strict` — the
+/// options the corpus's standalone host defaults to — and `lib` is that
+/// project's registered lib environment, served like any file.
+pub(crate) fn host_with_lib_environment(
+    config: HostConfig,
+    root: &str,
+    lib: &str,
+) -> Arc<VerterHost> {
+    let scheduler = verter_scheduler::scheduler::SchedulerConfig {
+        cpu_threads: 1,
+        ..verter_scheduler::scheduler::SchedulerConfig::default()
+    };
+    if lib.is_empty() {
+        return Arc::new(VerterHost::new_standalone_with_scheduler_config(
+            config, scheduler,
+        ));
+    }
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let tsconfig_path = format!("{root}/tsconfig.json");
+    workspace.inject_file(
+        tsconfig_path.clone(),
+        Arc::from(r#"{ "compilerOptions": { "strict": true } }"#),
+    );
+    let mut project = verter_workspace::ide_project_config(
+        root.to_string(),
+        root.to_string(),
+        Some(tsconfig_path.clone()),
+    );
+    project.compiler_options = verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
+    let host = Arc::new(VerterHost::new_with_scheduler_config(
+        config, workspace, scheduler,
+    ));
+    host.configure_projects(vec![project]);
+    register_lib_environment(&host, &format!("{root}/main.ts"), LIB_ENVIRONMENT_FILE, lib);
+    host
+}
+
+/// Register `source` as the lib environment of the project `canonical`
+/// belongs to, and serve it at its ambient virtual id.
+pub(crate) fn register_lib_environment(
+    host: &VerterHost,
+    canonical: &str,
+    lib_file: &str,
+    source: &str,
+) {
+    let workspace = host.workspace();
+    let project = host
+        .resolve_project_for_canonical(canonical)
+        .expect("the file belongs to a configured project");
+    verter_workspace::WorkspaceAccess::register_ambient_lib(
+        workspace.as_ref(),
+        verter_workspace::AmbientLibSpec {
+            project_id: Some(project),
+            canonical_id: Arc::from(lib_file),
+            source: Arc::from(source),
         },
-    ))
+    )
+    .expect("the lib registers against its project");
+    let key = verter_workspace::WorkspaceRead::project_stable_key(workspace.as_ref(), project)
+        .expect("the project has a stable key");
+    let virtual_id = verter_workspace::ambient_virtual_canonical_id(key, lib_file);
+    let _ = host
+        .upsert(crate::types::UpsertRequest {
+            canonical_id: None,
+            input_id: virtual_id.to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("the lib serves");
 }
 
 fn identity(canonical: &str, symbol: &str) -> FlowFunctionReturnIdentity {
@@ -776,7 +859,20 @@ pub(crate) fn drive_expect_boundary(
     function: &str,
     expected: Option<&ExpectedNode>,
 ) -> LaneMeasurement {
-    let host = make_audit_host();
+    drive_expect_boundary_with_lib(aux, "", id, script, function, expected)
+}
+
+/// [`drive_expect_boundary`] on a host whose project registers `lib` as
+/// its lib environment ([`make_audit_host_with_lib`]).
+pub(crate) fn drive_expect_boundary_with_lib(
+    aux: &str,
+    lib: &str,
+    id: &str,
+    script: &str,
+    function: &str,
+    expected: Option<&ExpectedNode>,
+) -> LaneMeasurement {
+    let host = make_audit_host_with_lib("/wb", lib);
     let dir = "/wb";
     if !aux.is_empty() {
         upsert(
@@ -946,7 +1042,20 @@ pub(crate) fn with_live_flow_node<R>(
     function: &str,
     f: impl FnOnce(&ProjectSemanticDispatch<'_>, Option<SemanticNodeId>) -> R,
 ) -> R {
-    let host = make_audit_host();
+    with_live_flow_node_with_lib(aux, "", id, script, function, f)
+}
+
+/// [`with_live_flow_node`] on a host whose project registers `lib` as its
+/// lib environment ([`make_audit_host_with_lib`]).
+pub(crate) fn with_live_flow_node_with_lib<R>(
+    aux: &str,
+    lib: &str,
+    id: &str,
+    script: &str,
+    function: &str,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_>, Option<SemanticNodeId>) -> R,
+) -> R {
+    let host = make_audit_host_with_lib("/wb", lib);
     let dir = "/wb";
     if !aux.is_empty() {
         upsert(

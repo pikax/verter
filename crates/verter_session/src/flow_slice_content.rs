@@ -803,6 +803,22 @@ pub enum SliceGuard {
         /// Whether the test is negated.
         negated: bool,
     },
+    /// `left === right` / `left == right` (`!==` / `!=` negate) between
+    /// two values at least one of which is a narrowable reference and
+    /// neither a form the literal and `typeof` guards carry: EACH
+    /// reference narrows by the OTHER operand's type at the test (the
+    /// checker's `narrowTypeByEquality`), both operand types read before
+    /// either narrow applies.
+    EqValue {
+        /// The left operand.
+        left: Box<SliceEqOperand>,
+        /// The right operand.
+        right: Box<SliceEqOperand>,
+        /// Whether the comparison is the coercing `==` / `!=`.
+        loose: bool,
+        /// Whether the comparison is negated.
+        negated: bool,
+    },
     /// `predicate(subject)` — a module-local, unexported,
     /// single-declaration same-file function whose declared return is
     /// `x is T` (the provably closed callee: a module-scoped file, one
@@ -853,6 +869,18 @@ pub enum SliceGuard {
     /// reference on its own). Both readings apply every part; negation
     /// negates each part.
     Both(Arc<[SliceGuard]>),
+}
+
+/// One operand of an equality between two values ([`SliceGuard::EqValue`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceEqOperand {
+    /// The operand's value, lowered like any other expression: the OTHER
+    /// operand narrows by its type at the test.
+    pub value: SliceExpr,
+    /// The reference the operand is, when it is one this half narrows
+    /// (always a whole binding: a member reference narrows its parent as a
+    /// discriminant, which this guard does not carry).
+    pub subject: Option<SliceNarrowSubject>,
 }
 
 /// How many levels of aliased conditions the checker inlines when it
@@ -906,6 +934,11 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
             ..
         } => {
             for subject in arguments.iter().flatten().chain(receiver.iter()) {
+                visitor(subject);
+            }
+        }
+        SliceGuard::EqValue { left, right, .. } => {
+            for subject in left.subject.iter().chain(right.subject.iter()) {
                 visitor(subject);
             }
         }
@@ -2430,8 +2463,9 @@ fn predicate_parameters(
 }
 
 /// Whether anything in the function whose `skeleton` this is ever writes
-/// `binding` whole — an assignment or update in its own body, or a write
-/// from a nested closure (`entry`'s descendant writes).
+/// `binding` whole — an assignment or update in its own body, or one a
+/// nested closure makes (`entry`'s descendant assignments). A closure's
+/// read or member write is not one (the checker's `isSymbolAssigned`).
 fn binding_is_assigned(
     skeleton: &FunctionBodySkeleton,
     bindings: &verter_semantic::analysis::flow::FlowBindingMap,
@@ -2445,7 +2479,7 @@ fn binding_is_assigned(
                 if bindings.canonical_local(local) == runtime)
     }) || entry.is_some_and(|entry| {
         entry
-            .descendant_writes
+            .descendant_assignments
             .iter()
             .filter_map(|identity| bindings.local(identity))
             .any(|local| bindings.canonical_local(local) == runtime)
@@ -6651,18 +6685,14 @@ impl Lowerer<'_> {
             return GuardDisposition::Unexpressible;
         }
         // A callee rooted at a name this frame does not bind is read in
-        // the owner scope, where its checker-visible signature set is
-        // exactly what the resolver serves only for a module's own
-        // unexported binding: a script's globals merge across files, a
-        // namespace block binds the name before the top level, and an
-        // exported binding takes further overloads from any augmenting
-        // `declare module` block.
+        // the owner scope, where the resolver serves a module's binding with
+        // its checker-visible signature set — an exported function's value
+        // merges the overloads every augmenting `declare module` block adds.
+        // A script's globals merge across files and a namespace block binds
+        // the name before the top level, which the owner scope does not see.
         if let Some(root) = chain_root_identifier(&call.callee) {
             if matches!(self.classify_occurrence(root.span), NameBinding::Free)
-                && (!self.module_scope
-                    || self.namespace_owned
-                    || self.top_level_name_is_exported(root.name.as_str())
-                    || self.top_level_declaration_is_exported(root.name.as_str()))
+                && (!self.module_scope || self.namespace_owned)
             {
                 return GuardDisposition::Unexpressible;
             }
@@ -6738,9 +6768,11 @@ impl Lowerer<'_> {
     /// the `typeof x === "kind"` spelling — `instanceof`, and `in`.
     ///
     /// Each family models an EXACT pair and degrades everything else that
-    /// still reaches a modeled slot: an equality between two references,
-    /// against a named constant, against a `typeof` this half cannot
-    /// resolve, or wrapping a nested guard in a boolean comparison; an
+    /// still reaches a modeled slot: an equality whose reference operand
+    /// is a member path or an access this half cannot express, against a
+    /// value that is neither a reference nor a literal, against a
+    /// `typeof` this half cannot resolve, or wrapping a nested guard in a
+    /// boolean comparison; an
     /// `in` with a non-literal key or an inexpressible subject access; an
     /// `instanceof` over an inexpressible subject or an unprovable
     /// constructor. Relational and arithmetic operators establish no
@@ -6811,6 +6843,9 @@ impl Lowerer<'_> {
                         negated,
                     });
                 }
+                if let Some(disposition) = self.equality_value_guard(binary, false, negated) {
+                    return disposition;
+                }
                 self.classify_unexpressible_comparison(binary)
             }
             // Loose (in)equality against `null` or `undefined` selects BOTH
@@ -6853,6 +6888,10 @@ impl Lowerer<'_> {
                             either
                         },
                     );
+                }
+                let negated = matches!(binary.operator, BinaryOperator::Inequality);
+                if let Some(disposition) = self.equality_value_guard(binary, true, negated) {
+                    return disposition;
                 }
                 self.classify_unexpressible_comparison(binary)
             }
@@ -6945,6 +6984,58 @@ impl Lowerer<'_> {
             }
         }
         GuardDisposition::NoNarrowing
+    }
+
+    /// An equality between two values ([`SliceGuard::EqValue`]): both
+    /// operands references or literals, at least one a represented whole
+    /// binding. The checker narrows EVERY reference operand by the other
+    /// operand's type, so a member reference (narrowing its parent as a
+    /// discriminant), an aliased discriminant, and a reference this half
+    /// cannot express are unexpressible. `None` when an operand is neither
+    /// a reference nor a literal, or no operand is a represented
+    /// reference: the caller's own classification decides those.
+    fn equality_value_guard(
+        &mut self,
+        binary: &oxc_ast::ast::BinaryExpression<'_>,
+        loose: bool,
+        negated: bool,
+    ) -> Option<GuardDisposition> {
+        if !is_equality_value_operand(&binary.left) || !is_equality_value_operand(&binary.right) {
+            return None;
+        }
+        let mut operands: Vec<SliceEqOperand> = Vec::with_capacity(2);
+        for operand in [&binary.left, &binary.right] {
+            let subject = match self.narrow_destination_of(operand) {
+                NarrowDestination::Represented => {
+                    let subject = self.narrow_subject_of(operand)?;
+                    let aliased_discriminant = self
+                        .alias_binding_of(operand)
+                        .is_some_and(|binding| self.discriminant_aliases.contains_key(&binding));
+                    if !subject.path.is_empty()
+                        || aliased_discriminant
+                        || self.subject_root_carries_an_unmentioned_narrowing(&subject)
+                    {
+                        return Some(GuardDisposition::Unexpressible);
+                    }
+                    Some(subject)
+                }
+                NarrowDestination::Unrepresented => return Some(GuardDisposition::Unexpressible),
+                NarrowDestination::Absent => None,
+            };
+            let value = self.lower_expr(operand, ExprMode::Return);
+            operands.push(SliceEqOperand { value, subject });
+        }
+        if operands.iter().all(|operand| operand.subject.is_none()) {
+            return None;
+        }
+        let right = operands.pop()?;
+        let left = operands.pop()?;
+        Some(GuardDisposition::modeled(SliceGuard::EqValue {
+            left: Box::new(left),
+            right: Box::new(right),
+            loose,
+            negated,
+        }))
     }
 
     /// Whether one COMPARISON operand names a position a narrow could
@@ -7225,6 +7316,35 @@ impl Lowerer<'_> {
             | SliceGuard::Instanceof { subject, .. }
             | SliceGuard::In { subject, .. }
             | SliceGuard::TypePredicate { subject, .. } => subject,
+            // Each reference an equality narrows must itself be constant;
+            // a non-constant one keeps only its value.
+            SliceGuard::EqValue {
+                left,
+                right,
+                loose,
+                negated,
+            } => {
+                let constant = |this: &Self, operand: &SliceEqOperand| SliceEqOperand {
+                    value: operand.value.clone(),
+                    subject: operand
+                        .subject
+                        .as_ref()
+                        .filter(|subject| {
+                            subject.path.is_empty() && this.is_constant_root(&subject.root)
+                        })
+                        .cloned(),
+                };
+                let (left, right) = (constant(self, left), constant(self, right));
+                if left.subject.is_none() && right.subject.is_none() {
+                    return Some(SliceGuard::None);
+                }
+                return Some(SliceGuard::EqValue {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    loose: *loose,
+                    negated: *negated,
+                });
+            }
             // Each reference a call predicate may narrow must itself be
             // constant; a non-constant one is dropped from the guard.
             SliceGuard::CallPredicate {
@@ -7592,39 +7712,6 @@ impl Lowerer<'_> {
             },
             Statement::TSExportAssignment(export) => names_binding(&export.expression),
             _ => false,
-        })
-    }
-
-    /// Whether an `export`-modified top-level declaration of any kind — a
-    /// variable, a class, an enum, a namespace — binds `name`: its value
-    /// is on the export surface, where augmentation can reach it.
-    fn top_level_declaration_is_exported(&self, name: &str) -> bool {
-        use oxc_ast::ast::Declaration;
-        self.program.body.iter().any(|statement| {
-            let Statement::ExportNamedDeclaration(export) = statement else {
-                return false;
-            };
-            match &export.declaration {
-                Some(Declaration::VariableDeclaration(variables)) => {
-                    variables.declarations.iter().any(|declarator| {
-                        declarator
-                            .id
-                            .get_binding_identifiers()
-                            .iter()
-                            .any(|identifier| identifier.name.as_str() == name)
-                    })
-                }
-                Some(Declaration::ClassDeclaration(class)) => {
-                    class.id.as_ref().is_some_and(|id| id.name.as_str() == name)
-                }
-                Some(Declaration::TSEnumDeclaration(declaration)) => {
-                    declaration.id.name.as_str() == name
-                }
-                Some(Declaration::TSModuleDeclaration(declaration)) => {
-                    declaration.id.name().as_str() == name
-                }
-                _ => false,
-            }
         })
     }
 
@@ -10699,6 +10786,17 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             receiver,
             negated: !negated,
         },
+        SliceGuard::EqValue {
+            left,
+            right,
+            loose,
+            negated,
+        } => SliceGuard::EqValue {
+            left,
+            right,
+            loose,
+            negated: !negated,
+        },
         SliceGuard::And(parts) => SliceGuard::Or(Arc::from(
             parts
                 .iter()
@@ -10764,6 +10862,31 @@ fn or_guard(left: SliceGuard, right: SliceGuard) -> SliceGuard {
 }
 
 /// The literal operand of an equality guard, if the expression IS one.
+/// Whether an equality operand is a value [`SliceGuard::EqValue`] reads:
+/// a reference (an identifier, `this`, or a static member chain over
+/// one) or a primitive literal. Any other operand evaluates in its own
+/// right, and the guard never re-evaluates it.
+fn is_equality_value_operand(expression: &Expression<'_>) -> bool {
+    match unwrap_reference_transparent(expression) {
+        Expression::Identifier(_)
+        | Expression::ThisExpression(_)
+        | Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_) => true,
+        Expression::StaticMemberExpression(member) => is_equality_value_operand(&member.object),
+        Expression::UnaryExpression(unary) => {
+            unary.operator == UnaryOperator::UnaryNegation
+                && matches!(
+                    unwrap_parenthesized(&unary.argument),
+                    Expression::NumericLiteral(_) | Expression::BigIntLiteral(_)
+                )
+        }
+        _ => false,
+    }
+}
+
 fn guard_literal_of(expression: &Expression<'_>, source: &str) -> Option<SliceGuardLiteral> {
     match unwrap_parenthesized(expression) {
         Expression::StringLiteral(literal) => {

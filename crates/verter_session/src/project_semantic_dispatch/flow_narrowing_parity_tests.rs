@@ -792,7 +792,6 @@ export function tus() { return takes(us); }
 export function tub() { return takes(ub); }
 export function tlit() { return two("a", "b"); }
 export function tnull(s: string | undefined, n: string) { return two(s, n); }
-export function tu() { return takes(u); }
 export function eu() { const v: typeof u extends (x: any) => x is A | B ? 1 : 0 = null!; return v; }
 export function ei() { const v: typeof i extends (x: any) => x is A & B ? 1 : 0 = null!; return v; }
 export function ei2() { const v: typeof i extends (x: any) => x is A ? 1 : 0 = null!; return v; }
@@ -815,10 +814,6 @@ export function pib() { const v: typeof ib extends (x: any) => x is infer U ? U 
 /// conditional whose extends type is an intersection decides each member
 /// (`A extends A & B` is `0`). Measured on 7.0.2, identically without
 /// `strictNullChecks` except `tnull` (`string`).
-///
-/// `takes(u)` is `A` on 7.0.2 with TS2345: `B`'s predicate is not
-/// assignable to the inferred `x is A`. The executor rejects the
-/// inapplicable candidate, so the call degrades.
 #[test]
 fn call_argument_inference_reads_the_last_overload_and_the_common_supertype() {
     check_rows(
@@ -841,10 +836,6 @@ fn call_argument_inference_reads_the_last_overload_and_the_common_supertype() {
             ("pib", "B", "B"),
         ],
     );
-    let host = host_with(CALL_INFERENCE);
-    for root in [STRICT_ROOT, LOOSE_ROOT] {
-        super::signature_predicate_inference_tests::assert_degrades(&host, root, "tu");
-    }
 }
 
 const NAMED_COMPOSITE_CONDITIONALS: &str = r#"
@@ -884,4 +875,326 @@ fn a_conditional_over_named_composites_decides_like_the_checker() {
         .map(|(function, printed)| (*function, *printed, *printed))
         .collect();
     check_rows(NAMED_COMPOSITE_CONDITIONALS, &rows);
+}
+
+const REFERENCE_EQUALITY: &str = r#"
+export const K = "a" as const;
+export function e1(x: "a" | "b", y: "a") { if (x === y) return x; throw 0; }
+export function e1y(x: "a" | "b", y: "a") { if (x === y) return y; throw 0; }
+export function e2(x: "a" | "b", y: "a") { if (x !== y) return x; throw 0; }
+export function e2y(x: "a" | "b", y: "a") { if (x !== y) return y; throw 0; }
+export function e3(x: "a" | "b", y: "a" | "c") { if (x === y) return x; throw 0; }
+export function e3y(x: "a" | "b", y: "a" | "c") { if (x === y) return y; throw 0; }
+export function e4(x: "a" | "b", y: "a" | "c") { if (x !== y) return x; throw 0; }
+export function e5(x: string | number, y: string) { if (x === y) return x; throw 0; }
+export function e6(x: string, y: "a" | "b") { if (x === y) return x; throw 0; }
+export function e6n(x: string | number, y: "a" | 1) { if (x === y) return x; throw 0; }
+export function e7(x: unknown, y: string) { if (x === y) return x; throw 0; }
+export function e8(x: unknown, y: { a: 1 }) { if (x === y) return x; throw 0; }
+export function e8b(x: unknown, y: "a" | { a: 1 }) { if (x === y) return x; throw 0; }
+export function e9(x: string | null, y: null) { if (x === y) return x; throw 0; }
+export function e10(x: string | null, y: null) { if (x !== y) return x; throw 0; }
+export function e10u(x: string | null | undefined, y: null) { if (x != y) return x; throw 0; }
+export function e11(x: string | undefined, y: string | undefined) { if (x === y) return x; throw 0; }
+export function e12(x: number | string | boolean, y: number) { if (x == y) return x; throw 0; }
+export function e12s(x: number | string | boolean, y: number) { if (x === y) return x; throw 0; }
+export function e13(x: 1 | "1" | true | "x", y: 1) { if (x == y) return x; throw 0; }
+export function e13n(x: 1 | "1" | true | "x", y: 1) { if (x != y) return x; throw 0; }
+export function e14(x: any, y: string) { if (x === y) return x; throw 0; }
+export function e15(x: string, y: any) { if (x === y) return x; throw 0; }
+export function e16(x: "a" | "b") { const k = "a"; if (x === k) return x; throw 0; }
+export function e17(x: "a" | "b") { const k = "a"; if (x !== k) return x; throw 0; }
+export function e19(x: {}, y: string) { if (x === y) return x; throw 0; }
+export function e21(x: "a", y: "a") { if (x !== y) return x; throw 0; }
+export function e21y(x: "a", y: "a") { if (x !== y) return y; throw 0; }
+export function e22(x: "a" | "b", y: "a" | "b") { if (x !== y) return x; throw 0; }
+export function e23x(x: 1 | 2, y: 2 | 3) { if (x === y) return x; throw 0; }
+export function e23y(x: 1 | 2, y: 2 | 3) { if (x === y) return y; throw 0; }
+export function e24(x: boolean, y: true) { if (x === y) return x; throw 0; }
+export function e24n(x: boolean, y: true) { if (x !== y) return x; throw 0; }
+export function e25(x: "a" | "b", y: "a" | "b") { if (y === x) return x; throw 0; }
+export function e26(x: "a" | "b" | undefined, y: undefined) { if (x == y) return x; throw 0; }
+export function k1(x: "a" | "b") { let k = "a"; if (x === k) return x; throw 0; }
+export function k2(x: "a" | "b") { if (x === K) return x; throw 0; }
+export function k3(x: "a" | "b") { if (x !== K) return x; throw 0; }
+export function o1(x: { a: 1 } | { b: 1 }, y: { a: 1 }) { if (x === y) return x; throw 0; }
+export function o2(x: { a: 1 } | string, y: { a: 1 }) { if (x === y) return x; throw 0; }
+export function o3(x: { a: 1 } | string, y: { a: 1 }) { if (x !== y) return x; throw 0; }
+export function u1(x: unknown, y: "a" | "b") { if (x === y) return x; throw 0; }
+export function u2(x: unknown, y: boolean) { if (x === y) return { v: x }; throw 0; }
+export function u3(x: unknown, y: unknown) { if (x === y) return x; throw 0; }
+export function u4(x: unknown, y: string) { if (x == y) return x; throw 0; }
+export function l2(x: "1" | 1 | true) { if (x == 1) return x; throw 0; }
+export function l3(x: string | number | boolean, y: string) { if (x == y) return x; throw 0; }
+export function z1(x: "a" | "b") { if (x !== Missing) return x; throw 0; }
+export function p1(x: "a" | "b", y: "a") { return x === y; }
+export function p2(x: string, y: string) { return x === y; }
+export function p3(x: unknown, y: string) { return x === y; }
+export function p4(y: "a", x: "a" | "b") { return x === y; }
+export function sig_p1() { return p1; }
+export function sig_p2() { return p2; }
+export function sig_p3() { return p3; }
+export function sig_p4() { return p4; }
+"#;
+
+/// An equality between two VALUES narrows every reference operand by the
+/// other operand's type at the test (`narrowTypeByEquality`), both types
+/// read before either narrow applies: `x: "a"` and `y: "a"` are both
+/// `never` past `x !== y`. On the equal edge the arms comparable to the
+/// value survive (`==` also keeps a `number` / `string` / boolean-literal
+/// arm against a `number` / `string` / `boolean` value, and selects both
+/// nullish arms against a nullish value), a surviving `string` / `number`
+/// / `bigint` arm becomes the value's literals of its kind, and an
+/// `unknown` or `{}` subject of `===` IS a primitive value (`object` for an
+/// object value, unchanged for a union); on the unequal edge only a unit
+/// value narrows. A `let` operand reads its declared `string`; a module
+/// constant, its literal. A returned equality infers the predicate the
+/// true edge establishes when the false edge empties it (`p1`, `p4`). A
+/// value this substrate cannot resolve (`Missing`) is no fact about either
+/// edge: the narrow degrades.
+/// Measured on 7.0.2 with `--strict` and with `--strictNullChecks false`
+/// (`e9` reads `string`, `e11` `string` and `e26` `"a" | "b"` there).
+#[test]
+fn an_equality_between_two_values_narrows_both_references() {
+    let rows = [
+        ("e1", "\"a\"", "\"a\""),
+        ("e1y", "\"a\"", "\"a\""),
+        ("e2", "\"b\"", "\"b\""),
+        ("e2y", "\"a\"", "\"a\""),
+        ("e3", "\"a\"", "\"a\""),
+        ("e3y", "\"a\"", "\"a\""),
+        ("e4", "\"a\" | \"b\"", "\"a\" | \"b\""),
+        ("e5", "string", "string"),
+        ("e6", "\"a\" | \"b\"", "\"a\" | \"b\""),
+        ("e6n", "\"a\" | 1", "\"a\" | 1"),
+        ("e7", "string", "string"),
+        ("e8", "object", "object"),
+        ("e8b", "unknown", "unknown"),
+        ("e9", "null", "string"),
+        ("e10", "string", "string"),
+        ("e10u", "string", "string"),
+        ("e11", "string | undefined", "string"),
+        (
+            "e12",
+            "string | number | boolean",
+            "string | number | boolean",
+        ),
+        ("e12s", "number", "number"),
+        ("e13", "1", "1"),
+        ("e13n", "\"1\" | \"x\" | true", "\"1\" | \"x\" | true"),
+        ("e14", "any", "any"),
+        ("e15", "string", "string"),
+        ("e16", "\"a\"", "\"a\""),
+        ("e17", "\"b\"", "\"b\""),
+        ("e19", "string", "string"),
+        ("e21", "never", "never"),
+        ("e21y", "never", "never"),
+        ("e22", "\"a\" | \"b\"", "\"a\" | \"b\""),
+        ("e23x", "2", "2"),
+        ("e23y", "2", "2"),
+        ("e24", "true", "true"),
+        ("e24n", "false", "false"),
+        ("e25", "\"a\" | \"b\"", "\"a\" | \"b\""),
+        ("e26", "undefined", "\"a\" | \"b\""),
+        ("k1", "\"a\" | \"b\"", "\"a\" | \"b\""),
+        ("k2", "\"a\"", "\"a\""),
+        ("k3", "\"b\"", "\"b\""),
+        ("o1", "{ a: 1; }", "{ a: 1; }"),
+        ("o2", "{ a: 1; }", "{ a: 1; }"),
+        ("o3", "string | { a: 1; }", "string | { a: 1; }"),
+        ("u1", "unknown", "unknown"),
+        ("u2", "{ v: boolean; }", "{ v: boolean; }"),
+        ("u3", "unknown", "unknown"),
+        ("u4", "unknown", "unknown"),
+        ("l2", "1", "1"),
+        (
+            "l3",
+            "string | number | boolean",
+            "string | number | boolean",
+        ),
+    ];
+    check_rows(REFERENCE_EQUALITY, &rows);
+    let host = host_with(REFERENCE_EQUALITY);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        super::signature_predicate_inference_tests::assert_degrades(&host, root, "z1");
+    }
+    check_predicate_rows(
+        REFERENCE_EQUALITY,
+        &[
+            (
+                "sig_p1",
+                "(x: \"a\" | \"b\", y: \"a\") => x is \"a\"",
+                "(x: \"a\" | \"b\", y: \"a\") => x is \"a\"",
+            ),
+            (
+                "sig_p2",
+                "(x: string, y: string) => boolean",
+                "(x: string, y: string) => boolean",
+            ),
+            (
+                "sig_p3",
+                "(x: unknown, y: string) => boolean",
+                "(x: unknown, y: string) => boolean",
+            ),
+            (
+                "sig_p4",
+                "(y: \"a\", x: \"a\" | \"b\") => x is \"a\"",
+                "(y: \"a\", x: \"a\" | \"b\") => x is \"a\"",
+            ),
+        ],
+    );
+}
+
+const CALL_RECOVERY: &str = r#"
+export interface A { a: 1 }
+export interface B { b: 1 }
+declare const u: ((x: unknown) => x is A) | ((x: unknown) => x is B);
+declare function takes<S>(g: (x: unknown) => x is S): S;
+declare function two<T>(a: T, b: T): T;
+declare function one(x: string): number;
+declare function rest(a: string, ...more: number[]): number;
+declare function opt(a: string, b?: number): number;
+declare function con<T extends string>(x: T): T;
+declare function ctx<T>(x: T, f: (v: T) => void): T;
+declare function box<T>(x: T[]): T;
+declare function ov(x: string): string;
+declare function ov(x: number): number;
+export function tu() { return takes(u); }
+export function tab(x: { a: 1 }, y: { b: 1 }) { return two(x, y); }
+export function o1(x: number) { return one(x); }
+export function o2() { return one(); }
+export function o3() { return one("a", "b"); }
+export function r0() { return rest(); }
+export function op0() { return opt(); }
+export function c1() { return con(1); }
+export function x1() { return ctx(1, (v: string) => {}); }
+export function bx(x: number) { return box(x); }
+export function v1(x: boolean) { return ov(x); }
+"#;
+
+/// A call its only candidate does not accept continues with that
+/// candidate as the checker's error-recovery candidate
+/// (`getCandidateForOverloadFailure`), re-inferred from the arguments, and
+/// the diagnostic the checker reports rides with the answer. Measured on
+/// 7.0.2, identically without `strictNullChecks`: `takes(u)` is `A`
+/// (TS2345: the inferred `x is A` does not accept `B`'s predicate);
+/// `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
+/// candidates' common supertype, which `y` then fails — where the checker
+/// prints the argument failure's elaboration, TS2741 ("Property 'a' is
+/// missing");
+/// `con(1)` is `string` — the inference violating `T extends string`
+/// takes the constraint (TS2345); `ctx(1, (v: string) => {})` is `string`
+/// (TS2345).
+///
+/// A call to a lone NON-generic signature is answered from its declared
+/// return without resolving the call — the checker's answer whatever the
+/// arguments: `one(x)` is `number` (TS2345), `one()` and `one("a", "b")`
+/// are `number` (TS2554), `rest()` is `number` (TS2555), `opt()` is
+/// `number` (TS2554). No applicability check runs there, so no diagnostic
+/// rides those answers.
+///
+/// A generic candidate whose inference relation fails (`box(x)`, the
+/// checker's `unknown`) and a call over several overloads (`ov(x)`, the
+/// checker's `never` with TS2769) keep the typed call gap: the first
+/// re-infers from a relation this executor abandoned, the second answers
+/// from a signature combining every overload.
+#[test]
+fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    };
+    let rows = [
+        ("tu", "A", CheckerDiagnosticCode::ArgumentNotAssignable),
+        (
+            "tab",
+            "{ a: 1; }",
+            CheckerDiagnosticCode::ArgumentNotAssignable,
+        ),
+        ("c1", "string", CheckerDiagnosticCode::ArgumentNotAssignable),
+        ("x1", "string", CheckerDiagnosticCode::ArgumentNotAssignable),
+    ];
+    let host = host_with(CALL_RECOVERY);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, printed, code) in rows {
+            assert_prints(&host, root, function, printed);
+            assert_eq!(
+                super::signature_predicate_inference_tests::checker_diagnostics(
+                    &host, root, function
+                ),
+                vec![CheckerDiagnostic {
+                    code,
+                    operation: CheckerDiagnosticOperation::CallResolution,
+                }],
+                "`{function}` in {root} carries the checker's TS{}",
+                code.code()
+            );
+        }
+        for function in ["o1", "o2", "o3", "r0", "op0"] {
+            assert_prints(&host, root, function, "number");
+        }
+        for function in ["bx", "v1"] {
+            super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
+        }
+    }
+}
+
+const LIB_VALUE_READS: &str = r#"
+export function l1(x: number | number[]) { if (Array.isArray(x)) return x; throw 0; }
+export function l2(x: number | number[]) { if (!Array.isArray(x)) return x; throw 0; }
+export function l3(x: string | string[]) { return Array.isArray(x); }
+export function f1(a: { readonly length: number; readonly [n: number]: number }) { return Array.from(a); }
+export function f2() { return Array.of(1, 2); }
+export function k1(o: { a: 1; b: 2 }) { return Object.keys(o); }
+export function m1() { return Math.max(1, 2); }
+export function m2() { return Math.PI; }
+export function j1(s: string) { return JSON.parse(s); }
+export function j2(v: unknown) { return JSON.stringify(v); }
+export function n1(n: unknown) { return Number.isFinite(n); }
+export function n2(x: unknown) { if (Number.isFinite(x)) return x; throw 0; }
+export function sig_l3() { return l3; }
+"#;
+
+/// A free `Array`, `Object`, `Math`, `JSON` or `Number` is the GLOBAL
+/// VALUE the project's lib environment declares (`declare var Array:
+/// ArrayConstructor;`), read through that declaration: its members'
+/// signatures answer calls, and `Array.isArray`'s `arg is any[]` narrows
+/// both edges and is the predicate a returned call infers. Measured on
+/// 7.0.2 against the full lib, identically without `strictNullChecks`;
+/// the host registers the lib's own declarations of these values.
+#[test]
+fn a_lib_global_value_reads_its_lib_declaration() {
+    let rows = [
+        ("l1", "number[]"),
+        ("l2", "number"),
+        ("f1", "number[]"),
+        ("f2", "number[]"),
+        ("k1", "string[]"),
+        ("m1", "number"),
+        ("m2", "number"),
+        ("j1", "any"),
+        ("j2", "string"),
+        ("n1", "boolean"),
+        ("n2", "unknown"),
+    ];
+    let host = super::signature_predicate_inference_tests::host_with_lib(LIB_VALUE_READS);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, printed) in rows {
+            assert_prints(&host, root, function, printed);
+        }
+        let predicate = "(x: string | string[]) => x is string[]";
+        assert_prints(&host, root, "sig_l3", predicate);
+        assert_predicate(&host, root, "sig_l3", predicate);
+    }
+}
+
+/// Without a lib environment a free global value names no declaration:
+/// the call through it stays the typed gap, never a guessed signature.
+#[test]
+fn a_lib_global_value_without_a_lib_stays_the_typed_gap() {
+    let host = host_with(LIB_VALUE_READS);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for function in ["l1", "m1", "sig_l3"] {
+            super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
+        }
+    }
 }
