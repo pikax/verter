@@ -685,6 +685,16 @@ impl std::hash::Hash for SliceNarrowRoot {
 /// type's: a `typeof u.v === "string"` narrows the type AT the path,
 /// while `u.kind === "a"` narrows the ROOT (the discriminant selects
 /// which of the root's union arms survives).
+/// One applied `asserts` call ([`SliceStatement::Assertion`]'s payload in
+/// expression position).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceAssertion {
+    /// The argument the predicate talks about.
+    pub subject: SliceNarrowSubject,
+    /// The predicate's target type; `None` for a targetless `asserts x`.
+    pub target: Option<GatedType>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SliceNarrowSubject {
     /// The binding the reference is rooted at.
@@ -1143,6 +1153,15 @@ pub enum SliceExpr {
     /// carriers, a leaf the shared leaf lowering). The evaluator unwraps
     /// the resolved operand through the lib `Awaited` surface; an operand
     /// the substrate cannot type keeps its typed gap and degrades.
+    /// A comma sequence whose operands include calls the checker enters
+    /// into control flow as `asserts` calls: `before` narrows ahead of the
+    /// value (the discarded operands, in order), `after` once the value
+    /// operand — itself the assertion call — has evaluated.
+    Sequence {
+        before: Arc<[SliceAssertion]>,
+        value: Box<SliceExpr>,
+        after: Option<SliceAssertion>,
+    },
     Awaited {
         operand: Box<SliceExpr>,
     },
@@ -2356,6 +2375,7 @@ pub(crate) fn build_flow_slice_content(
             &params,
         ),
         control_test_gap: false,
+        entered_assertion_sink: None,
         narrowing_alias_locals: FxHashSet::default(),
         alias_conditions: rustc_hash::FxHashMap::default(),
         discriminant_aliases: rustc_hash::FxHashMap::default(),
@@ -2660,6 +2680,20 @@ fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a
 /// checker's type, which drops a real contributor rather than merely
 /// widening, and is therefore worse than the superset a missing narrow
 /// produces.
+/// The reference a narrow lands on (the checker's `getReferenceCandidate`
+/// and `isMatchingReference`): through parentheses, non-null assertions
+/// and a comma sequence's LAST operand — `(touch(), x)` is `x`, the
+/// earlier operands only running first.
+fn reference_candidate<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    match unwrap_reference_transparent(expression) {
+        Expression::SequenceExpression(sequence) => match sequence.expressions.last() {
+            Some(last) => reference_candidate(last),
+            None => expression,
+        },
+        inner => inner,
+    }
+}
+
 fn unwrap_reference_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => {
@@ -2791,6 +2825,38 @@ fn narrowing_spine_calls<'e, 'a>(
     }
 }
 
+/// The statements that apply collected entered `asserts` calls, in order.
+fn assertion_statements(assertions: Vec<SliceAssertion>) -> Vec<SliceStatement> {
+    assertions
+        .into_iter()
+        .map(|SliceAssertion { subject, target }| SliceStatement::Assertion { subject, target })
+        .collect()
+}
+
+/// Whether a statement ends the path: a `throw`, a never-returning call,
+/// or a block that cannot complete normally.
+fn statement_ends_path(statement: &SliceStatement) -> bool {
+    match statement {
+        SliceStatement::Throw => true,
+        SliceStatement::Block(region) => !region
+            .can_fall_through
+            .reaches_end(CompletionDischarge::RegionComposition),
+        _ => false,
+    }
+}
+
+/// Statements one expression statement lowers to, as one block that
+/// completes unless one of them ends the path.
+fn sequential_block(statements: Vec<SliceStatement>) -> SliceStatement {
+    let can_fall_through = !statements.iter().any(statement_ends_path);
+    SliceStatement::Block(SliceRegion {
+        statements: Arc::from(statements.into_boxed_slice()),
+        can_fall_through: NormalCompletion::minted(
+            can_fall_through,
+            CompletionConstruction::RegionAccumulator,
+        ),
+    })
+}
 fn literal_boolean_value(expression: &Expression<'_>) -> Option<bool> {
     match unwrap_parenthesized(expression) {
         Expression::BooleanLiteral(literal) => Some(literal.value),
@@ -3151,6 +3217,15 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
         SliceExpr::Not { operand, .. } => SliceExpr::Not {
             operand,
             widen: true,
+        },
+        SliceExpr::Sequence {
+            before,
+            value,
+            after,
+        } => SliceExpr::Sequence {
+            before,
+            value: Box::new(widen_mutable_slot_literals(*value)),
+            after,
         },
         SliceExpr::Logical {
             conjunction,
@@ -4800,6 +4875,11 @@ struct Lowerer<'a> {
     /// itself right after lowering its test, so an arm region's own loop
     /// cannot drain it INTO the arm.
     control_test_gap: bool,
+    /// While set, the `asserts` predicates of the entered calls a scan
+    /// finds (outside any conditional arm) are collected here to be
+    /// applied after the scanned position, instead of taking the typed
+    /// gap.
+    entered_assertion_sink: Option<Vec<SliceAssertion>>,
     /// The same-frame `const`-kind locals whose initializer is a form the
     /// checker can bind a narrowing FACT to (a comparison, an
     /// `instanceof` / `in` test, a call, a composition of those, or
@@ -5625,7 +5705,13 @@ impl Lowerer<'_> {
                     // a predicate call takes evaluator evidence at guard
                     // application, and an unprovable callee degrades the
                     // demand through the typed guard-narrowing gap below.
-                    let unprovable_control_call = self.record_control_position_calls(&if_stmt.test);
+                    // An entered `asserts` call in the test narrows once
+                    // the test has run, ahead of both arms.
+                    let mut unprovable_control_call = false;
+                    let test_assertions = self.collecting_entered_assertions(|this| {
+                        unprovable_control_call = this.record_control_position_calls(&if_stmt.test);
+                    });
+                    out.extend(assertion_statements(test_assertions));
                     let active_guard_base = self.active_guard_bindings.len();
                     let active_guard_subject_base = self.active_guard_subjects.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
@@ -5724,7 +5810,10 @@ impl Lowerer<'_> {
                             // its effects take the same fail-closed scan
                             // every unmodeled position gets.
                             if let Some(init) = declarator.init.as_ref() {
-                                self.scan_unmodeled_position_effects(init);
+                                let entered = self.collecting_entered_assertions(|this| {
+                                    this.scan_unmodeled_position_effects(init)
+                                });
+                                out.extend(assertion_statements(entered));
                             }
                             continue;
                         };
@@ -5748,8 +5837,13 @@ impl Lowerer<'_> {
                         // pure-literal initializer carries no effect and
                         // stays silent).
                         if !self.slot_selected(id.span) {
+                            // An entered `asserts` call in it narrows once
+                            // the initializer has run.
                             if let Some(init) = declarator.init.as_ref() {
-                                self.scan_unmodeled_position_effects(init);
+                                let entered = self.collecting_entered_assertions(|this| {
+                                    this.scan_unmodeled_position_effects(init)
+                                });
+                                out.extend(assertion_statements(entered));
                             }
                             continue;
                         }
@@ -5901,7 +5995,7 @@ impl Lowerer<'_> {
                         // never to return ends the path exactly as an
                         // authored `throw` does: the statements after it
                         // are unreachable and contribute nothing.
-                        if matches!(statement, SliceStatement::Throw) {
+                        if statement_ends_path(&statement) {
                             can_fall_through = false;
                         }
                         out.push(statement);
@@ -5914,7 +6008,12 @@ impl Lowerer<'_> {
                 // before the region ends, so it takes the same fail-closed
                 // scan.
                 Statement::ThrowStatement(throw_stmt) => {
-                    self.scan_unmodeled_position_effects(&throw_stmt.argument);
+                    // An entered `asserts` call in it narrows before the
+                    // throw point.
+                    let entered = self.collecting_entered_assertions(|this| {
+                        this.scan_unmodeled_position_effects(&throw_stmt.argument)
+                    });
+                    out.extend(assertion_statements(entered));
                     out.push(SliceStatement::Throw);
                     can_fall_through = false;
                 }
@@ -6389,7 +6488,12 @@ impl Lowerer<'_> {
                     if !enumeration.declare {
                         for member in &enumeration.body.members {
                             if let Some(initializer) = member.initializer.as_ref() {
-                                self.scan_unmodeled_position_effects(initializer);
+                                // An entered `asserts` call narrows once the
+                                // initializer has run.
+                                let entered = self.collecting_entered_assertions(|this| {
+                                    this.scan_unmodeled_position_effects(initializer)
+                                });
+                                out.extend(assertion_statements(entered));
                             }
                         }
                     }
@@ -6679,14 +6783,11 @@ impl Lowerer<'_> {
                 }
             }
             // A sequence's VALUE is its last operand, and the checker
-            // narrows through it; the earlier operands are discarded and
-            // take the discarded-operand rail. This half carries no guard
-            // for the form, so a value-carrying last operand degrades.
+            // narrows through it (`narrowType` reads a comma's right
+            // operand); the earlier operands only run first, and their
+            // calls take the discarded-operand rail.
             Expression::SequenceExpression(sequence) => match sequence.expressions.last() {
-                Some(last) => match self.classify_guard(last) {
-                    GuardDisposition::NoNarrowing => GuardDisposition::NoNarrowing,
-                    _ => GuardDisposition::Unexpressible,
-                },
+                Some(last) => self.classify_guard(last),
                 None => GuardDisposition::NoNarrowing,
             },
             // An assignment used as a test narrows the binding it WROTE
@@ -7200,7 +7301,7 @@ impl Lowerer<'_> {
     /// land on: a narrowing destination, or the `typeof` of one. Both
     /// spellings put a modeled slot on the relation.
     fn operand_reaches_narrow_subject(&self, expression: &Expression<'_>) -> bool {
-        let operand = unwrap_reference_transparent(expression);
+        let operand = reference_candidate(expression);
         let destination = match operand {
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Typeof => {
                 self.narrow_destination_of(&unary.argument)
@@ -7216,23 +7317,6 @@ impl Lowerer<'_> {
             NarrowDestination::Represented
         } else if self.reference_root_is_represented(expression) {
             NarrowDestination::Unrepresented
-        } else if let Expression::SequenceExpression(sequence) =
-            unwrap_reference_transparent(expression)
-        {
-            // The checker's reference candidate reads a comma sequence as
-            // its last operand (`getReferenceCandidate`): a narrow of
-            // `(f(), x)` lands on `x`, which this half does not carry
-            // through the sequence.
-            match sequence
-                .expressions
-                .last()
-                .map(|last| self.narrow_destination_of(last))
-            {
-                Some(NarrowDestination::Represented | NarrowDestination::Unrepresented) => {
-                    NarrowDestination::Unrepresented
-                }
-                _ => NarrowDestination::Absent,
-            }
         } else {
             NarrowDestination::Absent
         }
@@ -7249,7 +7333,7 @@ impl Lowerer<'_> {
     /// destinations would degrade every test that merely mentions a
     /// frame binding.
     fn reference_root_is_represented(&self, expression: &Expression<'_>) -> bool {
-        match unwrap_reference_transparent(expression) {
+        match reference_candidate(expression) {
             Expression::Identifier(identifier) => self
                 .identifier_roots_a_narrow_destination(identifier.name.as_str(), identifier.span),
             Expression::StaticMemberExpression(member) => {
@@ -8199,12 +8283,12 @@ impl Lowerer<'_> {
     /// produces.
     fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
         let mut segments: Vec<Arc<str>> = Vec::new();
-        let mut current = unwrap_reference_transparent(expression);
+        let mut current = reference_candidate(expression);
         let identifier = loop {
             match current {
                 Expression::StaticMemberExpression(member) => {
                     segments.push(Arc::from(member.property.name.as_str()));
-                    current = unwrap_reference_transparent(&member.object);
+                    current = reference_candidate(&member.object);
                 }
                 Expression::Identifier(identifier) => break identifier,
                 _ => return None,
@@ -8260,6 +8344,13 @@ impl Lowerer<'_> {
             // its calls are never entered into control flow (the leaf
             // scanner's `void` rule).
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
+                // A comma sequence's operands are entered calls wherever
+                // the sequence sits.
+                if let Expression::SequenceExpression(sequence) =
+                    unwrap_parenthesized(&unary.argument)
+                {
+                    return Some(self.lower_entered_sequence_statement(sequence));
+                }
                 if let Expression::AssignmentExpression(assignment) =
                     unwrap_parenthesized(&unary.argument)
                 {
@@ -8285,82 +8376,154 @@ impl Lowerer<'_> {
                 }
                 self.scan_unmodeled_statement_effects(expression)
             }
-            Expression::CallExpression(call) => {
+            // Only an UNPARENTHESIZED call is entered into control flow
+            // (`(assertString(x));` narrows nothing — the binder's
+            // `maybeBindExpressionFlowIfCall` sees a parenthesized
+            // expression); a parenthesized one takes the scan below.
+            Expression::CallExpression(call)
+                if matches!(expression, Expression::CallExpression(_)) =>
+            {
                 // A bare call is a THROW POINT regardless of what it
                 // resolves to; a same-file assertion call additionally
                 // narrows. The marker keeps the throw point even when the
                 // assertion path below does not recognise the callee.
-                let free_callee = match unwrap_parenthesized(&call.callee) {
-                    Expression::Identifier(callee)
-                        if matches!(self.classify_occurrence(callee.span), NameBinding::Free) =>
-                    {
-                        Some(callee.name.as_str())
-                    }
-                    _ => None,
-                };
-                let assertion = free_callee.and_then(|name| {
-                    let (ordinal, target) = self.same_file_predicate(name, true, call.span)?;
-                    let argument = call
-                        .arguments
-                        .get(ordinal)
-                        .and_then(|argument| argument.as_expression())?;
-                    let subject = self.narrow_subject_of(argument)?;
-                    Some(SliceStatement::Assertion { subject, target })
-                });
-                // A closed same-file assertion whose target the predicate
-                // channel refuses (`asserts x is T` on `assertSame<T>`, or
-                // over a `T` this frame rebinds) narrows in the checker but
-                // cannot be applied here: the statement degrades through
-                // the typed gap rather than lowering as a throw point that
-                // leaves the subject silently unnarrowed.
-                if assertion.is_none()
-                    && free_callee
-                        .is_some_and(|name| self.assertion_target_is_refused(name, call.span))
-                {
-                    self.control_test_gap = true;
-                }
+                let assertion = self.entered_assertion(call);
                 // The statement's own call is the modeled boundary above;
                 // the effects NESTED in its callee expression and
                 // arguments are separate positions the slice never selects
-                // (`foo((assertString(x), 0));` narrows `x` in the
-                // checker) — scan them without re-scanning the call
-                // itself.
-                let mut scanner = LeafCallScanner::default();
-                scanner.visit_expression(&call.callee);
-                for argument in &call.arguments {
-                    if let Some(argument) = argument.as_expression() {
-                        scanner.visit_expression(argument);
+                // — scan them without re-scanning the call itself. An
+                // entered `asserts` call among them (a comma operand)
+                // applies before the statement's own call.
+                let nested =
+                    self.collecting_entered_assertions(|this| this.scan_call_operands(call));
+                let own = match assertion {
+                    Some(SliceAssertion { subject, target }) => {
+                        SliceStatement::Assertion { subject, target }
                     }
+                    // The statement's OWN call takes the same
+                    // prove-or-degrade discipline every other
+                    // result-independent position takes, PLUS the
+                    // reachability half no other position needs: a callee
+                    // that never returns ends the path, and treating it as
+                    // a plain throw point publishes the following
+                    // statements' contributions the checker drops.
+                    None => match self.statement_call_effect(call) {
+                        StatementCallEffect::Inert => {
+                            self.decided_above_call_spans.push(call.span.into());
+                            SliceStatement::ThrowPoint
+                        }
+                        StatementCallEffect::NeverReturns => SliceStatement::Throw,
+                        StatementCallEffect::Unprovable => {
+                            self.control_test_gap = true;
+                            SliceStatement::ThrowPoint
+                        }
+                    },
+                };
+                if nested.is_empty() {
+                    return Some(own);
                 }
-                if self.drain_scanned_same_frame_effects(
-                    scanner,
-                    CertificationMode::ValueFree,
-                    WritePolicy::SkeletonHiddenOnly,
-                ) {
-                    self.control_test_gap = true;
-                }
-                if let Some(assertion) = assertion {
-                    return Some(assertion);
-                }
-                // The statement's OWN call takes the same prove-or-degrade
-                // discipline every other result-independent position takes,
-                // PLUS the reachability half no other position needs: a
-                // callee that never returns ends the path, and treating it
-                // as a plain throw point publishes the following
-                // statements' contributions the checker drops.
-                match self.statement_call_effect(call) {
-                    StatementCallEffect::Inert => {
-                        self.decided_above_call_spans.push(call.span.into());
-                        Some(SliceStatement::ThrowPoint)
-                    }
-                    StatementCallEffect::NeverReturns => Some(SliceStatement::Throw),
-                    StatementCallEffect::Unprovable => {
-                        self.control_test_gap = true;
-                        Some(SliceStatement::ThrowPoint)
-                    }
-                }
+                let mut statements = assertion_statements(nested);
+                statements.push(own);
+                Some(sequential_block(statements))
             }
-            other => self.scan_unmodeled_statement_effects(other),
+            // Every operand of a comma sequence is entered like a
+            // statement of its own.
+            Expression::SequenceExpression(sequence) => {
+                Some(self.lower_entered_sequence_statement(sequence))
+            }
+            // The scan keeps the authored parentheses: a parenthesized
+            // call is not the statement's own.
+            _ => self.scan_unmodeled_statement_effects(expression),
+        }
+    }
+
+    /// A statement-position comma sequence: each operand lowers as an
+    /// expression statement of its own, in order, so an unparenthesized
+    /// call among them is entered into control flow (an `asserts` call
+    /// narrows what follows it; a never-returning one ends the path). The
+    /// operands lower as one block.
+    fn lower_entered_sequence_statement(
+        &mut self,
+        sequence: &oxc_ast::ast::SequenceExpression<'_>,
+    ) -> SliceStatement {
+        let mut statements = Vec::with_capacity(sequence.expressions.len());
+        for operand in &sequence.expressions {
+            let Some(statement) = self.lower_effect_statement(operand) else {
+                continue;
+            };
+            let ends = statement_ends_path(&statement);
+            statements.push(statement);
+            if ends {
+                break;
+            }
+        }
+        sequential_block(statements)
+    }
+
+    /// Run `scan` while collecting the `asserts` predicates of the entered
+    /// calls it finds, which the caller applies after the scanned
+    /// position.
+    fn collecting_entered_assertions(
+        &mut self,
+        scan: impl FnOnce(&mut Self),
+    ) -> Vec<SliceAssertion> {
+        let previous = self.entered_assertion_sink.replace(Vec::new());
+        scan(self);
+        std::mem::replace(&mut self.entered_assertion_sink, previous).unwrap_or_default()
+    }
+
+    /// The `asserts` predicate an ENTERED call applies — a free callee
+    /// naming a closed same-file assertion declaration, over an argument
+    /// this half narrows. A closed same-file assertion whose target the
+    /// predicate channel refuses (`asserts x is T` on `assertSame<T>`, or
+    /// over a `T` this frame rebinds) narrows in the checker but cannot be
+    /// applied here: it flags the typed gap.
+    fn entered_assertion(
+        &mut self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+    ) -> Option<SliceAssertion> {
+        let free_callee = match unwrap_parenthesized(&call.callee) {
+            Expression::Identifier(callee)
+                if matches!(self.classify_occurrence(callee.span), NameBinding::Free) =>
+            {
+                Some(callee.name.as_str())
+            }
+            _ => None,
+        };
+        let assertion = free_callee.and_then(|name| {
+            let (ordinal, target) = self.same_file_predicate(name, true, call.span)?;
+            let argument = call
+                .arguments
+                .get(ordinal)
+                .and_then(|argument| argument.as_expression())?;
+            let subject = self.narrow_subject_of(argument)?;
+            Some(SliceAssertion { subject, target })
+        });
+        if assertion.is_none()
+            && free_callee.is_some_and(|name| self.assertion_target_is_refused(name, call.span))
+        {
+            self.control_test_gap = true;
+        }
+        assertion
+    }
+
+    /// Scan the effects nested in one modeled call's callee and arguments
+    /// (`foo((assertString(x), 0));` narrows `x` in the checker), without
+    /// re-scanning the call itself.
+    fn scan_call_operands(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        let mut scanner = LeafCallScanner::default();
+        scanner.visit_expression(&call.callee);
+        for argument in &call.arguments {
+            if let Some(argument) = argument.as_expression() {
+                scanner.visit_expression(argument);
+            }
+        }
+        if self.drain_scanned_same_frame_effects(
+            scanner,
+            CertificationMode::ValueFree,
+            WritePolicy::SkeletonHiddenOnly,
+        ) {
+            self.control_test_gap = true;
         }
     }
 
@@ -8500,15 +8663,26 @@ impl Lowerer<'_> {
             scanner.statement_calls.insert(call.span);
         }
         scanner.visit_expression(expression);
-        if self.drain_scanned_same_frame_effects(
-            scanner,
-            CertificationMode::ValueFree,
-            WritePolicy::SkeletonHiddenOnly,
-        ) {
-            self.control_test_gap = true;
+        // An entered `asserts` call (a comma operand anywhere in the
+        // statement) narrows once the statement has run: its value is
+        // discarded, so nothing the statement lowers reads past it.
+        let entered = self.collecting_entered_assertions(|this| {
+            if this.drain_scanned_same_frame_effects(
+                scanner,
+                CertificationMode::ValueFree,
+                WritePolicy::SkeletonHiddenOnly,
+            ) {
+                this.control_test_gap = true;
+            }
+        });
+        let throw_point = verter_semantic::analysis::flow::expression_contains_call(expression)
+            .then_some(SliceStatement::ThrowPoint);
+        if entered.is_empty() {
+            return throw_point;
         }
-        verter_semantic::analysis::flow::expression_contains_call(expression)
-            .then_some(SliceStatement::ThrowPoint)
+        let mut statements: Vec<SliceStatement> = throw_point.into_iter().collect();
+        statements.extend(assertion_statements(entered));
+        Some(sequential_block(statements))
     }
 
     /// Lower one expression. Parameter and in-scope local identifiers
@@ -8804,22 +8978,42 @@ impl Lowerer<'_> {
                     .expressions
                     .last()
                     .expect("the guard proved a last operand");
+                // Every unparenthesized call operand is entered into
+                // control flow: an `asserts` call among the discarded
+                // operands narrows ahead of the value, and one that IS the
+                // value operand narrows once it has evaluated (`const y =
+                // (0, assertString(x))` narrows `x`).
+                let mut before = Vec::new();
                 for discarded in &sequence.expressions[..sequence.expressions.len() - 1] {
-                    if self.record_discarded_operand_calls(discarded) {
-                        self.control_test_gap = true;
+                    let entered = self.collecting_entered_assertions(|this| {
+                        if this.record_discarded_operand_calls(discarded) {
+                            this.control_test_gap = true;
+                        }
+                    });
+                    before.extend(entered);
+                }
+                let after = match last {
+                    Expression::CallExpression(call) => {
+                        let assertion = self.entered_assertion(call);
+                        // An entered call this half cannot apply keeps the
+                        // typed gap.
+                        if assertion.is_none() && self.call_may_assert_a_frame_binding(call) {
+                            self.control_test_gap = true;
+                        }
+                        assertion
+                    }
+                    _ => None,
+                };
+                let value = self.lower_expr(last, mode);
+                if before.is_empty() && after.is_none() {
+                    value
+                } else {
+                    SliceExpr::Sequence {
+                        before: Arc::from(before.into_boxed_slice()),
+                        value: Box::new(value),
+                        after,
                     }
                 }
-                // The checker enters the LAST operand's call into control
-                // flow too (`const y = (0, assertString(x))` narrows `x`),
-                // while the rails read only its value: an assertion that
-                // could narrow a frame-owned binding there is not applied,
-                // so it takes the typed gap.
-                if let Expression::CallExpression(call) = last {
-                    if self.call_may_assert_a_frame_binding(call) {
-                        self.control_test_gap = true;
-                    }
-                }
-                self.lower_expr(last, mode)
             }
             // ── THE shared value-structural descent ──────────────────
             //
@@ -8932,10 +9126,14 @@ impl Lowerer<'_> {
                         // The ternary's TEST is a control position exactly as
                         // the `if` twin's: only its provably result-independent
                         // calls are decided above; an unprovable one flags the
-                        // enclosing statement's guard-narrowing gap.
-                        if self.record_control_position_calls(&conditional.test) {
-                            self.control_test_gap = true;
-                        }
+                        // enclosing statement's guard-narrowing gap. An
+                        // entered `asserts` call in it narrows once the test
+                        // has run, ahead of both arms.
+                        let test_assertions = self.collecting_entered_assertions(|this| {
+                            if this.record_control_position_calls(&conditional.test) {
+                                this.control_test_gap = true;
+                            }
+                        });
                         // The ternary's arms are GUARDED exactly as the `if`
                         // statement's are: a closure created inside one
                         // captures the guarded reading of the guard's
@@ -8957,9 +9155,18 @@ impl Lowerer<'_> {
                         self.active_guard_bindings.truncate(active_guard_base);
                         self.active_guard_subjects
                             .truncate(active_guard_subject_base);
-                        SliceExpr::Union {
+                        let union = SliceExpr::Union {
                             arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
                             guard,
+                        };
+                        if test_assertions.is_empty() {
+                            union
+                        } else {
+                            SliceExpr::Sequence {
+                                before: Arc::from(test_assertions.into_boxed_slice()),
+                                value: Box::new(union),
+                                after: None,
+                            }
                         }
                     }
                     // A CALL POSITION with no structural arm (`f?.()`,
@@ -9807,13 +10014,39 @@ impl Lowerer<'_> {
         write_policy: WritePolicy,
     ) -> bool {
         self.decided_above_call_spans.extend(scanner.unentered);
+        let mut applied: Vec<verter_span::Span> = Vec::new();
+        if self.entered_assertion_sink.is_some() {
+            for call in &scanner.entered {
+                if let Some(assertion) = self.entered_assertion(call) {
+                    applied.push(call.span.into());
+                    if let Some(sink) = self.entered_assertion_sink.as_mut() {
+                        sink.push(assertion);
+                    }
+                }
+            }
+        }
+        // A modeled `asserts` call whose narrowing joins away past its
+        // conditional narrows nothing that follows: decided.
+        for call in &scanner.joined_away {
+            if self.entered_assertion(call).is_some() {
+                applied.push(call.span.into());
+                self.decided_above_call_spans.push(call.span.into());
+            }
+        }
+        let not_applied = |call: &ControlCall| match call {
+            ControlCall::Call { span, .. } => !applied.contains(span),
+            _ => true,
+        };
+        let control: Vec<ControlCall> = scanner.control.into_iter().filter(not_applied).collect();
+        let discarded: Vec<ControlCall> =
+            scanner.discarded.into_iter().filter(not_applied).collect();
         let control_unprovable = self.certify_result_independent_calls(
-            scanner.control,
+            control,
             ResultIndependentPosition::ControlTest,
             mode,
         );
         let discarded_unprovable = self.certify_result_independent_calls(
-            scanner.discarded,
+            discarded,
             ResultIndependentPosition::DiscardedOperand,
             mode,
         );
@@ -10544,6 +10777,25 @@ struct LeafCallScanner<'a> {
     void_nesting: usize,
     /// The spans of calls that are a comma operator's operand.
     comma_operand_calls: FxHashSet<oxc_span::Span>,
+    /// The spans of calls that are a comma operator's DISCARDED (not last)
+    /// operand: a test never reads their predicate, even in a control
+    /// position.
+    comma_discarded_calls: FxHashSet<oxc_span::Span>,
+    /// The same-frame calls the checker enters into control flow (an
+    /// expression statement's own call, a comma operand) outside any
+    /// conditional arm, whose `asserts` predicate persists past the
+    /// scanned position.
+    entered: Vec<&'a oxc_ast::ast::CallExpression<'a>>,
+    /// Conditional-arm nesting: a ternary arm or a `&&` / `||` / `??`
+    /// right operand, whose effects join the other path's.
+    conditional_nesting: usize,
+    /// Entered calls inside a conditional arm, not yet joined.
+    conditional_entered: Vec<&'a oxc_ast::ast::CallExpression<'a>>,
+    /// Entered calls of a conditional arm whose path joins one with no
+    /// entered call under a non-literal test: an `asserts` narrowing they
+    /// make does not persist past the conditional (the join is the
+    /// unnarrowed type).
+    joined_away: Vec<&'a oxc_ast::ast::CallExpression<'a>>,
     /// The spans of calls that are an expression statement's own
     /// expression (the scanned position's own, or one inside a class
     /// static block).
@@ -10580,6 +10832,17 @@ impl<'a> LeafCallScanner<'a> {
         self.control_nesting += 1;
         self.visit_expression(expr);
         self.control_nesting -= 1;
+    }
+
+    /// Visit an operand no path runs: an entered call there narrows
+    /// nothing that follows.
+    fn visit_unreached(&mut self, expr: &Expression<'a>) {
+        let start = self.conditional_entered.len();
+        self.conditional_nesting += 1;
+        self.visit_expression(expr);
+        self.conditional_nesting -= 1;
+        let joined: Vec<_> = self.conditional_entered.drain(start..).collect();
+        self.joined_away.extend(joined);
     }
 
     /// Visit a class member's key. A computed key evaluates at class
@@ -10772,8 +11035,30 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // statement-level `if` twin's: a predicate call there narrows the
         // branch reads even when the whole conditional folds into a leaf.
         self.visit_control_expression(&it.test);
+        // A literal test takes one arm for certain (its entered calls
+        // narrow what follows) and never the other (whose calls never run).
+        if let Some(taken) = literal_boolean_value(&it.test) {
+            let (always, never) = if taken {
+                (&it.consequent, &it.alternate)
+            } else {
+                (&it.alternate, &it.consequent)
+            };
+            self.visit_expression(always);
+            self.visit_unreached(never);
+            return;
+        }
+        let start = self.conditional_entered.len();
+        self.conditional_nesting += 1;
         self.visit_expression(&it.consequent);
+        let middle = self.conditional_entered.len();
         self.visit_expression(&it.alternate);
+        self.conditional_nesting -= 1;
+        let end = self.conditional_entered.len();
+        // Only one arm enters calls, so the other path joins unnarrowed.
+        if (middle == start) != (end == middle) {
+            let joined: Vec<_> = self.conditional_entered.drain(start..).collect();
+            self.joined_away.extend(joined);
+        }
     }
     fn visit_logical_expression(&mut self, it: &oxc_ast::ast::LogicalExpression<'a>) {
         if self.nested_frame_nesting > 0 {
@@ -10784,7 +11069,29 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // which narrowing (`isString(x) && x` reads `x` as `string` in
         // the checker) — a control position, conservatively for `??` too.
         self.visit_control_expression(&it.left);
+        // A literal boolean left operand decides whether the right one
+        // runs: for certain (`true && …`, `false || …`) or never (`false
+        // && …`, `true || …`, `true ?? …`).
+        if let Some(value) = literal_boolean_value(&it.left) {
+            let runs = match it.operator {
+                oxc_ast::ast::LogicalOperator::And => value,
+                oxc_ast::ast::LogicalOperator::Or => !value,
+                oxc_ast::ast::LogicalOperator::Coalesce => false,
+            };
+            if runs {
+                self.visit_expression(&it.right);
+            } else {
+                self.visit_unreached(&it.right);
+            }
+            return;
+        }
+        let start = self.conditional_entered.len();
+        self.conditional_nesting += 1;
         self.visit_expression(&it.right);
+        self.conditional_nesting -= 1;
+        // The path that skips the right operand joins unnarrowed.
+        let joined: Vec<_> = self.conditional_entered.drain(start..).collect();
+        self.joined_away.extend(joined);
     }
     // Statement TESTS are control positions. Statements are reachable
     // inside a leaf-lowered expression only through an immediately
@@ -10870,8 +11177,21 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         }
     }
     fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+        if self.nested_frame_nesting == 0
+            && (self.comma_operand_calls.contains(&call.span)
+                || self.statement_calls.contains(&call.span))
+        {
+            let call = self.alloc(call);
+            if self.conditional_nesting == 0 {
+                self.entered.push(call);
+            } else {
+                self.conditional_entered.push(call);
+            }
+        }
         if self.nested_frame_nesting > 0 {
             self.decided.push(call.span.into());
+        } else if self.comma_discarded_calls.contains(&call.span) {
+            self.discarded.push(ControlCall::of_call(call));
         } else if self.control_nesting > 0 {
             self.control.push(ControlCall::of_call(call));
         } else if self.comma_operand_calls.contains(&call.span)
@@ -10946,9 +11266,12 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
     fn visit_sequence_expression(&mut self, it: &oxc_ast::ast::SequenceExpression<'a>) {
         // The checker enters a call that is a comma operator's operand —
         // either side — into control flow.
-        for operand in &it.expressions {
+        for (index, operand) in it.expressions.iter().enumerate() {
             if let Expression::CallExpression(call) = operand {
                 self.comma_operand_calls.insert(call.span);
+                if index + 1 < it.expressions.len() {
+                    self.comma_discarded_calls.insert(call.span);
+                }
             }
         }
         walk::walk_sequence_expression(self, it);

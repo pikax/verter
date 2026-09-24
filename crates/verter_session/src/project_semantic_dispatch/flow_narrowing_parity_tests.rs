@@ -1580,7 +1580,9 @@ fn a_returned_logical_test_over_lib_calls_infers_like_the_checker() {
 
 const ENTERED_CALLS: &str = r#"
 declare function assertString(x: unknown): asserts x is string;
+declare function assertTruthy(x: unknown): asserts x;
 declare function g(v: unknown): void;
+function fail(): never { throw 0; }
 export function n1(x: string | number) { g(assertString(x)); return x; }
 export function n2(x: string | number) { const y = assertString(x); return x; }
 export function n3(x: string | number) { const y = [assertString(x)]; return { y, x }; }
@@ -1588,17 +1590,45 @@ export function n4(x: string | number) { void assertString(x); return x; }
 export function n5(x: string | number) { `${assertString(x)}`; return x; }
 export function n6(x: string | number) { const y = (0, assertString(x)); return { y, x }; }
 export function n7(x: string | number) { g((0, assertString(x))); return x; }
+export function p1(x: string | number) { const y = (0, assertString(x)); return x; }
+export function p2(x: string | number) { const y = (0, (assertString(x))); return x; }
+export function p3(x: string | number) { (assertString(x)); return x; }
+export function p4(x: string | number) { const y = ((assertString(x)), 0); return x; }
+export function p5(x: string | number) { void (0, assertString(x)); return x; }
+export function p6(x: string | number) { const y = (0, 1, assertString(x)); return x; }
+export function p7(x: string | number) { const y = (assertString(x), 1, 2); return x; }
+export function p8(x: string | number) { let y; y = (0, assertString(x)); return x; }
+export function p9(x: string | number) { const y = [(0, assertString(x))]; return x; }
+export function p11(x: string | undefined) { const y = (0, assertTruthy(x)); return x; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function p15(x: string | number, c: boolean) { const y = c ? (0, assertString(x)) : 0; return x; }
+export function p17(x: string | number) { if ((0, assertString(x))) { } return x; }
+export function p19(x: string | number) { (assertString(x), 0); return x; }
+export function p22(x: string | number) { const y = (assertString(x), x); return y; }
+export function j1(x: string | number, c: boolean) { const y = c ? 0 : (0, assertString(x)); return x; }
+export function j2(x: string | number, c: boolean) { const y = c && (0, assertString(x)); return x; }
+export function j3(x: string | number) { const y = true ? (0, assertString(x)) : 0; return x; }
+export function j5(x: string | number, c: boolean) { const y = ((0, assertString(x)) ? 1 : 2); return { y, x }; }
+export function k7(x: string | number) { true && (assertString(x), true); return x; }
+export function f8(x: string | number) { if (typeof x === "number") { (0, fail()); } return x; }
 "#;
 
 /// The checker enters a call into control flow — where an `asserts`
-/// callee narrows what follows — only when it is an expression
-/// statement's own call or a comma operator's operand
-/// (`maybeBindExpressionFlowIfCall`). Measured on 7.0.2, identically
-/// without `strictNullChecks`: an argument (`n1`), an initializer (`n2`),
-/// an array element (`n3`), a `void` operand (`n4`) and a template
-/// interpolation (`n5`) leave `x` as `string | number`, so each answer is
-/// complete; a comma operand narrows `x` to `string` (`n6`, `n7`), which
-/// the flow lane does not apply, so each degrades.
+/// callee narrows what follows — only when it is an UNPARENTHESIZED
+/// expression statement's own call or comma operand
+/// (`maybeBindExpressionFlowIfCall`), and the narrowing persists past the
+/// position unless a conditional's other path joins it unnarrowed.
+/// Measured on 7.0.2, identically without `strictNullChecks`: an argument
+/// (`n1`), an initializer (`n2`), an array element (`n3`), a `void`
+/// operand (`n4`), a template interpolation (`n5`) and a parenthesized
+/// call (`p2`, `p3`, `p4`) leave `x` as `string | number`; a comma
+/// operand narrows `x` to `string` wherever the sequence sits — an
+/// initializer, an argument, an array element, an assignment, a `void`
+/// operand, an `if` or ternary test, a statement (`n6`, `n7`, `p1`, `p5`
+/// to `p9`, `p11`, `p12`, `p17`, `p19`, `p22`, `j5`); inside one arm of a
+/// conditional it narrows nothing past it (`p15`, `j1`, `j2`), unless a
+/// literal test makes that arm certain (`j3`, `k7`). A never-returning
+/// comma operand ends the path like its statement twin (`f8` is `string`).
 #[test]
 fn only_an_entered_call_can_assert() {
     let rows = [
@@ -1611,14 +1641,35 @@ fn only_an_entered_call_can_assert() {
         ),
         ("n4", "string | number", "string | number"),
         ("n5", "string | number", "string | number"),
+        ("n6", "{ y: void; x: string; }", "{ y: void; x: string; }"),
+        ("n7", "string", "string"),
+        ("p1", "string", "string"),
+        ("p2", "string | number", "string | number"),
+        ("p3", "string | number", "string | number"),
+        ("p4", "string | number", "string | number"),
+        ("p5", "string", "string"),
+        ("p6", "string", "string"),
+        ("p7", "string", "string"),
+        ("p8", "string", "string"),
+        ("p9", "string", "string"),
+        ("p11", "string", "string"),
+        ("p12", "string", "string"),
+        ("p15", "string | number", "string | number"),
+        ("p17", "string", "string"),
+        ("p19", "string", "string"),
+        ("p22", "string", "string"),
+        ("j1", "string | number", "string | number"),
+        ("j2", "string | number", "string | number"),
+        ("j3", "string", "string"),
+        (
+            "j5",
+            "{ y: number; x: string; }",
+            "{ y: number; x: string; }",
+        ),
+        ("k7", "string", "string"),
+        ("f8", "string", "string"),
     ];
     check_rows(ENTERED_CALLS, &rows);
-    let host = host_with(ENTERED_CALLS);
-    for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for function in ["n6", "n7"] {
-            super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
-        }
-    }
 }
 
 const EMPTY_OBJECT_TARGETS: &str = r#"
@@ -1686,8 +1737,7 @@ export function s3(x: "a" | "b") { if ((touch(), x) === "a") { return x; } throw
 /// control flow, so the test narrows exactly as its spine does. Measured
 /// on 7.0.2, identically without `strictNullChecks`: `s1` is `number`,
 /// `s2` `string`. A comparison whose reference sits behind a comma
-/// sequence narrows that reference in the checker (`s3` is `"a"`), which
-/// this lane does not carry through the sequence: it degrades.
+/// sequence narrows that reference (`s3` is `"a"`).
 #[test]
 fn a_call_off_the_narrowing_spine_narrows_nothing() {
     let host = super::signature_predicate_inference_tests::host_with_lib_source(
@@ -1697,6 +1747,188 @@ fn a_call_off_the_narrowing_spine_narrows_nothing() {
     for root in [STRICT_ROOT, LOOSE_ROOT] {
         assert_prints(&host, root, "s1", "number");
         assert_prints(&host, root, "s2", "string");
-        super::signature_predicate_inference_tests::assert_degrades(&host, root, "s3");
+        assert_prints(&host, root, "s3", "\"a\"");
     }
+}
+
+const COMMA_REFERENCES: &str = r#"
+export interface Foo { kind: "foo"; n: number }
+export interface Bar { kind: "bar"; s: string }
+export class Cls { c = 1 }
+function touch() { }
+function isFoo(x: unknown): x is Foo { return true; }
+export function c1(x: "a" | "b") { if ((touch(), x) === "a") { return x; } throw 0; }
+export function c2(x: string | number) { if (typeof (touch(), x) === "string") { return x; } throw 0; }
+export function c3(x: string | undefined) { if ((touch(), x)) { return x; } throw 0; }
+export function c4(x: unknown) { if (isFoo((touch(), x))) { return x; } throw 0; }
+export function c5(x: Cls | string) { if ((touch(), x) instanceof Cls) { return x; } throw 0; }
+export function c6(x: Foo | Bar) { if ("n" in (touch(), x)) { return x; } throw 0; }
+export function c7(u: Foo | Bar) { return { v: (touch(), u.kind) === "foo" ? u.n : 0 }; }
+export function c8(x: "a" | "b") { return (touch(), x) === "a"; }
+export function c9(x: string | number) { if (typeof ((touch(), x)) === "string") { return x; } throw 0; }
+export function c10(x: string | number, y: string | number) { if (typeof (y, x) === "string") { return x; } throw 0; }
+export function c11(x: "a" | "b") { if ((0, 1, x) !== "a") { return x; } throw 0; }
+export function c12(x: string | null) { if ((touch(), x) != null) { return x; } throw 0; }
+export function sig_c8() { return c8; }
+"#;
+
+/// A narrow lands on the reference a comma sequence's LAST operand is
+/// (the checker's `getReferenceCandidate` and `isMatchingReference`): an
+/// equality, a `typeof`, a truthiness test, a predicate argument, an
+/// `instanceof` or `in` operand and a discriminant read behind `(touch(),
+/// x)` all narrow `x`, the earlier operands only running first. Measured
+/// on 7.0.2, identically without `strictNullChecks`.
+#[test]
+fn a_reference_behind_a_comma_sequence_narrows() {
+    let rows = [
+        ("c1", "\"a\"", "\"a\""),
+        ("c2", "string", "string"),
+        ("c3", "string", "string"),
+        ("c4", "Foo", "Foo"),
+        ("c5", "Cls", "Cls"),
+        ("c6", "Foo", "Foo"),
+        ("c7", "{ v: number; }", "{ v: number; }"),
+        ("c9", "string", "string"),
+        ("c10", "string", "string"),
+        ("c11", "\"b\"", "\"b\""),
+        ("c12", "string", "string"),
+    ];
+    check_rows(COMMA_REFERENCES, &rows);
+    check_predicate_rows(
+        COMMA_REFERENCES,
+        &[(
+            "sig_c8",
+            "(x: \"a\" | \"b\") => x is \"a\"",
+            "(x: \"a\" | \"b\") => x is \"a\"",
+        )],
+    );
+}
+
+const TYPEOF_EMPTY_OBJECT: &str = r#"
+export function t1(x: unknown) { if (typeof x === "object") return x; throw 0; }
+export function t2(x: {}) { if (typeof x === "object") return x; throw 0; }
+export function t3(x: {} | undefined) { if (typeof x === "object") return x; throw 0; }
+export function t4(x: {}) { if (typeof x === "function") return x; throw 0; }
+export function t5(x: {}) { if (typeof x !== "object") return x; throw 0; }
+export function t6(x: unknown) { return x === null || typeof x === "object"; }
+export function t7(x: unknown) { return typeof x === "object"; }
+export function t8(x: {} | null) { return typeof x === "object"; }
+export function t9(x: unknown) { if (x !== null && typeof x === "object") return x; throw 0; }
+export function t10(x: {}) { return typeof x === "object"; }
+export function t11(x: unknown) { if (x == null || typeof x === "object") return x; throw 0; }
+export function t12(x: {}) { if (typeof x === "string") return x; throw 0; }
+export function u1(x: {}) { if (typeof x === "undefined") return x; throw 0; }
+export function u2(x: {}) { if (typeof x !== "undefined") return x; throw 0; }
+export function u4(x: {}) { if (typeof x !== "string") return x; throw 0; }
+export function u5(x: {}) { if (typeof x === "number") return x; throw 0; }
+export function u7(x: {}) { if (typeof x === "symbol") return x; throw 0; }
+export function u8(x: {}) { if (typeof x === "bigint") return x; throw 0; }
+export function u9(x: {} | string) { if (typeof x === "object") return x; throw 0; }
+export function u10(x: {} | null) { if (typeof x === "object") return x; throw 0; }
+export function u11(x: {} | undefined) { if (typeof x === "undefined") return x; throw 0; }
+export function u12(x: {} | undefined) { if (typeof x !== "undefined") return x; throw 0; }
+export function sig_t6() { return t6; }
+export function sig_t7() { return t7; }
+export function sig_t8() { return t8; }
+export function sig_t10() { return t10; }
+"#;
+
+/// The empty object type `{}` holds every value but `null` and
+/// `undefined`, so a `typeof` test narrows it to the kind's implied type
+/// without them (`narrowTypeByTypeof`): `object` under `"object"`, the
+/// global `Function` under `"function"`, `string`, `number`, `symbol`,
+/// `bigint` under theirs, nothing under `"undefined"` with
+/// `strictNullChecks` (`undefined` without it); the negated edge keeps
+/// `{}`. With `unknown` split into `{} | null | undefined` past a nullish
+/// test, a returned `x === null || typeof x === "object"` infers `x is
+/// object | null`. Measured on 7.0.2 (the `.d.ts` line, strict and without
+/// `strictNullChecks`).
+#[test]
+fn a_typeof_test_narrows_the_empty_object_type() {
+    let rows = [
+        ("t1", "object | null", "object"),
+        ("t2", "object", "object"),
+        ("t3", "object", "object"),
+        ("t5", "{}", "{}"),
+        ("t9", "object", "object"),
+        ("t11", "object | null | undefined", "unknown"),
+        ("t12", "string", "string"),
+        ("u1", "never", "undefined"),
+        ("u2", "{}", "{}"),
+        ("u4", "{}", "{}"),
+        ("u5", "number", "number"),
+        ("u7", "symbol", "symbol"),
+        ("u8", "bigint", "bigint"),
+        ("u9", "object", "object"),
+        ("u10", "object | null", "object"),
+        ("u11", "undefined", "undefined"),
+        ("u12", "{}", "{}"),
+    ];
+    check_rows(TYPEOF_EMPTY_OBJECT, &rows);
+    check_predicate_rows(
+        TYPEOF_EMPTY_OBJECT,
+        &[
+            (
+                "sig_t6",
+                "(x: unknown) => x is object | null",
+                "(x: unknown) => boolean",
+            ),
+            (
+                "sig_t7",
+                "(x: unknown) => x is object | null",
+                "(x: unknown) => x is object",
+            ),
+            (
+                "sig_t8",
+                "(x: {} | null) => x is object | null",
+                "(x: {}) => x is object",
+            ),
+            (
+                "sig_t10",
+                "(x: {}) => x is object",
+                "(x: {}) => x is object",
+            ),
+        ],
+    );
+    let host = host_with(TYPEOF_EMPTY_OBJECT);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        super::signature_predicate_inference_tests::assert_complete(&host, root, "t4");
+    }
+}
+
+const NON_UNION_MEMBER_EQUALITY: &str = r#"
+export function d3(x: number[]) { return x.length === 0; }
+export function d4(x: string) { return x.length === 0; }
+export function d6(x: number[]) { if (x.length === 0) { return x; } throw 0; }
+export function d7(x: { a: string }) { if (x.a === "q") { return x; } throw 0; }
+export function sig_d3() { return d3; }
+export function sig_d4() { return d4; }
+"#;
+
+/// A property equality narrows the property's parent only through a
+/// DISCRIMINANT property of a union (`isMatchingReferenceDiscriminant`):
+/// a parameter that is a union neither as declared nor as narrowed is
+/// never narrowed, and its member is not read for it. Measured on 7.0.2,
+/// identically without `strictNullChecks`: `d3` / `d4` return `boolean`
+/// with no predicate, `d6` is `number[]`, `d7` `{ a: string; }`.
+#[test]
+fn a_member_equality_never_narrows_a_non_union_parent() {
+    check_rows(
+        NON_UNION_MEMBER_EQUALITY,
+        &[
+            ("d6", "number[]", "number[]"),
+            ("d7", "{ a: string; }", "{ a: string; }"),
+        ],
+    );
+    check_predicate_rows(
+        NON_UNION_MEMBER_EQUALITY,
+        &[
+            (
+                "sig_d3",
+                "(x: number[]) => boolean",
+                "(x: number[]) => boolean",
+            ),
+            ("sig_d4", "(x: string) => boolean", "(x: string) => boolean"),
+        ],
+    );
 }

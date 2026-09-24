@@ -1689,15 +1689,35 @@ fn instanceof_constructor_with_symbol_has_instance_never_narrows_to_the_class_in
 /// same-file `function` declaration whose return annotation is not an
 /// `asserts` predicate (an unannotated declaration cannot be an assertion
 /// — assertion signatures are never inferred). Every other discarded call
-/// is unprovable: never certified, and the statement takes the typed gap.
+/// is unprovable: never certified, and the statement takes the typed gap
+/// — except a closed same-file assertion, which the checker enters into
+/// control flow and this half applies ahead of the value (measured on
+/// 7.0.2: `(assertString(x), x)` is `string`, and `c ? (assertString(x),
+/// x) : x` is `string | number`).
 #[test]
 fn discarded_sequence_operand_calls_are_never_blanket_certified() {
-    let refused = [
+    let applied = [
         (
             "a closed same-file assertion",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { return (assertString(x), x) }",
         ),
+        (
+            "a closed assertion nested in a ternary arm",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(c: boolean, x: string | number) { return c ? (assertString(x), x) : x }",
+        ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the applied assertion mints no gap: {node:?}"
+        );
+    }
+
+    let refused = [
         (
             "an imported callee",
             "import { touch } from \"./touch\";\n\
@@ -1712,11 +1732,6 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
             "a member callee",
             "export {};\ndeclare const o: { touch(): void };\n\
              function f(x: string | number) { return (o.touch(), x) }",
-        ),
-        (
-            "a closed assertion nested in a ternary arm",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(c: boolean, x: string | number) { return c ? (assertString(x), x) : x }",
         ),
     ];
     for (case, source) in refused {
@@ -2573,12 +2588,39 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
 /// stays silent — the elision optimization is unchanged.
 #[test]
 fn elided_declaration_position_effects_take_the_typed_gap() {
-    let gapped = [
+    // A closed same-file assertion that is a comma operand there is
+    // entered into control flow and applied once the position has run
+    // (measured on 7.0.2: each leaves `x` as `string`).
+    let applied = [
         (
             "an assertion in an unselected binding's initializer",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { const unused = (assertString(x), 0); return x }",
         ),
+        (
+            "an assertion in a destructuring declarator's initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const { a } = (assertString(x), { a: 0 }); return x }",
+        ),
+        (
+            "an assertion in an enum member initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { enum E { A = (assertString(x), 1) } return x }",
+        ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+        assert!(
+            node.body
+                .statements
+                .iter()
+                .any(|statement| matches!(statement, SliceStatement::Assertion { .. })),
+            "{case}: the assertion applies after the position: {node:?}"
+        );
+    }
+
+    let gapped = [
         (
             "an imported callee with a frame-owned subject in an unselected initializer",
             "import { check } from \"./check\";\n\
@@ -2589,18 +2631,8 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { const unused = (x = \"s\", 0); return x }",
         ),
         (
-            "an assertion in a destructuring declarator's initializer",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { const { a } = (assertString(x), { a: 0 }); return x }",
-        ),
-        (
             "a write in a destructuring declarator's initializer",
             "export {};\nfunction f(x: string | number) { const [a] = (x = \"s\", [0]); return x }",
-        ),
-        (
-            "an assertion in an enum member initializer",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { enum E { A = (assertString(x), 1) } return x }",
         ),
         (
             "a write in an enum member initializer",
@@ -3019,10 +3051,6 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number, y: string) { if ((x = y)) { return x } return 0 }",
         ),
         (
-            "a truthiness test whose value is a sequence's last operand",
-            "export {};\nfunction f(x: string | number) { if ((0, x)) { return x } return 0 }",
-        ),
-        (
             "a truthiness test whose value is either branch of a conditional",
             "export {};\nfunction f(x: string | number, b: boolean) { if (b ? x : 0) { return x } return 0 }",
         ),
@@ -3033,10 +3061,6 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
         (
             "a guard wrapped in a negated boolean comparison",
             "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") !== false) { return x } return 0 }",
-        ),
-        (
-            "a sequence whose value is a guard",
-            "export {};\nfunction f(x: string | number) { if ((0, typeof x === \"string\")) { return x } return 0 }",
         ),
         (
             "a conditional whose branch is a guard",
@@ -3079,6 +3103,37 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "{case}: the unexpressible narrow takes the typed gap: {node:?}"
         );
     }
+
+    // The checker narrows the reference a comma sequence's LAST operand
+    // is (`narrowType` reads a comma's right operand; measured on 7.0.2:
+    // `if ((0, x)) return x` over `string | undefined` is `string`), which
+    // this half carries as the guard of that operand.
+    let comma = content_for(
+        "export {};\nfunction f(x: string | number) { if ((0, x)) { return x } return 0 }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&comma),
+        0,
+        "the comma test is modeled: {comma:?}"
+    );
+    assert!(
+        matches!(if_guard(&comma), SliceGuard::Truthy { .. }),
+        "the last operand's truthiness is the guard: {comma:?}"
+    );
+    let comma_guard = content_for(
+        "export {};\nfunction f(x: string | number) { if ((0, typeof x === \"string\")) { return x } return 0 }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&comma_guard),
+        0,
+        "a comma whose last operand is a guard is modeled: {comma_guard:?}"
+    );
+    assert!(
+        matches!(if_guard(&comma_guard), SliceGuard::Typeof { .. }),
+        "the last operand's `typeof` is the guard: {comma_guard:?}"
+    );
 
     // TypeScript preserves a narrowing FACT through a `const` alias, so
     // the truthiness of the alias is not the whole narrowing: the alias
@@ -4326,7 +4381,12 @@ fn locator_miss_is_typed_none() {
 /// `string | number`).
 #[test]
 fn unmodeled_expression_statement_effects_take_the_typed_gap() {
-    let gapped = [
+    // A closed same-file assertion the checker enters into control flow —
+    // a comma operand, also inside a `void`, a right operand a literal
+    // `true` always runs, a member write's or an unselected assignment's
+    // right-hand side — applies once the statement has run (measured on
+    // 7.0.2: each leaves `x` as `string`).
+    let applied = [
         (
             "a discarded sequence operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
@@ -4338,15 +4398,9 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { void (assertString(x), 0); return x }",
         ),
         (
-            "a logical right operand",
+            "a logical right operand under a literal `true`",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { true && (assertString(x), true); return x }",
-        ),
-        (
-            "a call argument",
-            "import { touch } from \"./touch\";\n\
-             function assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { touch((assertString(x), 0)); return x }",
         ),
         (
             "a member-write statement's right-hand side",
@@ -4357,6 +4411,23 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
             "an assignment right-hand side the slice did not select",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { let y = 0; y = (assertString(x), 1); return x }",
+        ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the entered assertion applies: {node:?}"
+        );
+    }
+
+    let gapped = [
+        (
+            "a call argument",
+            "import { touch } from \"./touch\";\n\
+             function assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { touch((assertString(x), 0)); return x }",
         ),
         (
             "a class-hidden write in an expression statement",
@@ -4386,8 +4457,8 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
         );
     }
 
-    // A throw argument evaluates before the region ends — its effect gaps
-    // AHEAD of the throw inside the try block's region.
+    // A throw argument evaluates before the region ends — its entered
+    // assertion applies AHEAD of the throw inside the try block's region.
     let thrown = content_for(
         "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
          function f(x: string | number) { try { throw (assertString(x), \"e\"); } catch { return x; } return x }",
@@ -4398,8 +4469,15 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     };
     assert_eq!(
         region_guard_gap_count(block),
-        1,
-        "an assertion in a throw argument takes the typed gap ahead of the throw: {thrown:?}"
+        0,
+        "an assertion in a throw argument applies ahead of the throw: {thrown:?}"
+    );
+    assert!(
+        matches!(
+            block.statements.as_ref(),
+            [SliceStatement::Assertion { .. }, SliceStatement::Throw]
+        ),
+        "the assertion precedes the throw: {thrown:?}"
     );
 
     let silent = [

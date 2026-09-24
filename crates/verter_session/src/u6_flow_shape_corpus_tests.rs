@@ -1384,6 +1384,14 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "8c244056779f2cb44c43349b0082320f0efd95cb3d410cc91a01fa87de05c62d",
     ),
     (
+        "N42_comma_sequence_guard",
+        "57f6e26bb13bb3afd43ac27f75179c1234a052f4f81e6c8fdff086cd3dae356b",
+    ),
+    (
+        "N50_sequence_discriminant_test",
+        "fb8a33d2bbe3ab90c2ff5c2553907745533496c9bd5de8a5722d587846a764b2",
+    ),
+    (
         "N38_postfix_non_null_wrapped_guard",
         "ea4d706da28a3e569aefa75f45af245cd496d8a55295927c5b7d9d9d58bfabe8",
     ),
@@ -3306,7 +3314,9 @@ mod corpus_suite {
             ),
             (
                 "N27_switch_true_guard_dispatch",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N28_switch_typeof_dispatch",
@@ -3328,6 +3338,12 @@ mod corpus_suite {
             ),
             (
                 "N36_aliased_discriminant",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "N50_sequence_discriminant_test",
                 "checker prints `{ v: string; }`; the renderer spells the same \
                  surface `{ v: string }` — object members print without the \
                  trailing `;` terminator",
@@ -5117,11 +5133,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
     ),
     (
-        "N50_sequence_discriminant_test",
-        Owner::U6NarrowLattice,
-        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
-    ),
-    (
         "N61_unannotated_const_assertion_does_not_narrow",
         Owner::U6NarrowSubstitution,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert the divergence this KnownOwed row records does not exist",
@@ -5151,7 +5162,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// undeclared-call rows, whose members spell the typed marker and so need no
 /// shallow entry.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 70;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 69;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -5255,10 +5266,8 @@ const OPEN_DEBTS: &[&str] = &[
     "N34_non_null_asserted_property_discriminant",
     "N39_instanceof_imported_class",
     "N41_instanceof_member_expression_constructor",
-    "N42_comma_sequence_guard",
     "N47_correlated_tuple_discriminant",
     "N48_closure_narrows_captured_binding",
-    "N50_sequence_discriminant_test",
     // Assertion CALL TARGETS the statement rail does not accept: a class
     // method and an annotated `const`. Each publishes the unnarrowed union
     // as a typed ReturnOnly. The `does_not_narrow` row is the paired
@@ -5344,8 +5353,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // `let`-aliased condition control (N84) publishes complete. A `const`
     // alias carries its condition's fact (N35), a call handing no
     // narrowable reference is certified inert (N43), and a loose `== null`
-    // selects both nullish arms (N76): 35 match.
-    (Owner::U6NarrowTypeof, 48, 40, 8),
+    // selects both nullish arms (N76), and a test behind a comma sequence
+    // is its last operand (N42): 41 match.
+    (Owner::U6NarrowTypeof, 48, 41, 7),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish
@@ -5357,8 +5367,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // warm), so the row is parked against its narrowing block. D10
     // closed N88's unknown-key intersection (the Record mint), moving
     // this owner to 25 matching. A `const` alias of a discriminant, read
-    // or destructured, is a discriminant of its object (N36, N37): 27.
-    (Owner::U6NarrowLattice, 38, 27, 11),
+    // or destructured, is a discriminant of its object (N36, N37), and a
+    // discriminant behind a comma sequence is its last operand (N50): 28.
+    (Owner::U6NarrowLattice, 38, 28, 10),
     // A call's predicate is read from its callee's resolved signature —
     // an arrow bound to a `const`, an object-literal method, a generic
     // instantiated at the call (N56, N57, N59): 9 match.

@@ -6270,6 +6270,7 @@ fn expression_write_tree(
                 walk(left, out);
                 walk(right, out);
             }
+            SliceExpr::Sequence { value, .. } => walk(value, out),
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
             }
@@ -6766,6 +6767,8 @@ enum ArmGuardClass {
 enum TopTypeofEdge {
     /// The arm stays whole on the edge.
     Kept,
+    /// No value of the arm takes the edge.
+    Dropped,
     /// The checker substitutes this implied type for the arm.
     Implied(SemanticNodeId),
     /// The checker's reading is not modeled: the arm stays possible and
@@ -10585,6 +10588,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Apply one entered `asserts` call: the call is a throw point first
+    /// (if it throws, the narrow never happened), then its predicate
+    /// narrows the subject for the rest of the path — to the target, or by
+    /// truthiness for a targetless `asserts v`.
+    fn apply_assertion(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        target: Option<&crate::flow_slice_content::GatedType>,
+    ) {
+        self.capture_throw_point();
+        let fact = match target {
+            Some(target) => self.narrow_to_predicate_target(subject, target, false),
+            None => self.narrow_truthy(subject, false),
+        };
+        match fact {
+            GuardNarrowing::Narrowed(subject, node) => {
+                self.push_narrowing(&subject, node);
+            }
+            GuardNarrowing::Unchanged => {}
+        }
+    }
+
     /// The union-of-facts reading of a disjunction: each disjunct's
     /// narrow is computed against the starting overlay as the operands
     /// before it LEFT it — `a || b` is true through `a`, or through `b`
@@ -10841,6 +10866,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if let Some(top) = self.top_arm_typeof_edge(*arm, kind, negated) {
                 match top {
                     TopTypeofEdge::Kept => out.push(*arm),
+                    TopTypeofEdge::Dropped => changed = true,
                     TopTypeofEdge::Implied(node) => {
                         out.push(node);
                         changed = true;
@@ -10912,8 +10938,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         )
     }
 
-    /// The `typeof` edge of a TOP arm (`unknown` / `any`), which no
-    /// runtime kind classifies: `None` for every other arm.
+    /// The `typeof` edge of a TOP arm (`unknown` / `any`) or of the empty
+    /// object type `{}`, which no runtime kind classifies: `None` for
+    /// every other arm.
     ///
     /// The checker's `narrowTypeByTypeName` SUBSTITUTES the kind's implied
     /// type on the positive edge, because that type is a subtype of the
@@ -10925,6 +10952,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// on, where the checker splits `unknown` into `{} | null |
     /// undefined` and removes the tested kind (`{} | null`, `{} |
     /// undefined`).
+    ///
+    /// `{}` holds every value but `null` and `undefined`, so its positive
+    /// edge is the kind's implied type without them: `string` under
+    /// `"string"`, `object` under `"object"`, the global `Function` under
+    /// `"function"`, and nothing under `"undefined"` with
+    /// `strictNullChecks` (`undefined` without it, where `{}` holds it).
+    /// Its negated edge keeps `{}` (the checker has no "`{}` minus a
+    /// kind" type).
     fn top_arm_typeof_edge(
         &mut self,
         arm: SemanticNodeId,
@@ -10932,15 +10967,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         negated: bool,
     ) -> Option<TopTypeofEdge> {
         use crate::flow_slice_content::SliceTypeofKind;
-        let is_any = match self.dispatch.graph().node_data(arm).as_deref() {
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => true,
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => false,
-            _ => return None,
-        };
         let primitive = |this: &Self, kind| {
             this.dispatch
                 .graph()
                 .intern_node(SemanticNodeData::Primitive(kind))
+        };
+        let is_any = match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => true,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => false,
+            Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty() => {
+                if negated {
+                    return Some(TopTypeofEdge::Kept);
+                }
+                return Some(match kind {
+                    SliceTypeofKind::Undefined if self.nullability.is_strict() => {
+                        TopTypeofEdge::Dropped
+                    }
+                    SliceTypeofKind::Object => {
+                        TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Object))
+                    }
+                    _ => self.top_arm_typeof_edge(
+                        primitive(self, PrimitiveKind::Unknown),
+                        kind,
+                        false,
+                    )?,
+                });
+            }
+            _ => return None,
         };
         if negated {
             let removed = match kind {
@@ -11638,6 +11691,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .to_vec()
                     .into_boxed_slice(),
             );
+            // The checker narrows the parent only through a DISCRIMINANT
+            // property of a union — the reference's declared type when
+            // that is a union, else its narrowed type
+            // (`isMatchingReferenceDiscriminant`): a parent that is a union
+            // in neither reading is never narrowed, and its member is not
+            // read for it.
+            if self.parent_is_never_a_union(&parent_subject) {
+                return GuardNarrowing::Unchanged;
+            }
             // A parent arm whose projected discriminant the relation
             // oracle cannot compare stays possible on BOTH edges and
             // degrades the result — undecided is never "proved off this
@@ -12281,6 +12343,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             })
             .collect();
         self.union(&refined)
+    }
+
+    /// Whether a whole PARAMETER reference is a union neither as declared
+    /// nor as narrowed here, so no member of it discriminates.
+    fn parent_is_never_a_union(
+        &mut self,
+        parent: &crate::flow_slice_content::SliceNarrowSubject,
+    ) -> bool {
+        let crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } = &parent.root else {
+            return false;
+        };
+        if !parent.path.is_empty() {
+            return false;
+        }
+        let Some(declared) = self.params.get(*ordinal as usize).copied() else {
+            return false;
+        };
+        let Some(current) = self.subject_current_node(parent) else {
+            return false;
+        };
+        self.enumerated_union_arms_or_self(declared).len() < 2
+            && self.enumerated_union_arms_or_self(current).len() < 2
     }
 
     /// Whether a PARAMETER's declared type is a union whose arms project
@@ -15728,17 +15812,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.capture_throw_point();
-                    let fact = match target {
-                        Some(target) => self.narrow_to_predicate_target(subject, target, false),
-                        None => self.narrow_truthy(subject, false),
-                    };
-                    match fact {
-                        GuardNarrowing::Narrowed(subject, node) => {
-                            self.push_narrowing(&subject, node);
-                        }
-                        GuardNarrowing::Unchanged => {}
-                    }
+                    self.apply_assertion(subject, target.as_ref());
                 }
                 crate::flow_slice_content::SliceStatement::TransparentLoop => {}
                 // The loop is entered and never completes normally: the
@@ -17187,6 +17261,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => Positional::Hold,
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
+            }
+            crate::flow_slice_content::SliceExpr::Sequence {
+                before,
+                value,
+                after,
+            } => {
+                for assertion in before.iter() {
+                    self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                }
+                let outcome = self.eval_expr(value);
+                if let Some(assertion) = after {
+                    self.apply_assertion(&assertion.subject, assertion.target.as_ref());
+                }
+                outcome
             }
             crate::flow_slice_content::SliceExpr::Logical {
                 conjunction,

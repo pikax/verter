@@ -8198,13 +8198,12 @@ function inherited(x: C | B) {
 }
 
 /// A DISCARDED sequence operand's assertion call narrows everything after
-/// it: `(assertString(x), x)` is `string` in the checker. Lowering only
-/// the last operand and blanket-certifying the discarded call
-/// decided-above published the unnarrowed `string | number` complete and
-/// warm. The discarded assertion is unprovable here: the demand keeps the
-/// unnarrowed join, carries the typed gap, and holds zero candidates.
+/// it: the checker enters the comma operand into control flow, so
+/// `(assertString(x), x)` is `string`. The assertion applies ahead of the
+/// sequence's value. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `string`.
 #[test]
-fn discarded_sequence_assertion_never_certifies_decided_above() {
+fn discarded_sequence_assertion_narrows_the_value() {
     const CANONICAL: &str = "/ws/discarded-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8218,7 +8217,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
@@ -8429,6 +8428,38 @@ fn assert_object_read_gaps_unwarmed(
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
         0,
         "{name}: an unprovable call never warms"
+    );
+}
+
+/// `name`'s read of `x` (the whole return, or its object's `x` member when
+/// `member` is set) is `string` and the answer is complete: an entered
+/// `asserts x is string` call applied before the read.
+fn assert_entered_assertion_narrows_the_read(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    member: bool,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key);
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let read = if member {
+        object_prop(&expr, "x")
+    } else {
+        &expr
+    };
+    assert_eq!(
+        read,
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "{name}: the asserted read is `string`, got {expr:?}"
+    );
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: the applied assertion leaves the read complete"
     );
 }
 
@@ -8686,15 +8717,13 @@ function f(x: string | number) {
 }
 /// An UNSELECTED binding's initializer never lowers — but it still runs at
 /// the statement: the discarded assertion of `const unused =
-/// (assertString(x), 0)` narrows `x` to `string` in the checker for every
-/// read that follows. The demand plan pruned the position (the binding is
-/// never read), so no call obligation existed, and no scanner saw it —
-/// the return's read of `x` could seal complete and warm at the unnarrowed
-/// `string | number`. The elided position takes the same fail-closed
-/// discipline: the read keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// (assertString(x), 0)` is a comma operand the checker enters into
+/// control flow, so it narrows `x` to `string` for every read that
+/// follows. The scan of the elided position collects it and applies it
+/// once the initializer has run. Measured on 7.0.2 (`--strict`, and
+/// without `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn unselected_initializer_assertion_never_seals_unnarrowed() {
+fn unselected_initializer_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/unselected-init-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8709,18 +8738,18 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
 /// A DESTRUCTURING declarator never lowers (it is not a simple local
 /// reaching definition) — but its initializer still runs at the statement,
-/// so the assertion in `const { a } = (assertString(x), { a: 0 })` narrows
-/// `x` for the checker while nothing here modeled or scanned it. The same
-/// typed `GuardNarrowing` gap applies: the read stays unnarrowed and the
-/// family slot holds zero candidates.
+/// and the assertion in `const { a } = (assertString(x), { a: 0 })` is a
+/// comma operand the checker enters into control flow: it applies once
+/// the initializer has run. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn destructuring_initializer_assertion_never_seals_unnarrowed() {
+fn destructuring_initializer_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/destructuring-init-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8735,20 +8764,18 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
 /// An enum declaration is not transparent: every member initializer
-/// evaluates in THIS frame at the statement, so the assertion in `enum E {
-/// A = (assertString(x), 1) }` narrows `x` for every read that follows in
-/// the checker. The declaration lowered as a no-op — no obligation, no
-/// scanner — so the unnarrowed superset could seal complete and warm. The
-/// same fail-closed discipline applies: the read of `x` keeps the
-/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
-/// the family slot holds zero candidates.
+/// evaluates in THIS frame at the statement, and the assertion in `enum E {
+/// A = (assertString(x), 1) }` is a comma operand the checker enters into
+/// control flow, so it narrows `x` for every read that follows; it applies
+/// once the initializer has run. Measured on 7.0.2 (`--strict`, and
+/// without `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn enum_member_initializer_assertion_never_seals_unnarrowed() {
+fn enum_member_initializer_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/enum-init-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8763,7 +8790,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
@@ -8925,16 +8952,13 @@ function f(x: "a" | "b" | "c") {
     });
 }
 
-/// An expression statement that is neither a modeled write nor a bare
-/// assertion call still EXECUTES: the discarded sequence operand of
-/// `(assertString(x), 0);` narrows `x` to `string` in the checker for the
-/// read that follows, while no content lowered for it and no obligation
-/// reached it — the return's read of `x` could seal complete and warm at
-/// the unnarrowed `string | number`. The statement takes the fail-closed
-/// scan: the read keeps the unnarrowed join, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// Every operand of a statement-position comma sequence is entered into
+/// control flow: the discarded operand of `(assertString(x), 0);` narrows
+/// `x` to `string` for the read that follows, exactly as the bare call
+/// statement does. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `{ x: string; }`.
 #[test]
-fn expression_statement_discarded_assertion_never_seals_unnarrowed() {
+fn expression_statement_discarded_assertion_narrows_the_read() {
     const CANONICAL: &str = "/ws/expression-statement-discarded-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8949,7 +8973,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 
