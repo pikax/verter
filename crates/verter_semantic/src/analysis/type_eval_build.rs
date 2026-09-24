@@ -544,7 +544,7 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
             ));
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None);
+            collect_module_declaration(module, source, out, None, false);
         }
         Statement::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -743,7 +743,7 @@ fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut Lowe
             ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None);
+            collect_module_declaration(module, source, out, None, false);
         }
         Declaration::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -1612,11 +1612,15 @@ fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) ->
         .collect()
 }
 
+/// `ambient` is whether an enclosing namespace is ambient: a `declare
+/// namespace` and every namespace inside one exports each member, written
+/// `export` or not.
 fn collect_module_declaration(
     decl: &TSModuleDeclaration<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
     prefix: Option<&str>,
+    ambient: bool,
 ) {
     // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
     // NOT a file-scope namespace. Its inner declarations augment the surface of
@@ -1643,14 +1647,15 @@ fn collect_module_declaration(
     let Some(body) = decl.body.as_ref() else {
         return;
     };
+    let ambient = ambient || decl.declare;
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            collect_module_declaration(inner, source, out, Some(module_name.as_str()));
+            collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                collect_namespaced_statement(stmt, source, out, module_name.as_str());
+                collect_namespaced_statement(stmt, source, out, module_name.as_str(), ambient);
             }
         }
     }
@@ -1842,16 +1847,28 @@ fn collect_namespaced_statement_into_augmentation(
         Statement::TSModuleDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
-        // Namespace VALUE indexing is EXPORT-ONLY (mirrors
-        // `collect_namespaced_statement`): a non-exported `const hidden = …` is
-        // private to the namespace body, so a DIRECT `VariableDeclaration` is
-        // intentionally not indexed. Only the exported path registers a
-        // qualified value member such as `JSX.VERSION`.
+        // An augmentation block is ambient, so every member of a namespace
+        // inside it is exported, written `export` or not (an ambient namespace
+        // in `collect_namespaced_statement`).
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 collect_namespaced_declaration_into_augmentation(
                     decl, source, out, namespace, scope,
                 );
+            }
+        }
+        Statement::VariableDeclaration(var_decl) => {
+            for declarator in &var_decl.declarations {
+                if let Some(parts) =
+                    lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
+                {
+                    out.aug_value_decls.push((scope.clone(), parts));
+                }
+            }
+        }
+        Statement::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.aug_value_decls.push((scope.clone(), parts));
             }
         }
         _ => {}
@@ -1905,6 +1922,11 @@ fn collect_namespaced_declaration_into_augmentation(
                 }
             }
         }
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.aug_value_decls.push((scope.clone(), parts));
+            }
+        }
         _ => {}
     }
 }
@@ -1956,6 +1978,7 @@ fn collect_namespaced_statement(
     source: &str,
     out: &mut LoweredStatementParts,
     namespace: &str,
+    ambient: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -1983,18 +2006,33 @@ fn collect_namespaced_statement(
             }
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace), ambient);
         }
         // Namespace value indexing is EXPORT-ONLY: a non-exported
         // `namespace N { const hidden = … }` is private to the namespace body
         // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
-        // `Statement::VariableDeclaration` is intentionally NOT indexed under
-        // its qualified name. Only the exported path below
-        // (`export const VERSION = …` → `collect_namespaced_declaration`)
-        // registers a qualified value member such as `N.VERSION`.
+        // `Statement::VariableDeclaration` is NOT indexed under its qualified
+        // name. The exported path below (`export const VERSION = …` →
+        // `collect_namespaced_declaration`) registers a qualified value member
+        // such as `N.VERSION` — and in an AMBIENT namespace every member is
+        // exported, written `export` or not.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration(decl, source, out, namespace);
+                collect_namespaced_declaration(decl, source, out, namespace, ambient);
+            }
+        }
+        Statement::VariableDeclaration(var_decl) if ambient => {
+            for declarator in &var_decl.declarations {
+                if let Some(parts) =
+                    lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
+                {
+                    out.value_decls.push(parts);
+                }
+            }
+        }
+        Statement::FunctionDeclaration(func) if ambient => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.value_decls.push(parts);
             }
         }
         _ => {}
@@ -2006,6 +2044,7 @@ fn collect_namespaced_declaration(
     source: &str,
     out: &mut LoweredStatementParts,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -2033,10 +2072,11 @@ fn collect_namespaced_declaration(
             }
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace), ambient);
         }
-        // A namespaced value member (`namespace NS { export const M = … }`)
-        // registers under its QUALIFIED name `NS.M` so `typeof NS.M` binds.
+        // A namespaced value member (`namespace NS { export const M = … }`,
+        // `export function f()`) registers under its QUALIFIED name `NS.M`
+        // so `typeof NS.M` binds.
         Declaration::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
                 if let Some(parts) =
@@ -2044,6 +2084,11 @@ fn collect_namespaced_declaration(
                 {
                     out.value_decls.push(parts);
                 }
+            }
+        }
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.value_decls.push(parts);
             }
         }
         _ => {}
@@ -2965,9 +3010,23 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
 }
 
 fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
+    lower_function_parts_in(func, source, None)
+}
+
+/// [`lower_function_parts`] for a function declared in `namespace`: it is
+/// added under its QUALIFIED name (`NS.f`), as a namespaced variable is.
+fn lower_function_parts_in(
+    func: &Function<'_>,
+    source: &str,
+    namespace: Option<&str>,
+) -> Option<LoweredValueDeclParts> {
     let (name, name_offset) = {
         let id = func.id.as_ref()?;
-        (id.name.to_string(), id.span.start)
+        let name = match namespace {
+            Some(ns) => qualified_name(ns, &id.name),
+            None => id.name.to_string(),
+        };
+        (name, id.span.start)
     };
 
     let mut sig = extract_function_signature(func, source);

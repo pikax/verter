@@ -83,6 +83,11 @@ pub(super) struct AugmentationContributions {
     pub(super) contributor_nodes: Vec<SemanticNodeId>,
     contributor_roots: Vec<AugmentationContributorRoot>,
     pub(super) source_env_unobservable: bool,
+    /// Where the excluded contributor's own declaration falls among
+    /// `contributor_nodes` in declaration precedence order: the count of
+    /// contributions that precede it. `None` when no contributor was
+    /// excluded.
+    base_position: Option<usize>,
 }
 
 /// Record a completed semantic augmentation stitch using the public typed
@@ -721,11 +726,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
         });
 
+        // A namespace's value member is its own declaration, named by its
+        // qualified path (`NS.Inner.f`): the longest prefix of the path that
+        // names one reads the rest of the path from it. The namespace a
+        // function or class merges with contributes its members this way too.
+        let unbound = !(has_value || has_import_local || has_type_symbol || has_namespace_prefix);
+        for length in (1..=path.len()).rev() {
+            let mut qualified = value_root.name.to_string();
+            for segment in &path[..length] {
+                qualified.push('.');
+                qualified.push_str(segment);
+            }
+            let declared = matches!(
+                shallow.visible_value_binding(value_root.scope.owner, &qualified),
+                Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
+            ) || (unbound
+                && value_root.name.as_ref() != "globalThis"
+                && self.global_value_declaration(&qualified).is_some());
+            if declared {
+                let member_root = ValueRootKey {
+                    scope: value_root.scope.clone(),
+                    name: Arc::from(qualified),
+                };
+                return self.build_typeof(&member_root, &path[length..], context);
+            }
+        }
+
         // A name no scope declares or imports is read in the program's GLOBAL
         // scope: `globalThis` is the global object, and any other name its
         // global value declaration. The global root replaces the bare-name
         // resolution below; the segments `globalThis` consumed leave `path`.
         let mut global_via_global_this = false;
+        // A function declared in several files: every later file's
+        // declaration, whose overloads join the first's.
+        let mut global_peers: Vec<ResolvedRootIdentity> = Vec::new();
         let (global_root, path) =
             if has_value || has_import_local || has_type_symbol || has_namespace_prefix {
                 (None, path)
@@ -770,22 +804,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // object; `let`, `const`, `class` and `enum` are global by
                 // name alone (the checker's TS2339 on `globalThis.x`).
                 use verter_semantic::analysis::type_eval::ValueDeclKind;
-                match self.global_value_declaration(member) {
-                    Some((
-                        identity,
-                        ValueDeclKind::Var | ValueDeclKind::Function | ValueDeclKind::AsyncFunction,
-                    )) => {
+                match self.global_value_declarations(member).as_deref() {
+                    Some(
+                        [(
+                            identity,
+                            ValueDeclKind::Var
+                            | ValueDeclKind::Function
+                            | ValueDeclKind::AsyncFunction,
+                        ), peers @ ..],
+                    ) => {
                         global_via_global_this = true;
-                        (Some(identity), rest)
+                        global_peers = peers.iter().map(|(peer, _)| peer.clone()).collect();
+                        (Some(identity.clone()), rest)
                     }
                     _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
                 }
             } else {
-                match self.global_value_declaration(value_root.name.as_ref()) {
-                    Some((identity, _)) => (Some(identity), path),
-                    None => {
-                        return (QueryResult::Error(QueryError::Miss), empty_signature()).into()
+                match self
+                    .global_value_declarations(value_root.name.as_ref())
+                    .as_deref()
+                {
+                    Some([(identity, _), peers @ ..]) => {
+                        global_peers = peers.iter().map(|(peer, _)| peer.clone()).collect();
+                        (Some(identity.clone()), path)
                     }
+                    _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
                 }
             };
 
@@ -1168,76 +1211,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context,
             )
         } else if !prepared.signatures.is_empty() {
-            // Overload visibility (projection-time rule) comes from the ONE
-            // shared authority — the same rule the member-position overload
-            // carrier applies, so a group reached as `typeof f` and the same
-            // group reached as `C['m']` publish the same contributors. Each
-            // visible signature lowers
-            // through the located body source at its GROUP-level
-            // `ValueSignature` ordinal (the whole-signature deref recovers the
-            // function IR from the retained snapshot — binding the signature's
-            // own type parameters — and names a body-derived return's served
-            // function position so the lowering demands it from the
-            // whole-function producer through the sealed helper); the
-            // composed constructor-like object is interned directly.
+            // The composed constructor-like object is interned directly.
             let is_class =
                 prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
-            let visible = crate::semantic_query::visible_overload_ordinals(
-                prepared
-                    .signatures
-                    .iter()
-                    .map(|sig| sig.has_implementation_body),
+            // One signature group per declaration the function merges, in
+            // declaration order: every later file's declaration of a global
+            // function follows the first's.
+            let mut groups = self.prepared_signature_groups(
+                &prepared,
+                &empty_env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
             );
-            let signature_nodes: Vec<crate::semantic_query::SemanticNodeId> =
-                visible
-                    .into_iter()
-                    .map(|ordinal| {
-                        let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                        verter_type_expr::locators::TypeBodySlot {
-                            anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
-                                owner: prepared.root_identity.owner,
-                                symbol: Arc::clone(&prepared.root_identity.symbol_name),
-                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                            },
-                            path: Arc::from(
-                                vec![verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
-                                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                                }]
-                                .into_boxed_slice(),
-                            ),
-                        },
-                    );
-                        self.lower_located_body_with_provenance(
-                            locator,
-                            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
-                            &[],
-                            &prepared.name_resolution,
-                            &empty_env,
-                            &scope,
-                            scope_payload.as_ref(),
-                            &shadowing,
-                            &mut substitutions,
-                            context,
-                        )
-                    })
-                    .collect();
-            let entries = if is_class {
-                // A class's value signatures ARE its construct signatures —
-                // normalise their kind to `Construct`.
-                signature_nodes
-                    .into_iter()
-                    .map(|sig| SurfaceEntry::ConstructSignature(self.construct_kind_twin(sig)))
-                    .collect()
+            for peer in &global_peers {
+                let Some((_, _, _, peer_prepared)) = self.effective_prepared_value_decl(
+                    &peer.canonical_id,
+                    peer.owner,
+                    &peer.symbol_name,
+                ) else {
+                    return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                };
+                groups.extend(self.prepared_signature_groups(
+                    &peer_prepared,
+                    &empty_env,
+                    &scope,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    context,
+                ));
+            }
+            if !is_class && groups.len() > 1 {
+                self.merged_declaration_signatures_node(groups)
             } else {
-                signature_nodes
-                    .into_iter()
-                    .map(SurfaceEntry::CallSignature)
-                    .collect()
-            };
-            let surface = crate::semantic_query::SurfaceView::from_entries(entries, None, false);
-            self.graph()
-                .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
+                let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
+                self.value_signature_surface(signature_nodes, is_class, &scope)
+            }
         } else if let Some(members) = prepared.enum_members.as_ref() {
             let object_expr = ObjectExpr {
                 properties: members
@@ -1293,6 +1305,156 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.project_typeof_path(node_id, path, context, observed_hash, value_root);
         output.result_is_partial |= composed_partial;
         output
+    }
+
+    /// The visible value signatures of one prepared function declaration,
+    /// lowered and grouped by the declaration that contributes them.
+    ///
+    /// Overload visibility (projection-time rule) comes from the ONE shared
+    /// authority — the same rule the member-position overload carrier
+    /// applies, so a group reached as `typeof f` and the same group reached
+    /// as `C['m']` publish the same contributors. Each visible signature
+    /// lowers through the located body source at its GROUP-level
+    /// `ValueSignature` ordinal (the whole-signature deref recovers the
+    /// function IR from the retained snapshot — binding the signature's own
+    /// type parameters — and names a body-derived return's served function
+    /// position so the lowering demands it from the whole-function producer
+    /// through the sealed helper).
+    ///
+    /// A file's top-level overloads are ONE declaration. A namespace
+    /// member's or a `declare global` block's overloads group by the block
+    /// that declares them: the checker's candidate order tries a later
+    /// block's before an earlier one's.
+    #[allow(clippy::too_many_arguments)]
+    fn prepared_signature_groups(
+        &self,
+        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Vec<Vec<SemanticNodeId>> {
+        let identity = &prepared.root_identity;
+        let by_block = identity.symbol_name.contains('.')
+            || self
+                .ctx
+                .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
+                .is_some_and(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .decl_bodies()
+                        .header_index()
+                        .value_header_in(identity.owner, identity.symbol_name.as_ref())
+                        .is_none()
+                });
+        let visible = crate::semantic_query::visible_overload_ordinals(
+            prepared
+                .signatures
+                .iter()
+                .map(|sig| sig.has_implementation_body),
+        );
+        let mut groups: Vec<Vec<SemanticNodeId>> = Vec::new();
+        let mut current_block: Option<Option<u32>> = None;
+        for ordinal in visible {
+            let block = by_block
+                .then(|| match &prepared.signatures[ordinal].spans_origin {
+                    verter_type_expr::span_origins::FunctionSpansOrigin::AliasBody { anchor }
+                    | verter_type_expr::span_origins::FunctionSpansOrigin::Member {
+                        anchor, ..
+                    } => Some(anchor.contributor_index),
+                    verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
+                })
+                .flatten();
+            let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::clone(&identity.canonical_id),
+                        owner: identity.owner,
+                        symbol: Arc::clone(&identity.symbol_name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    path: Arc::from(
+                        vec![
+                            verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                            },
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                },
+            );
+            let node = self.lower_located_body_with_provenance(
+                locator,
+                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                &[],
+                &prepared.name_resolution,
+                env,
+                scope,
+                scope_payload,
+                shadowing,
+                substitutions,
+                context,
+            );
+            match groups.last_mut() {
+                Some(group) if current_block == Some(block) => group.push(node),
+                _ => groups.push(vec![node]),
+            }
+            current_block = Some(block);
+        }
+        groups
+    }
+
+    /// A function value's signatures as one surface: its call signatures,
+    /// or for a class its construct signatures.
+    fn value_signature_surface(
+        &self,
+        signature_nodes: Vec<SemanticNodeId>,
+        is_class: bool,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let entries = if is_class {
+            // A class's value signatures ARE its construct signatures —
+            // normalise their kind to `Construct`.
+            signature_nodes
+                .into_iter()
+                .map(|sig| SurfaceEntry::ConstructSignature(self.construct_kind_twin(sig)))
+                .collect()
+        } else {
+            signature_nodes
+                .into_iter()
+                .map(SurfaceEntry::CallSignature)
+                .collect()
+        };
+        let surface = crate::semantic_query::SurfaceView::from_entries(entries, None, false);
+        self.graph()
+            .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
+    }
+
+    /// The overload set of a function merged from several declarations:
+    /// one arm per declaration, in declaration order — a lone signature, or
+    /// the declaration's own ordered overload group. `SignaturesOfType`
+    /// lists every arm's signatures in that order; call resolution tries a
+    /// later declaration's first.
+    fn merged_declaration_signatures_node(
+        &self,
+        groups: Vec<Vec<SemanticNodeId>>,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::composite::CompositeList;
+        let arms: Vec<SemanticNodeId> = groups
+            .into_iter()
+            .map(|group| match group.as_slice() {
+                [lone] => *lone,
+                _ => self.graph().intern_node(SemanticNodeData::Intersection(
+                    CompositeList::overload_group(Arc::from(group.into_boxed_slice())),
+                )),
+            })
+            .collect();
+        self.graph().intern_node(SemanticNodeData::Intersection(
+            CompositeList::merged_overload_group(Arc::from(arms.into_boxed_slice())),
+        ))
     }
 
     fn project_typeof_path(
@@ -4113,6 +4275,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
+            base_position,
         } = contributions;
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
@@ -4134,14 +4297,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
         // contributor splitter (`collect_merged_contributor_arms` only reads
         // Object / Intersection / Alias bodies).
-        let mut all_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
+        let base_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
             Some(data) => match data.as_ref() {
                 SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
                 _ => vec![base_result],
             },
             None => vec![base_result],
         };
-        all_contributors.extend(contributor_nodes);
+        // The base keeps its own place in declaration precedence order: a
+        // global read from a later declaration's file still lists the earlier
+        // files' declarations first. Augmentations follow the declaration
+        // they augment.
+        let position = base_position.unwrap_or(0).min(contributor_nodes.len());
+        let mut all_contributors: Vec<SemanticNodeId> = contributor_nodes[..position].to_vec();
+        all_contributors.extend(base_contributors);
+        all_contributors.extend_from_slice(&contributor_nodes[position..]);
         let merged = self.graph().intern_node_with_scope(
             SemanticNodeData::MergedDecl {
                 contributors: Arc::from(all_contributors.into_boxed_slice()),
@@ -4344,6 +4514,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // fast exact-key path instead of re-healing every call.
         let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
             Vec::new();
+        let mut base_position: Option<usize> = None;
         enum OrderedOrigin {
             Augmenter(usize),
             FileScope(usize),
@@ -4391,6 +4562,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         });
         for candidate in ordered {
             if excluded_contributor == Some(candidate.canonical.as_ref()) {
+                base_position.get_or_insert(contributor_nodes.len());
                 continue;
             }
             match candidate.origin {
@@ -4797,6 +4969,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     contributor_nodes: Vec::new(),
                     contributor_roots: Vec::new(),
                     source_env_unobservable: true,
+                    base_position: None,
                 });
             }
             return None;
@@ -4850,6 +5023,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
+            base_position,
         })
     }
 
@@ -4917,6 +5091,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
+            base_position: _,
         } = self.collect_augmentation_contributions(
             target,
             name,
@@ -5064,21 +5239,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// The program's GLOBAL value declaration named `name` — a module's
     /// `declare global { var / let / const / function / class }` member or
-    /// a script's file-scope value — with its declaration kind. A `var`
-    /// declared in several files is ONE variable whose type is its first
-    /// declaration's, in declaration precedence order (the checker requires
-    /// every later declaration to repeat it, TS2403). `None` when the
-    /// program declares no such global value, or when this lane cannot
-    /// address it:
-    ///
-    /// - another kind of declaration spans more than one file: merging a
-    ///   function's overloads across files is not modelled, and a
-    ///   block-scoped global declared twice is the checker's TS2451;
-    /// - a declaring module also declares a module-scope value of the same
-    ///   name, which the identity `(module, name)` addresses instead.
-    ///
-    /// A `declare global` block in a SCRIPT binds nothing, and an automatic
-    /// lib's values are the lib environment's own.
+    /// a script's file-scope value — with its declaration kind: the first
+    /// of [`Self::global_value_declarations`].
     pub(super) fn global_value_declaration(
         &self,
         name: &str,
@@ -5086,6 +5248,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ResolvedRootIdentity,
         verter_semantic::analysis::type_eval::ValueDeclKind,
     )> {
+        self.global_value_declarations(name)?.into_iter().next()
+    }
+
+    /// Every file's declaration of the GLOBAL value `name`, in declaration
+    /// precedence order, each with its kind. A `var` declared in several
+    /// files is ONE variable whose type is its first declaration's (the
+    /// checker requires every later declaration to repeat it, TS2403), so
+    /// only that one is listed; a function declared in several files is
+    /// one function whose overloads are every file's, so all are. `None`
+    /// when the program declares no such global value, or when this lane
+    /// cannot address it:
+    ///
+    /// - declarations of other kinds, or of mixed kinds, span more than
+    ///   one file: a block-scoped global declared twice is the checker's
+    ///   TS2451;
+    /// - a declaring module also declares a module-scope value of the same
+    ///   name, which the identity `(module, name)` addresses instead.
+    ///
+    /// A `declare global` block in a SCRIPT binds nothing, and an automatic
+    /// lib's values are the lib environment's own.
+    pub(super) fn global_value_declarations(
+        &self,
+        name: &str,
+    ) -> Option<
+        Vec<(
+            ResolvedRootIdentity,
+            verter_semantic::analysis::type_eval::ValueDeclKind,
+        )>,
+    > {
         use crate::global_contributors::{ContributorOrigin, FileModuleKind};
         use verter_semantic::analysis::type_eval::ValueDeclKind;
         let host = self.ctx.host_for_fact_tracer_install();
@@ -5126,7 +5317,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             declarations.push((entry, kind));
         }
-        let (first, kind) = *declarations.iter().min_by(|(left, _), (right, _)| {
+        declarations.sort_by(|(left, _), (right, _)| {
             host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
                 .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
                 .then_with(|| {
@@ -5136,25 +5327,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .cmp(right.artifact_key.canonical.as_ref())
                 })
                 .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
-        })?;
+        });
+        let first = declarations.first()?.0;
         let spans_files = declarations
             .iter()
             .any(|(entry, _)| entry.artifact_key.canonical != first.artifact_key.canonical);
-        if spans_files
-            && !declarations
+        if spans_files {
+            let is_function = |kind: &ValueDeclKind| {
+                matches!(kind, ValueDeclKind::Function | ValueDeclKind::AsyncFunction)
+            };
+            if declarations
                 .iter()
                 .all(|(_, kind)| *kind == ValueDeclKind::Var)
-        {
-            return None;
+            {
+                declarations.truncate(1);
+            } else if !declarations.iter().all(|(_, kind)| is_function(kind)) {
+                return None;
+            }
         }
-        Some((
-            ResolvedRootIdentity::new_in_owner(
-                Arc::clone(&first.artifact_key.canonical),
-                first.owner,
-                name,
-            ),
-            kind,
-        ))
+        Some(
+            declarations
+                .into_iter()
+                .map(|(entry, kind)| {
+                    (
+                        ResolvedRootIdentity::new_in_owner(
+                            Arc::clone(&entry.artifact_key.canonical),
+                            entry.owner,
+                            name,
+                        ),
+                        kind,
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// The global `TemplateStringsArray` type — a tagged template's first

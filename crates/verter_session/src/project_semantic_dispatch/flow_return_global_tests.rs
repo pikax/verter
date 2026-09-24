@@ -487,6 +487,7 @@ fn member_of(ty: &TypeExpr, key: &str) -> TypeExpr {
 /// readBareConst              skConst                     42
 /// readDeep                   skObj.deep.v                "d"
 /// readGlobalThisDeep         globalThis.skObj.deep       { v: "d"; }
+/// readNsInner                skNs.inner                  number
 /// readScriptVar              scriptVar                   number
 /// readGlobalThisScriptVar    globalThis.scriptVar        number
 /// readScriptFn               scriptFn()                  string
@@ -532,6 +533,7 @@ fn every_global_value_form_resolves_like_the_checker() {
             "readDeep",
             literal(verter_type_expr::LiteralValue::String("d".to_string())),
         ),
+        (GV_READER, "readNsInner", primitive(Number)),
         (GV_READER, "readScriptVar", primitive(Number)),
         (GV_READER, "readGlobalThisScriptVar", primitive(Number)),
         (GV_READER, "readScriptFn", primitive(String)),
@@ -608,14 +610,11 @@ fn a_global_function_value_is_its_overload_surface() {
 }
 
 /// What is NOT on the global object stays unresolved: a block-scoped
-/// global (`let`) through `globalThis`, an undeclared name, and a
-/// namespace member, whose value surface this lane does not route.
+/// global (`let`) through `globalThis`, and an undeclared name.
 ///
 /// TypeScript 7.0.2: `globalThis.skLet` and `globalThis.scriptLet` are
 /// TS2339 and `globalThis.nothingHere` TS7017 — the checker's error type,
-/// recovery for a program that does not type-check. `skNs.inner` is
-/// `number`: a global namespace's members are not declarations this lane
-/// resolves a value root to.
+/// recovery for a program that does not type-check.
 ///
 /// Mutation: admitting every global value kind as a property of the global
 /// object resolves `readGlobalThisLet` to `string` and
@@ -630,34 +629,36 @@ fn a_name_off_the_global_object_stays_unresolved() {
     ] {
         assert_unresolved(&host, GV_MISSING, name);
     }
-    assert_unresolved(&host, GV_READER, "readNsInner");
 }
 
 const GV_MULTI_SCRIPT: &str = "/gv/multi-a.ts";
 const GV_MULTI_SCRIPT_SRC: &str = r#"declare var dupVar: { a: 1 };
 declare function splitFn(): number;
+declare function orderFn(): "a";
 "#;
 const GV_MULTI_MODULE: &str = "/gv/multi-b.ts";
-const GV_MULTI_MODULE_SRC: &str = r#"declare global { var dupVar: { a: 1 }; function splitFn(x: string): string; }
+const GV_MULTI_MODULE_SRC: &str = r#"declare global { var dupVar: { a: 1 }; function splitFn(x: string): string; function orderFn(): "b"; }
 export {};
 "#;
 const GV_MULTI_READER: &str = "/gv/multi-r.ts";
 const GV_MULTI_READER_SRC: &str = r#"export function readDupVar() { return dupVar.a; }
 export function readSplitFnNone() { return splitFn(); }
 export function readSplitFnString() { return splitFn("x"); }
+export function readOrderFn() { return orderFn(); }
 "#;
 
 /// A global declared in more than one file: a `var` redeclared elsewhere
-/// is ONE variable typed by its first declaration; a function whose
-/// overloads span files is not merged here, and its calls fail closed.
+/// is ONE variable typed by its first declaration; a function's overloads
+/// merge across the files, and a call tries a later file's first.
 ///
 /// TypeScript 7.0.2: `readDupVar` is `1`; `readSplitFnNone` is `number`
 /// and `readSplitFnString` `string` — one overload set merged across the
-/// two files, which this lane does not assemble.
+/// two files; `readOrderFn` is `"b"`, the later file's overload.
 ///
 /// Mutation: refusing every multi-file global degrades `readDupVar`;
-/// admitting the first file's declaration for a function answers
-/// `readSplitFnString` with the first file's lone overload.
+/// admitting only the first file's declaration for a function answers
+/// `readSplitFnString` with the first file's lone overload; one flat
+/// overload list answers `readOrderFn` with `"a"`.
 #[test]
 fn a_global_declared_in_several_files() {
     let host = host_with(&[
@@ -671,13 +672,15 @@ fn a_global_declared_in_several_files() {
         "readDupVar",
         literal(verter_type_expr::LiteralValue::Number(1.0)),
     );
-    for name in ["readSplitFnNone", "readSplitFnString"] {
-        let outcome = eval(&host, GV_MULTI_READER, name);
-        assert_eq!(
-            (outcome.degradation, outcome.candidates),
-            (Some(FlowReturnDegradation::UnrepresentableCallee), 0),
-            "{name}: {outcome:?}"
-        );
+    for (name, expected) in [
+        ("readSplitFnNone", primitive(PrimitiveName::Number)),
+        ("readSplitFnString", primitive(PrimitiveName::String)),
+        (
+            "readOrderFn",
+            literal(verter_type_expr::LiteralValue::String("b".to_string())),
+        ),
+    ] {
+        assert_clean_warm(&host, GV_MULTI_READER, name, expected);
     }
 }
 
@@ -775,9 +778,8 @@ fn a_global_beside_a_same_name_module_value_fails_closed() {
 /// TypeScript 7.0.2: `skVar` is `boolean` while `augment.ts` declares
 /// `var skVar: boolean`, and `string` once it declares `var skVar:
 /// string`; `lateVar` is `number` once a script declares it. `lateFn()`
-/// is `number` with one declaration and stays `number` once another
-/// script adds an overload — a merge across files this lane fails closed
-/// on.
+/// is `number` with one declaration and `string` once a later script
+/// declares `lateFn(): string` — a later file's overload is tried first.
 ///
 /// Mutation: validating the population while an upserted contributor
 /// waits for ingestion keeps the first warm `readLateFn` answer after the
@@ -830,13 +832,13 @@ fn an_edit_to_a_global_value_misses_the_warm_read() {
     );
     // The overload arrives in a script that waits for ingestion: the warm
     // read may not vouch for the population until it is ingested.
-    let fn_b = "declare function lateFn(x: string): string;\n";
+    let fn_b = "declare function lateFn(): string;\n";
     upsert(&host, "/gv/fn-b.ts", fn_b);
     let pending = eval(&host, LATE_READER, "readLateFn");
     assert_eq!(
-        pending.degradation,
-        Some(FlowReturnDegradation::UnrepresentableCallee),
-        "overloads spread over files fail closed: {pending:?}"
+        (pending.ty, pending.degradation),
+        (primitive(PrimitiveName::String), None),
+        "the added overload"
     );
     // Once another read has ingested an added overload, the warm read
     // still sees it through the name's value contributors.
@@ -857,9 +859,9 @@ fn an_edit_to_a_global_value_misses_the_warm_read() {
     let _ = eval(&host, LATE_READER, "readBare");
     let merged = eval(&host, LATE_READER, "readLateFn");
     assert_eq!(
-        merged.degradation,
-        Some(FlowReturnDegradation::UnrepresentableCallee),
-        "overloads spread over files fail closed: {merged:?}"
+        (merged.ty, merged.degradation),
+        (primitive(PrimitiveName::String), None),
+        "the added overload"
     );
 }
 

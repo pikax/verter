@@ -4165,6 +4165,8 @@ mod indexed_access_relation_tests;
 #[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
+mod namespace_member_value_tests;
+#[cfg(test)]
 mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
