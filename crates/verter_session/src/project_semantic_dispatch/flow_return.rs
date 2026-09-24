@@ -5371,11 +5371,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .map(|arm| self.resolved_reduction_view(arm.view))
             .collect();
-        let has_empty_object = resolved.iter().any(|node| {
+        // The checker flattens every operand into one member list before
+        // it reduces, so an empty object type standing as ONE MEMBER of a
+        // union operand (a narrowed `unknown` reads `{} | undefined`)
+        // admits primitive operands to the check as well.
+        let is_empty_object = |node: SemanticNodeId| {
             matches!(
-                self.graph().node_data(*node).as_deref(),
+                self.graph().node_data(node).as_deref(),
                 Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
             )
+        };
+        let has_empty_object = resolved.iter().any(|node| {
+            is_empty_object(*node)
+                || matches!(
+                    self.graph().node_data(*node).as_deref(),
+                    Some(SemanticNodeData::Union(members))
+                        if members.iter().any(|member| is_empty_object(*member))
+                )
         });
         // The operands are visited in the union's own `VerterStableV1`
         // order — the representation order every order-sensitive union
@@ -6682,6 +6694,25 @@ fn signature_answer_is_frame_shadowed(
         .any(|name| owner_scope_answers_frame_name(dispatch, binder_env, name))
 }
 
+/// Which spelling of a literal comparison a narrow reads. The checker's
+/// rules differ only on the positive edge over `unknown` and over a type
+/// with an empty object arm (`{}`):
+///
+/// - [`Self::Strict`] (`===`) reads the literal itself over both
+///   (measured: `x === "1"` over `x: {} | number` reads `"1"`);
+/// - [`Self::Loose`] (`==` against a literal, which is never coerced)
+///   filters, so `unknown` and `{}` stay (`x == "1"` reads `unknown`
+///   over `x: unknown` and `{}` over `x: {} | number`);
+/// - [`Self::SwitchCase`] (a `case` clause) reads the literal over
+///   `unknown` and filters over `{}` (`case "a"` reads `"a"` over
+///   `unknown` and `{}` over `{} | number`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralComparison {
+    Strict,
+    Loose,
+    SwitchCase,
+}
+
 /// One branch-local narrowing verdict. There is deliberately no
 /// "impossible branch" variant: the checker's rule for a guard edge no
 /// arm survives is that the SUBJECT reads `never` while the edge stays
@@ -7809,6 +7840,7 @@ fn reestablish_narrowings(
             binding: identity.clone(),
             path: Arc::clone(&fact.path),
             narrowed_to: fact.narrowed_to,
+            fresh_literal: fact.fresh_literal,
         }))
         .collect();
     products.set_narrowing(root, NarrowingProduct::new(merged));
@@ -7817,12 +7849,15 @@ fn reestablish_narrowings(
 /// Record `path` under `root` narrowing to `node` in `products` — the ONE
 /// narrowing write, shared by the live overlay and by the snapshot states
 /// a `finally` bakes a fact into, so the two can never diverge. A fact
-/// about the SAME position replaces the earlier one.
+/// about the SAME position replaces the earlier one. `fresh_literal` is
+/// the compared literal a literal equality took from the compared value
+/// ([`FlowNarrowingFact::fresh_literal`]).
 fn push_narrowing_into(
     products: &mut FlowProductStore,
     root: &FlowProductSubject,
     path: &Arc<[Arc<str>]>,
     node: SemanticNodeId,
+    fresh_literal: Option<SemanticNodeId>,
 ) {
     let mut facts: Vec<FlowNarrowingFact> = products
         .narrowing(root)
@@ -7845,6 +7880,7 @@ fn push_narrowing_into(
         },
         path: Arc::clone(path),
         narrowed_to: node,
+        fresh_literal,
     });
     products.set_narrowing(root, NarrowingProduct::new(facts));
 }
@@ -9167,10 +9203,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
+        self.push_narrowing_with_fresh_literal(subject, node, None);
+    }
+
+    /// [`Self::push_narrowing`] for a literal equality's narrow, carrying
+    /// the compared literal when the narrow took it from the compared value.
+    fn push_narrowing_with_fresh_literal(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        node: SemanticNodeId,
+        fresh_literal: Option<SemanticNodeId>,
+    ) {
         let Some(root) = self.resolved_narrow_subject(&subject.root) else {
             return;
         };
-        push_narrowing_into(&mut self.products, &root, &subject.path, node);
+        push_narrowing_into(
+            &mut self.products,
+            &root,
+            &subject.path,
+            node,
+            fresh_literal,
+        );
         self.narrowing_writes
             .push(NarrowingLedgerEntry::Established {
                 root,
@@ -9554,7 +9607,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             || self.reads_widening_literal_local(expr)
             || self
                 .fresh_call_return_for(expr, node)
-                .is_some_and(|call| call.values.contains(&node));
+                .is_some_and(|call| call.values.contains(&node))
+            || self.fresh_narrowed_literal(expr, node) == Some(node);
         let fresh_values = self.position_fresh_values(expr, node, bare_literal);
         parts.push(EvolvingPart {
             node,
@@ -9673,6 +9727,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             )
         {
             return vec![node];
+        }
+        if let Some(literal) = self.fresh_narrowed_literal(expr, node) {
+            return vec![literal];
         }
         if let crate::flow_slice_content::SliceExpr::Local {
             binding,
@@ -11289,9 +11346,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
-        // A narrow on the ROOT is visible from a member-path fact too:
-        // `u.kind === "a"` narrows `u`, and a later `typeof u.v` reads
-        // the narrowed root before projecting.
+        // The longest narrowed prefix of the path is what a read of the
+        // subject sees, so the guard starts from it: a narrow on the ROOT
+        // is visible from a member-path fact (`u.kind === "a"` narrows
+        // `u`, and a later `typeof u.v` reads the narrowed root before
+        // projecting), and a narrow on the member itself is visible to the
+        // next test of that member (`o.k !== undefined && o.k !== null`).
+        for prefix_len in (1..=subject.path.len()).rev() {
+            let prefix = crate::flow_slice_content::SliceNarrowSubject {
+                root: subject.root.clone(),
+                path: Arc::from(subject.path[..prefix_len].to_vec().into_boxed_slice()),
+            };
+            if let Some(base) = self.narrowed_read(&prefix) {
+                return self.project_segments_navigate(base, &subject.path[prefix_len..]);
+            }
+        }
         let root_subject = crate::flow_slice_content::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(Vec::new().into_boxed_slice()),
@@ -11543,7 +11612,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 subject,
                 literal,
                 negated,
-            } => self.narrow_eq_literal(subject, literal, *negated == positive),
+                loose,
+            } => self.narrow_eq_literal(
+                subject,
+                literal,
+                *negated == positive,
+                if *loose {
+                    LiteralComparison::Loose
+                } else {
+                    LiteralComparison::Strict
+                },
+            ),
             SliceGuard::Instanceof {
                 subject,
                 ctor,
@@ -11815,6 +11894,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         let node = self.union(&survivors);
         ArmFilter::Narrowed(node)
+    }
+
+    /// The empty object type `{}` — what `unknown` keeps once a guard
+    /// removes `null` and `undefined` from it.
+    fn empty_object_node(&mut self) -> SemanticNodeId {
+        self.lower_body_type(&verter_type_expr::TypeExpr::Object(Arc::new(
+            verter_type_expr::ObjectExpr {
+                properties: Vec::new(),
+            },
+        )))
     }
 
     /// The graph's `never` — what a subject reads on a guard edge every
@@ -12176,6 +12265,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ArmFilter::Unchanged => {}
             }
         }
+        // The truthy edge reads `unknown` as `{} | null | undefined` under
+        // `strictNullChecks` and keeps `{}` (measured: `if (x)` over
+        // `x: unknown` reads `{}`). The falsy edge keeps all three, which
+        // is `unknown` again; without `strictNullChecks` neither edge
+        // narrows.
+        if !negated && self.nullability.is_strict() {
+            if let Some(current) = self.subject_current_node(subject) {
+                if matches!(
+                    self.dispatch.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                ) {
+                    let empty = self.empty_object_node();
+                    return GuardNarrowing::Narrowed(subject.clone(), empty);
+                }
+            }
+        }
         let fact = self.narrow_arms_by(subject, |this, arm| {
             Some(match this.arm_truthiness_edge(arm, negated) {
                 crate::semantic_query::TruthinessInhabitance::Yes => true,
@@ -12227,26 +12332,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// `subject === literal`. An EMPTY subject path filters the binding's
-    /// own arms by overlap with the literal (either assignability
-    /// direction — the two spellings of "the same literal"); when no arm
-    /// filters (the subject's whole type is a BROAD arm the literal only
-    /// narrows, `x === "a"` over `x: string`) the positive reading narrows
-    /// the subject to the literal itself — the checker's own rule for a
-    /// literal strictly narrower than the declared type. A non-empty path
-    /// is a DISCRIMINANT, filtering the arms of the tested property's
-    /// PARENT reference — the root itself for a one-segment path, the
-    /// enclosing reference for a deeper one. The checker never selects a
-    /// ROOT arm through a nested discriminant: doing so DROPS the
-    /// constituents whose nested member differs (a SUBSET of the
-    /// checker's type — strictly worse than widening), while the parent
-    /// reference is exactly what it narrows (`m.meta.kind === "one"`
-    /// narrows `m.meta`, never `m`).
+    /// `subject === literal`. An EMPTY subject path narrows the binding
+    /// itself ([`Self::narrow_eq_literal_reference`]). A non-empty path
+    /// narrows two references: the tested member, by the same reference
+    /// rule, and its PARENT as a DISCRIMINANT
+    /// ([`Self::narrow_eq_literal_parent`]).
     fn narrow_eq_literal(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         literal: &crate::flow_slice_content::SliceGuardLiteral,
         negated: bool,
+        comparison: LiteralComparison,
     ) -> GuardNarrowing {
         // `strictNullChecks` off: an equality with `null` / `undefined`
         // narrows nothing on either edge (the checker's
@@ -12265,157 +12361,409 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return GuardNarrowing::Unchanged;
         };
         let literal_node = self.lower_body_type(&literal_ty);
+        let before = self.subject_current_node(subject);
         if subject.path.is_empty() {
-            // An arm whose relation to the literal the oracle cannot
-            // decide (a deferred form such as a template-literal arm)
-            // stays possible on BOTH edges and degrades the result: the
-            // checker decides such relations (`"none"` is off the
-            // `` `item-${string}` `` edge), so treating "undecided" as
-            // "proved unchanged" published a superset clean and warm.
-            let mut undecided = false;
-            let narrowed = self.narrow_arms_by(subject, |this, arm| {
-                if matches!(
-                    this.dispatch.graph().node_data(arm).as_deref(),
-                    Some(SemanticNodeData::Primitive(
-                        PrimitiveKind::Any | PrimitiveKind::Unknown
-                    ))
-                ) {
+            let narrowed = self.narrow_eq_literal_reference(
+                subject,
+                literal,
+                literal_node,
+                negated,
+                comparison,
+            );
+            return self.establish_fresh_equality_literal(
+                narrowed,
+                before,
+                literal_node,
+                negated,
+                comparison,
+            );
+        }
+        // A `case` clause's dispatch edge is baked as ONE fact: the
+        // discriminant's parent.
+        if comparison == LiteralComparison::SwitchCase {
+            return self.narrow_eq_literal_parent(subject, literal_node, negated);
+        }
+        // The discriminant narrows the tested property's PARENT
+        // reference, so that fact lands at the parent subject: a later
+        // read of the parent, or of any member projected from it,
+        // resolves against the surviving arms — while the root keeps
+        // every constituent for two segments and beyond. The tested
+        // member is a reference of its own, narrowed by the same rule as
+        // a binding (`o.k == null` over `k: string | null` reads `null`
+        // on the positive edge and `string` on the negated one, whether
+        // or not `o` is a union).
+        let parent = self.narrow_eq_literal_parent(subject, literal_node, negated);
+        let leaf =
+            self.narrow_eq_literal_reference(subject, literal, literal_node, negated, comparison);
+        let leaf =
+            self.establish_fresh_equality_literal(leaf, before, literal_node, negated, comparison);
+        match (parent, leaf) {
+            (parent, GuardNarrowing::Unchanged) => parent,
+            (GuardNarrowing::Narrowed(parent_subject, node), leaf) => {
+                self.push_narrowing(&parent_subject, node);
+                leaf
+            }
+            (_, leaf) => leaf,
+        }
+    }
+
+    /// Establish a literal equality's narrow whose literal the narrow took
+    /// from the compared VALUE — the checker's FRESH literal type, which
+    /// widens wherever a bare literal would (measured: `if (x === "s")
+    /// return x` over `x: string`, alone, is `string`; `let y = x` is
+    /// `string`, `[x]` is `string[]`). That is a positive edge whose
+    /// narrowed value holds the literal while the reference's own
+    /// constituents did not (`x: "s" | number` keeps its declared, pinned
+    /// `"s"`; `x: boolean` keeps its pinned `true`). A `case` clause's
+    /// literal is never fresh (`case "s": return x` is `"s"`). The fact
+    /// is pushed here, carrying the literal, and the caller sees
+    /// [`GuardNarrowing::Unchanged`]; every other narrow is returned as
+    /// it came.
+    fn establish_fresh_equality_literal(
+        &mut self,
+        narrowed: GuardNarrowing,
+        before: Option<SemanticNodeId>,
+        literal_node: SemanticNodeId,
+        negated: bool,
+        comparison: LiteralComparison,
+    ) -> GuardNarrowing {
+        let GuardNarrowing::Narrowed(subject, node) = &narrowed else {
+            return narrowed;
+        };
+        if negated
+            || comparison == LiteralComparison::SwitchCase
+            || !self.top_level_literal_nodes(*node).contains(&literal_node)
+        {
+            return narrowed;
+        }
+        let literal_is_boolean = matches!(
+            self.dispatch.graph().node_data(literal_node).as_deref(),
+            Some(SemanticNodeData::Literal(
+                crate::semantic_query::LiteralValue::Boolean(_)
+            ))
+        );
+        let pinned = before.is_some_and(|before| {
+            self.enumerated_union_arms_or_self(before)
+                .into_iter()
+                .any(|arm| {
+                    let arm = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                        super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                        super::relation::IdentityCarrierUnwrap::Unresolvable => arm,
+                    };
+                    arm == literal_node
+                        || (literal_is_boolean
+                            && matches!(
+                                self.dispatch.graph().node_data(arm).as_deref(),
+                                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                            ))
+                })
+        });
+        if pinned {
+            return narrowed;
+        }
+        self.push_narrowing_with_fresh_literal(subject, *node, Some(literal_node));
+        GuardNarrowing::Unchanged
+    }
+
+    /// The fresh literal a READ of `expr` carries from a literal
+    /// equality's narrow ([`FlowNarrowingFact::fresh_literal`]): the read
+    /// is the narrowed reference itself — a binding, or a member path
+    /// rooted at one — its value is the fact's, and the literal is one of
+    /// that value's top-level constituents.
+    fn fresh_narrowed_literal(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (root, path): (_, Arc<[Arc<str>]>) = match expr {
+            crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => (
+                crate::flow_slice_content::SliceNarrowRoot::Param {
+                    ordinal: *ordinal,
+                    binding: *binding,
+                },
+                Arc::from([]),
+            ),
+            crate::flow_slice_content::SliceExpr::Local {
+                binding,
+                name,
+                captured: false,
+                ..
+            } => (
+                crate::flow_slice_content::SliceNarrowRoot::Local {
+                    name: Arc::clone(name),
+                    binding: binding.clone(),
+                },
+                Arc::from([]),
+            ),
+            crate::flow_slice_content::SliceExpr::Type(leaf) => {
+                let verter_type_expr::TypeExpr::TypeOf(value_ref) = leaf.ty() else {
+                    return None;
+                };
+                if value_ref.path.len() < 2 || !value_ref.type_args.is_empty() {
                     return None;
                 }
-                let (Some(forward), Some(backward)) = (
-                    this.assignable(arm, literal_node),
-                    this.assignable(literal_node, arm),
-                ) else {
-                    undecided = true;
-                    return Some(true);
-                };
-                // The positive edge keeps overlapping arms. The negative
-                // edge drops only an arm wholly covered by the literal: a
-                // broad `string` can exclude `"a"` and remain `string`, so
-                // the unrepresentable exclusion leaves that arm unchanged.
-                Some(if negated {
-                    !forward
-                } else {
-                    forward || backward
-                })
-            });
-            if undecided {
-                self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
-                ));
+                (
+                    crate::flow_slice_content::SliceNarrowRoot::Local {
+                        name: Arc::from(value_ref.path[0].as_str()),
+                        binding: leaf.frame_root()?.clone(),
+                    },
+                    value_ref.path[1..]
+                        .iter()
+                        .map(|part| Arc::from(part.as_str()))
+                        .collect(),
+                )
             }
-            match narrowed {
-                // No arm overlaps the literal at all: the subject reads
-                // `never` on this edge and the edge stays alive
-                // (measured: `x: "a"` is `never` inside `if (x === "b")`,
-                // and only its own reads collapse — a sibling binding's
-                // contributor keeps its type).
-                ArmFilter::NoSurvivor => {
-                    return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
-                }
-                ArmFilter::Narrowed(node) => {
-                    let node = self.refine_arms_by_literal(node, literal, negated);
+            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, .. } => {
+                return self.fresh_narrowed_literal(inner, node);
+            }
+            _ => return None,
+        };
+        let root = self.resolved_narrow_subject(&root)?;
+        let fact = self
+            .products
+            .narrowing(&root)?
+            .facts()
+            .iter()
+            .find(|fact| fact.path == path)?;
+        let literal = fact.fresh_literal?;
+        (fact.narrowed_to == node && self.top_level_literal_nodes(node).contains(&literal))
+            .then_some(literal)
+    }
+
+    /// `reference === literal` over one reference — a binding, or the
+    /// tested member itself. The reference's own arms are filtered by
+    /// overlap with the literal (either assignability direction — the two
+    /// spellings of "the same literal"); when no arm filters (the whole
+    /// type is a BROAD arm the literal only narrows, `x === "a"` over
+    /// `x: string`) the positive reading narrows the reference to the
+    /// literal itself — the checker's own rule for a literal strictly
+    /// narrower than the declared type.
+    ///
+    /// `unknown` and a type with an empty object arm (`{}`) are the
+    /// checker's exception on the positive edge, per
+    /// [`LiteralComparison`]: the literal itself, or a plain filter that
+    /// keeps `unknown` or `{}`.
+    fn narrow_eq_literal_reference(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        literal_node: SemanticNodeId,
+        negated: bool,
+        comparison: LiteralComparison,
+    ) -> GuardNarrowing {
+        use crate::flow_slice_content::SliceGuardLiteral;
+        let nullish = matches!(
+            literal,
+            SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
+        );
+        let (unknown, empty_arm) = match self.subject_current_node(subject) {
+            Some(current) if !nullish && !negated => (
+                matches!(
+                    self.dispatch.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                ),
+                self.enumerated_union_arms_or_self(current)
+                    .iter()
+                    .any(|arm| {
+                        matches!(
+                            self.dispatch.graph().node_data(*arm).as_deref(),
+                            Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
+                        )
+                    }),
+            ),
+            _ => (false, false),
+        };
+        if (unknown && comparison != LiteralComparison::Loose)
+            || (empty_arm && comparison == LiteralComparison::Strict)
+        {
+            return GuardNarrowing::Narrowed(subject.clone(), literal_node);
+        }
+        let unknown_or_empty_arm = unknown || empty_arm;
+        // A nullish equality reads `unknown` as `{} | null | undefined`
+        // (the checker's `getAdjustedTypeWithFacts`; this runs under
+        // `strictNullChecks` only): the positive edge is the literal and
+        // the negated edge keeps `{}` and the OTHER nullish member
+        // (measured: `x !== null` reads `{} | undefined`, `x !==
+        // undefined` reads `{} | null`, both together read `{}`).
+        if nullish {
+            if let Some(current) = self.subject_current_node(subject) {
+                if matches!(
+                    self.dispatch.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                ) {
+                    if !negated {
+                        return GuardNarrowing::Narrowed(subject.clone(), literal_node);
+                    }
+                    let other = match literal {
+                        SliceGuardLiteral::Null => verter_type_expr::PrimitiveName::Undefined,
+                        _ => verter_type_expr::PrimitiveName::Null,
+                    };
+                    let other = self.lower_body_type(&verter_type_expr::TypeExpr::Primitive(other));
+                    let empty = self.empty_object_node();
+                    let node = self.union(&[empty, other]);
                     return GuardNarrowing::Narrowed(subject.clone(), node);
                 }
-                ArmFilter::Unchanged => {}
             }
-            if let Some(current) = self.subject_current_node(subject) {
-                let refined = self.refine_arms_by_literal(current, literal, negated);
-                if refined != current {
-                    return GuardNarrowing::Narrowed(subject.clone(), refined);
-                }
+        }
+        // An arm whose relation to the literal the oracle cannot
+        // decide (a deferred form such as a template-literal arm)
+        // stays possible on BOTH edges and degrades the result: the
+        // checker decides such relations (`"none"` is off the
+        // `` `item-${string}` `` edge), so treating "undecided" as
+        // "proved unchanged" published a superset clean and warm.
+        let mut undecided = false;
+        let narrowed = self.narrow_arms_by(subject, |this, arm| {
+            if matches!(
+                this.dispatch.graph().node_data(arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Any | PrimitiveKind::Unknown
+                ))
+            ) {
+                return None;
             }
-            if !negated {
-                // No arm was filtered. The literal can still be a STRICT
-                // subtype of the subject's whole type — then the literal
-                // IS the narrow (`x: string` guarded by `=== "a"` reads
-                // `"a"` on the positive edge). A mutually-assignable
-                // subject (`any`) establishes nothing.
-                let Some(current) = self.subject_current_node(subject) else {
-                    return GuardNarrowing::Unchanged;
-                };
-                if self.assignable(literal_node, current) == Some(true)
-                    && self.assignable(current, literal_node) != Some(true)
-                {
-                    return GuardNarrowing::Narrowed(subject.clone(), literal_node);
-                }
-            }
-            GuardNarrowing::Unchanged
-        } else {
-            // The discriminant narrows the tested property's PARENT
-            // reference, so the fact lands at the parent subject: a
-            // later read of the parent, or of any member projected from
-            // it, resolves against the surviving arms — while the root
-            // keeps every constituent for two segments and beyond.
-            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
-                root: subject.root.clone(),
-                path: Arc::from(
-                    subject.path[..subject.path.len() - 1]
-                        .to_vec()
-                        .into_boxed_slice(),
-                ),
+            let (Some(forward), Some(backward)) = (
+                this.assignable(arm, literal_node),
+                this.assignable(literal_node, arm),
+            ) else {
+                undecided = true;
+                return Some(true);
             };
-            let last: Arc<[Arc<str>]> = Arc::from(
-                subject.path[subject.path.len() - 1..]
+            // The positive edge keeps overlapping arms. The negative
+            // edge drops only an arm wholly covered by the literal: a
+            // broad `string` can exclude `"a"` and remain `string`, so
+            // the unrepresentable exclusion leaves that arm unchanged.
+            Some(if negated {
+                !forward
+            } else {
+                forward || backward
+            })
+        });
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        match narrowed {
+            // No arm overlaps the literal at all: the subject reads
+            // `never` on this edge and the edge stays alive
+            // (measured: `x: "a"` is `never` inside `if (x === "b")`,
+            // and only its own reads collapse — a sibling binding's
+            // contributor keeps its type).
+            ArmFilter::NoSurvivor => {
+                return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
+            }
+            ArmFilter::Narrowed(node) => {
+                let node = self.refine_arms_by_literal(node, literal, negated);
+                return GuardNarrowing::Narrowed(subject.clone(), node);
+            }
+            ArmFilter::Unchanged => {}
+        }
+        if let Some(current) = self.subject_current_node(subject) {
+            let refined = self.refine_arms_by_literal(current, literal, negated);
+            if refined != current {
+                return GuardNarrowing::Narrowed(subject.clone(), refined);
+            }
+        }
+        if !negated && !unknown_or_empty_arm {
+            // No arm was filtered. The literal can still be a STRICT
+            // subtype of the subject's whole type — then the literal
+            // IS the narrow (`x: string` guarded by `=== "a"` reads
+            // `"a"` on the positive edge). A mutually-assignable
+            // subject (`any`) establishes nothing.
+            let Some(current) = self.subject_current_node(subject) else {
+                return GuardNarrowing::Unchanged;
+            };
+            if self.assignable(literal_node, current) == Some(true)
+                && self.assignable(current, literal_node) != Some(true)
+            {
+                return GuardNarrowing::Narrowed(subject.clone(), literal_node);
+            }
+        }
+        GuardNarrowing::Unchanged
+    }
+
+    /// The discriminant reading of `parent.member === literal`: filter
+    /// the arms of the tested property's PARENT reference — the root for
+    /// a one-segment path, the enclosing reference for a deeper one. The
+    /// checker never selects a ROOT arm through a nested discriminant:
+    /// doing so DROPS the constituents whose nested member differs (a
+    /// SUBSET of the checker's type — strictly worse than widening),
+    /// while the parent reference is exactly what it narrows
+    /// (`m.meta.kind === "one"` narrows `m.meta`, never `m`).
+    fn narrow_eq_literal_parent(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        literal_node: SemanticNodeId,
+        negated: bool,
+    ) -> GuardNarrowing {
+        let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+            root: subject.root.clone(),
+            path: Arc::from(
+                subject.path[..subject.path.len() - 1]
                     .to_vec()
                     .into_boxed_slice(),
-            );
-            // A parent arm whose projected discriminant the relation
-            // oracle cannot compare stays possible on BOTH edges and
-            // degrades the result — undecided is never "proved off this
-            // edge" nor "proved unchanged".
-            let mut undecided = false;
-            let mut projected: Vec<SemanticNodeId> = Vec::new();
-            let narrowed = self.narrow_arms_by(&parent_subject, |this, arm| {
-                let member = this.project_segments_navigate(arm, &last)?;
-                projected.push(member);
-                let verdict = if negated {
-                    // Excluding one literal removes a parent arm only when
-                    // the projected member is wholly that literal. A named
-                    // alias can project a broad discriminant union without
-                    // exposing its root constituents; `"a"` fits
-                    // `"a" | "b"`, but its negative edge remains possible.
-                    this.assignable(member, literal_node)
-                        .map(|covered| !covered)
+            ),
+        };
+        let last: Arc<[Arc<str>]> = Arc::from(
+            subject.path[subject.path.len() - 1..]
+                .to_vec()
+                .into_boxed_slice(),
+        );
+        // A parent arm whose projected discriminant the relation
+        // oracle cannot compare stays possible on BOTH edges and
+        // degrades the result — undecided is never "proved off this
+        // edge" nor "proved unchanged".
+        let mut undecided = false;
+        let mut projected: Vec<SemanticNodeId> = Vec::new();
+        let narrowed = self.narrow_arms_by(&parent_subject, |this, arm| {
+            let member = this.project_segments_navigate(arm, &last)?;
+            projected.push(member);
+            let verdict = if negated {
+                // Excluding one literal removes a parent arm only when
+                // the projected member is wholly that literal. A named
+                // alias can project a broad discriminant union without
+                // exposing its root constituents; `"a"` fits
+                // `"a" | "b"`, but its negative edge remains possible.
+                this.assignable(member, literal_node)
+                    .map(|covered| !covered)
+            } else {
+                this.assignable(literal_node, member)
+            };
+            match verdict {
+                Some(keep) => Some(keep),
+                None => {
+                    undecided = true;
+                    Some(true)
+                }
+            }
+        });
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        match narrowed {
+            // The checker filters a PARENT through a member test only
+            // when the member DISCRIMINATES its arms. A no-survivor
+            // filter whose projections DIFFER is the genuine
+            // discriminant case with no matching arm: the parent reads
+            // `never` and the edge stays alive (measured:
+            // `{ kind: "a" } | { kind: "c" }` under `x.kind === "b"`).
+            // A non-union parent, or one whose member projects
+            // identically in every arm, is never discriminated — the
+            // checker keeps its declared type — so no fact lands.
+            ArmFilter::NoSurvivor => {
+                let discriminated = (projected.len() > 1
+                    && projected.windows(2).any(|pair| pair[0] != pair[1]))
+                    || self.declared_parent_discriminates(&parent_subject, &last);
+                if discriminated {
+                    GuardNarrowing::Narrowed(parent_subject, self.never_node())
                 } else {
-                    this.assignable(literal_node, member)
-                };
-                match verdict {
-                    Some(keep) => Some(keep),
-                    None => {
-                        undecided = true;
-                        Some(true)
-                    }
+                    GuardNarrowing::Unchanged
                 }
-            });
-            if undecided {
-                self.record_degradation(FlowReturnDegradation::FlowGap(
-                    crate::semantic_query::FlowGap::GuardNarrowing,
-                ));
             }
-            match narrowed {
-                // The checker filters a PARENT through a member test only
-                // when the member DISCRIMINATES its arms. A no-survivor
-                // filter whose projections DIFFER is the genuine
-                // discriminant case with no matching arm: the parent reads
-                // `never` and the edge stays alive (measured:
-                // `{ kind: "a" } | { kind: "c" }` under `x.kind === "b"`).
-                // A non-union parent, or one whose member projects
-                // identically in every arm, is never discriminated — the
-                // checker keeps its declared type — so no fact lands.
-                ArmFilter::NoSurvivor => {
-                    let discriminated = (projected.len() > 1
-                        && projected.windows(2).any(|pair| pair[0] != pair[1]))
-                        || self.declared_parent_discriminates(&parent_subject, &last);
-                    if discriminated {
-                        GuardNarrowing::Narrowed(parent_subject, self.never_node())
-                    } else {
-                        GuardNarrowing::Unchanged
-                    }
-                }
-                ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(parent_subject, node),
-                ArmFilter::Unchanged => GuardNarrowing::Unchanged,
-            }
+            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(parent_subject, node),
+            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
         }
     }
 
@@ -12541,7 +12889,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // direction — never another clause's value.
         if !subject.path.is_empty() {
             let root = self.narrow_subject(&subject.root);
-            push_narrowing_into(&mut state.products, &root, &subject.path, node);
+            push_narrowing_into(&mut state.products, &root, &subject.path, node, None);
             return;
         }
         // A whole-binding fact rides the reaching-TYPE product, keeping
@@ -13725,6 +14073,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 WideningMembership::Partial(Arc::clone(&call.values))
             });
         }
+        if let Some(literal) = self.fresh_narrowed_literal(init, node) {
+            return Some(if literal == node {
+                WideningMembership::All
+            } else {
+                WideningMembership::Partial(Arc::from([literal]))
+            });
+        }
         None
     }
 
@@ -13909,6 +14264,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return widen_fresh_read_node(self.dispatch, node, self.nullability);
             }
             return widen_values_within(self.dispatch, node, &call.values, self.nullability);
+        }
+        if let Some(literal) = self.fresh_narrowed_literal(expr, node) {
+            if literal == node {
+                return widen_fresh_read_node(self.dispatch, node, self.nullability);
+            }
+            return widen_values_within(self.dispatch, node, &[literal], self.nullability);
         }
         if let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr {
             match self.membership_of(binding) {
@@ -14097,7 +14458,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         let fresh = bare_fresh
                                             || self
                                                 .fresh_call_return_for(expr, node)
-                                                .is_some_and(|call| call.values.contains(&node));
+                                                .is_some_and(|call| call.values.contains(&node))
+                                            || self.fresh_narrowed_literal(expr, node)
+                                                == Some(node);
                                         self.yield_contributions.push(YieldContribution {
                                             node,
                                             arm: self.reduction_arm(expr, node),
@@ -14259,7 +14622,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // positions).
                                 fresh_literal |= self
                                     .fresh_call_return_for(expr, node)
-                                    .is_some_and(|call| call.values.contains(&node));
+                                    .is_some_and(|call| call.values.contains(&node))
+                                    || self.fresh_narrowed_literal(expr, node) == Some(node);
                                 if let Some(test) = predicate_test {
                                     self.infer_return_predicate(test, node);
                                 }
@@ -14498,7 +14862,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // `switch (x) { case "b": return 1 }` over
                                 // `x: "a"` still contributes `1`).
                                 crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
-                                    match self.narrow_eq_literal(subject, test, false) {
+                                    match self.narrow_eq_literal(
+                                        subject,
+                                        test,
+                                        false,
+                                        LiteralComparison::SwitchCase,
+                                    ) {
                                         GuardNarrowing::Narrowed(fact_subject, node) => {
                                             self.bake_narrow_into_state(
                                                 &mut dispatch,

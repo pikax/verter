@@ -1704,6 +1704,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "95343cc9fd971495876ad1406249ffc7167c107bea92a77eade69daaa71d4d54",
     ),
     (
+        "N76_loose_equality_null_removes_both",
+        "5528e42ed8ecaadd555d1c924f48f2f5c86d4868f88f9ac626ea0098518f0c20",
+    ),
+    (
         "N77_strict_not_null_keeps_undefined",
         "64a93578211c164bb4f545454879b4d63be0bace35905d5f22e30629b66ea1f8",
     ),
@@ -3418,7 +3422,7 @@ mod corpus_suite {
                 // Equality-guard forms: the loose `== null` operator, and equality
     // against a const-typed literal binding or comparison target.
     "N76_loose_equality_null_removes_both",
-                "checker prints `{ v: string | number; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | null | undefined | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
             ),
             (
                 "N77_strict_not_null_keeps_undefined",
@@ -5249,7 +5253,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N72_typeof_function_guard",
     "N74_array_isarray_true_arm",
     "N75_array_isarray_false_arm",
-    "N76_loose_equality_null_removes_both",
     "N79_equality_against_const_literal_binding",
     "N80_equality_against_const_literal_target_narrows",
     "N81_equality_against_let_widened_target_does_not_narrow",
@@ -5326,8 +5329,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6FlowReturnSubstrate, 67, 59, 2),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
-    // `let`-aliased condition control (N84) publishes complete: 32 match.
-    (Owner::U6NarrowTypeof, 48, 32, 16),
+    // `let`-aliased condition control (N84) publishes complete, and a loose
+    // `== null` selects both nullish members (N76): 33 match.
+    (Owner::U6NarrowTypeof, 48, 33, 15),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish

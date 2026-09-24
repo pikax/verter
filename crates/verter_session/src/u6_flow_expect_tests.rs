@@ -5811,9 +5811,9 @@ fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
             id: "guard_typeof_unknown_negated_undefined",
             script: "export function f(x: unknown) { if (typeof x !== \"undefined\") return x; return 0; }",
             checker: "{} | null",
-            // Extensionally the checker's answer: its return reunion
-            // absorbs `0` into `{}`, which this join keeps as an arm.
-            rendered: "Union({  } | null | 0)",
+            // The return reunion absorbs `0` into the `{}` member of the
+            // narrowed `{} | null`.
+            rendered: "Union({  } | null)",
             degradation: Degr::None,
             warm: true,
         },

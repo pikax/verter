@@ -900,8 +900,8 @@ pub enum SliceGuard {
     },
     /// `subject === <literal>` (`!==` negates). An EMPTY subject path is
     /// a literal-equality narrow of the binding itself; a non-empty path
-    /// is a DISCRIMINANT — the narrow selects the root's union arms by
-    /// the member's type.
+    /// narrows the tested member and is a DISCRIMINANT of its parent —
+    /// the narrow selects the parent's union arms by the member's type.
     EqLiteral {
         /// The compared reference.
         subject: SliceNarrowSubject,
@@ -909,6 +909,12 @@ pub enum SliceGuard {
         literal: SliceGuardLiteral,
         /// Whether the comparison is negated.
         negated: bool,
+        /// The loose spelling (`==` / `!=`) against a literal that is not
+        /// `null` or `undefined`. It narrows exactly as the strict one
+        /// except that `unknown` and an empty object arm are never
+        /// replaced by the literal on the positive edge — the checker's
+        /// double-equals rule (a literal operand is never coerced).
+        loose: bool,
     },
     /// `subject instanceof Ctor`, the constructor named by a bare
     /// identifier the frame leaves FREE that provably denotes the module's
@@ -7165,15 +7171,66 @@ impl Lowerer<'_> {
                         subject,
                         literal,
                         negated,
+                        loose: false,
                     });
                 }
                 self.classify_unexpressible_comparison(binary)
             }
-            // Loose (in)equality is a narrowing operator with its own
-            // semantics — `x == null` selects BOTH nullish arms — which
-            // this vocabulary does not carry, so it never lowers through
-            // the strict literal relation.
+            // Loose (in)equality. A `typeof` comparison narrows as the
+            // strict one does. With `null` or `undefined` it selects BOTH
+            // nullish arms (`x == null` is `x === null || x === undefined`,
+            // and `x != null` its conjunction of negations — the checker's
+            // `EQUndefinedOrNull` / `NEUndefinedOrNull` facts). With any
+            // other literal it is the loose [`SliceGuard::EqLiteral`].
             BinaryOperator::Equality | BinaryOperator::Inequality => {
+                let negated = matches!(binary.operator, BinaryOperator::Inequality);
+                if let Some(guard) = self.typeof_guard(&binary.left, &binary.right, negated) {
+                    return GuardDisposition::modeled(guard);
+                }
+                if let Some(guard) = self.typeof_guard(&binary.right, &binary.left, negated) {
+                    return GuardDisposition::modeled(guard);
+                }
+                for (subject_side, literal_side) in
+                    [(&binary.left, &binary.right), (&binary.right, &binary.left)]
+                {
+                    let Some(subject) = self.narrow_subject_of(subject_side) else {
+                        continue;
+                    };
+                    let Some(literal) = guard_literal_of(literal_side, self.source) else {
+                        continue;
+                    };
+                    if self.subject_root_carries_an_unmentioned_narrowing(&subject) {
+                        return GuardDisposition::Unexpressible;
+                    }
+                    if !matches!(
+                        literal,
+                        SliceGuardLiteral::Null | SliceGuardLiteral::Undefined
+                    ) {
+                        return GuardDisposition::modeled(SliceGuard::EqLiteral {
+                            subject,
+                            literal,
+                            negated,
+                            loose: true,
+                        });
+                    }
+                    let arms: Arc<[SliceGuard]> = Arc::from(
+                        [SliceGuardLiteral::Null, SliceGuardLiteral::Undefined]
+                            .into_iter()
+                            .map(|literal| SliceGuard::EqLiteral {
+                                subject: subject.clone(),
+                                literal,
+                                negated,
+                                loose: false,
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
+                    return GuardDisposition::modeled(if negated {
+                        SliceGuard::And(arms)
+                    } else {
+                        SliceGuard::Or(arms)
+                    });
+                }
                 self.classify_unexpressible_comparison(binary)
             }
             BinaryOperator::Instanceof => {
@@ -11083,10 +11140,12 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             subject,
             literal,
             negated,
+            loose,
         } => SliceGuard::EqLiteral {
             subject,
             literal,
             negated: !negated,
+            loose,
         },
         SliceGuard::Instanceof {
             subject,

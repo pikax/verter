@@ -438,6 +438,7 @@ mod tests {
                 binding: entering.identity(&subject).unwrap(),
                 path: Arc::from([]),
                 narrowed_to: string,
+                fresh_literal: None,
             }]),
         );
         let observation = entering.observe_writes();

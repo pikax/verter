@@ -2986,8 +2986,8 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { const k = \"string\"; if (typeof x === k) { return x } return 0 }",
         ),
         (
-            "a loose equality against a represented reference",
-            "export {};\nfunction f(x: string | null) { if (x == null) { return 0 } return x }",
+            "a loose equality between two parameters",
+            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x == y) { return x } return 0 }",
         ),
         (
             "an `in` test whose key is not a literal",
@@ -4776,6 +4776,7 @@ fn typeof_and_equality_guards_support_both_operand_orders_and_negation() {
             subject,
             literal,
             negated: n,
+            ..
         } = &guard
         else {
             panic!("the test must model an EqLiteral guard: {guard:?}");

@@ -4607,3 +4607,494 @@ export function ternSameIface(c: boolean, a: A1, b: B1) { return c ? a : b; }
         "the stable order recovers the recorded survivor"
     );
 }
+
+/// Loose and strict literal equality, `unknown` and empty-object arms, and
+/// `case` clauses.
+const EQUALITY_NARROWING_SOURCE: &str = r#"
+interface Foo { a: string }
+export function looseNull(x: string | undefined) { if (x == null) return x; return 0; }
+export function looseNotNull(x: string | null | undefined) { if (x != null) return x; return 0; }
+export function looseUndef(x: string | null) { if (x == undefined) return x; return 0; }
+export function looseNullRev(x: number | null) { if (null == x) return 1; return x; }
+export function looseUnknown(x: unknown) { if (x == null) return x; return 0; }
+export function looseUnknownNot(x: unknown) { if (x != null) return x; return 0; }
+export function looseAny(x: any) { if (x == null) return x; return 0; }
+export function looseObj(x: Foo | null) { if (x != null) return x.a; return 0; }
+export function looseDisc(o: { k: string | null; v: number }) { if (o.k == null) return 1; return o.k; }
+export function looseTernary(x: string | null) { return x == null ? 0 : x; }
+export function looseStr(x: string | number) { if (x == "1") return x; return true; }
+export function u1(x: unknown) { if (x !== null) return x; return 0; }
+export function u2(x: unknown) { if (x !== undefined) return x; return 0; }
+export function u3(x: unknown) { if (x !== null && x !== undefined) return x; return 0; }
+export function u4(x: unknown) { if (x === null) return 1; return x; }
+export function u5(x: unknown) { if (x) return x; return 0; }
+export function u6(x: unknown) { if (x != undefined) return x; return 0; }
+export function u7(x: unknown) { if (x === null) return x; return 0; }
+export function u8(o: { k: string | null | undefined }) { if (o.k !== undefined && o.k !== null) return o.k; return 0; }
+export function u9(o: { k: string | null }) { if (o.k === "a") return o.k; return 0; }
+export function u10(o: { k: unknown }) { if (o.k != null) return o.k; return 0; }
+export function u11(x: unknown) { if (!x) return x; return 0; }
+export function u12(o: { k: unknown }) { if (o.k) return o.k; return 0; }
+export function s1(x: unknown) { if (x === "1") return x; return 0; }
+export function s2(x: unknown) { if (x == "1") return x; return 0; }
+export function s3(x: {} | number) { if (x === "1") return x; return false; }
+export function s4(x: {} | number) { if (x == "1") return x; return false; }
+export function s5(x: string | number) { if (x != "1") return x; return true; }
+export function s6(x: boolean | string) { if (x == true) return x; return 0; }
+export function s7(x: number | string) { if (x == 1) return x; return true; }
+export function s8(o: { k: string | number }) { if (o.k == "a") return o.k; return 0; }
+export function s9(x: "a" | "b" | 1) { if (x == "a") return x; return true; }
+export function s10(x: "a" | "b" | 1) { if (x != "a") return x; return true; }
+export function s11(x: any) { if (x == "a") return x; return true; }
+export function s12(x: {}) { if (x == "1") return x; return false; }
+export function s13(x: {}) { if (x === "1") return x; return false; }
+export function s14(x: string | number) { if (typeof x == "string") return x; return true; }
+export function s15(x: string | number) { if (typeof x != "string") return x; return true; }
+export function sw1(x: unknown) { switch (x) { case "a": return x; } return 0; }
+export function sw2(x: {} | number) { switch (x) { case "a": return x; } return false; }
+export function sw3(x: unknown) { switch (x) { case "a": return x; default: return 0; } }
+export function sw4(x: unknown) { switch (x) { case "a": default: return x; } }
+export function sw5(x: {}) { switch (x) { case "a": return x; } return false; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`EQUALITY_NARROWING_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const EQUALITY_NARROWING_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // 0 | undefined / string | 0 / 0 | undefined / string | 0
+    (
+        "looseNull",
+        "0 | undefined",
+        "0 | string",
+        "0 | undefined",
+        "0 | string",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "looseNotNull",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // 0 | null / string | 0 / 0 | null / string | 0
+    (
+        "looseUndef",
+        "0 | null",
+        "0 | string",
+        "0 | null",
+        "0 | string",
+    ),
+    // number / number / number / number
+    ("looseNullRev", "number", "number", "number", "number"),
+    // 0 | null | undefined / unknown / 0 | null | undefined / unknown
+    (
+        "looseUnknown",
+        "0 | null | undefined",
+        "unknown",
+        "0 | null | undefined",
+        "unknown",
+    ),
+    // {} / unknown / {} / unknown
+    ("looseUnknownNot", "{  }", "unknown", "{  }", "unknown"),
+    // any / any / any / any
+    ("looseAny", "any", "any", "any", "any"),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "looseObj",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string | 1 / string | 1 / string | 1 / string | 1
+    (
+        "looseDisc",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "looseTernary",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // "1" | true / "1" | true / "1" | true / "1" | true
+    (
+        "looseStr",
+        "\"1\" | true",
+        "\"1\" | true",
+        "\"1\" | true",
+        "\"1\" | true",
+    ),
+    // {} | undefined / unknown / {} | undefined / unknown
+    (
+        "u1",
+        "undefined | {  }",
+        "unknown",
+        "undefined | {  }",
+        "unknown",
+    ),
+    // {} | null / unknown / {} | null / unknown
+    ("u2", "null | {  }", "unknown", "null | {  }", "unknown"),
+    // {} / unknown / {} / unknown
+    ("u3", "{  }", "unknown", "{  }", "unknown"),
+    // {} | undefined / unknown / {} | undefined / unknown
+    (
+        "u4",
+        "undefined | {  }",
+        "unknown",
+        "undefined | {  }",
+        "unknown",
+    ),
+    // {} / unknown / {} / unknown
+    ("u5", "{  }", "unknown", "{  }", "unknown"),
+    // {} / unknown / {} / unknown
+    ("u6", "{  }", "unknown", "{  }", "unknown"),
+    // 0 | null / unknown / 0 | null / unknown
+    ("u7", "0 | null", "unknown", "0 | null", "unknown"),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    ("u8", "0 | string", "0 | string", "0 | string", "0 | string"),
+    // "a" | 0 / "a" | 0 / "a" | 0 / "a" | 0
+    ("u9", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0"),
+    // {} / unknown / {} / unknown
+    ("u10", "{  }", "unknown", "{  }", "unknown"),
+    // unknown / unknown / unknown / unknown
+    ("u11", "unknown", "unknown", "unknown", "unknown"),
+    // {} / unknown / {} / unknown
+    ("u12", "{  }", "unknown", "{  }", "unknown"),
+    // "1" | 0 / "1" | 0 / "1" | 0 / "1" | 0
+    ("s1", "\"1\" | 0", "\"1\" | 0", "\"1\" | 0", "\"1\" | 0"),
+    // unknown / unknown / unknown / unknown
+    ("s2", "unknown", "unknown", "unknown", "unknown"),
+    // "1" | false / "1" | false / "1" | false / "1" | false
+    (
+        "s3",
+        "\"1\" | false",
+        "\"1\" | false",
+        "\"1\" | false",
+        "\"1\" | false",
+    ),
+    // {} / {} / {} / {}
+    ("s4", "{  }", "{  }", "{  }", "{  }"),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "s5",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // 0 | true / 0 | true / 0 | true / 0 | true
+    ("s6", "0 | true", "0 | true", "0 | true", "0 | true"),
+    // 1 | true / 1 | true / 1 | true / 1 | true
+    ("s7", "1 | true", "1 | true", "1 | true", "1 | true"),
+    // "a" | 0 / "a" | 0 / "a" | 0 / "a" | 0
+    ("s8", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0"),
+    // "a" | true / "a" | true / "a" | true / "a" | true
+    (
+        "s9",
+        "\"a\" | true",
+        "\"a\" | true",
+        "\"a\" | true",
+        "\"a\" | true",
+    ),
+    // "b" | 1 | true / "b" | 1 | true / "b" | 1 | true / "b" | 1 | true
+    (
+        "s10",
+        "\"b\" | 1 | true",
+        "\"b\" | 1 | true",
+        "\"b\" | 1 | true",
+        "\"b\" | 1 | true",
+    ),
+    // any / any / any / any
+    ("s11", "any", "any", "any", "any"),
+    // {} / {} / {} / {}
+    ("s12", "{  }", "{  }", "{  }", "{  }"),
+    // "1" | false / "1" | false / "1" | false / "1" | false
+    (
+        "s13",
+        "\"1\" | false",
+        "\"1\" | false",
+        "\"1\" | false",
+        "\"1\" | false",
+    ),
+    // string | true / string | true / string | true / string | true
+    (
+        "s14",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // number | true / number | true / number | true / number | true
+    (
+        "s15",
+        "number | true",
+        "number | true",
+        "number | true",
+        "number | true",
+    ),
+    // "a" | 0 / "a" | 0 / "a" | 0 / "a" | 0
+    ("sw1", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0"),
+    // {} / {} / {} / {}
+    ("sw2", "{  }", "{  }", "{  }", "{  }"),
+    // "a" | 0 / "a" | 0 / "a" | 0 / "a" | 0
+    ("sw3", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0", "\"a\" | 0"),
+    // unknown / unknown / unknown / unknown
+    ("sw4", "unknown", "unknown", "unknown", "unknown"),
+    // {} / {} / {} / {}
+    ("sw5", "{  }", "{  }", "{  }", "{  }"),
+];
+
+/// Every row is measured on TypeScript 7.0.2 in the four
+/// `strictNullChecks` × `noImplicitAny` projects:
+///
+/// - `x == null` selects both nullish members and `x != null` removes both
+///   (`looseNull`, `looseNotNull`, `looseUndef`), on a member path too
+///   (`looseDisc`: `o.k == null` narrows `o.k` itself, `string | 1`);
+/// - with `strictNullChecks`, `unknown` reads as `{} | null | undefined`:
+///   `x !== null` is `{} | undefined`, `x !== undefined` is `{} | null`,
+///   both together and a truthy test are `{}`, and the return join absorbs
+///   a primitive beside `{}` (`u1`: `{} | undefined`, the `0` gone);
+/// - `==` against a non-nullish literal narrows as `===` does
+///   (`looseStr`: `"1" | true`) except over `unknown` and an empty object
+///   arm, which it only filters (`s2`: `unknown`, `s4`: `{}`), where
+///   `===` reads the literal (`s1`, `s3`: `"1" | false`);
+/// - a `case` clause reads the literal over `unknown` and filters over
+///   `{}` (`sw1`: `"a" | 0`, `sw2`: `{}`);
+/// - `typeof x == "string"` narrows as the strict spelling (`s14`, `s15`).
+#[test]
+fn equality_narrows_by_the_checkers_literal_comparison_rules() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "equality-narrowing.ts",
+        EQUALITY_NARROWING_SOURCE,
+        EQUALITY_NARROWING_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Literal equalities whose narrow takes the compared literal from the
+/// compared value.
+const FRESH_EQUALITY_LITERAL_SOURCE: &str = r#"
+export function f1(x: string) { if (x === "s") return x; throw 0; }
+export function f2(x: string) { if (x === "s") { let y = x; return y; } throw 0; }
+export function f3(x: string) { if (x === "s") { const y = x; return y; } throw 0; }
+export function f4(x: string) { if (x === "s") return [x]; throw 0; }
+export function f5(x: string) { if (x === "s") return { v: x }; throw 0; }
+export function f6(x: string) { switch (x) { case "s": return x; } throw 0; }
+export function f7(x: string | number) { if (x === 1) return x; throw 0; }
+export function f8(x: string) { return x === "s" ? x : "s"; }
+export function f9(x: boolean) { if (x === true) return x; throw 0; }
+export function f10(x: string) { if (x !== "s") throw 0; return x; }
+export function f11(x: string) { if (x === "s" || x === "t") return x; throw 0; }
+export function f12(o: { k: string }) { if (o.k === "s") return o.k; throw 0; }
+export function f13(x: string) { if (x == "s") return x; throw 0; }
+export function f14(x: string) { if (x === "s") return x; return x; }
+export function f15(x: string, c: boolean) { if (x === "s") return c ? x : x; throw 0; }
+export function f16(x: unknown) { if (x === "s") return x; throw 0; }
+export function f17(x: unknown) { if (x === true) return x; throw 0; }
+export function f18(x: "s" | number) { if (x === "s") return x; throw 0; }
+export function f19(x: string) { if (x === "s") { const y = x; let z = y; return z; } throw 0; }
+export function f21(x: string | number) { if (x === "s") return [x]; throw 0; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`FRESH_EQUALITY_LITERAL_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const FRESH_EQUALITY_LITERAL_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string / string / string / string
+    ("f1", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("f2", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("f3", "string", "string", "string", "string"),
+    // string[] / string[] / string[] / string[]
+    ("f4", "string[]", "string[]", "string[]", "string[]"),
+    // { v: string; } / { v: string; } / { v: string; } / { v: string; }
+    (
+        "f5",
+        "{ v: string }",
+        "{ v: string }",
+        "{ v: string }",
+        "{ v: string }",
+    ),
+    // "s" / "s" / "s" / "s"
+    ("f6", "\"s\"", "\"s\"", "\"s\"", "\"s\""),
+    // number / number / number / number
+    ("f7", "number", "number", "number", "number"),
+    // string / string / string / string
+    ("f8", "string", "string", "string", "string"),
+    // true / true / true / true
+    ("f9", "true", "true", "true", "true"),
+    // string / string / string / string
+    ("f10", "string", "string", "string", "string"),
+    // "s" | "t" / "s" | "t" / "s" | "t" / "s" | "t"
+    (
+        "f11",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+        "\"s\" | \"t\"",
+    ),
+    // string / string / string / string
+    ("f12", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("f13", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("f14", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("f15", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("f16", "string", "string", "string", "string"),
+    // boolean / boolean / boolean / boolean
+    ("f17", "boolean", "boolean", "boolean", "boolean"),
+    // "s" / "s" / "s" / "s"
+    ("f18", "\"s\"", "\"s\"", "\"s\"", "\"s\""),
+    // string / string / string / string
+    ("f19", "string", "string", "string", "string"),
+    // string[] / string[] / string[] / string[]
+    ("f21", "string[]", "string[]", "string[]", "string[]"),
+];
+
+/// A narrow that replaces a primitive with the compared literal reads the
+/// checker's FRESH literal type, which widens where a bare literal would
+/// (TypeScript 7.0.2, every project): alone as a return (`f1`, `f10`,
+/// `f12` over a member path, `f16` over `unknown`, `f17`: `boolean`), at a
+/// mutable declaration or through a `const` (`f2`, `f3`, `f19`), in an
+/// array or object literal (`f4`: `string[]`, `f5`: `{ v: string; }`,
+/// `f21`), and as both arms of a conditional (`f8`, `f15`). A literal the
+/// reference already declared is not fresh (`f18`: `"s"`, `f9`: `true`),
+/// a `case` clause's literal is not either (`f6`: `"s"`), and a union of
+/// literals is never widened (`f11`: `"s" | "t"`).
+#[test]
+fn an_equality_narrow_from_the_compared_value_is_a_fresh_literal() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "fresh-equality-literal.ts",
+        FRESH_EQUALITY_LITERAL_SOURCE,
+        FRESH_EQUALITY_LITERAL_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Index-signature sources against named members, and `any` / `unknown` /
+/// `never` against every kind of target.
+const INDEX_AND_ANY_RELATION_SOURCE: &str = r#"
+declare const __v_idxToReq: ({ [k: string]: string }) extends ({ a: string }) ? "y" : "n";
+export function idxToReq() { return __v_idxToReq; }
+declare const __v_idxToOpt: ({ [k: string]: string }) extends ({ a?: string }) ? "y" : "n";
+export function idxToOpt() { return __v_idxToOpt; }
+declare const __v_idxToOptBad: ({ [k: string]: number }) extends ({ a?: string }) ? "y" : "n";
+export function idxToOptBad() { return __v_idxToOptBad; }
+declare const __v_idxNumToReq: ({ [k: number]: string }) extends ({ 0: string }) ? "y" : "n";
+export function idxNumToReq() { return __v_idxNumToReq; }
+declare const __v_idxToReqAny: ({ [k: string]: any }) extends ({ a: string }) ? "y" : "n";
+export function idxToReqAny() { return __v_idxToReqAny; }
+declare const __v_idxToEmpty: ({ [k: string]: string }) extends ({}) ? "y" : "n";
+export function idxToEmpty() { return __v_idxToEmpty; }
+declare const __v_idxAndPropToReq: ({ [k: string]: string; a: string }) extends ({ a: string; b: string }) ? "y" : "n";
+export function idxAndPropToReq() { return __v_idxAndPropToReq; }
+declare const __v_tmplIdxToReq: ({ [k: `a${string}`]: string }) extends ({ ab: string }) ? "y" : "n";
+export function tmplIdxToReq() { return __v_tmplIdxToReq; }
+declare const __v_anyToUnknown: (any) extends (unknown) ? "y" : "n";
+export function anyToUnknown() { return __v_anyToUnknown; }
+declare const __v_anyToAny: (any) extends (any) ? "y" : "n";
+export function anyToAny() { return __v_anyToAny; }
+declare const __v_anyToStr: (any) extends (string) ? "y" : "n";
+export function anyToStr() { return __v_anyToStr; }
+declare const __v_anyToNever: (any) extends (never) ? "y" : "n";
+export function anyToNever() { return __v_anyToNever; }
+declare const __v_neverToStr: (never) extends (string) ? "y" : "n";
+export function neverToStr() { return __v_neverToStr; }
+declare const __v_unknownToAny: (unknown) extends (any) ? "y" : "n";
+export function unknownToAny() { return __v_unknownToAny; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`INDEX_AND_ANY_RELATION_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const INDEX_AND_ANY_RELATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "n" / "n" / "n" / "n"
+    ("idxToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("idxToOpt", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("idxToOptBad", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("idxNumToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("idxToReqAny", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("idxToEmpty", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("idxAndPropToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("tmplIdxToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("anyToUnknown", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("anyToAny", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" | "y" / "n" | "y" / "n" | "y" / "n" | "y"
+    (
+        "anyToStr",
+        "\"n\" | \"y\"",
+        "\"n\" | \"y\"",
+        "\"n\" | \"y\"",
+        "\"n\" | \"y\"",
+    ),
+    // "n" | "y" / "n" | "y" / "n" | "y" / "n" | "y"
+    (
+        "anyToNever",
+        "\"n\" | \"y\"",
+        "\"n\" | \"y\"",
+        "\"n\" | \"y\"",
+        "\"n\" | \"y\"",
+    ),
+    // "y" / "y" / "y" / "y"
+    ("neverToStr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("unknownToAny", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+];
+
+/// Measured as `S extends T ? "y" : "n"` on TypeScript 7.0.2, every
+/// project: an index signature never satisfies a REQUIRED named member
+/// (`idxToReq`, `idxNumToReq`, `idxToReqAny`, `idxAndPropToReq`,
+/// `tmplIdxToReq`: `"n"`), while an OPTIONAL one is satisfied without
+/// relating the index value (`idxToOpt` and `idxToOptBad`: `"y"`); an `any`
+/// check type takes the true branch alone against `any` or `unknown`
+/// (`anyToUnknown`, `anyToAny`: `"y"`) and both branches against anything
+/// else (`anyToStr`, `anyToNever`: `"n" | "y"`).
+#[test]
+fn index_signatures_and_any_relate_by_the_checkers_rules() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "index-and-any-relations.ts",
+        INDEX_AND_ANY_RELATION_SOURCE,
+        INDEX_AND_ANY_RELATION_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}

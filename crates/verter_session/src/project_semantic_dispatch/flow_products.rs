@@ -1329,6 +1329,11 @@ pub struct FlowNarrowingFact {
     pub path: Arc<[Arc<str>]>,
     /// The type the guard narrows it to.
     pub narrowed_to: SemanticNodeId,
+    /// The compared literal, when the narrow took it from the compared
+    /// VALUE rather than from the reference's own constituents (`x ===
+    /// "s"` over `x: string` reads `"s"`): the checker's fresh literal
+    /// type, which widens wherever a bare literal would.
+    pub fresh_literal: Option<SemanticNodeId>,
 }
 
 /// Identity-only ordering: display names and binding-kind metadata cannot

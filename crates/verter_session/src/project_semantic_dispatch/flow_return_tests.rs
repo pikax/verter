@@ -4916,24 +4916,30 @@ fn flow_return_guard_union_omits_impossible_conjunction_alternative() {
     );
 }
 
-/// A disjunct that RE-ESTABLISHES the fact its position already holds
-/// still contributes its edge to the union. A member-path guard is where
-/// that is reachable: the subject's current node is the root's narrow
-/// projected down the path, never the path's own standing fact, so the
-/// enclosing conjunct's `typeof x.v === "string"` and the disjunct's
-/// identical test both write `string` at `x.v`. The disjunction's edges
-/// prove `string` and `number`, so `x.v` reads `string | number` inside
-/// it.
-///
-/// Reading each disjunct's contribution as a before/after diff of the
-/// overlay instead cannot see the second write at all: the `string`
-/// alternative comes out empty, `x.v` fails "narrowed in every
-/// alternative", and the branch publishes the enclosing `string` — a
-/// type NO edge of the disjunction proves on its own.
+/// A disjunction over a member path reads each disjunct from the
+/// member's STANDING fact. Inside `typeof x.v === "string" && (typeof x.v
+/// === "string" || typeof x.v === "number")` the second disjunct narrows
+/// the already-`string` member to `never`, so `x.v` reads `string`
+/// (TypeScript 7.0.2: `{ r: string; }`, with and without
+/// `strictNullChecks`). Reading the disjuncts from the root's projection
+/// instead publishes `string | number`, a type the enclosing conjunct
+/// already excluded. Disjuncts that each narrow the member contribute
+/// their union: `typeof x.v !== "boolean" && (typeof x.v === "string" ||
+/// typeof x.v === "number")` over `string | number | boolean` reads
+/// `string | number` (TypeScript 7.0.2: `{ r: string | number; }`).
 #[test]
-fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
+fn flow_return_guard_union_reads_each_disjunct_from_the_standing_member_fact() {
     let expr = expect_clean_flow_value(
         "function makeProps(x: { v: string | number }) { if (typeof x.v === \"string\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
+    );
+    assert_eq!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: { v: string | number | boolean }) { if (typeof x.v !== \"boolean\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
     );
     assert_eq!(
         member_types(&expr, "r"),
@@ -4941,12 +4947,6 @@ fn flow_return_guard_union_counts_a_disjunct_that_re_establishes_a_held_fact() {
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         ])]
-    );
-    assert_ne!(
-        member_types(&expr, "r"),
-        vec![verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String,
-        )]
     );
 }
 

@@ -5656,37 +5656,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             RelationResult::NotAssignable
                         }
                     } else {
-                        // Optional target member satisfied by source index
-                        // evidence: EVERY applicable source index relates
-                        // (mirroring the legacy
-                        // `relate_property_via_source_index` loop) — the
-                        // first match alone would let an `any` index
-                        // swallow a refuting narrower index.
-                        let mut matched = false;
-                        let mut pair = assignable(bindings);
-                        for index in source.indices.iter().filter(|index| {
+                        // An optional target member the source does not
+                        // name is satisfied without relating a source index
+                        // signature to it (the checker's
+                        // `getUnmatchedProperty`); a source whose key set is
+                        // open may still carry the key with any value.
+                        let indexed = source.indices.iter().any(|index| {
                             index_signature_applies_to_property(
                                 self.graph(),
                                 index.key_type,
                                 &target_member.key,
                             )
-                        }) {
-                            matched = true;
-                            pair = result_and(
-                                pair,
-                                self.relate_projected_values(
-                                    &index.value,
-                                    &target_member.value,
-                                    bindings,
-                                ),
-                            );
-                            if matches!(pair, RelationResult::NotAssignable) {
-                                break;
-                            }
-                        }
-                        if matched {
-                            pair
-                        } else if source.open {
+                        });
+                        if source.open && !indexed {
                             RelationResult::Unknown
                         } else {
                             assignable(bindings)
@@ -7778,12 +7760,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 {
                     RelationResult::NotAssignable
                 }
+                // A property the source does not declare: a required target
+                // property is unmatched, whatever index signature the source
+                // carries, and an optional one is satisfied without relating
+                // any index signature to it (the checker's
+                // `getUnmatchedProperty`: `{ [k: string]: string }` is not
+                // assignable to `{ a: string }`, and `{ [k: string]: number
+                // }` is assignable to `{ a?: string }`).
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                    if let Some(index_result) =
-                        self.relate_property_via_source_index(source, t_prop, bindings)
-                    {
-                        index_result
-                    } else if t_prop.optional {
+                    if t_prop.optional {
                         assignable(bindings)
                     } else {
                         RelationResult::NotAssignable
@@ -7918,37 +7903,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings,
             InferPosition::Covariant,
         )
-    }
-
-    pub(super) fn relate_property_via_source_index(
-        &self,
-        source: &SurfaceView,
-        target_prop: &crate::semantic_query::SurfaceMember,
-        bindings: &mut Vec<InferBinding>,
-    ) -> Option<RelationResult> {
-        let graph = self.graph();
-        let mut matched = false;
-        let mut acc = RelationResult::Assignable {
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
-        };
-        for s_index in source.index_signatures.iter() {
-            let target_key = target_prop.key.cloned_known()?;
-            if !index_signature_applies_to_property(graph, s_index.key_type, &target_key) {
-                continue;
-            }
-            matched = true;
-            let r = self.relate_member(
-                s_index.value_type,
-                target_prop.value,
-                bindings,
-                InferPosition::Covariant,
-            );
-            acc = result_and(acc, r);
-            if matches!(acc, RelationResult::NotAssignable) {
-                return Some(RelationResult::NotAssignable);
-            }
-        }
-        matched.then_some(acc)
     }
 
     pub(super) fn relate_target_index_signature(
