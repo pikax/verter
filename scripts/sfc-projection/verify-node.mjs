@@ -2325,6 +2325,10 @@ async function evaluateStp19Node({ repoRoot, resolvedEngines, skipProbes }) {
   const stp19 = await protocol.evaluateStp19({
     repoRoot,
     engines: resolvedEngines,
+    runEngine: (engine, probes) =>
+      engine.kind === "javascript"
+        ? runJsEngine(engine, probes, repoRoot)
+        : runNativeEngine(engine, probes, repoRoot),
     skipProbes,
   });
   return { errors: stp19.errors };

@@ -17,6 +17,11 @@
  *   engine verdict it names on every resolved engine.
  *
  * Rejections are reproduced, never asserted from clean passes.
+ *
+ * Engine execution is injected by the caller as `runEngine(engine, probes)`
+ * (verify-node owns the engine runners). The protocol never imports
+ * verify-node.mjs: that module is the CLI entry, and a static import of the
+ * still-evaluating entry from a dynamically imported protocol never settles.
  */
 
 import { spawnSync } from "node:child_process";
@@ -25,7 +30,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { NODE_MANDATORY_CASES } from "../../../scripts/sfc-projection/node-mandatory-cases.mjs";
-import { runJsEngine, runNativeEngine } from "../../../scripts/sfc-projection/verify-node.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../../..");
@@ -450,17 +454,14 @@ export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT, only = null) {
   return errors;
 }
 
-async function checkFile(engine, repoRoot, rel) {
+async function checkFile(runEngine, engine, repoRoot, rel) {
   const probes = {
     positive: rel,
     negative: rel,
     cleanTwin: rel,
     tsconfig: `${PROBES}/tsconfig.json`,
   };
-  const run =
-    engine.kind === "javascript"
-      ? runJsEngine(engine, probes, repoRoot)
-      : await runNativeEngine(engine, probes, repoRoot);
+  const run = await runEngine(engine, probes);
   const text = fs.readFileSync(path.join(repoRoot, rel), "utf8");
   return { diags: run.positive.diags, text };
 }
@@ -475,7 +476,7 @@ function lineAt(text, pos) {
  * Every diagnostic of `rel` has `code` and sits on an anchored line at the
  * anchored authored token; every anchor has exactly one diagnostic.
  */
-export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines }) {
+export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines, runEngine }) {
   const errors = [];
   const files = [
     { rel: `${PROBES}/negative-construction.ts`, code: 2769, anchors: CONSTRUCTION_ANCHORS },
@@ -483,7 +484,7 @@ export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines })
   ];
   for (const engine of engines) {
     for (const file of files) {
-      const { diags, text } = await checkFile(engine, repoRoot, file.rel);
+      const { diags, text } = await checkFile(runEngine, engine, repoRoot, file.rel);
       const hits = new Map(file.anchors.map((anchor) => [anchor, 0]));
       for (const diag of diags) {
         const line = Number.isInteger(diag.pos) ? lineAt(text, diag.pos) : "";
@@ -523,7 +524,7 @@ export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines })
  * clean probe must first hold the opposite verdict, so a plant that fails to
  * apply (or a verdict the clean probe already has) cannot pass.
  */
-export async function assertTsTwinsRejected({ repoRoot = REPO_ROOT, engines }) {
+export async function assertTsTwinsRejected({ repoRoot = REPO_ROOT, engines, runEngine }) {
   const errors = [];
   const verdict = (diags, text, expect) => {
     const anchor = expect.gains || expect.loses;
@@ -544,8 +545,8 @@ export async function assertTsTwinsRejected({ repoRoot = REPO_ROOT, engines }) {
     fs.writeFileSync(twinAbs, mutated);
     try {
       for (const engine of engines) {
-        const clean = await checkFile(engine, repoRoot, originalRel);
-        const dirty = await checkFile(engine, repoRoot, twinRel);
+        const clean = await checkFile(runEngine, engine, repoRoot, originalRel);
+        const dirty = await checkFile(runEngine, engine, repoRoot, twinRel);
         const cleanHit = verdict(clean.diags, clean.text, spec.expect);
         const dirtyHit = verdict(dirty.diags, dirty.text, spec.expect);
         const rejected = spec.expect.gains ? !cleanHit && dirtyHit : cleanHit && !dirtyHit;
@@ -569,6 +570,7 @@ export async function assertTsTwinsRejected({ repoRoot = REPO_ROOT, engines }) {
 export async function evaluateStp19({
   repoRoot = REPO_ROOT,
   engines = [],
+  runEngine = null,
   skipProbes = false,
 } = {}) {
   const errors = [];
@@ -581,9 +583,11 @@ export async function evaluateStp19({
   if (!skipProbes) {
     if (engines.length === 0) {
       errors.push(err("STP19-explicit", "missing-probes", "no resolved engine for STP19 probes"));
+    } else if (typeof runEngine !== "function") {
+      errors.push(err("STP19-explicit", "missing-probes", "no engine runner for STP19 probes"));
     } else {
-      errors.push(...(await assertAnchoredNegatives({ repoRoot, engines })));
-      errors.push(...(await assertTsTwinsRejected({ repoRoot, engines })));
+      errors.push(...(await assertAnchoredNegatives({ repoRoot, engines, runEngine })));
+      errors.push(...(await assertTsTwinsRejected({ repoRoot, engines, runEngine })));
     }
   }
   const before = errors.length;
