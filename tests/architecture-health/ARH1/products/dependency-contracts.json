@@ -1009,13 +1009,13 @@
         }
       ],
       "snapshot": {
-        "pubFn": 175,
+        "pubFn": 177,
         "pubFnTestHooks": 0,
         "pubCrateFn": 44,
         "pubType": 200,
         "pubCrateMod": 2,
         "inlinePubMod": 15,
-        "pubStructField": 294
+        "pubStructField": 296
       },
       "authority": [
         {

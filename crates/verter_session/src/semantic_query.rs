@@ -2575,6 +2575,24 @@ impl MapperKind {
     }
 }
 
+/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+/// type parameter binder or an `infer` declaration or reference — so the
+/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+#[must_use]
+pub fn keyof_operand_is_type_variable(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    operand: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(operand).as_deref(),
+        Some(
+            SemanticNodeData::TypeParam { .. }
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
+        )
+    )
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2598,6 +2616,14 @@ pub struct MapperKey {
     /// Lowering-time classification of `value_expr`. See
     /// [`MapperKind`].
     pub kind: MapperKind,
+    /// Whether the mapping was declared over `keyof T` for a TYPE
+    /// PARAMETER `T` — TypeScript's homomorphic type variable — so `source`
+    /// is `T` or the type that instantiated it. Such a mapping maps each
+    /// union constituent of its source, passes a primitive through and
+    /// maps an array or tuple element-wise (`instantiateMappedType`); one
+    /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
+    /// that type's own keys.
+    pub over_type_variable: bool,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -10118,6 +10144,24 @@ pub struct FunctionParam {
     /// include it) but never enters `parse_stable_hash`. `None` for a synthetic
     /// parameter with no source site.
     pub span: Option<verter_span::Span>,
+    /// The parameter's DECLARED type is a literal type — a string, number,
+    /// bigint or boolean literal, or `null` (TypeScript's
+    /// `HasLiteralTypes`). A declaration fact: an instantiation keeps it, so
+    /// `(x: T)` instantiated at `'a'` is not literal-declared.
+    pub declared_literal: bool,
+}
+
+/// Whether a declared parameter type is a literal type in TypeScript's
+/// syntax (`LiteralType`): a string, number, bigint or boolean literal, or
+/// `null`. A reference to a literal alias, a union of literals, a template
+/// literal type and `undefined` are not.
+#[must_use]
+pub fn declares_literal_type(ty: &verter_type_expr::TypeExpr) -> bool {
+    matches!(
+        ty,
+        verter_type_expr::TypeExpr::Literal(_)
+            | verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Null)
+    )
 }
 
 impl FunctionParam {
@@ -10136,6 +10180,7 @@ impl FunctionParam {
             optional,
             rest,
             span: None,
+            declared_literal: false,
         }
     }
 }

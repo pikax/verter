@@ -522,6 +522,7 @@ impl StructuralEncoder<'_> {
                 self.push_str(&format!("{:?}", mapper.readonly));
                 self.encode_child_opt(mapper.name_remap, depth);
                 self.push_str(&format!("{:?}", mapper.kind));
+                self.push_str(&format!("{:?}", mapper.over_type_variable));
             }
             SemanticNodeData::TypeParam {
                 decl,

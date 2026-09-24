@@ -855,6 +855,13 @@ enum NumericIndexDemand {
     BroadNumber,
 }
 
+/// An intersection join's contributors split into their non-nullish parts
+/// and the `null` / `undefined` arms all of them carry.
+struct NullishSplit {
+    cores: Option<Vec<SemanticNodeId>>,
+    common_nullish: Vec<SemanticNodeId>,
+}
+
 /// Whether a string key is a CANONICAL non-negative integer key —
 /// TS's numeric-key coercion rule `String(Number(s)) === s` restricted
 /// to the integer positions a tuple can hold: nonempty, ASCII digits
@@ -979,14 +986,16 @@ pub(crate) struct MergedDeclSurface {
 
 /// One peer-merged member. `values` holds a single value for an ordinary member
 /// and the ORDERED, deduplicated overload value list for an accumulated
-/// same-name method group (length > 1 only for methods). The graph reducer
-/// interns a multi-value method group into an `Intersection`; the display
-/// projection renders it as a property holding that intersection — both yield
-/// the identical surface.
+/// same-name method group (length > 1 only for methods), with
+/// `declarations` naming, per value, the contributor that declared it. The
+/// graph reducer interns a multi-value method group into an overload group
+/// `Intersection`; the display projection renders it as a property holding
+/// that intersection — both yield the identical surface.
 #[derive(Debug, Clone)]
 pub(crate) struct MergedDeclMember {
     pub(crate) member: ShallowSurfaceMember,
     pub(crate) values: Vec<SemanticNodeId>,
+    pub(crate) declarations: Vec<usize>,
 }
 
 /// The full display surface of a `MergedDecl` carrier: the preserved
@@ -1072,7 +1081,7 @@ pub(crate) fn reduce_merged_decl_display_surface(
 /// `Intersection` bodies (interface/class with heritage) contribute their
 /// object-surface arms as own-body and their remaining reference arms as
 /// heritage (de-duplicated). Any other shape yields nothing.
-fn collect_merged_contributor_arms(
+pub(super) fn collect_merged_contributor_arms(
     graph: &SemanticGraphStore,
     node: SemanticNodeId,
     own_surfaces: &mut Vec<ShallowSurface>,
@@ -1139,11 +1148,13 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         first: ShallowSurfaceMember,
         /// Ordered overload values when accumulating same-name methods.
         method_values: Vec<SemanticNodeId>,
+        /// The contributor that declared each accumulated value.
+        method_declarations: Vec<usize>,
     }
 
     let mut by_key: indexmap::IndexMap<crate::semantic_query::AuthoredPropertyKey, Accum> =
         indexmap::IndexMap::new();
-    for surface in contributor_surfaces {
+    for (declaration, surface) in contributor_surfaces.iter().enumerate() {
         for member in &surface.members {
             match by_key.get_mut(&member.key) {
                 None => {
@@ -1152,6 +1163,7 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
                         Accum {
                             first: member.clone(),
                             method_values: vec![member.value],
+                            method_declarations: vec![declaration],
                         },
                     );
                 }
@@ -1163,6 +1175,7 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
                         accum.first.has_implementation_body |= member.has_implementation_body;
                         if !accum.method_values.contains(&member.value) {
                             accum.method_values.push(member.value);
+                            accum.method_declarations.push(declaration);
                         }
                     }
                 }
@@ -1173,15 +1186,16 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
     let members = by_key
         .into_values()
         .map(|accum| {
-            let values =
+            let (values, declarations) =
                 if accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
-                    accum.method_values
+                    (accum.method_values, accum.method_declarations)
                 } else {
-                    vec![accum.first.value]
+                    (vec![accum.first.value], vec![accum.method_declarations[0]])
                 };
             MergedDeclMember {
                 member: accum.first,
                 values,
+                declarations,
             }
         })
         .collect();
@@ -1461,7 +1475,62 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
     }
 
+    /// The type an indexed access reads off a property whose declared type
+    /// is `value`, declared in `declaring_file` — TypeScript's indexed-access
+    /// read. Under the declaring project's `strictNullChecks` an OPTIONAL
+    /// property reads `value | undefined` (`{ o?: 3 }['o']` is
+    /// `3 | undefined`; `exactOptionalPropertyTypes` does not change the
+    /// read). With it off, `null` and `undefined` are not types of their
+    /// own: the read is the declared type with them erased (`o?: 3 |
+    /// undefined` reads `3`), the checker's union construction under that
+    /// option.
+    fn index_read(
+        &self,
+        value: SemanticNodeId,
+        optional: bool,
+        declaring_file: Option<&str>,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::{NullabilityPolicy, PrimitiveKind};
+        let strict = declaring_file.is_none_or(|canonical| {
+            self.dispatch
+                .ctx
+                .host_for_fact_tracer_install()
+                .semantic_compiler_options_for(canonical)
+                .strict_null_checks
+        });
+        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
+        self.push_union_flattened(&mut arms, value);
+        if strict {
+            if !optional {
+                return value;
+            }
+            arms.push(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+            );
+            return self
+                .dispatch
+                .intern_normalized_union(&arms, NullabilityPolicy::Strict);
+        }
+        let nullable = |arm: &SemanticNodeId| {
+            matches!(
+                self.graph().node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                ))
+            )
+        };
+        if arms.len() < 2 || !arms.iter().any(nullable) {
+            return value;
+        }
+        self.dispatch
+            .intern_normalized_union(&arms, NullabilityPolicy::Erased)
+    }
+
     /// Project a numeric demand into a tuple's element set.
+    ///
+    /// Reads follow `declaring_file`'s `strictNullChecks` as
+    /// [`Self::index_read`] does.
     ///
     /// - `Position(i)`: element `i`'s value type; an optional slot widens
     ///   to `value | undefined`; the label never flows (only
@@ -1480,8 +1549,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &self,
         elements: &[crate::semantic_query::TupleElement],
         demand: NumericIndexDemand,
+        declaring_file: Option<&str>,
     ) -> Option<SemanticNodeId> {
-        use crate::semantic_query::PrimitiveKind;
         match demand {
             NumericIndexDemand::Position(position) => {
                 if let Some(rest_start) = elements.iter().position(|element| element.rest) {
@@ -1490,20 +1559,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                 }
                 let element = elements.get(position)?;
-                if element.optional {
-                    let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(2);
-                    self.push_union_flattened(&mut arms, element.value);
-                    arms.push(
-                        self.graph()
-                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
-                    );
-                    Some(
-                        self.dispatch
-                            .intern_normalized_union_or_intersection(&arms, true),
-                    )
-                } else {
-                    Some(element.value)
-                }
+                Some(self.index_read(element.value, element.optional, declaring_file))
             }
             NumericIndexDemand::BroadNumber => {
                 let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len() + 1);
@@ -1511,12 +1567,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     if element.rest {
                         arms.push(self.rest_element_item_type(element.value)?);
                     } else {
-                        self.push_union_flattened(&mut arms, element.value);
-                        if element.optional {
-                            arms.push(self.graph().intern_node(SemanticNodeData::Primitive(
-                                PrimitiveKind::Undefined,
-                            )));
-                        }
+                        let read = self.index_read(element.value, element.optional, declaring_file);
+                        self.push_union_flattened(&mut arms, read);
                     }
                 }
                 Some(
@@ -1928,6 +1980,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // what `build_typeof` already mints for a top-level
                     // function overload group, so `obj.m` and a same-shaped
                     // `f` answer alike from here on.
+                    //
+                    // An INDEXED ACCESS (`T['k']`) reads a property the
+                    // checker's way: an optional property reads its declared
+                    // type plus `undefined` (`index_read`); a property
+                    // navigation step reads the declared type alone.
+                    let index_read = matches!(segment, PathSegment::Index(_));
+                    let object_scope = self
+                        .graph()
+                        .node_scope(current)
+                        .and_then(|scope| scope.canonical_file());
                     // An ACCESSOR is a property: its read is the accessor's
                     // VALUE type (the getter's return, else the setter's
                     // parameter), whichever of a get/set pair came first.
@@ -1940,7 +2002,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             crate::semantic_query::SurfaceKeyProjection::Exact(member)
                                 if member.visibility.is_public() =>
                             {
-                                Some(member.value)
+                                Some(if index_read {
+                                    self.index_read(
+                                        member.value,
+                                        member.optional,
+                                        member
+                                            .declaration_origin
+                                            .as_deref()
+                                            .or(object_scope.as_deref()),
+                                    )
+                                } else {
+                                    member.value
+                                })
                             }
                             _ => None,
                         }
@@ -3264,7 +3337,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let projected = self
                         .classify_numeric_index_segment(segment)
-                        .and_then(|demand| self.project_tuple_index(&elements, demand));
+                        .and_then(|demand| {
+                            let declaring_file = self
+                                .graph()
+                                .node_scope(current)
+                                .and_then(|scope| scope.canonical_file());
+                            self.project_tuple_index(&elements, demand, declaring_file.as_deref())
+                        });
                     match projected {
                         Some(value) => {
                             let meta = match segment {
@@ -3951,7 +4030,211 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         if contributors.is_empty() {
             results.push(self.opaque_miss());
-        } else if contributors.len() >= 2
+            return;
+        }
+        if contributors.len() >= 2 {
+            if let Some(split) = self.split_nullish_arms(&contributors) {
+                // The checker intersects the member's types and then
+                // distributes the intersection over their unions, where a
+                // `null` / `undefined` arm meets only itself: the joined
+                // value is the intersection of the contributors'
+                // non-nullish parts plus the nullish arms EVERY contributor
+                // carries (measured against the pinned checker: `(H & {
+                // onClick?: (p: PE) => void })['onClick']` over `H.onClick?:
+                // (p: FE) => void` is `((p: FE) => void) & ((p: PE) => void)
+                // | undefined`; `{ a: X | undefined } & { a: Y }` reads
+                // `X & Y`).
+                let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(3);
+                if let Some(cores) = split.cores {
+                    let mut joined: Vec<SemanticNodeId> = Vec::with_capacity(1);
+                    self.join_intersection_contributors(cores, &mut joined);
+                    arms.extend(joined);
+                }
+                arms.extend(split.common_nullish);
+                results.push(match arms.as_slice() {
+                    [] => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                    [only] => *only,
+                    _ => self
+                        .dispatch
+                        .intern_normalized_union_or_intersection(&arms, true),
+                });
+                return;
+            }
+        }
+        self.join_intersection_contributors(contributors, results);
+    }
+
+    /// The nullish split of an intersection join's `contributors` — the
+    /// checker's distribution of an intersection over its members' `null` /
+    /// `undefined` arms — or `None` when no contributor carries one or the
+    /// split is not provable from the graph (the join then keeps the
+    /// undistributed intersection).
+    ///
+    /// A nullish kind EVERY contributor carries as a union arm is lifted
+    /// out whole: `(T | undefined) & (U | undefined)` is `(T & U) |
+    /// undefined` for any `T`, `U` (the checker strips `undefined`, then
+    /// `null`, the same way). Any other nullish arm must meet, in some
+    /// other contributor, only arms provably disjoint from it, so every
+    /// term it enters is `never`: `(T | undefined) & QA` is `T & QA`, while
+    /// `(T | undefined) & U` stays undistributed. `cores` is each
+    /// contributor's non-nullish part in order, `None` when some
+    /// contributor has none (the non-nullish product is empty);
+    /// `common_nullish` is the lifted nullish arms.
+    fn split_nullish_arms(&self, contributors: &[SemanticNodeId]) -> Option<NullishSplit> {
+        let nullish_kind = |arm: SemanticNodeId| match self.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(
+                kind @ (PrimitiveKind::Null | PrimitiveKind::Undefined),
+            )) => Some(*kind),
+            _ => None,
+        };
+        let arm_lists: Vec<Vec<SemanticNodeId>> = contributors
+            .iter()
+            .map(
+                |&contributor| match self.graph().node_data(contributor).as_deref() {
+                    Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+                    _ => vec![contributor],
+                },
+            )
+            .collect();
+        if !arm_lists
+            .iter()
+            .flatten()
+            .any(|arm| nullish_kind(*arm).is_some())
+        {
+            return None;
+        }
+        let common: Vec<PrimitiveKind> = [PrimitiveKind::Undefined, PrimitiveKind::Null]
+            .into_iter()
+            .filter(|kind| {
+                arm_lists
+                    .iter()
+                    .all(|arms| arms.iter().any(|arm| nullish_kind(*arm) == Some(*kind)))
+            })
+            .collect();
+        // A contributor that is nothing but nullish arms is no union the
+        // checker strips: its pairing with every other arm must vanish.
+        if arm_lists
+            .iter()
+            .any(|arms| arms.iter().all(|arm| nullish_kind(*arm).is_some()))
+            && !arm_lists
+                .iter()
+                .flatten()
+                .all(|arm| nullish_kind(*arm).is_some() || self.provably_non_nullish(*arm, 0))
+        {
+            return None;
+        }
+        let stripped: Vec<Vec<SemanticNodeId>> = arm_lists
+            .into_iter()
+            .map(|arms| {
+                arms.into_iter()
+                    .filter(|arm| !nullish_kind(*arm).is_some_and(|kind| common.contains(&kind)))
+                    .collect()
+            })
+            .collect();
+        let disjoint_from = |arm: SemanticNodeId, kind: PrimitiveKind| match nullish_kind(arm) {
+            Some(other) => other != kind,
+            None => self.provably_non_nullish(arm, 0),
+        };
+        for (position, arms) in stripped.iter().enumerate() {
+            for &arm in arms {
+                let Some(kind) = nullish_kind(arm) else {
+                    continue;
+                };
+                let vanishes = stripped.iter().enumerate().any(|(other, other_arms)| {
+                    other != position && other_arms.iter().all(|a| disjoint_from(*a, kind))
+                });
+                if !vanishes {
+                    return None;
+                }
+            }
+        }
+        let mut cores: Option<Vec<SemanticNodeId>> = Some(Vec::with_capacity(stripped.len()));
+        for arms in stripped {
+            let core: Vec<SemanticNodeId> = arms
+                .into_iter()
+                .filter(|arm| nullish_kind(*arm).is_none())
+                .collect();
+            cores = match (cores, core.as_slice()) {
+                (None, _) | (_, []) => None,
+                (Some(mut cores), [only]) => {
+                    cores.push(*only);
+                    Some(cores)
+                }
+                (Some(mut cores), _) => {
+                    cores.push(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&core, true),
+                    );
+                    Some(cores)
+                }
+            };
+        }
+        Some(NullishSplit {
+            cores,
+            common_nullish: common
+                .into_iter()
+                .map(|kind| self.graph().intern_node(SemanticNodeData::Primitive(kind)))
+                .collect(),
+        })
+    }
+
+    /// Whether `node` provably excludes both `null` and `undefined`, so the
+    /// checker's intersection of it with either is `never`: a literal, a
+    /// non-nullish primitive (`object` included), an object, array, tuple
+    /// or template-literal type, a signature, an interface or class
+    /// reference, or an intersection with such an arm.
+    fn provably_non_nullish(&self, node: SemanticNodeId, depth: usize) -> bool {
+        const MAX_NESTING: usize = 4;
+        if depth > MAX_NESTING {
+            return false;
+        }
+        let Some(data) = self.graph().node_data(node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::Object(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Signature { .. } => true,
+            SemanticNodeData::Primitive(kind) => matches!(
+                kind,
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Object
+            ),
+            SemanticNodeData::DeclRef { identity }
+            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                self.dispatch.prepared_decl_kind(identity),
+                Some(
+                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                )
+            ),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.members_arc();
+                drop(data);
+                arms.iter()
+                    .any(|arm| self.provably_non_nullish(*arm, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
+    /// Join intersection `contributors` (at least one) the member-value
+    /// way, pushing the joined value onto `results`.
+    fn join_intersection_contributors(
+        &self,
+        contributors: Vec<SemanticNodeId>,
+        results: &mut Vec<SemanticNodeId>,
+    ) {
+        if contributors.len() >= 2
             && contributors
                 .iter()
                 .any(|v| value_may_contribute_call_signatures(self.graph(), *v))
@@ -6934,6 +7217,43 @@ fn arm_is_object_surface(graph: &SemanticGraphStore, arm: SemanticNodeId) -> boo
 /// this wrapper then interns each accumulated same-name method overload group
 /// into an `Intersection` value node, while a single-signature method or an
 /// ordinary property keeps its verbatim value.
+/// The overload group of one merged method: its `values` in source order,
+/// `declarations` naming each value's declaration. The overloads of one
+/// declaration form an `OverloadGroup`; overloads from several
+/// declarations form a `MergedOverloadGroup` with one arm per declaration.
+/// Both are ORDERED carriers — a commutative sort would reverse the observed
+/// overload set — and both are one method's signature list, never an
+/// intersection type.
+fn intern_merged_overloads(
+    graph: &SemanticGraphStore,
+    values: &[SemanticNodeId],
+    declarations: &[usize],
+) -> SemanticNodeId {
+    use crate::semantic_query::composite::CompositeList;
+    let mut arms: Vec<SemanticNodeId> = Vec::new();
+    let mut start = 0;
+    while start < values.len() {
+        let mut end = start + 1;
+        while end < values.len() && declarations[end] == declarations[start] {
+            end += 1;
+        }
+        arms.push(if end - start == 1 {
+            values[start]
+        } else {
+            graph.intern_node(SemanticNodeData::Intersection(
+                CompositeList::overload_group(Arc::from(&values[start..end])),
+            ))
+        });
+        start = end;
+    }
+    match arms.as_slice() {
+        [single_declaration] => *single_declaration,
+        _ => graph.intern_node(SemanticNodeData::Intersection(
+            CompositeList::merged_overload_group(Arc::from(arms.into_boxed_slice())),
+        )),
+    }
+}
+
 fn merge_declaration_surfaces(
     graph: &SemanticGraphStore,
     contributor_surfaces: &[ShallowSurface],
@@ -6950,16 +7270,8 @@ fn merge_declaration_surfaces(
                 == Some(verter_type_expr::ObjectMethodKind::Method)
                 && merged.values.len() > 1
             {
-                // ORDERED carrier: a same-name method overload group in
-                // source order — commutative sorting would reverse the
-                // observed overload set.
-                let group = graph.intern_node(SemanticNodeData::Intersection(
-                    crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
-                        merged.values.into_boxed_slice(),
-                    )),
-                ));
                 ShallowSurfaceMember {
-                    value: group,
+                    value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
                     ..merged.member
                 }
             } else {

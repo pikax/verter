@@ -605,6 +605,7 @@ fn mapped_type_renders_modifiers_and_name_remap() {
         store.intern_node(SemanticNodeData::Mapped {
             source: t,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: k,
                 key_space,
                 value_expr: v,
