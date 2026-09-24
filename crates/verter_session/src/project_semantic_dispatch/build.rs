@@ -83,6 +83,11 @@ pub(super) struct AugmentationContributions {
     pub(super) contributor_nodes: Vec<SemanticNodeId>,
     contributor_roots: Vec<AugmentationContributorRoot>,
     pub(super) source_env_unobservable: bool,
+    /// Where the excluded contributor's own declaration falls among
+    /// `contributor_nodes` in declaration precedence order: the count of
+    /// contributions that precede it. `None` when no contributor was
+    /// excluded.
+    base_position: Option<usize>,
 }
 
 /// Record a completed semantic augmentation stitch using the public typed
@@ -744,9 +749,111 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
         });
 
-        if !(has_value || has_import_local || has_type_symbol || has_namespace_prefix) {
-            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+        // A namespace's value member is its own declaration, named by its
+        // qualified path (`NS.Inner.f`): the longest prefix of the path that
+        // names one reads the rest of the path from it. The namespace a
+        // function or class merges with contributes its members this way too.
+        let unbound = !(has_value || has_import_local || has_type_symbol || has_namespace_prefix);
+        for length in (1..=path.len()).rev() {
+            let mut qualified = value_root.name.to_string();
+            for segment in &path[..length] {
+                qualified.push('.');
+                qualified.push_str(segment);
+            }
+            let declared = matches!(
+                shallow.visible_value_binding(value_root.scope.owner, &qualified),
+                Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
+            ) || (unbound
+                && value_root.name.as_ref() != "globalThis"
+                && self.global_value_declaration(&qualified).is_some());
+            if declared {
+                let member_root = ValueRootKey {
+                    scope: value_root.scope.clone(),
+                    name: Arc::from(qualified),
+                };
+                return self.build_typeof(&member_root, &path[length..], context);
+            }
         }
+
+        // A name no scope declares or imports is read in the program's GLOBAL
+        // scope: `globalThis` is the global object, and any other name its
+        // global value declaration. The global root replaces the bare-name
+        // resolution below; the segments `globalThis` consumed leave `path`.
+        let mut global_via_global_this = false;
+        // A function declared in several files: every later file's
+        // declaration, whose overloads join the first's.
+        let mut global_peers: Vec<ResolvedRootIdentity> = Vec::new();
+        let (global_root, path) =
+            if has_value || has_import_local || has_type_symbol || has_namespace_prefix {
+                (None, path)
+            } else if value_root.name.as_ref() == "globalThis" {
+                // Every leading `globalThis` segment is the global object again.
+                let mut rest = path;
+                while rest
+                    .first()
+                    .is_some_and(|segment| segment.as_ref() == "globalThis")
+                {
+                    rest = &rest[1..];
+                }
+                // The whole global object spans every global of the program
+                // AND of its libs, which this lane does not enumerate: it
+                // stays the deferred `typeof globalThis` carrier, whose
+                // members a projection reads through this same root.
+                let Some((member, rest)) = rest.split_first() else {
+                    let scope = NodeScopeId::File {
+                        canonical_id: Arc::clone(&value_root.scope.canonical_id),
+                        owner: value_root.scope.owner,
+                        whole_hash: observed_hash,
+                        local_scope: value_root.scope.local_scope,
+                    };
+                    let carrier = self.graph().intern_node_with_scope(
+                        SemanticNodeData::new_typeof(
+                            value_root.clone(),
+                            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        ),
+                        scope,
+                    );
+                    return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(carrier),
+                        self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
+                    ))
+                    .with_observed_self_roots([(
+                        Arc::clone(&value_root.scope.canonical_id),
+                        observed_hash,
+                    )]);
+                };
+                // Only a `var` and a function are properties of the global
+                // object; `let`, `const`, `class` and `enum` are global by
+                // name alone (the checker's TS2339 on `globalThis.x`).
+                use verter_semantic::analysis::type_eval::ValueDeclKind;
+                match self.global_value_declarations(member).as_deref() {
+                    Some(
+                        [(
+                            identity,
+                            ValueDeclKind::Var
+                            | ValueDeclKind::Function
+                            | ValueDeclKind::AsyncFunction,
+                        ), peers @ ..],
+                    ) => {
+                        global_via_global_this = true;
+                        global_peers = peers.iter().map(|(peer, _)| peer.clone()).collect();
+                        (Some(identity.clone()), rest)
+                    }
+                    _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                }
+            } else {
+                match self
+                    .global_value_declarations(value_root.name.as_ref())
+                    .as_deref()
+                {
+                    Some([(identity, _), peers @ ..]) => {
+                        global_peers = peers.iter().map(|(peer, _)| peer.clone()).collect();
+                        (Some(identity.clone()), path)
+                    }
+                    _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                }
+            };
 
         // Same scope-recording rule as `build_resolve_decl` — the value
         // binding's origin scope is the owning canonical so dispatch
@@ -772,85 +879,88 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );
-        let root_identity =
-            match crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        let resolved_root = match global_root {
+            Some(global) => Some(global),
+            None => crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 self.ctx,
                 value_root.scope.canonical_id.as_ref(),
                 value_root.scope.owner,
                 scope_payload.as_ref(),
                 value_root.name.as_ref(),
-            ) {
-                Some(identity) => identity,
-                None => {
-                    // `typeof name` where `name` is an IMPORT whose specifier
-                    // does not (yet) resolve — `import theme from './theme'`
-                    // before `/theme.ts` exists. The miss is a MissingDependency
-                    // result: it MUST invalidate the moment the dependency
-                    // appears. The build-layer fence (`WholeHash` /
-                    // `RouteGeneration` / `ProjectGeneration`) carries NO
-                    // import-route rail — the only rail that moves when a
-                    // known-miss specifier resolves (a synthetic
-                    // project-generation dep is the wrong correctness rail, per
-                    // the architecture ruling). So when the name is
-                    // import-backed we OBSERVE the owner's import-route
-                    // RESOLUTION WITNESS into the active tracer (the sealed
-                    // transaction's exhausted probe set for the miss, which the
-                    // dependency's appearance advances) — bubbling it into the
-                    // outer
-                    // component-meta result signature so the warm read misses
-                    // after the dependency is added. When the route fact cannot
-                    // be produced (no import-route surface to root on), the
-                    // miss is unrootable and MUST be cache-suppressed
-                    // (`ReturnOnly`): the value still flows, but no warm entry
-                    // publishes, so the next request recomputes cold and
-                    // recovers. A non-import miss (a genuinely absent LOCAL
-                    // symbol) stays the ordinary unrooted Miss.
-                    let is_import_backed = has_import_local
-                        || has_namespace_prefix
-                        || scope_payload.as_ref().is_some_and(|p| {
-                            p.import_bindings().contains_key(value_root.name.as_ref())
-                        });
-                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-                    if is_import_backed {
-                        let owner_canonical = value_root.scope.canonical_id.as_ref();
-                        // Best-effort: observe the owner's import-route
-                        // resolution witness into the active tracer so any
-                        // consumer cache whose validity rail consults
-                        // import-route facts re-validates when the specifier
-                        // resolves.
-                        self.ctx
-                            .host_for_fact_tracer_install()
-                            .observe_owner_import_route_witness(owner_canonical);
-                        // The build-layer fence cannot carry the import-route
-                        // rail (no `DepVersion` variant expresses a resolution
-                        // witness) and a value-import known-miss may not even surface
-                        // in the owner's type-import route table — so the route
-                        // fact above is NOT a guaranteed invalidation rail for
-                        // EVERY consuming memo (the `TypeOf` memo, the
-                        // `evaluate_deferred` memo, the field-materialize memo, the
-                        // resolved-meta result cache). A `typeof <unresolved
-                        // import>` is a genuine `MissingDependency` PARTIAL: the
-                        // resolution is structurally incomplete because a dependency
-                        // is absent. Marking it `result_is_partial` makes EVERY
-                        // consuming cache refuse warm admission (the no-poison
-                        // invariant — `result_is_partial` folds through every
-                        // nested read and the finalisation boundary forces
-                        // `cache_suppress`), so the next request after the
-                        // dependency appears recomputes cold and recovers. Also
-                        // mark the request-scoped materialization suppress sticky
-                        // (which OR-folds into the resolved-meta result's
-                        // `synthesis_should_suppress` gate) for the no-`RequestContext`
-                        // belt-and-braces. (Per the architecture ruling: when the
-                        // route fact cannot guarantee invalidation, the degraded
-                        // MissingDependency result is `ReturnOnly`.)
-                        output.result_is_partial = true;
-                        output.cache_suppress = true;
-                        crate::request_context::mark_request_result_partial();
-                    }
-                    return output;
+            ),
+        };
+        let root_identity = match resolved_root {
+            Some(identity) => identity,
+            None => {
+                // `typeof name` where `name` is an IMPORT whose specifier
+                // does not (yet) resolve — `import theme from './theme'`
+                // before `/theme.ts` exists. The miss is a MissingDependency
+                // result: it MUST invalidate the moment the dependency
+                // appears. The build-layer fence (`WholeHash` /
+                // `RouteGeneration` / `ProjectGeneration`) carries NO
+                // import-route rail — the only rail that moves when a
+                // known-miss specifier resolves (a synthetic
+                // project-generation dep is the wrong correctness rail, per
+                // the architecture ruling). So when the name is
+                // import-backed we OBSERVE the owner's import-route
+                // RESOLUTION WITNESS into the active tracer (the sealed
+                // transaction's exhausted probe set for the miss, which the
+                // dependency's appearance advances) — bubbling it into the
+                // outer
+                // component-meta result signature so the warm read misses
+                // after the dependency is added. When the route fact cannot
+                // be produced (no import-route surface to root on), the
+                // miss is unrootable and MUST be cache-suppressed
+                // (`ReturnOnly`): the value still flows, but no warm entry
+                // publishes, so the next request recomputes cold and
+                // recovers. A non-import miss (a genuinely absent LOCAL
+                // symbol) stays the ordinary unrooted Miss.
+                let is_import_backed = has_import_local
+                    || has_namespace_prefix
+                    || scope_payload.as_ref().is_some_and(|p| {
+                        p.import_bindings().contains_key(value_root.name.as_ref())
+                    });
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                if is_import_backed {
+                    let owner_canonical = value_root.scope.canonical_id.as_ref();
+                    // Best-effort: observe the owner's import-route
+                    // resolution witness into the active tracer so any
+                    // consumer cache whose validity rail consults
+                    // import-route facts re-validates when the specifier
+                    // resolves.
+                    self.ctx
+                        .host_for_fact_tracer_install()
+                        .observe_owner_import_route_witness(owner_canonical);
+                    // The build-layer fence cannot carry the import-route
+                    // rail (no `DepVersion` variant expresses a resolution
+                    // witness) and a value-import known-miss may not even surface
+                    // in the owner's type-import route table — so the route
+                    // fact above is NOT a guaranteed invalidation rail for
+                    // EVERY consuming memo (the `TypeOf` memo, the
+                    // `evaluate_deferred` memo, the field-materialize memo, the
+                    // resolved-meta result cache). A `typeof <unresolved
+                    // import>` is a genuine `MissingDependency` PARTIAL: the
+                    // resolution is structurally incomplete because a dependency
+                    // is absent. Marking it `result_is_partial` makes EVERY
+                    // consuming cache refuse warm admission (the no-poison
+                    // invariant — `result_is_partial` folds through every
+                    // nested read and the finalisation boundary forces
+                    // `cache_suppress`), so the next request after the
+                    // dependency appears recomputes cold and recovers. Also
+                    // mark the request-scoped materialization suppress sticky
+                    // (which OR-folds into the resolved-meta result's
+                    // `synthesis_should_suppress` gate) for the no-`RequestContext`
+                    // belt-and-braces. (Per the architecture ruling: when the
+                    // route fact cannot guarantee invalidation, the degraded
+                    // MissingDependency result is `ReturnOnly`.)
+                    output.result_is_partial = true;
+                    output.cache_suppress = true;
+                    crate::request_context::mark_request_result_partial();
                 }
-            };
+                return output;
+            }
+        };
         // Effective post-fallback identity: when the resolved root names a
         // re-exporting canonical with no local prepared VALUE decl, the
         // export-target walk yields the DECLARING decl — every downstream
@@ -865,6 +975,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
+        // A nominal carrier's head is the asked root, and `globalThis` is not
+        // the declaration a `globalThis.x` carrier would have to name.
+        if global_via_global_this && prepared.type_annotation.is_unique_symbol {
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+        }
         // A `unique symbol` value is TypeScript's one NOMINAL type, and its
         // widened inhabitant — the bare `symbol` primitive — is interned ONCE
         // per graph. Lowering the annotation here would therefore hand every
@@ -938,6 +1053,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(nominal) =
             self.member_nominal_typeof(value_root, path, &effective_root, Some(scope.clone()))
         {
+            if global_via_global_this {
+                return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            }
             return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                 QueryResult::Value(nominal),
                 self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
@@ -1116,76 +1234,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context,
             )
         } else if !prepared.signatures.is_empty() {
-            // Overload visibility (projection-time rule) comes from the ONE
-            // shared authority — the same rule the member-position overload
-            // carrier applies, so a group reached as `typeof f` and the same
-            // group reached as `C['m']` publish the same contributors. Each
-            // visible signature lowers
-            // through the located body source at its GROUP-level
-            // `ValueSignature` ordinal (the whole-signature deref recovers the
-            // function IR from the retained snapshot — binding the signature's
-            // own type parameters — and names a body-derived return's served
-            // function position so the lowering demands it from the
-            // whole-function producer through the sealed helper); the
-            // composed constructor-like object is interned directly.
+            // The composed constructor-like object is interned directly.
             let is_class =
                 prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
-            let visible = crate::semantic_query::visible_overload_ordinals(
-                prepared
-                    .signatures
-                    .iter()
-                    .map(|sig| sig.has_implementation_body),
+            // One signature group per declaration the function merges, in
+            // declaration order: every later file's declaration of a global
+            // function follows the first's.
+            let mut groups = self.prepared_signature_groups(
+                &prepared,
+                &empty_env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
             );
-            let signature_nodes: Vec<crate::semantic_query::SemanticNodeId> =
-                visible
-                    .into_iter()
-                    .map(|ordinal| {
-                        let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                        verter_type_expr::locators::TypeBodySlot {
-                            anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
-                                owner: prepared.root_identity.owner,
-                                symbol: Arc::clone(&prepared.root_identity.symbol_name),
-                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                            },
-                            path: Arc::from(
-                                vec![verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
-                                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                                }]
-                                .into_boxed_slice(),
-                            ),
-                        },
-                    );
-                        self.lower_located_body_with_provenance(
-                            locator,
-                            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
-                            &[],
-                            &prepared.name_resolution,
-                            &empty_env,
-                            &scope,
-                            scope_payload.as_ref(),
-                            &shadowing,
-                            &mut substitutions,
-                            context,
-                        )
-                    })
-                    .collect();
-            let entries = if is_class {
-                // A class's value signatures ARE its construct signatures —
-                // normalise their kind to `Construct`.
-                signature_nodes
-                    .into_iter()
-                    .map(|sig| SurfaceEntry::ConstructSignature(self.construct_kind_twin(sig)))
-                    .collect()
+            for peer in &global_peers {
+                let Some((_, _, _, peer_prepared)) = self.effective_prepared_value_decl(
+                    &peer.canonical_id,
+                    peer.owner,
+                    &peer.symbol_name,
+                ) else {
+                    return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                };
+                groups.extend(self.prepared_signature_groups(
+                    &peer_prepared,
+                    &empty_env,
+                    &scope,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    context,
+                ));
+            }
+            if !is_class && groups.len() > 1 {
+                self.merged_declaration_signatures_node(groups)
             } else {
-                signature_nodes
-                    .into_iter()
-                    .map(SurfaceEntry::CallSignature)
-                    .collect()
-            };
-            let surface = crate::semantic_query::SurfaceView::from_entries(entries, None, false);
-            self.graph()
-                .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
+                let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
+                self.value_signature_surface(signature_nodes, is_class, &scope)
+            }
         } else if let Some(members) = prepared.enum_members.as_ref() {
             let object_expr = ObjectExpr {
                 properties: members
@@ -1241,6 +1328,156 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.project_typeof_path(node_id, path, context, observed_hash, value_root);
         output.result_is_partial |= composed_partial;
         output
+    }
+
+    /// The visible value signatures of one prepared function declaration,
+    /// lowered and grouped by the declaration that contributes them.
+    ///
+    /// Overload visibility (projection-time rule) comes from the ONE shared
+    /// authority — the same rule the member-position overload carrier
+    /// applies, so a group reached as `typeof f` and the same group reached
+    /// as `C['m']` publish the same contributors. Each visible signature
+    /// lowers through the located body source at its GROUP-level
+    /// `ValueSignature` ordinal (the whole-signature deref recovers the
+    /// function IR from the retained snapshot — binding the signature's own
+    /// type parameters — and names a body-derived return's served function
+    /// position so the lowering demands it from the whole-function producer
+    /// through the sealed helper).
+    ///
+    /// A file's top-level overloads are ONE declaration. A namespace
+    /// member's or a `declare global` block's overloads group by the block
+    /// that declares them: the checker's candidate order tries a later
+    /// block's before an earlier one's.
+    #[allow(clippy::too_many_arguments)]
+    fn prepared_signature_groups(
+        &self,
+        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Vec<Vec<SemanticNodeId>> {
+        let identity = &prepared.root_identity;
+        let by_block = identity.symbol_name.contains('.')
+            || self
+                .ctx
+                .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
+                .is_some_and(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .decl_bodies()
+                        .header_index()
+                        .value_header_in(identity.owner, identity.symbol_name.as_ref())
+                        .is_none()
+                });
+        let visible = crate::semantic_query::visible_overload_ordinals(
+            prepared
+                .signatures
+                .iter()
+                .map(|sig| sig.has_implementation_body),
+        );
+        let mut groups: Vec<Vec<SemanticNodeId>> = Vec::new();
+        let mut current_block: Option<Option<u32>> = None;
+        for ordinal in visible {
+            let block = by_block
+                .then(|| match &prepared.signatures[ordinal].spans_origin {
+                    verter_type_expr::span_origins::FunctionSpansOrigin::AliasBody { anchor }
+                    | verter_type_expr::span_origins::FunctionSpansOrigin::Member {
+                        anchor, ..
+                    } => Some(anchor.contributor_index),
+                    verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
+                })
+                .flatten();
+            let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::clone(&identity.canonical_id),
+                        owner: identity.owner,
+                        symbol: Arc::clone(&identity.symbol_name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    path: Arc::from(
+                        vec![
+                            verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                            },
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                },
+            );
+            let node = self.lower_located_body_with_provenance(
+                locator,
+                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                &[],
+                &prepared.name_resolution,
+                env,
+                scope,
+                scope_payload,
+                shadowing,
+                substitutions,
+                context,
+            );
+            match groups.last_mut() {
+                Some(group) if current_block == Some(block) => group.push(node),
+                _ => groups.push(vec![node]),
+            }
+            current_block = Some(block);
+        }
+        groups
+    }
+
+    /// A function value's signatures as one surface: its call signatures,
+    /// or for a class its construct signatures.
+    fn value_signature_surface(
+        &self,
+        signature_nodes: Vec<SemanticNodeId>,
+        is_class: bool,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let entries = if is_class {
+            // A class's value signatures ARE its construct signatures —
+            // normalise their kind to `Construct`.
+            signature_nodes
+                .into_iter()
+                .map(|sig| SurfaceEntry::ConstructSignature(self.construct_kind_twin(sig)))
+                .collect()
+        } else {
+            signature_nodes
+                .into_iter()
+                .map(SurfaceEntry::CallSignature)
+                .collect()
+        };
+        let surface = crate::semantic_query::SurfaceView::from_entries(entries, None, false);
+        self.graph()
+            .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
+    }
+
+    /// The overload set of a function merged from several declarations:
+    /// one arm per declaration, in declaration order — a lone signature, or
+    /// the declaration's own ordered overload group. `SignaturesOfType`
+    /// lists every arm's signatures in that order; call resolution tries a
+    /// later declaration's first.
+    fn merged_declaration_signatures_node(
+        &self,
+        groups: Vec<Vec<SemanticNodeId>>,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::composite::CompositeList;
+        let arms: Vec<SemanticNodeId> = groups
+            .into_iter()
+            .map(|group| match group.as_slice() {
+                [lone] => *lone,
+                _ => self.graph().intern_node(SemanticNodeData::Intersection(
+                    CompositeList::overload_group(Arc::from(group.into_boxed_slice())),
+                )),
+            })
+            .collect();
+        self.graph().intern_node(SemanticNodeData::Intersection(
+            CompositeList::merged_overload_group(Arc::from(arms.into_boxed_slice())),
+        ))
     }
 
     fn project_typeof_path(
@@ -1543,6 +1780,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (
                     QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                         name: Arc::from("default"),
+                        args: Arc::from([]),
                     })),
                     empty_signature(),
                 )
@@ -3736,6 +3974,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<_> = (
                 QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                     name: Arc::clone(decl_name),
+                    args: Arc::clone(args),
                 })),
                 empty_signature(),
             )
@@ -4061,6 +4300,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
+            base_position,
         } = contributions;
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
@@ -4082,14 +4322,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
         // contributor splitter (`collect_merged_contributor_arms` only reads
         // Object / Intersection / Alias bodies).
-        let mut all_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
+        let base_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
             Some(data) => match data.as_ref() {
                 SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
                 _ => vec![base_result],
             },
             None => vec![base_result],
         };
-        all_contributors.extend(contributor_nodes);
+        // The base keeps its own place in declaration precedence order: a
+        // global read from a later declaration's file still lists the earlier
+        // files' declarations first. Augmentations follow the declaration
+        // they augment.
+        let position = base_position.unwrap_or(0).min(contributor_nodes.len());
+        let mut all_contributors: Vec<SemanticNodeId> = contributor_nodes[..position].to_vec();
+        all_contributors.extend(base_contributors);
+        all_contributors.extend_from_slice(&contributor_nodes[position..]);
         let merged = self.graph().intern_node_with_scope(
             SemanticNodeData::MergedDecl {
                 contributors: Arc::from(all_contributors.into_boxed_slice()),
@@ -4245,7 +4492,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let population_hit = artifact_store.global_contributor_index().snapshot().lookup(
+        let population = artifact_store.global_contributor_index().snapshot();
+        let population_hit = population.lookup(
             &target,
             decl_name,
             overlay_discriminator,
@@ -4259,7 +4507,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &target, decl_name,
                     ),
                     lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: population_hit.fingerprint,
+                    expected_hash: population.observation_fingerprint(
+                        &target,
+                        decl_name,
+                        overlay_discriminator,
+                    ),
                 },
             ),
         );
@@ -4287,6 +4539,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // fast exact-key path instead of re-healing every call.
         let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
             Vec::new();
+        let mut base_position: Option<usize> = None;
         enum OrderedOrigin {
             Augmenter(usize),
             FileScope(usize),
@@ -4334,6 +4587,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         });
         for candidate in ordered {
             if excluded_contributor == Some(candidate.canonical.as_ref()) {
+                base_position.get_or_insert(contributor_nodes.len());
                 continue;
             }
             match candidate.origin {
@@ -4740,6 +4994,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     contributor_nodes: Vec::new(),
                     contributor_roots: Vec::new(),
                     source_env_unobservable: true,
+                    base_position: None,
                 });
             }
             return None;
@@ -4793,6 +5048,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             contributor_nodes,
             contributor_roots,
             source_env_unobservable,
+            base_position,
         })
     }
 
@@ -4860,6 +5116,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
+            base_position: _,
         } = self.collect_augmentation_contributions(
             target,
             name,
@@ -4920,22 +5177,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(merged)
     }
 
-    /// The identity of the program's merged GLOBAL declaration named
-    /// `name`: its FIRST declaration in declaration precedence order (the
-    /// configured file sequence, then the canonical path) among every
-    /// module's `declare global` contribution and every script's file-scope
-    /// interface. `None` when the program declares no such global type.
-    ///
-    /// A `declare global` block in a SCRIPT is an error that binds nothing,
-    /// and an automatic lib's declarations are the lib's own (reached
-    /// through the lib environment, never through this lookup). The global
-    /// contributor population is observed onto the active fact tracer, so
-    /// a contributor added, removed or reordered misses every warm read
-    /// that named the global through this identity — including a read that
-    /// found none.
-    pub(super) fn first_global_declaration(&self, name: &str) -> Option<ResolvedRootIdentity> {
+    /// The program's contributors to the global `name` in `space`, with the
+    /// global contributor population observed onto the active fact tracer:
+    /// a contributor added, removed or reordered misses every warm read that
+    /// named the global through them — including a read that found none.
+    fn global_contributors_in(
+        &self,
+        name: &str,
+        space: verter_semantic::facts::SymbolSpace,
+    ) -> crate::global_contributors::SymbolContributors {
         use crate::file_artifact_store::AugmentationTargetKind;
-        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
         let host = self.ctx.host_for_fact_tracer_install();
         host.ingest_program_ambient_roots();
         let (_, overlay_discriminator) =
@@ -4946,24 +5197,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .project_type_store()
             .indexed()
             .global_contributor_index()
-            .snapshot()
-            .lookup_in_space(
-                &target,
-                name,
-                overlay_discriminator,
-                true,
-                verter_semantic::facts::SymbolSpace::Type,
-            );
+            .snapshot();
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
                     canonical_id: String::new(),
                     key: crate::global_contributors::population_contributor_fact_key(&target, name),
                     lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: population.fingerprint,
+                    expected_hash: population.observation_fingerprint(
+                        &target,
+                        name,
+                        overlay_discriminator,
+                    ),
                 },
             ),
         );
+        population.lookup_in_space(&target, name, overlay_discriminator, true, space)
+    }
+
+    /// The identity of the program's merged GLOBAL declaration named
+    /// `name`: its FIRST declaration in declaration precedence order (the
+    /// configured file sequence, then the canonical path) among every
+    /// module's `declare global` contribution and every script's file-scope
+    /// interface. `None` when the program declares no such global type.
+    ///
+    /// A `declare global` block in a SCRIPT is an error that binds nothing,
+    /// and an automatic lib's declarations are the lib's own (reached
+    /// through the lib environment, never through this lookup).
+    pub(super) fn first_global_declaration(&self, name: &str) -> Option<ResolvedRootIdentity> {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population =
+            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Type);
         let first = population
             .entries
             .iter()
@@ -4975,6 +5240,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         ContributorOrigin::FileScopeInterface => true,
                         ContributorOrigin::FileScopeNamespace
+                        | ContributorOrigin::FileScopeValue
                         | ContributorOrigin::ModuleAugmentation => false,
                     }
             })
@@ -4994,6 +5260,180 @@ impl<'a> ProjectSemanticDispatch<'a> {
             first.owner,
             name,
         ))
+    }
+
+    /// The program's GLOBAL value declaration named `name` — a module's
+    /// `declare global { var / let / const / function / class }` member or
+    /// a script's file-scope value — with its declaration kind: the first
+    /// of [`Self::global_value_declarations`].
+    pub(super) fn global_value_declaration(
+        &self,
+        name: &str,
+    ) -> Option<(
+        ResolvedRootIdentity,
+        verter_semantic::analysis::type_eval::ValueDeclKind,
+    )> {
+        self.global_value_declarations(name)?.into_iter().next()
+    }
+
+    /// Every file's declaration of the GLOBAL value `name`, in declaration
+    /// precedence order, each with its kind. A `var` declared in several
+    /// files is ONE variable whose type is its first declaration's (the
+    /// checker requires every later declaration to repeat it, TS2403), so
+    /// only that one is listed; a function declared in several files is
+    /// one function whose overloads are every file's, so all are. `None`
+    /// when the program declares no such global value, or when this lane
+    /// cannot address it:
+    ///
+    /// - declarations of other kinds, or of mixed kinds, span more than
+    ///   one file: a block-scoped global declared twice is the checker's
+    ///   TS2451;
+    /// - a declaring module also declares a module-scope value of the same
+    ///   name, which the identity `(module, name)` addresses instead.
+    ///
+    /// A `declare global` block in a SCRIPT binds nothing, and an automatic
+    /// lib's values are the lib environment's own.
+    pub(super) fn global_value_declarations(
+        &self,
+        name: &str,
+    ) -> Option<
+        Vec<(
+            ResolvedRootIdentity,
+            verter_semantic::analysis::type_eval::ValueDeclKind,
+        )>,
+    > {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        use verter_semantic::analysis::type_eval::ValueDeclKind;
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population =
+            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Value);
+        let mut declarations: Vec<(&crate::global_contributors::ContributorEntry, ValueDeclKind)> =
+            Vec::new();
+        for entry in population.entries.iter() {
+            let declares = !entry.is_automatic_lib
+                && match entry.origin {
+                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+                    ContributorOrigin::FileScopeValue => true,
+                    ContributorOrigin::FileScopeInterface
+                    | ContributorOrigin::FileScopeNamespace
+                    | ContributorOrigin::ModuleAugmentation => false,
+                };
+            if !declares {
+                continue;
+            }
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(&entry.artifact_key.canonical)?
+                .indexed;
+            let headers = indexed.shallow_state.decl_bodies().header_index();
+            let kind = if entry.origin == ContributorOrigin::FileScopeValue {
+                headers.value_header_in(entry.owner, name)?.kind
+            } else {
+                if indexed.shallow_state.has_value_symbol_in(entry.owner, name) {
+                    return None;
+                }
+                headers
+                    .augmentation_value_header_in(
+                        &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                        entry.owner,
+                        name,
+                    )?
+                    .kind
+            };
+            declarations.push((entry, kind));
+        }
+        declarations.sort_by(|(left, _), (right, _)| {
+            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                .then_with(|| {
+                    left.artifact_key
+                        .canonical
+                        .as_ref()
+                        .cmp(right.artifact_key.canonical.as_ref())
+                })
+                .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
+        });
+        let first = declarations.first()?.0;
+        let spans_files = declarations
+            .iter()
+            .any(|(entry, _)| entry.artifact_key.canonical != first.artifact_key.canonical);
+        if spans_files {
+            let is_function = |kind: &ValueDeclKind| {
+                matches!(kind, ValueDeclKind::Function | ValueDeclKind::AsyncFunction)
+            };
+            if declarations
+                .iter()
+                .all(|(_, kind)| *kind == ValueDeclKind::Var)
+            {
+                declarations.truncate(1);
+            } else if !declarations.iter().all(|(_, kind)| is_function(kind)) {
+                return None;
+            }
+        }
+        Some(
+            declarations
+                .into_iter()
+                .map(|(entry, kind)| {
+                    (
+                        ResolvedRootIdentity::new_in_owner(
+                            Arc::clone(&entry.artifact_key.canonical),
+                            entry.owner,
+                            name,
+                        ),
+                        kind,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The global `TemplateStringsArray` type — a tagged template's first
+    /// argument — read from `canonical`'s `owner` scope.
+    ///
+    /// The checker types the template strings with its GLOBAL type, so a
+    /// same-named declaration or import in the call's own scope does not
+    /// rename them. A scope that binds no such name resolves the bare
+    /// reference exactly like an authored reference to the global (the
+    /// program's global declaration, else the unresolved lib carrier every
+    /// reference in the scope shares); a scope that shadows it reads the
+    /// program's global declaration from its own file, and has no answer
+    /// when the program declares none.
+    pub(super) fn global_template_strings_array(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Option<SemanticNodeId> {
+        const NAME: &str = "TemplateStringsArray";
+        let reference = verter_type_expr::TypeExpr::Ref {
+            name: Arc::from(NAME),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                &bundle, owner,
+            )
+        });
+        let shadowed = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            canonical,
+            owner,
+            payload.as_ref(),
+            NAME,
+        )
+        .is_some();
+        let global;
+        let (scope_canonical, scope_owner) = if shadowed {
+            global = self.first_global_declaration(NAME)?;
+            (global.canonical_id.as_ref(), global.owner)
+        } else {
+            (canonical, owner)
+        };
+        self.lower_type_expr_in_owner_scope_with_mode(
+            scope_canonical,
+            scope_owner,
+            &reference,
+            crate::semantic_query::ProjectionMode::Navigate,
+        )
     }
 
     /// Whether the TYPE declaration `name` in `canonical` is (one
@@ -6704,11 +7144,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Extract" | "Exclude" if args.len() == 2 => {
                 let source_arg = args[0];
                 let filter_arg = args[1];
-                // Context-propagating deferred
-                // resolution (see Pick comment above for chain).
-                let source_resolved = self
-                    .evaluate_deferred_semantic_node_with_context(source_arg, context)
-                    .into_active_query_build_node(self);
+                // Context-propagating resolution (see Pick comment above for
+                // chain). A declaration carrier settles to what it declares,
+                // so an application that is a union (`Partial<A | B>`)
+                // distributes like one.
+                let source_resolved = self.resolve_signature_source_carrier(source_arg, context);
                 // The FILTER operand resolves through the same deferred
                 // evaluator: a carrier filter (`R` still a reference shell)
                 // would judge every per-member relation `Unknown` and defer
@@ -6719,7 +7159,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let source_data = graph.node_data(source_resolved);
                 let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
                     Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::Primitive(_)) => {
+                    // A settled non-union type is the one constituent the
+                    // distribution filters.
+                    Some(
+                        SemanticNodeData::Literal(_)
+                        | SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                        | SemanticNodeData::TemplateLiteral { .. },
+                    ) => {
                         vec![source_resolved]
                     }
                     _ => {
@@ -6730,9 +7180,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return (QueryResult::Value(result), fence, false);
                     }
                 };
+                // A single constituent that survives is the source as
+                // written (`Extract<Face, { a: 1 }>` is `Face`).
+                let single = !matches!(source_data.as_deref(), Some(SemanticNodeData::Union(_)));
                 drop(source_data);
                 let keep_assignable = name == "Extract";
                 let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+                let written = |arm: SemanticNodeId| if single { source_arg } else { arm };
                 for arm in arms.iter().copied() {
                     // Per-arm routing through the SOLE relation authority
                     // (`execute(Relate)`); an undecided arm defers the whole
@@ -6742,12 +7196,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             ..
                         } => {
                             if keep_assignable {
-                                survivors.push(arm);
+                                survivors.push(written(arm));
                             }
                         }
                         crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
                             if !keep_assignable {
-                                survivors.push(arm);
+                                survivors.push(written(arm));
                             }
                         }
                         crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
@@ -8695,6 +9149,134 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots);
         keyof_output.result_is_partial = keyof_is_partial;
         keyof_output
+    }
+
+    /// `keyof` over a carrier the checker resolves: a declaration, an
+    /// application, a mapped type. A mapped type's keys are its key space
+    /// — for a homomorphic one, `keyof` of its source (`keyof Partial<X>`
+    /// is `keyof X`) — and a builtin utility's are the keys it produces
+    /// (`keyof Pick<X, 'a' | 'b'>` is `"a" | "b"`); a declaration's are its
+    /// public members, read off the surface it resolves to. A key union of
+    /// two or more over a declaration or a user generic application stays
+    /// that type's `keyof` carrier, the origin the checker prints (`keyof
+    /// Face`, `keyof G<1>`); one key is that key (`keyof D1` over `class
+    /// D1 { p = 1 }` is `"p"`). The key set a relation reads is
+    /// [`Self::key_set_of`]. `None` when the carrier does not resolve (an
+    /// open operand keeps its carrier).
+    pub(super) fn key_of_through_carrier(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let read = |base: SemanticNodeId| match self
+            .execute_read(SemanticQueryKey::KeyOf { base, context })
+            .value
+        {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        };
+        let settled_keys = |keys: SemanticNodeId| {
+            (!matches!(
+                self.graph().node_data(keys).as_deref(),
+                Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
+            ))
+            .then_some(keys)
+        };
+        let named = match self.graph().node_data(base).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+            Some(SemanticNodeData::InstantiationRef { base: identity, .. })
+                if identity.canonical_id.as_ref() != "__builtin__" =>
+            {
+                Some(identity.clone())
+            }
+            _ => None,
+        };
+        // A mapped type — written, or a builtin mapped utility's
+        // application — is read before it materializes, so a homomorphic
+        // one answers `keyof` its source. A declaration materializes once,
+        // under the demand every other reader of it shares.
+        let transit_settled = match self.graph().node_data(base).as_deref() {
+            Some(SemanticNodeData::Mapped { .. }) => Some(base),
+            Some(SemanticNodeData::InstantiationRef { base: identity, .. })
+                if identity.canonical_id.as_ref() == "__builtin__" =>
+            {
+                Some(self.resolve_signature_source_carrier(
+                    base,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ))
+            }
+            _ => None,
+        };
+        if let Some(SemanticNodeData::Mapped { source, mapper }) = transit_settled
+            .and_then(|settled| self.graph().node_data(settled))
+            .as_deref()
+        {
+            if mapper.name_remap.is_some()
+                || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                    self, *source, mapper,
+                )
+            {
+                return None;
+            }
+            return match self.graph().node_data(mapper.key_space).as_deref() {
+                Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
+                    read(*source).and_then(|keys| {
+                        // `keyof` over the source keeps its own printed form
+                        // (`keyof Partial<Face>` prints `keyof Face`).
+                        match self.graph().node_data(keys).as_deref() {
+                            Some(SemanticNodeData::Opaque(_)) => None,
+                            _ => Some(keys),
+                        }
+                    })
+                }
+                _ => settled_keys(
+                    self.evaluate_deferred_semantic_node_with_context(mapper.key_space, context)
+                        .into_active_query_build_node(self),
+                ),
+            };
+        }
+        let settled = self.resolve_signature_source_carrier(base, context);
+        if settled == base {
+            return None;
+        }
+        let keys = settled_keys(read(settled)?)?;
+        match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::Union(members)) if named.is_some() && members.len() > 1 => None,
+            _ => Some(keys),
+        }
+    }
+
+    /// The literal keys `keyof base` denotes — the set a relation or a
+    /// comparability question reads, whichever `keyof` carrier stands for
+    /// it in print. `None` when the keys do not settle.
+    pub(super) fn key_set_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
+        let published =
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let read = |base: SemanticNodeId| match self
+            .execute_read(SemanticQueryKey::KeyOf {
+                base,
+                context: published,
+            })
+            .value
+        {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        };
+        let keys = read(base)?;
+        let kept = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
+            _ => return Some(keys),
+        };
+        let settled = self.resolve_signature_source_carrier(kept, published);
+        if settled == kept {
+            return None;
+        }
+        let keys = read(settled)?;
+        (!matches!(
+            self.graph().node_data(keys).as_deref(),
+            Some(SemanticNodeData::KeyOf { .. })
+        ))
+        .then_some(keys)
     }
 
     pub(super) fn intern_keyspace_keys<I>(
@@ -11780,39 +12362,124 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.awaited_relation_failed_on(AwaitedRelation::Normalize, operand, reduced)
     }
 
-    /// Re-enter `relation`'s own family on `operand`. Going back through the
-    /// query — rather than recursing privately — is what puts nested unwraps
-    /// under the family memo, the singleflight and the connected-work
-    /// budget; each relation re-enters ONLY itself, so an async return
-    /// payload never comes back as `Awaited<T>` for a nested naked `T`.
-    ///
-    /// The re-entry first applies the checker's own recursion rule
-    /// (`getAwaitedTypeNoAlias` and its `awaitedTypeStack`): when `operand`
-    /// is a type this relation is ALREADY unwrapping on the current path, the
-    /// thenable that promised it references itself, directly or indirectly,
-    /// in its fulfillment callback. The checker reports TS1062 there and
-    /// fails the step ([`AwaitedStep::Failed`]). Which operands are in flight
-    /// is a fact about this path, not about `operand`, so every answer built
-    /// over such a failure stays out of the warm memo.
+    /// Whether `operand` is a type `relation` is ALREADY unwrapping on the
+    /// current path — the checker's own recursion rule
+    /// (`getAwaitedTypeNoAlias` and its `awaitedTypeStack`): the thenable
+    /// that promised it references itself, directly or indirectly, in its
+    /// fulfillment callback, and the checker reports TS1062 and fails the
+    /// step. The path is every operand an enclosing run of this relation
+    /// has reached (its tail steps included, which open no query) plus every
+    /// in-flight query of the relation. Which operands are in flight is a
+    /// fact about this path, not about `operand`, so every answer built over
+    /// such a failure stays out of the warm memo.
+    fn awaited_operand_on_path(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> bool {
+        let on_path = self.awaited_active.borrow().contains(&(relation, operand))
+            || self
+                .graph()
+                .is_same_path_inflight_on_current_thread(&relation.key(operand, context));
+        if on_path {
+            self.fold_into_top_build_local_taint(false, true);
+        }
+        on_path
+    }
+
+    /// Re-enter `relation`'s own family on `operand` — a NESTED unwrap (a
+    /// union arm, a type parameter's constraint arm). Going back through the
+    /// query puts it under the family memo and the singleflight; each
+    /// relation re-enters ONLY itself, so an async return payload never
+    /// comes back as `Awaited<T>` for a nested naked `T`. An operand already
+    /// on the path fails the step with TS1062
+    /// ([`Self::awaited_operand_on_path`]).
     fn awaited_relation_step(
         &self,
         relation: AwaitedRelation,
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> AwaitedStep {
-        let key = relation.key(operand, context);
-        if self.graph().is_same_path_inflight_on_current_thread(&key) {
-            self.fold_into_top_build_local_taint(false, true);
-            return AwaitedStep::Failed;
+    ) -> AwaitedOutcome {
+        if self.awaited_operand_on_path(relation, operand, context) {
+            return AwaitedOutcome::Failed;
         }
-        match self.execute_read(key).value {
+        match self.execute_read(relation.key(operand, context)).value {
             QueryResult::Value(node)
                 if self.awaited_relation_failed_on(relation, operand, node) =>
             {
-                AwaitedStep::Failed
+                AwaitedOutcome::Failed
             }
-            QueryResult::Value(node) => AwaitedStep::Value(node),
-            _ => AwaitedStep::Refused,
+            QueryResult::Value(node) => AwaitedOutcome::Value(node),
+            _ => AwaitedOutcome::Refused,
+        }
+    }
+
+    /// One RUN of `relation` from `operand`: its tail steps
+    /// ([`AwaitedStep::Next`], [`AwaitedStep::Expand`]) continue in this
+    /// loop rather than re-entering the query, so a chain of distinct
+    /// thenables costs no query depth — the checker's own relation has no
+    /// depth rule (a 5000-step chain awaits to its value on tsc 7.0.2).
+    ///
+    /// Every operand the run reaches is on the path for the checker's
+    /// recursion rule while the run lasts, nested runs included
+    /// ([`Self::awaited_operand_on_path`]). Every tail step is charged to
+    /// the connected-work budget, so genuinely unbounded work (a thenable
+    /// that grows without repeating) stops as a typed partial instead of
+    /// running on.
+    fn awaited_relation_run(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> AwaitedOutcome {
+        let base = self.awaited_active.borrow().len();
+        let _path = AwaitedPathGuard {
+            active: &self.awaited_active,
+            base,
+        };
+        self.awaited_active.borrow_mut().push((relation, operand));
+        // The declaration carriers expanded consecutively into `current`,
+        // outermost first: when `current` is its own answer, the innermost
+        // carrier is, and so on outwards while each carrier was its
+        // predecessor's body.
+        let mut carriers: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut current = operand;
+        loop {
+            let step = match relation {
+                AwaitedRelation::Normalize => self.awaited_normalize_node(current, context),
+                AwaitedRelation::Payload => self.async_return_payload_node(current, context),
+            };
+            let next = match step {
+                AwaitedStep::Value(mut node) => {
+                    for (carrier, body) in carriers.iter().rev() {
+                        if node != *body {
+                            break;
+                        }
+                        node = *carrier;
+                    }
+                    return AwaitedOutcome::Value(node);
+                }
+                AwaitedStep::Failed => return AwaitedOutcome::Failed,
+                AwaitedStep::Refused => return AwaitedOutcome::Refused,
+                AwaitedStep::Next(next) => {
+                    carriers.clear();
+                    next
+                }
+                AwaitedStep::Expand { carrier, body } => {
+                    carriers.push((carrier, body));
+                    body
+                }
+            };
+            if self.awaited_operand_on_path(relation, next, context) {
+                return AwaitedOutcome::Failed;
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                return AwaitedOutcome::Refused;
+            }
+            self.awaited_active.borrow_mut().push((relation, next));
+            current = next;
         }
     }
 
@@ -11830,9 +12497,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in arms {
             match self.awaited_relation_step(relation, *arm, context) {
-                AwaitedStep::Value(node) => reduced.push(node),
-                AwaitedStep::Failed => {}
-                AwaitedStep::Refused => return AwaitedStep::Refused,
+                AwaitedOutcome::Value(node) => reduced.push(node),
+                AwaitedOutcome::Failed => {}
+                AwaitedOutcome::Refused => return AwaitedStep::Refused,
             }
         }
         match reduced.as_slice() {
@@ -11842,19 +12509,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// The declaration a lowering-time self-reference sentinel names.
+    /// The instantiation a lowering-time self-reference sentinel names.
     ///
     /// A declaration's body lowers a reference to the declaration itself as
-    /// `RecursiveRef { name }` (`interface Rec { then(f: (v: Rec) => void):
-    /// void }` — the `Rec` in the callback), scoped to the declaring file.
-    /// For a declaration with no type parameters that sentinel denotes
-    /// exactly the declaration, so it answers as its `DeclRef` carrier.
-    /// A generic declaration's sentinel does not record which instantiation
-    /// it stands for, and a function-local declaration is not addressable by
-    /// its file slot, so both stay the sentinel.
-    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let name = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name })) => Arc::clone(name),
+    /// `RecursiveRef { name, args }` (`interface Rec { then(f: (v: Rec) =>
+    /// void): void }` — the `Rec` in the callback; `G<[T]>` inside the body
+    /// of `G<string>`), scoped to the declaring file. The sentinel records
+    /// the instantiation it stands for, so it answers as that application's
+    /// carrier: the `InstantiationRef` over the recorded arguments, or the
+    /// `DeclRef` of a declaration with no type parameters. A generic
+    /// declaration referenced without arguments, and a function-local
+    /// declaration (not addressable by its file slot), stay the sentinel.
+    pub(super) fn self_reference_declaration(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (name, args) = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })) => {
+                (Arc::clone(name), Arc::clone(args))
+            }
             _ => return None,
         };
         let scope = self.graph().node_scope(node)?;
@@ -11872,7 +12545,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             *owner,
             name.as_ref(),
         )?;
-        if !prepared.type_parameters.is_empty() {
+        if args.is_empty() && !prepared.type_parameters.is_empty() {
             return None;
         }
         let identity = crate::semantic_query::DeclIdentity {
@@ -11881,10 +12554,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             whole_hash: *whole_hash,
             decl_name: name,
         };
-        Some(
-            self.graph()
-                .intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope.clone()),
-        )
+        let carrier = if args.is_empty() {
+            SemanticNodeData::DeclRef { identity }
+        } else {
+            SemanticNodeData::InstantiationRef {
+                base: identity,
+                args,
+            }
+        };
+        Some(self.graph().intern_node_with_scope(carrier, scope.clone()))
     }
 
     /// Settle the operand once, through the shared deferred evaluator, and
@@ -11935,14 +12613,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// - an object surface is decided by its `then` member
     ///   ([`Self::surface_thenability`]): not thenable ⇒ itself; a valid
-    ///   thenable ⇒ the relation over the promised value; a callable `then`
+    ///   thenable ⇒ the run continues on a single promised value, and
+    ///   several are the checker's union, each arm a nested unwrap; a callable `then`
     ///   with no callable `onfulfilled` ⇒ `any` (the checker reports the
     ///   operand and types it `any`); the promised values are one union to
     ///   the checker, so a value the relation FAILS on is dropped, and the
     ///   step fails only when every value does;
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands ONE
-    ///   level through the shared `Instantiate` family and re-enters the
-    ///   relation on its body. When the body comes back unchanged the
+    ///   level through the shared `Instantiate` family and the run continues
+    ///   on its body. When the body comes back unchanged the
     ///   CARRIER is the answer, so a non-thenable alias keeps its authored
     ///   identity (`Promise<Box<T>>`, never the expanded `{ w: T }`).
     ///
@@ -11963,9 +12642,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 match thenability {
                     Thenability::NotThenable => AwaitedStep::Value(resolved),
-                    Thenability::Promised(values) => {
-                        self.awaited_union_step(relation, &values, context)
-                    }
+                    // A single promised value is a tail step; several are
+                    // the checker's union, each arm its own nested unwrap.
+                    Thenability::Promised(values) => match values.as_slice() {
+                        [single] => AwaitedStep::Next(*single),
+                        _ => self.awaited_union_step(relation, &values, context),
+                    },
                     Thenability::Malformed => AwaitedStep::Value(
                         self.graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
@@ -11982,9 +12664,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if self.same_node_payload(body, resolved) {
                     return AwaitedStep::Refused;
                 }
-                match self.awaited_relation_step(relation, body, context) {
-                    AwaitedStep::Value(reduced) if reduced == body => AwaitedStep::Value(resolved),
-                    step => step,
+                AwaitedStep::Expand {
+                    carrier: resolved,
+                    body,
                 }
             }
             _ => AwaitedStep::Refused,
@@ -12266,15 +12948,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Some(None)` when the application stays deferred, `Some(Some(node))`
     /// when it reduced, `None` on refusal.
     ///
-    /// When `Awaited<argument>` is an application whose evaluation is
-    /// ALREADY in progress on this path, the conditional has recursed back
-    /// into itself with the same argument: `Awaited<V>` for a `then` whose
-    /// fulfillment value leads back to the operand. The checker's
-    /// instantiation never terminates there; it stops at its depth limit,
-    /// reports TS2589 and continues with its error type. That recovery is
-    /// the answer, and it holds whatever else is in flight — every
-    /// application on the path leads back to this one, and the error type
-    /// dominates each union and branch the conditional builds on the way.
+    /// The conditional's own recursion is evaluated inside one root
+    /// ([`Self::lib_awaited_node`]); this read is a root. When
+    /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
+    /// on this path, the conditional has come back to itself with the same
+    /// argument and can never reach a value: the checker stops at its limit,
+    /// reports TS2589 and continues with its error type, which dominates
+    /// each union and branch on the way. That recovery is the answer.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self
@@ -12305,7 +12985,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(Some(body))
     }
 
-    /// The lib `Awaited<T>` CONDITIONAL, evaluated over `operand`:
+    /// The lib `Awaited<T>` CONDITIONAL over `operand`, as the root of one
+    /// evaluation:
     ///
     /// ```text
     /// type Awaited<T> = T extends null | undefined ? T
@@ -12325,7 +13006,99 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// an open binder, a compiler-deferred awaited value, or a nested
     /// deferred application defers; a declaration carrier expands one level
     /// and keeps its identity when the result is the body itself.
+    ///
+    /// The conditional's recursion into `Awaited<V>` is evaluated the way
+    /// the checker evaluates it and stops where the checker stops: a tail
+    /// run reaching [`LIB_AWAITED_TAIL_STEPS`] or a path reaching
+    /// [`LIB_AWAITED_NESTED_STEPS`] nested steps is the TS2589 recovery. So
+    /// is an application that recurs on its own path: it can never reach a
+    /// value, so the checker's count is certain to run out there.
+    ///
+    /// [`LIB_AWAITED_TAIL_STEPS`]: crate::semantic_query::LIB_AWAITED_TAIL_STEPS
+    /// [`LIB_AWAITED_NESTED_STEPS`]: crate::semantic_query::LIB_AWAITED_NESTED_STEPS
     fn lib_awaited_node(&self, operand: SemanticNodeId) -> LibAwaited {
+        let mut walk = LibAwaitedWalk::default();
+        self.lib_awaited_run(operand, &mut walk, 0)
+    }
+
+    /// The TS2589 recovery of the lib conditional.
+    fn lib_awaited_too_deep(&self) -> SemanticNodeId {
+        self.checker_recovery(crate::semantic_query::CheckerDiagnostic {
+            code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+        })
+    }
+
+    /// One TAIL RUN of the lib conditional from `operand`, entered with
+    /// `tail_start` steps already counted: each application whose recursion
+    /// is a single `Awaited<V>` over a non-union `V` continues the run, and
+    /// the run fails at the checker's tail limit. Every step is charged to
+    /// the connected-work budget, whose trip is a typed partial.
+    fn lib_awaited_run(
+        &self,
+        operand: SemanticNodeId,
+        walk: &mut LibAwaitedWalk,
+        tail_start: u32,
+    ) -> LibAwaited {
+        let mark = walk.path.len();
+        let mut current = operand;
+        let mut tail = tail_start;
+        let result = loop {
+            match self.lib_awaited_application(current, walk) {
+                LibStep::Done(result) => break result,
+                LibStep::Next(value) if self.settled_union_arms_of(value).is_some() => {
+                    break self.lib_awaited_nested(value, walk, false);
+                }
+                LibStep::Next(value) => {
+                    tail += 1;
+                    if tail >= crate::semantic_query::LIB_AWAITED_TAIL_STEPS {
+                        break LibAwaited::Reduced(self.lib_awaited_too_deep());
+                    }
+                    if let Err(reasons) = self.charge_connected_work() {
+                        self.fold_local_partial_completeness(reasons);
+                        break LibAwaited::Refused;
+                    }
+                    current = value;
+                }
+            }
+        };
+        walk.path.truncate(mark);
+        result
+    }
+
+    /// A NESTED step to `Awaited<value>`: one through a callback union
+    /// (`through_callback_union`), one into a union `value`, two for both.
+    /// The path fails at the checker's nesting limit. A union's arms each
+    /// start a fresh tail run; a callback arm continues into a run the
+    /// checker enters with one step already counted.
+    fn lib_awaited_nested(
+        &self,
+        value: SemanticNodeId,
+        walk: &mut LibAwaitedWalk,
+        through_callback_union: bool,
+    ) -> LibAwaited {
+        let is_union = self.settled_union_arms_of(value).is_some();
+        let steps = u32::from(through_callback_union) + u32::from(is_union);
+        walk.nesting += steps;
+        let result = if walk.nesting >= crate::semantic_query::LIB_AWAITED_NESTED_STEPS {
+            LibAwaited::Reduced(self.lib_awaited_too_deep())
+        } else if let Err(reasons) = self.charge_connected_work() {
+            self.fold_local_partial_completeness(reasons);
+            LibAwaited::Refused
+        } else {
+            self.lib_awaited_run(value, walk, if is_union { 0 } else { 1 })
+        };
+        walk.nesting -= steps;
+        result
+    }
+
+    /// One application of the lib conditional: its value, or the single
+    /// `V` a tail step continues with.
+    fn lib_awaited_application(
+        &self,
+        operand: SemanticNodeId,
+        walk: &mut LibAwaitedWalk,
+    ) -> LibStep {
         use crate::project_semantic_dispatch::absorb::SpecialKind;
         let resolved = self
             .evaluate_deferred_semantic_node_with_context(
@@ -12337,93 +13110,93 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .self_reference_declaration(resolved)
             .unwrap_or(resolved);
         if let Some((kind, special)) = self.peek_special(resolved) {
-            return match kind {
+            return LibStep::Done(match kind {
                 SpecialKind::Any
                 | SpecialKind::Never
                 | SpecialKind::Unknown
                 | SpecialKind::Error => LibAwaited::Reduced(special),
-            };
+            });
         }
         if self.settled_non_thenable(resolved) {
-            return LibAwaited::Reduced(resolved);
+            return LibStep::Done(LibAwaited::Reduced(resolved));
         }
+        if walk.path.contains(&resolved) {
+            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep()));
+        }
+        walk.path.push(resolved);
         let Some(data) = self.graph().node_data(resolved) else {
-            return LibAwaited::Refused;
+            return LibStep::Done(LibAwaited::Refused);
         };
         match data.as_ref() {
             SemanticNodeData::TypeParam { .. } | SemanticNodeData::IntrinsicApplication { .. } => {
-                LibAwaited::Deferred
+                LibStep::Done(LibAwaited::Deferred)
             }
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
                 drop(data);
                 let mut reduced = Vec::with_capacity(members.len());
                 for member in members.iter() {
-                    match self.lib_awaited_read(*member) {
-                        Some(Some(node)) => reduced.push(node),
-                        Some(None) => return LibAwaited::Deferred,
-                        None => return LibAwaited::Refused,
+                    match self.lib_awaited_run(*member, walk, 0) {
+                        LibAwaited::Reduced(node) => reduced.push(node),
+                        other => return LibStep::Done(other),
                     }
                 }
-                LibAwaited::Reduced(self.intern_normalized_union_or_intersection(&reduced, true))
+                LibStep::Done(LibAwaited::Reduced(
+                    self.intern_normalized_union_or_intersection(&reduced, true),
+                ))
             }
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {
-                // `Promise<V>.then`'s `onfulfilled` is `(value: V) => …`.
+                // `Promise<V>.then`'s `onfulfilled` is the optional, nullable
+                // `((value: V) => ...) | null | undefined`: a callback union.
                 let value = args[0];
                 drop(data);
-                match self.lib_awaited_read(value) {
-                    Some(Some(node)) => LibAwaited::Reduced(node),
-                    Some(None) => LibAwaited::Deferred,
-                    None => LibAwaited::Refused,
-                }
+                LibStep::Done(self.lib_awaited_nested(value, walk, true))
             }
             SemanticNodeData::InstantiationRef { .. }
                 if self.lib_awaited_carrier_argument(resolved).is_some() =>
             {
-                // A nested authored application: reduced when its own
-                // application reduces, otherwise the whole stays deferred.
+                // A nested authored application: its own evaluation decides
+                // the operand this one continues on; a deferred one keeps the
+                // whole deferred.
                 let inner = self
                     .lib_awaited_carrier_argument(resolved)
                     .expect("guarded by the arm");
                 drop(data);
                 match self.lib_awaited_read(inner) {
-                    Some(Some(node)) => match self.lib_awaited_read(node) {
-                        Some(Some(outer)) => LibAwaited::Reduced(outer),
-                        Some(None) => LibAwaited::Deferred,
-                        None => LibAwaited::Refused,
-                    },
-                    Some(None) => LibAwaited::Deferred,
-                    None => LibAwaited::Refused,
+                    Some(Some(node)) => self.lib_awaited_application(node, walk),
+                    Some(None) => LibStep::Done(LibAwaited::Deferred),
+                    None => LibStep::Done(LibAwaited::Refused),
                 }
             }
             SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
                 drop(data);
                 let Some(body) = self.declaration_carrier_body(resolved) else {
-                    return LibAwaited::Refused;
+                    return LibStep::Done(LibAwaited::Refused);
                 };
                 if self.same_node_payload(body, resolved) {
-                    return LibAwaited::Refused;
+                    return LibStep::Done(LibAwaited::Refused);
                 }
-                match self.lib_awaited_read(body) {
-                    Some(Some(node)) if node == body => LibAwaited::Reduced(resolved),
-                    Some(Some(node)) => LibAwaited::Reduced(node),
-                    Some(None) => LibAwaited::Deferred,
-                    None => LibAwaited::Refused,
+                match self.lib_awaited_application(body, walk) {
+                    LibStep::Done(LibAwaited::Reduced(node)) if node == body => {
+                        LibStep::Done(LibAwaited::Reduced(resolved))
+                    }
+                    step => step,
                 }
             }
             SemanticNodeData::Object(surface) => {
-                let outcome = self.lib_awaited_surface(resolved, surface);
+                let outcome = self.lib_awaited_surface(resolved, surface, walk);
                 drop(data);
                 match outcome {
-                    LibThen::NotMatched => LibAwaited::Reduced(resolved),
-                    LibThen::Result(node) => LibAwaited::Reduced(node),
-                    LibThen::Deferred => LibAwaited::Deferred,
-                    LibThen::Refused => LibAwaited::Refused,
+                    LibThen::NotMatched => LibStep::Done(LibAwaited::Reduced(resolved)),
+                    LibThen::Result(node) => LibStep::Done(LibAwaited::Reduced(node)),
+                    LibThen::Next(value) => LibStep::Next(value),
+                    LibThen::Deferred => LibStep::Done(LibAwaited::Deferred),
+                    LibThen::Refused => LibStep::Done(LibAwaited::Refused),
                 }
             }
-            _ => LibAwaited::Refused,
+            _ => LibStep::Done(LibAwaited::Refused),
         }
     }
 
@@ -12475,10 +13248,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `then` signature by receiver eligibility (tsc 7.0.2 types
     /// `Awaited<{ y: 2; then(this: { x: 1 }, onfulfilled: (v: number) => void): void }>`
     /// as `number`, where awaiting the same value is `any`).
+    ///
+    /// A single callback `F` is the checker's tail recursion: its `V` is
+    /// [`LibThen::Next`]. A callback UNION (several `then` sources, several
+    /// callable arms, or a nullable or optional `onfulfilled`) distributes,
+    /// each arm a nested step.
     fn lib_awaited_surface(
         &self,
         operand: SemanticNodeId,
         surface: &crate::semantic_query::SurfaceView,
+        walk: &mut LibAwaitedWalk,
     ) -> LibThen {
         let thens = then_members(surface);
         // An absent or OPTIONAL `then` does not satisfy the required member.
@@ -12535,15 +13314,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             members => vec![members.iter().map(|member| member.value).collect()],
         };
+        let single_source = then_sources.len() == 1;
         let mut results = Vec::new();
         for source in &then_sources {
             let Some(inferred) = self.lib_inferred_onfulfilled(source) else {
                 return LibThen::Refused;
             };
-            let onfulfilled = match inferred {
+            let (onfulfilled, callback_union) = match inferred {
                 Some(PositionalArgument::Type {
-                    non_nullish_arms, ..
-                }) => non_nullish_arms,
+                    ty,
+                    non_nullish_arms,
+                    includes_undefined,
+                }) => {
+                    let callback_union = !single_source
+                        || includes_undefined
+                        || non_nullish_arms.len() != 1
+                        || self.settled_union_arms_of(ty).is_some();
+                    (non_nullish_arms, callback_union)
+                }
                 // `infer F` over a missing parameter is `unknown`, which is
                 // not a function: `never`.
                 Some(PositionalArgument::Absent) => return LibThen::Result(never),
@@ -12556,42 +13344,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // contributes `Awaited<unknown>` (tsc 7.0.2:
             // `then(onfulfilled: any)` is `unknown`).
             for arm in onfulfilled {
-                if matches!(
+                let value = if matches!(
                     self.graph().node_data(arm).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
                 ) {
-                    let unknown = self
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-                    match self.lib_awaited_read(unknown) {
-                        Some(Some(node)) => results.push(node),
-                        Some(None) => return LibThen::Deferred,
-                        None => return LibThen::Refused,
+                    self.graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                } else {
+                    self.note_awaited_evidence([arm]);
+                    let callbacks = match self.shared_positional_reads(
+                        arm,
+                        crate::semantic_query::SignatureKind::Call,
+                        0,
+                    ) {
+                        Ok(found) => found,
+                        Err(_) => return LibThen::Refused,
+                    };
+                    let Some(callback) = callbacks.last() else {
+                        continue;
+                    };
+                    match &callback.argument {
+                        PositionalArgument::Type { ty, .. } => *ty,
+                        PositionalArgument::Absent => self
+                            .graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
                     }
-                    continue;
+                };
+                if !callback_union {
+                    return LibThen::Next(value);
                 }
-                self.note_awaited_evidence([arm]);
-                let callbacks = match self.shared_positional_reads(
-                    arm,
-                    crate::semantic_query::SignatureKind::Call,
-                    0,
-                ) {
-                    Ok(found) => found,
-                    Err(_) => return LibThen::Refused,
-                };
-                let Some(callback) = callbacks.last() else {
-                    continue;
-                };
-                let value = match &callback.argument {
-                    PositionalArgument::Type { ty, .. } => *ty,
-                    PositionalArgument::Absent => self
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
-                };
-                match self.lib_awaited_read(value) {
-                    Some(Some(node)) => results.push(node),
-                    Some(None) => return LibThen::Deferred,
-                    None => return LibThen::Refused,
+                match self.lib_awaited_nested(value, walk, true) {
+                    LibAwaited::Reduced(node) => results.push(node),
+                    LibAwaited::Deferred => return LibThen::Deferred,
+                    LibAwaited::Refused => return LibThen::Refused,
                 }
             }
         }
@@ -12647,7 +13432,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arms.into_iter().any(|arm| {
             !matches!(
                 self.awaited_relation_step(AwaitedRelation::Normalize, arm, context),
-                AwaitedStep::Value(node) if node == arm
+                AwaitedOutcome::Value(node) if node == arm
             )
         })
     }
@@ -12666,7 +13451,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::StructuralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_awaited_normalize();
-        let reduced = self.awaited_normalize_node(operand, context);
+        let reduced = self.awaited_relation_run(AwaitedRelation::Normalize, operand, context);
         self.awaited_relation_output(AwaitedRelation::Normalize, operand, reduced)
     }
 
@@ -12684,14 +13469,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         match data.as_ref() {
             // `Promise<V>` — recognised by RESOLVED declaration identity
-            // through the registry, never by spelling — unwraps its payload
-            // by RE-ENTERING this family.
+            // through the registry, never by spelling — unwraps its payload:
+            // a tail step of this relation's run.
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {
-                let payload = args[0];
-                drop(data);
-                self.awaited_relation_step(AwaitedRelation::Normalize, payload, context)
+                AwaitedStep::Next(args[0])
             }
             // Union distribution: every arm re-enters the family and the
             // results renormalise canonically.
@@ -12733,9 +13516,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.lib_awaited_read(argument) {
                     None => AwaitedStep::Refused,
                     Some(None) => AwaitedStep::Value(resolved),
-                    Some(Some(reduced)) => {
-                        self.awaited_relation_step(AwaitedRelation::Normalize, reduced, context)
-                    }
+                    Some(Some(reduced)) => AwaitedStep::Next(reduced),
                 }
             }
             // Object surfaces and declaration carriers follow the shared
@@ -12762,7 +13543,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::StructuralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_async_return_payload();
-        let reduced = self.async_return_payload_node(operand, context);
+        let reduced = self.awaited_relation_run(AwaitedRelation::Payload, operand, context);
         self.awaited_relation_output(AwaitedRelation::Payload, operand, reduced)
     }
 
@@ -12802,9 +13583,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if matches!(op, crate::semantic_query::CompilerIntrinsicTypeOp::Awaited)
                     && args.len() == 1 =>
             {
-                let inner = args[0];
-                drop(data);
-                self.awaited_relation_step(AwaitedRelation::Payload, inner, context)
+                AwaitedStep::Next(args[0])
             }
             // An authored lib `Awaited<X>` at the TOP of the payload arrives as
             // the syntax-preserving `__builtin__` carrier, recognised by
@@ -12825,20 +13604,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 match self.lib_awaited_read(argument) {
                     None => AwaitedStep::Refused,
-                    Some(None) => {
-                        self.awaited_relation_step(AwaitedRelation::Payload, argument, context)
-                    }
-                    Some(Some(reduced)) => {
-                        self.awaited_relation_step(AwaitedRelation::Payload, reduced, context)
-                    }
+                    Some(None) => AwaitedStep::Next(argument),
+                    Some(Some(reduced)) => AwaitedStep::Next(reduced),
                 }
             }
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {
-                let payload = args[0];
-                drop(data);
-                self.awaited_relation_step(AwaitedRelation::Payload, payload, context)
+                AwaitedStep::Next(args[0])
             }
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
@@ -12860,15 +13633,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         relation: AwaitedRelation,
         operand: SemanticNodeId,
-        reduced: AwaitedStep,
+        reduced: AwaitedOutcome,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let observed_self_roots = self.observed_self_roots_from_nodes([operand]);
         let result = match reduced {
-            AwaitedStep::Value(node) => QueryResult::Value(node),
-            AwaitedStep::Failed => {
+            AwaitedOutcome::Value(node) => QueryResult::Value(node),
+            AwaitedOutcome::Failed => {
                 QueryResult::Value(self.checker_recovery(relation.recursion_diagnostic()))
             }
-            AwaitedStep::Refused => QueryResult::Error(QueryError::Miss),
+            AwaitedOutcome::Refused => QueryResult::Error(QueryError::Miss),
         };
         let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
@@ -13853,8 +14626,8 @@ mod carrier_type_param_descent_tests {
 }
 
 /// Which awaited relation a shared structural arm re-enters.
-#[derive(Debug, Clone, Copy)]
-enum AwaitedRelation {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AwaitedRelation {
     /// [`SemanticQueryKey::AwaitedNormalize`].
     Normalize,
     /// [`SemanticQueryKey::AsyncReturnPayload`].
@@ -13901,6 +14674,45 @@ enum AwaitedStep {
     Failed,
     /// The protocol cannot decide the operand.
     Refused,
+    /// A TAIL step: the relation's answer for the operand is its answer for
+    /// this one node (a `Promise<V>` payload, a thenable promising a single
+    /// value, an awaited application's argument). The run continues with it
+    /// in the same loop ([`ProjectSemanticDispatch::awaited_relation_run`]).
+    Next(SemanticNodeId),
+    /// A declaration carrier expanded to its body: the run continues with
+    /// the body, and when the body is its own answer the CARRIER is, so a
+    /// non-thenable alias keeps its authored identity.
+    Expand {
+        /// The carrier the step expanded.
+        carrier: SemanticNodeId,
+        /// Its body, the node the run continues with.
+        body: SemanticNodeId,
+    },
+}
+
+/// The outcome of one awaited relation over an operand.
+#[derive(Debug, Clone, Copy)]
+enum AwaitedOutcome {
+    /// The relation reduced the operand to this node.
+    Value(SemanticNodeId),
+    /// The checker's TS1062 failure ([`AwaitedStep::Failed`]).
+    Failed,
+    /// The protocol cannot decide the operand, or the connected-work budget
+    /// ran out first.
+    Refused,
+}
+
+/// Pops the operands one awaited run pushed onto the dispatch's path when
+/// the run ends, however it ends.
+struct AwaitedPathGuard<'g> {
+    active: &'g std::cell::RefCell<Vec<(AwaitedRelation, SemanticNodeId)>>,
+    base: usize,
+}
+
+impl Drop for AwaitedPathGuard<'_> {
+    fn drop(&mut self) {
+        self.active.borrow_mut().truncate(self.base);
+    }
 }
 
 /// The lib `Awaited<T>` conditional's outcome over one operand.
@@ -13914,6 +14726,27 @@ enum LibAwaited {
     Refused,
 }
 
+/// One application of the lib conditional.
+#[derive(Debug)]
+enum LibStep {
+    /// The application's outcome.
+    Done(LibAwaited),
+    /// The application recurses into `Awaited<V>` through a single callback:
+    /// the checker's tail step, continuing the current run on `V`.
+    Next(SemanticNodeId),
+}
+
+/// The lib conditional's recursion on one evaluation path, counted the way
+/// the checker counts it.
+#[derive(Debug, Default)]
+struct LibAwaitedWalk {
+    /// Nested (non-tail) steps on the path.
+    nesting: u32,
+    /// The applications on the path, for the recurrence that never reaches
+    /// a value.
+    path: Vec<SemanticNodeId>,
+}
+
 /// The lib conditional's `then` branch over one object surface.
 #[derive(Debug)]
 enum LibThen {
@@ -13921,6 +14754,8 @@ enum LibThen {
     NotMatched,
     /// The branch result.
     Result(SemanticNodeId),
+    /// A single callback `F`: the conditional continues as `Awaited<V>`.
+    Next(SemanticNodeId),
     /// A promised value is still generic.
     Deferred,
     /// A signature source did not settle.

@@ -2,6 +2,9 @@
 //! lane: a bare type name no scope declares or imports names the merged
 //! global declaration — every module's `declare global` contribution and
 //! every script's file-scope interface, in declaration precedence order.
+//! A bare VALUE name no scope binds, and a `globalThis` member path, read
+//! the global value declaration the same way: a module's `declare global`
+//! `var` / `let` / `const` / `function`, or a script's file-scope value.
 //!
 //! Every expected answer was measured on the pinned TypeScript 7.0.2
 //! checker (`tsc --declaration --emitDeclarationOnly --strict` over the
@@ -340,18 +343,526 @@ fn declare_global_contributes_only_from_a_module() {
     );
 }
 
-/// Global VALUE declarations — a `declare global { var … }` read bare or
-/// through `globalThis` — fail closed: a value-space global declaration
-/// has no routed body source, so the read is the typed unresolved value,
-/// never a fabricated answer.
+/// A global VALUE declaration read bare or through `globalThis` resolves
+/// through the declaration.
 ///
 /// TypeScript 7.0.2: `readGlobalThisVar` (`globalThis.skVar`) and
 /// `readBareVar` (`skVar`) are both `boolean`.
+///
+/// Mutation: without the global value root in `TypeOf` both rows degrade
+/// (`UnresolvedValue`); without the global-augmentation fallback of the
+/// prepared value declaration they degrade the same way.
 #[test]
-fn global_value_reads_fail_closed() {
+fn a_global_value_reads_through_its_declaration() {
     let host = global_host();
-    assert_unresolved(&host, READER, "readGlobalThisVar");
-    assert_unresolved(&host, READER, "readBareVar");
+    assert_clean_warm(
+        &host,
+        READER,
+        "readGlobalThisVar",
+        primitive(PrimitiveName::Boolean),
+    );
+    assert_clean_warm(
+        &host,
+        READER,
+        "readBareVar",
+        primitive(PrimitiveName::Boolean),
+    );
+}
+
+const GV_AUGMENT: &str = "/gv/augment.ts";
+const GV_AUGMENT_SRC: &str = r#"declare global {
+  interface SkGlobal { extra: number }
+  var skVar: boolean;
+  function skFn(): number;
+  function skFn(x: string): string;
+  let skLet: string;
+  const skConst: 42;
+  var skObj: { deep: { v: "d" } };
+  namespace skNs { const inner: number; }
+}
+export {};
+"#;
+
+/// A SCRIPT: every file-scope value is global by name; its `var`s and
+/// functions are also properties of the global object.
+const GV_SCRIPT: &str = "/gv/script.ts";
+const GV_SCRIPT_SRC: &str = r#"declare var scriptVar: number;
+declare function scriptFn(): string;
+var plainScriptVar = "s";
+let scriptLet = 1;
+function scriptDeclFn() { return true; }
+function scriptReadsGlobalThis() { return globalThis.skVar; }
+function scriptReadsOwnVar() { return globalThis.scriptVar; }
+function scriptReadsBare() { return skVar; }
+"#;
+
+const GV_READER: &str = "/gv/m0.ts";
+const GV_READER_SRC: &str = r#"export function readGlobalThisVar() { return globalThis.skVar; }
+export function readBareVar() { return skVar; }
+export function readGlobalFn() { return skFn(); }
+export function readGlobalFnOverload() { return skFn("x"); }
+export function readGlobalThisFn() { return globalThis.skFn(); }
+export function readGlobalFnValue() { return skFn; }
+export function readBareLet() { return skLet; }
+export function readBareConst() { return skConst; }
+export function readDeep() { return skObj.deep.v; }
+export function readGlobalThisDeep() { return globalThis.skObj.deep; }
+export function readNsInner() { return skNs.inner; }
+export function readScriptVar() { return scriptVar; }
+export function readGlobalThisScriptVar() { return globalThis.scriptVar; }
+export function readScriptFn() { return scriptFn(); }
+export function readPlainScriptVar() { return plainScriptVar; }
+export function readScriptLet() { return scriptLet; }
+export function readScriptDeclFn() { return scriptDeclFn(); }
+export function readGlobalThisWhole() { return globalThis; }
+export function readTypeofGlobalThisParam(g: typeof globalThis) { return g.skVar; }
+export function readGlobalThisGlobalThis() { return globalThis.globalThis.skVar; }
+export function readGlobalThisInObject() { return { v: globalThis.skVar, n: 1 }; }
+export function readGlobalThisPlainScript() { return globalThis.plainScriptVar; }
+"#;
+
+/// A module whose own `skVar` shadows the global by NAME, never on the
+/// global object.
+const GV_SHADOW: &str = "/gv/m1.ts";
+const GV_SHADOW_SRC: &str = r#"const skVar = 1;
+export function readShadowedGlobalThis() { return globalThis.skVar; }
+export function localGlobalThis() { const globalThis = { skVar: "local" }; return globalThis.skVar; }
+"#;
+
+/// Names that are NOT properties of the global object: a block-scoped
+/// global and an undeclared one (the checker's TS2339 / TS7017).
+const GV_MISSING: &str = "/gv/m2.ts";
+const GV_MISSING_SRC: &str = r#"export function readGlobalThisLet() { return globalThis.skLet; }
+export function readGlobalThisScriptLet() { return globalThis.scriptLet; }
+export function readGlobalThisMissing() { return globalThis.nothingHere; }
+"#;
+
+fn global_value_host() -> Arc<VerterHost> {
+    host_with(&[
+        (GV_AUGMENT, GV_AUGMENT_SRC),
+        (GV_SCRIPT, GV_SCRIPT_SRC),
+        (GV_READER, GV_READER_SRC),
+        (GV_SHADOW, GV_SHADOW_SRC),
+        (GV_MISSING, GV_MISSING_SRC),
+    ])
+}
+
+fn literal(value: verter_type_expr::LiteralValue) -> TypeExpr {
+    TypeExpr::Literal(value)
+}
+
+/// The type of one member of a published object.
+#[track_caller]
+fn member_of(ty: &TypeExpr, key: &str) -> TypeExpr {
+    let TypeExpr::Object(shape) = ty else {
+        panic!("expected an object, got {ty:?}");
+    };
+    shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(property)
+                if property.key.as_string() == Some(key) =>
+            {
+                Some(property.ty.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("member `{key}` missing in {ty:?}"))
+}
+
+/// Every global value form, read bare, through `globalThis`, through a
+/// `typeof globalThis` parameter and from a script, resolves as the
+/// checker resolves it.
+///
+/// TypeScript 7.0.2 (`.d.ts` return types):
+///
+/// ```text
+/// readGlobalThisVar          globalThis.skVar            boolean
+/// readBareVar                skVar                       boolean
+/// readGlobalFn               skFn()                      number
+/// readGlobalFnOverload       skFn("x")                   string
+/// readGlobalThisFn           globalThis.skFn()           number
+/// readBareLet                skLet                       string
+/// readBareConst              skConst                     42
+/// readDeep                   skObj.deep.v                "d"
+/// readGlobalThisDeep         globalThis.skObj.deep       { v: "d"; }
+/// readNsInner                skNs.inner                  number
+/// readScriptVar              scriptVar                   number
+/// readGlobalThisScriptVar    globalThis.scriptVar        number
+/// readScriptFn               scriptFn()                  string
+/// readPlainScriptVar         plainScriptVar              string
+/// readScriptLet              scriptLet                   number
+/// readScriptDeclFn           scriptDeclFn()              boolean
+/// readGlobalThisWhole        globalThis                  typeof globalThis
+/// readTypeofGlobalThisParam  (g: typeof globalThis) g.skVar   boolean
+/// readGlobalThisGlobalThis   globalThis.globalThis.skVar boolean
+/// readGlobalThisInObject     { v: globalThis.skVar }     { v: boolean; n: number; }
+/// readGlobalThisPlainScript  globalThis.plainScriptVar   string
+/// readShadowedGlobalThis     globalThis.skVar (module `const skVar = 1`)  boolean
+/// localGlobalThis            (local `globalThis` object) string
+/// scriptReadsGlobalThis      globalThis.skVar in a script     boolean
+/// scriptReadsOwnVar          globalThis.scriptVar in a script number
+/// scriptReadsBare            skVar in a script                boolean
+/// ```
+///
+/// Mutation: without the global value root every bare and `globalThis`
+/// row degrades (`UnresolvedValue`, a call row `UnrepresentableCallee`);
+/// without the script's file-scope value contributions (or without
+/// ingesting a script that holds only values) the script rows degrade;
+/// without the walker's member read through a deferred carrier,
+/// `readTypeofGlobalThisParam` degrades.
+#[test]
+fn every_global_value_form_resolves_like_the_checker() {
+    use PrimitiveName::{Boolean, Number, String};
+    let host = global_value_host();
+    for (canonical, name, expected) in [
+        (GV_READER, "readGlobalThisVar", primitive(Boolean)),
+        (GV_READER, "readBareVar", primitive(Boolean)),
+        (GV_READER, "readGlobalFn", primitive(Number)),
+        (GV_READER, "readGlobalFnOverload", primitive(String)),
+        (GV_READER, "readGlobalThisFn", primitive(Number)),
+        (GV_READER, "readBareLet", primitive(String)),
+        (
+            GV_READER,
+            "readBareConst",
+            literal(verter_type_expr::LiteralValue::Number(42.0)),
+        ),
+        (
+            GV_READER,
+            "readDeep",
+            literal(verter_type_expr::LiteralValue::String("d".to_string())),
+        ),
+        (GV_READER, "readNsInner", primitive(Number)),
+        (GV_READER, "readScriptVar", primitive(Number)),
+        (GV_READER, "readGlobalThisScriptVar", primitive(Number)),
+        (GV_READER, "readScriptFn", primitive(String)),
+        (GV_READER, "readPlainScriptVar", primitive(String)),
+        (GV_READER, "readScriptLet", primitive(Number)),
+        (GV_READER, "readScriptDeclFn", primitive(Boolean)),
+        (
+            GV_READER,
+            "readGlobalThisWhole",
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["globalThis".to_string()],
+                type_args: Vec::new(),
+            }),
+        ),
+        (GV_READER, "readTypeofGlobalThisParam", primitive(Boolean)),
+        (GV_READER, "readGlobalThisGlobalThis", primitive(Boolean)),
+        (GV_READER, "readGlobalThisPlainScript", primitive(String)),
+        (GV_SHADOW, "readShadowedGlobalThis", primitive(Boolean)),
+        (GV_SHADOW, "localGlobalThis", primitive(String)),
+        (GV_SCRIPT, "scriptReadsGlobalThis", primitive(Boolean)),
+        (GV_SCRIPT, "scriptReadsOwnVar", primitive(Number)),
+        (GV_SCRIPT, "scriptReadsBare", primitive(Boolean)),
+    ] {
+        assert_clean_warm(&host, canonical, name, expected);
+    }
+    for (name, key, expected) in [
+        (
+            "readGlobalThisDeep",
+            "v",
+            literal(verter_type_expr::LiteralValue::String("d".to_string())),
+        ),
+        ("readGlobalThisInObject", "v", primitive(Boolean)),
+    ] {
+        let outcome = eval(&host, GV_READER, name);
+        assert_eq!(
+            (outcome.degradation, outcome.candidates),
+            (None, 1),
+            "{name}"
+        );
+        assert_eq!(member_of(&outcome.ty, key), expected, "{name}");
+    }
+}
+
+/// A global function read as a VALUE is its whole overload surface.
+///
+/// TypeScript 7.0.2: `readGlobalFnValue` (`skFn`) prints `typeof skFn` —
+/// the two declared overloads, `() => number` and `(x: string) => string`,
+/// which the published surface spells structurally, in declaration order.
+#[test]
+fn a_global_function_value_is_its_overload_surface() {
+    let host = global_value_host();
+    let outcome = eval(&host, GV_READER, "readGlobalFnValue");
+    assert_eq!((outcome.degradation, outcome.candidates), (None, 1));
+    let TypeExpr::Object(shape) = &outcome.ty else {
+        panic!("readGlobalFnValue must be a callable surface, got {outcome:?}");
+    };
+    let returns: Vec<Option<TypeExpr>> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_type_expr::ObjectMember::CallSignature(signature) => {
+                Some(signature.return_type.as_deref().cloned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        returns,
+        vec![
+            Some(primitive(PrimitiveName::Number)),
+            Some(primitive(PrimitiveName::String)),
+        ]
+    );
+}
+
+/// What is NOT on the global object stays unresolved: a block-scoped
+/// global (`let`) through `globalThis`, and an undeclared name.
+///
+/// TypeScript 7.0.2: `globalThis.skLet` and `globalThis.scriptLet` are
+/// TS2339 and `globalThis.nothingHere` TS7017 — the checker's error type,
+/// recovery for a program that does not type-check.
+///
+/// Mutation: admitting every global value kind as a property of the global
+/// object resolves `readGlobalThisLet` to `string` and
+/// `readGlobalThisScriptLet` to `number`.
+#[test]
+fn a_name_off_the_global_object_stays_unresolved() {
+    let host = global_value_host();
+    for name in [
+        "readGlobalThisLet",
+        "readGlobalThisScriptLet",
+        "readGlobalThisMissing",
+    ] {
+        assert_unresolved(&host, GV_MISSING, name);
+    }
+}
+
+const GV_MULTI_SCRIPT: &str = "/gv/multi-a.ts";
+const GV_MULTI_SCRIPT_SRC: &str = r#"declare var dupVar: { a: 1 };
+declare function splitFn(): number;
+declare function orderFn(): "a";
+"#;
+const GV_MULTI_MODULE: &str = "/gv/multi-b.ts";
+const GV_MULTI_MODULE_SRC: &str = r#"declare global { var dupVar: { a: 1 }; function splitFn(x: string): string; function orderFn(): "b"; }
+export {};
+"#;
+const GV_MULTI_READER: &str = "/gv/multi-r.ts";
+const GV_MULTI_READER_SRC: &str = r#"export function readDupVar() { return dupVar.a; }
+export function readSplitFnNone() { return splitFn(); }
+export function readSplitFnString() { return splitFn("x"); }
+export function readOrderFn() { return orderFn(); }
+"#;
+
+/// A global declared in more than one file: a `var` redeclared elsewhere
+/// is ONE variable typed by its first declaration; a function's overloads
+/// merge across the files, and a call tries a later file's first.
+///
+/// TypeScript 7.0.2: `readDupVar` is `1`; `readSplitFnNone` is `number`
+/// and `readSplitFnString` `string` — one overload set merged across the
+/// two files; `readOrderFn` is `"b"`, the later file's overload.
+///
+/// Mutation: refusing every multi-file global degrades `readDupVar`;
+/// admitting only the first file's declaration for a function answers
+/// `readSplitFnString` with the first file's lone overload; one flat
+/// overload list answers `readOrderFn` with `"a"`.
+#[test]
+fn a_global_declared_in_several_files() {
+    let host = host_with(&[
+        (GV_MULTI_SCRIPT, GV_MULTI_SCRIPT_SRC),
+        (GV_MULTI_MODULE, GV_MULTI_MODULE_SRC),
+        (GV_MULTI_READER, GV_MULTI_READER_SRC),
+    ]);
+    assert_clean_warm(
+        &host,
+        GV_MULTI_READER,
+        "readDupVar",
+        literal(verter_type_expr::LiteralValue::Number(1.0)),
+    );
+    for (name, expected) in [
+        ("readSplitFnNone", primitive(PrimitiveName::Number)),
+        ("readSplitFnString", primitive(PrimitiveName::String)),
+        (
+            "readOrderFn",
+            literal(verter_type_expr::LiteralValue::String("b".to_string())),
+        ),
+    ] {
+        assert_clean_warm(&host, GV_MULTI_READER, name, expected);
+    }
+}
+
+/// An edit that touches no declaration of the global keeps the warm read:
+/// the read's observation of the name's contributors validates unchanged.
+///
+/// Mutation: validating the observation over fewer symbol spaces than the
+/// reader observed misses every warm global value read.
+#[test]
+fn an_unrelated_edit_keeps_the_warm_global_value_read() {
+    let host = global_value_host();
+    for name in ["readBareVar", "readGlobalThisScriptVar"] {
+        let _ = eval(&host, GV_READER, name);
+    }
+    upsert(&host, "/gv/unrelated.ts", "export const unrelated = 1;\n");
+    assert_clean_warm(
+        &host,
+        GV_READER,
+        "readBareVar",
+        primitive(PrimitiveName::Boolean),
+    );
+    assert_clean_warm(
+        &host,
+        GV_READER,
+        "readGlobalThisScriptVar",
+        primitive(PrimitiveName::Number),
+    );
+}
+
+/// A declaration file holding only file-scope values declares globals.
+///
+/// TypeScript 7.0.2: `readEnvVar` is `string`, `readEnvFn` `number`.
+///
+/// Mutation: ingesting a declaration file only for its `declare global` /
+/// `declare module` blocks leaves both reads unresolved.
+#[test]
+fn a_declaration_file_of_values_declares_globals() {
+    const ENV: &str = "/gv/env.d.ts";
+    const ENV_READER: &str = "/gv/env-r.ts";
+    let host = host_with(&[
+        (
+            ENV,
+            "declare var envVar: string;\ndeclare function envFn(): number;\n",
+        ),
+        (
+            ENV_READER,
+            "export function readEnvVar() { return envVar; }\nexport function readEnvFn() { return globalThis.envFn(); }\n",
+        ),
+    ]);
+    assert_clean_warm(
+        &host,
+        ENV_READER,
+        "readEnvVar",
+        primitive(PrimitiveName::String),
+    );
+    assert_clean_warm(
+        &host,
+        ENV_READER,
+        "readEnvFn",
+        primitive(PrimitiveName::Number),
+    );
+}
+
+/// A module declaring a global value beside a module-scope value of the
+/// same name: the identity `(module, name)` names the module's own value,
+/// so the global is not addressed and its reads fail closed.
+///
+/// TypeScript 7.0.2: `readBoth` and `readBothViaGlobalThis` are `boolean`
+/// (the global); `readOwnBoth` inside the declaring module is `number`.
+///
+/// Mutation: addressing the global through the declaring module answers
+/// both reads with the module's own `const`.
+#[test]
+fn a_global_beside_a_same_name_module_value_fails_closed() {
+    const BOTH: &str = "/gv/both.ts";
+    const BOTH_READER: &str = "/gv/both-r.ts";
+    let host = host_with(&[
+        (
+            BOTH,
+            "declare global { var bothVar: boolean; }\nconst bothVar = 1;\nexport function readOwnBoth() { return bothVar; }\n",
+        ),
+        (
+            BOTH_READER,
+            "export function readBoth() { return bothVar; }\nexport function readBothViaGlobalThis() { return globalThis.bothVar; }\n",
+        ),
+    ]);
+    for name in ["readBoth", "readBothViaGlobalThis"] {
+        assert_unresolved(&host, BOTH_READER, name);
+    }
+}
+
+/// An edit to a global value's declaration, and a declaration added later,
+/// both miss the warm read.
+///
+/// TypeScript 7.0.2: `skVar` is `boolean` while `augment.ts` declares
+/// `var skVar: boolean`, and `string` once it declares `var skVar:
+/// string`; `lateVar` is `number` once a script declares it. `lateFn()`
+/// is `number` with one declaration and `string` once a later script
+/// declares `lateFn(): string` — a later file's overload is tried first.
+///
+/// Mutation: validating the population while an upserted contributor
+/// waits for ingestion keeps the first warm `readLateFn` answer after the
+/// added overload; observing only the type space's contributors keeps the
+/// second once another read has ingested it.
+#[test]
+fn an_edit_to_a_global_value_misses_the_warm_read() {
+    const LATE_READER: &str = "/gv/late-r.ts";
+    let host = host_with(&[
+        (
+            GV_AUGMENT,
+            "declare global { var skVar: boolean; }\nexport {};\n",
+        ),
+        ("/gv/fn-a.ts", "declare function lateFn(): number;\n"),
+        (
+            LATE_READER,
+            "export function readBare() { return skVar; }\nexport function readLate() { return lateVar; }\nexport function readLateFn() { return lateFn(); }\n",
+        ),
+    ]);
+    assert_clean_warm(
+        &host,
+        LATE_READER,
+        "readBare",
+        primitive(PrimitiveName::Boolean),
+    );
+    assert_clean_warm(
+        &host,
+        LATE_READER,
+        "readLateFn",
+        primitive(PrimitiveName::Number),
+    );
+    assert_unresolved(&host, LATE_READER, "readLate");
+    upsert(
+        &host,
+        GV_AUGMENT,
+        "declare global { var skVar: string; }\nexport {};\n",
+    );
+    let edited = eval(&host, LATE_READER, "readBare");
+    assert_eq!(
+        (edited.ty, edited.degradation),
+        (primitive(PrimitiveName::String), None),
+        "the edited declaration's type"
+    );
+    upsert(&host, "/gv/late.ts", "declare var lateVar: number;\n");
+    let added = eval(&host, LATE_READER, "readLate");
+    assert_eq!(
+        (added.ty, added.degradation),
+        (primitive(PrimitiveName::Number), None),
+        "the added declaration's type"
+    );
+    // The overload arrives in a script that waits for ingestion: the warm
+    // read may not vouch for the population until it is ingested.
+    let fn_b = "declare function lateFn(): string;\n";
+    upsert(&host, "/gv/fn-b.ts", fn_b);
+    let pending = eval(&host, LATE_READER, "readLateFn");
+    assert_eq!(
+        (pending.ty, pending.degradation),
+        (primitive(PrimitiveName::String), None),
+        "the added overload"
+    );
+    // Once another read has ingested an added overload, the warm read
+    // still sees it through the name's value contributors.
+    let host = host_with(&[
+        ("/gv/fn-a.ts", "declare function lateFn(): number;\n"),
+        (
+            LATE_READER,
+            "export function readBare() { return skVar; }\nexport function readLateFn() { return lateFn(); }\n",
+        ),
+    ]);
+    assert_clean_warm(
+        &host,
+        LATE_READER,
+        "readLateFn",
+        primitive(PrimitiveName::Number),
+    );
+    upsert(&host, "/gv/fn-b.ts", fn_b);
+    let _ = eval(&host, LATE_READER, "readBare");
+    let merged = eval(&host, LATE_READER, "readLateFn");
+    assert_eq!(
+        (merged.ty, merged.degradation),
+        (primitive(PrimitiveName::String), None),
+        "the added overload"
+    );
 }
 
 /// The declaring file a whole-value read of the global names, read off the

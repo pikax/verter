@@ -1386,6 +1386,28 @@ fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure]
     &site.closures
 }
 
+#[test]
+// @ai-generated - A tagged template is one call occurrence of its tag.
+fn a_tagged_template_is_a_call_occurrence_of_its_tag() {
+    let source = "function f(x: string) { return tag`a${x}b`; }";
+    let skeleton = skeleton_of(source);
+    let calls: Vec<&SkeletonCall> = skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.calls.iter())
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the tagged template calls its tag once; the substitution calls nothing"
+    );
+    assert_eq!(
+        calls[0].callee,
+        SkeletonCallee::Named(skeleton.name_id("tag").expect("tag interned"))
+    );
+    assert!(!calls[0].new_construct);
+}
+
 /// An array literal opens one child site per element, but a nest of array
 /// literals deeper than the shallow inference's nesting budget is a leaf:
 /// that inference answers it whole and reports the typed budget

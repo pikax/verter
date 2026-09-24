@@ -7389,8 +7389,8 @@ fn lower_lib_global_mints_only_a_global_the_environment_provides() {
 /// The D10 heritage controls for `instanceof` derivation: the
 /// declaration-identity chain decides both edges, a STRUCTURAL TWIN with
 /// no heritage relation takes the checker's OWN subtype fallback (clean,
-/// warm), a twin whose carrier the relation authority cannot decide
-/// stays behind the typed guard gap, the cold walk reads one heritage
+/// warm), a twin of a class WITH heritage takes the same fallback through
+/// the heritage carrier (clean, warm), the cold walk reads one heritage
 /// bundle per visited ancestor, and an identical warm demand adds zero
 /// dispatches of any class.
 #[test]
@@ -7537,15 +7537,12 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
         // (5) The same fallback over a tested class that HAS heritage:
         // `Twin` is shape-identical to `KSub`'s composed instance
-        // surface and heritage proves the two unrelated, but `KSub`'s
-        // carrier unwraps to the heritage INTERSECTION (`K & { s }`) and
-        // the shared relation authority answers that pair undecided in
-        // one direction. An undecided relation is no fact: the fallback
-        // is never entered on a guess, so the subject stays possible
-        // behind the typed guard gap and never warms. The missing
-        // capability is the relation authority's, not this evaluator's —
-        // deciding a class-vs-class structural pair through a composed
-        // heritage carrier is outside D10's mutation boundary.
+        // surface (`K & { s }`) and heritage proves the two unrelated, so
+        // the checker's subtype fallback narrows the subject to the tested
+        // class — TypeScript 7.0.2 (`tsc --declaration
+        // --emitDeclarationOnly --strict`) returns `0 | KSub` from
+        // `carrierTwin`. The relation reads the heritage carrier through
+        // its declaration, so the narrow is clean and warms.
         let key = whole_return_key(dispatch, CANONICAL, "carrierTwin");
         let result = flow_result_value(dispatch, key.clone());
         let expr = host
@@ -7555,23 +7552,24 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
             matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
             if arms.iter().any(|arm| matches!(
                 arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
                 verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Twin"
             ))),
-            "an undecided structural relation never narrows the arm away, got {expr:?}"
+            "the structural twin narrows to the tested class, got {expr:?}"
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "the undecided structural relation stays behind the typed guard gap"
+            None,
+            "a decided structural fallback is clean"
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "a structurally-undecided arm never warms"
+            1,
+            "the clean structural fallback warms"
         );
 
         // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
@@ -10965,12 +10963,28 @@ fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
 /// the result, and the result is `ReturnOnly` — never a guessed
 /// absorption promoted warm.
 ///
-/// `L & K` is assignable to `L`, so the pair IS an admitted reduction
-/// candidate; the reverse direction (`L` against the intersection) is the
-/// judgement the authority does not give.
+/// `L & Absent` (over an import that does not resolve) is assignable to
+/// `L`, so the pair IS an admitted reduction candidate; the reverse
+/// direction (`L` against the intersection) reaches the unresolved
+/// `Absent` and is the judgement the authority does not give. Over a
+/// resolved `L & K` both directions decide and the checker's reduction
+/// runs: TypeScript 7.0.2 (`tsc --declaration --emitDeclarationOnly
+/// --strict`) returns `L` from `makeProps(x: L | null) { if (x
+/// instanceof K) { return x } return anL }`, and so does the lane.
 #[test]
 fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warms() {
-    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let decided = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(decided);
+    assert_eq!(
+        degradation, None,
+        "a decided reduction is complete: {expr:?}"
+    );
+    assert!(
+        matches!(&expr, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"),
+        "the intersection arm is absorbed into its supertype: {expr:?}"
+    );
+
+    let script = "import type { Absent } from \"./absent-reunion-source\"\nclass L { readonly l = \"l\" }\ndeclare const anL: L\ndeclare const both: L & Absent\nfunction makeProps(c: boolean) { if (c) { return both } return anL }";
     let (expr, degradation) = flow_expr_for_script(script);
     assert_eq!(
         degradation,
@@ -11110,8 +11124,9 @@ fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
 /// The call value of a generic callee whose declared return intersects
 /// the empty object type reduces to the bare constituent, at the whole
 /// return AND at a member position — the checker's own
-/// `getIntersectionType` reduction, applied where the call instantiates
-/// it and NOT in the canonical intersection algebra.
+/// `getIntersectionType` reduction, which the canonical intersection
+/// applies too (TypeScript 7.0.2: `{} & 'x'` is `"x"`), while a written
+/// `string & {}` keeps both arms (`string & {}`).
 #[test]
 fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() {
     let (whole, whole_degradation) = flow_expr_cold_warm(
@@ -11154,12 +11169,20 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         ));
         let intersection =
             dispatch.intern_normalized_union_or_intersection(&[empty, literal], false);
+        assert_eq!(
+            intersection, literal,
+            "`{{}} & \"x\"` is `\"x\"` in the canonical layer"
+        );
+        let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let kept = dispatch.intern_normalized_union_or_intersection(&[string, empty], false);
         assert!(
             matches!(
-                graph.node_data(intersection).as_deref(),
+                graph.node_data(kept).as_deref(),
                 Some(crate::semantic_query::SemanticNodeData::Intersection(_))
             ),
-            "an AUTHORED `{{}} & \"x\"` keeps both constituents in the canonical layer"
+            "a written `string & {{}}` keeps both constituents"
         );
     });
 }

@@ -3839,10 +3839,12 @@ fn local_reaching_definition_is_binding_and_local() {
         declared,
         freshness,
         auto_typed_form,
+        evolving_array,
     } = &node.body.statements[0]
     else {
         panic!("the first statement must be the const binding");
     };
+    assert_eq!(*evolving_array, None, "`1` is not an empty array literal");
     assert_eq!(name.as_ref(), "x");
     assert_eq!(*kind, SliceBindingKind::Const);
     assert!(!auto_typed_form, "a `const` is never auto-typed");

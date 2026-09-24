@@ -184,7 +184,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             identity.decl_name.as_ref(),
         )
-        .then(|| self.recursive_ref_sentinel(identity))
+        .then(|| self.recursive_ref_sentinel(identity, Arc::from([])))
     }
 
     fn plan_reference_projection(
@@ -254,7 +254,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     identity.owner,
                     identity.decl_name.as_ref(),
                 ) {
-                    return ReferenceProjectionPlan::Ready(self.recursive_ref_sentinel(identity));
+                    return ReferenceProjectionPlan::Ready(
+                        self.recursive_ref_sentinel(identity, Arc::from([])),
+                    );
                 }
                 if matches!(
                     context.mode,
@@ -944,6 +946,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 memo.insert((node, context), self.opaque(QueryError::Miss));
                 Ok(None)
             }
+            // An inert structure is its own projection under every context.
+            SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. }
+                if self.graph().node_is_inert_structure(node) =>
+            {
+                work_credit.consume()?;
+                crate::loop5_instrumentation::watchdog_beat();
+                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                memo.insert((node, context), node);
+                Ok(None)
+            }
             SemanticNodeData::DeclRef { .. } => {
                 if let Some(recursive) = self.active_decl_recursion_sentinel(data.as_ref()) {
                     memo.insert((node, context), recursive);
@@ -1020,6 +1032,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         "project_view_node_worklist",
                     );
                     vacant.insert(self.opaque(QueryError::Miss));
+                    continue;
+                }
+                // An inert structure is its own projection under every context.
+                SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. }
+                    if self.graph().node_is_inert_structure(child) =>
+                {
+                    work_credit.consume()?;
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                    vacant.insert(child);
                     continue;
                 }
                 SemanticNodeData::DeclRef { .. } => {

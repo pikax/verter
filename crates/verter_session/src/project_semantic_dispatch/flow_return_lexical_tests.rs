@@ -3792,12 +3792,12 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// The call-resolution executor now answers most of these routes: an
 /// explicit type argument instantiates the clause exactly, and argument
 /// inference from a literal publishes the un-widened literal of the
-/// checker's widened answer. What remains is the shape TypeScript itself
-/// cannot infer (`gcBareInferred`, where `unknown` IS the checker's
-/// answer) and the route the executor does not read: the annotated-alias
-/// value type (`gcViaAnnotated`) keeps the sb15 interim `unknown`. A
-/// NAMESPACE-scoped callee (`GcNs.nsCall`) is read through its qualified
-/// declaration like a file-scope one.
+/// checker's widened answer, a NAMESPACE-scoped callee (`GcNs.nsCall`)
+/// included — its exported function is a declaration of its own. What
+/// remains is the shape TypeScript itself cannot infer (`gcBareInferred`,
+/// where `unknown` IS the checker's answer) and the route the executor does
+/// not read: the annotated-alias value type (`gcViaAnnotated`) keeps the
+/// sb15 interim `unknown`.
 ///
 /// Oracle (tsgo checker, `--strict --declaration`):
 ///
@@ -3809,6 +3809,7 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// GcNs.nsCall():    string
 /// new GcHolder<number>().viaCall(): string
 /// new GcHolder<number>().ownT():   number
+/// GcNs.nsCall(): string            GcNs.nsPlainCall(): string
 /// ```
 ///
 /// The `Literal(String("a"))` rows are the un-widened literals of the
@@ -3909,27 +3910,17 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         },
     );
 
-    // A NAMESPACE-scoped generic callee is read through its qualified
-    // declaration: its explicit type argument instantiates its clause
-    // exactly as a file-scope callee's does.
-    r5_node(
+    // A NAMESPACE-scoped generic callee instantiates its clause from the
+    // explicit type argument too.
+    assert_clean_warm(
         &host,
         "GcNs.nsCall",
-        FunctionPartIdentity::DeclarationBody,
-        |dispatch, node| {
-            assert_eq!(
-                node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::String),
-                "GcNs.nsCall must instantiate the callee's own type parameter, \
-                 never publish the callee's binder"
-            );
-        },
+        TypeExpr::Primitive(PrimitiveName::String),
     );
 
     // CONTROLS — a NON-generic direct callee is untouched: the rule fires
     // on the callee's declared clause, not on "any direct call".
-    // `GcNs.nsPlainCall` is the namespace control: non-generic, so the
-    // executor's reach gap on namespace-scoped callees does not fire.
+    // `GcNs.nsPlainCall` is the namespace control.
     for name in ["gcNonGeneric", "GcNs.nsPlainCall"] {
         assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::String));
     }

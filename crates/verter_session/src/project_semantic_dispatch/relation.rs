@@ -5857,6 +5857,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// The pair a relation decides in place of `(source, target)` when
+    /// either side is a written intersection whose canonical intersection
+    /// differs from it (`getIntersectionType`: `string & ('a' | 1)` IS
+    /// `'a'`, `number & string` IS `never`); `None` when neither is.
+    fn reduced_authored_relation_pair(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        let is_intersection = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Intersection(_))
+            )
+        };
+        if !is_intersection(source) && !is_intersection(target) {
+            return None;
+        }
+        let nullability = crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
+            self.dispatch_txn
+                .borrow()
+                .relation
+                .strict
+                .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                .strict_null_checks,
+        );
+        let graph = self.graph();
+        let reduced_source =
+            super::canonical_algebra::reduced_authored_intersection(graph, source, nullability);
+        let reduced_target =
+            super::canonical_algebra::reduced_authored_intersection(graph, target, nullability);
+        (reduced_source.is_some() || reduced_target.is_some()).then(|| {
+            (
+                reduced_source.unwrap_or(source),
+                reduced_target.unwrap_or(target),
+            )
+        })
+    }
+
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
     /// primitive/identity/top/bottom cases inline BEFORE any recursive
     /// structural work. Non-trivial pairs return `Unknown` and fall
@@ -5884,6 +5923,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(target_data) = graph.node_data(target) else {
             return ShallowRelation::Unknown;
         };
+        if let Some((source, target)) = self.reduced_authored_relation_pair(source, target) {
+            drop(source_data);
+            drop(target_data);
+            return self.shallow_relation_check(source, target);
+        }
         match (&*source_data, &*target_data) {
             // The error-type wildcard fires BEFORE the `(_, Never)` bottom
             // arm — `error` relates bidirectionally like `any` (the same
@@ -6102,15 +6146,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the memo.
     ///
     /// A declaration CARRIER (a `DeclRef` / `InstantiationRef` / an
-    /// unexpanded declaration or recursive-reference placeholder) must too,
-    /// but ONLY when the pair's other side carries a nominal identity: the
-    /// nominal axis compares DECLARING identities, and a carrier's identity
-    /// is revealed only by the canonical frame's identity unwrap plus
-    /// `Instantiate`. Widening that to every carrier pair would decide
-    /// composites, array/tuple elements, and object members that the
-    /// deferred gate answers `Unknown` today — a general change to the
-    /// assignability lattice, not a nominal one — so the predicate stays
-    /// scoped to the pairs the nominal axis owns.
+    /// unexpanded declaration or recursive-reference placeholder) or a
+    /// mapped type must too: the checker relates the type a carrier names,
+    /// which only the canonical frame's identity unwrap reveals — an
+    /// intersection target `QA & QB` distributes into pairs whose arms are
+    /// declarations, and a nominal pair compares DECLARING identities. The
+    /// canonical frame's memo also closes a recursive declaration's cycle
+    /// coinductively.
     ///
     /// This runs on EVERY `RelateWork::Eval`, so its cost is the relation
     /// engine's per-pair floor: each side's node data is read AT MOST ONCE
@@ -6135,18 +6177,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if matches!(&*target_data, SemanticNodeData::Conditional { .. }) {
             return true;
         }
-        let is_decl_carrier = |data: &SemanticNodeData| {
+        let is_carrier = |data: &SemanticNodeData| {
             matches!(
                 data,
                 SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::KeyOf { .. }
                     | SemanticNodeData::Opaque(
                         QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
                     )
             )
         };
-        (source_data.typeof_nominal_identity().is_some() && is_decl_carrier(&target_data))
-            || (target_data.typeof_nominal_identity().is_some() && is_decl_carrier(&source_data))
+        is_carrier(&source_data) || is_carrier(&target_data)
     }
 
     /// Expand a single relate pair into direct result(s) or sub-work
@@ -6352,6 +6395,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(target_data);
             let merged = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
             work.push(RelateWork::Eval(source, merged));
+            return;
+        }
+
+        // ── A written intersection is the type the checker constructs from
+        //    it (`getIntersectionType`): `string & ('a' | 1)` IS `'a'`,
+        //    `number & string` IS `never`. A shell whose canonical
+        //    intersection differs relates as that type. ──────────────────
+        if let Some((source, target)) = self.reduced_authored_relation_pair(source, target) {
+            drop(source_data);
+            drop(target_data);
+            work.push(RelateWork::Eval(source, target));
             return;
         }
 
@@ -6606,6 +6660,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
             return;
         }
+        // An intersection TARGET is related arm by arm before an
+        // intersection source is split, as the checker orders
+        // `unionOrIntersectionRelatedTo`: `QA & Z` against `(QA | QB) & Z`
+        // needs the whole source against each target arm.
+        if let SemanticNodeData::Intersection(members) = &*target_data {
+            let members = members.members_arc();
+            drop(source_data);
+            drop(target_data);
+            distribute_and(work, results, &members, |m| (source, *m));
+            return;
+        }
         if let SemanticNodeData::Intersection(members) = &*source_data {
             let members = members.members_arc();
             let object_target = matches!(&*target_data, SemanticNodeData::Object(_));
@@ -6623,13 +6688,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 other => other,
             });
-            return;
-        }
-        if let SemanticNodeData::Intersection(members) = &*target_data {
-            let members = members.members_arc();
-            drop(source_data);
-            drop(target_data);
-            distribute_and(work, results, &members, |m| (source, *m));
             return;
         }
 
@@ -7235,7 +7293,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // identity is already open and closes coinductively. A
                 // scope-less sentinel stays concrete (fail-closed Unknown
                 // downstream, never a fabricated verdict).
-                SemanticNodeData::Opaque(QueryError::RecursiveRef { name }) => {
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
                     let Some(crate::semantic_query::NodeScopeId::File {
                         canonical_id,
                         owner,
@@ -7252,7 +7310,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             whole_hash,
                             decl_name: Arc::clone(name),
                         },
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        Arc::clone(args),
                     )
                 }
                 SemanticNodeData::DeclRef { identity } => (
@@ -7278,6 +7336,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     current = read;
                     continue;
+                }
+                // `keyof` over a type whose keys settle is that key set
+                // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
+                SemanticNodeData::KeyOf { base } => {
+                    let base = *base;
+                    drop(data);
+                    match self.key_set_of(base) {
+                        Some(keys) if keys != current => {
+                            current = keys;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
+                }
+                // A written intersection is the type the checker constructs
+                // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
+                SemanticNodeData::Intersection(_) => {
+                    drop(data);
+                    match self.reduced_authored_relation_pair(current, current) {
+                        Some((reduced, _)) if reduced != current => {
+                            current = reduced;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
+                }
+                // A homomorphic mapped type over a closed object is the
+                // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
+                // the checker resolves its members, so a relation compares
+                // them. Any other mapped type stays the operand it is.
+                SemanticNodeData::Mapped { source, mapper } => {
+                    let (source, mapper) = (*source, mapper.clone());
+                    drop(data);
+                    match self.identity_mapped_object_for_relation(source, &mapper) {
+                        Some(object) if object != current => {
+                            current = object;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
                 }
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };
@@ -7336,6 +7434,111 @@ impl<'a> ProjectSemanticDispatch<'a> {
             current = unwrapped;
         }
         IdentityCarrierUnwrap::Unresolvable
+    }
+
+    /// The object an identity mapped type over a closed object surface
+    /// names — `Partial<Face>` IS `{ a?: 1 }`, `Required<{ a?: 1 }>` IS
+    /// `{ a: 1 }` — for a relation to compare: each key of the mapper's
+    /// key space reads the source member of that name, with the mapper's
+    /// modifiers applied, exactly as the mapped build's identity arm
+    /// produces it.
+    ///
+    /// `None` (the operand stays the carrier it is, undecided) for an open
+    /// or computed mapper, a key remap, a source that is no plain object
+    /// surface — a union distributes, an array or tuple maps elementwise,
+    /// and signatures and index signatures map on their own — and a key
+    /// without a source member. The object is interned for the relation
+    /// only: no member is published, so no member edge is recorded.
+    fn identity_mapped_object_for_relation(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+    ) -> Option<SemanticNodeId> {
+        if mapper.name_remap.is_some()
+            || !matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+            || super::raise::mapped_type_is_open_or_unknown(self, source, mapper)
+        {
+            return None;
+        }
+        let IdentityCarrierUnwrap::Concrete(object) =
+            self.unwrap_identity_carrier_for_relation(source)
+        else {
+            return None;
+        };
+        let source_members: Vec<crate::semantic_query::SurfaceMember> = {
+            let data = self.graph().node_data(object)?;
+            let SemanticNodeData::Object(view) = &*data else {
+                return None;
+            };
+            if !view.call_signatures.is_empty()
+                || !view.construct_signatures.is_empty()
+                || !view.index_signatures.is_empty()
+            {
+                return None;
+            }
+            view.closed().complete_members().to_vec()
+        };
+        // A homomorphic key space (`[P in keyof T]`) is the source's public
+        // member names, read off the surface just unwrapped; any other is
+        // the shared key-domain enumerator's.
+        let homomorphic = matches!(
+            self.graph().node_data(mapper.key_space).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == source
+        );
+        let keys: Vec<crate::semantic_query::PropertyKey> = if homomorphic {
+            source_members
+                .iter()
+                .filter(|member| member.visibility == verter_type_expr::MemberVisibility::Public)
+                .map(|member| member.key.cloned_known())
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            self.key_literals_from_keyspace_node(mapper.key_space)?
+                .into_iter()
+                .map(|key| key.key)
+                .collect()
+        };
+        let mut produced: Vec<crate::semantic_query::SurfaceMember> =
+            Vec::with_capacity(keys.len());
+        for key in keys {
+            if produced
+                .iter()
+                .any(|member| member.key.cloned_known().as_ref() == Some(&key))
+            {
+                continue;
+            }
+            let member = source_members
+                .iter()
+                .find(|member| member.key.cloned_known().as_ref() == Some(&key))?;
+            produced.push(crate::semantic_query::SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
+                value: member.value,
+                optional: match mapper.optionality {
+                    crate::semantic_query::OptionalityMod::Add => true,
+                    crate::semantic_query::OptionalityMod::Remove => false,
+                    crate::semantic_query::OptionalityMod::Keep => member.optional,
+                },
+                readonly: match mapper.readonly {
+                    crate::semantic_query::ReadonlyMod::Add => true,
+                    crate::semantic_query::ReadonlyMod::Remove => false,
+                    crate::semantic_query::ReadonlyMod::Keep => member.readonly,
+                },
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: member.visibility,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: member.spans,
+                declaration_origin: member.declaration_origin.clone(),
+            });
+        }
+        Some(
+            self.graph()
+                .intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+                    produced,
+                    Some(mapper.key_space),
+                ))),
+        )
     }
 
     /// Source-side declaration identity carrier with Object body against
@@ -7663,7 +7866,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> SemanticNodeId {
         let graph = self.graph();
         let name = match graph.node_data(value).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name })) => Arc::clone(name),
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => {
+                Arc::clone(name)
+            }
             _ => return value,
         };
         let Some(origin) = origin else {

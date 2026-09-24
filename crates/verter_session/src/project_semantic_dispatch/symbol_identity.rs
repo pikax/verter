@@ -776,7 +776,8 @@ mod tests {
     fn partial_identity_reasons_are_typed_and_carry_no_node() {
         assert_eq!(
             demand_error(QueryError::RecursiveRef {
-                name: Arc::from("Cycle")
+                name: Arc::from("Cycle"),
+                args: std::sync::Arc::from([]),
             }),
             SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::Cycle)
         );

@@ -862,6 +862,31 @@ struct NullishSplit {
     common_nullish: Vec<SemanticNodeId>,
 }
 
+/// The global wrapper interface a primitive's members come from — its
+/// apparent type (`string` and a string literal read `String`).
+fn primitive_wrapper_name(data: &SemanticNodeData) -> Option<&'static str> {
+    use crate::semantic_query::PrimitiveKind;
+    match data {
+        SemanticNodeData::Primitive(PrimitiveKind::String)
+        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_))
+        | SemanticNodeData::TemplateLiteral { .. } => Some("String"),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(_)) => {
+            Some("Number")
+        }
+        SemanticNodeData::Primitive(PrimitiveKind::Boolean)
+        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(_)) => {
+            Some("Boolean")
+        }
+        SemanticNodeData::Primitive(PrimitiveKind::BigInt)
+        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_)) => {
+            Some("BigInt")
+        }
+        SemanticNodeData::Primitive(PrimitiveKind::Symbol) => Some("Symbol"),
+        _ => None,
+    }
+}
+
 /// Whether a string key is a CANONICAL non-negative integer key —
 /// TS's numeric-key coercion rule `String(Number(s)) === s` restricted
 /// to the integer positions a tuple can hold: nonempty, ASCII digits
@@ -1532,6 +1557,72 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .intern_normalized_union(&arms, NullabilityPolicy::Erased)
     }
 
+    /// The property name a path segment reads when it is a string key that
+    /// is not a numeric position (`length`, `map`) — the key an array,
+    /// tuple or primitive reads off its apparent type.
+    fn segment_string_name(&self, segment: &PathSegment) -> Option<Arc<str>> {
+        let name = match segment {
+            PathSegment::Member(PropertyKey::String(name))
+            | PathSegment::Index(IndexKey::String(name)) => Arc::clone(name),
+            PathSegment::Index(IndexKey::Computed(node)) => {
+                match self.dispatch.normalized_index_key_node(*node) {
+                    IndexKey::String(name) => name,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        (!is_canonical_index_digits(&name)).then_some(name)
+    }
+
+    /// A tuple's `length`: `number` with a rest element, else the union of
+    /// the lengths from its required count to its element count
+    /// (`[1, 2?]['length']` is `1 | 2`).
+    fn tuple_length(&self, elements: &[crate::semantic_query::TupleElement]) -> SemanticNodeId {
+        use crate::semantic_query::PrimitiveKind;
+        if elements.iter().any(|element| element.rest) {
+            return self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        }
+        let required = elements.iter().filter(|element| !element.optional).count();
+        let lengths: Vec<SemanticNodeId> = (required..=elements.len())
+            .map(|length| {
+                self.graph().intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::Number(length as f64),
+                ))
+            })
+            .collect();
+        self.dispatch
+            .intern_normalized_union_or_intersection(&lengths, true)
+    }
+
+    /// The apparent `Array<element>` (`ReadonlyArray` for a readonly
+    /// array or tuple) whose members an array's non-index keys read.
+    fn array_apparent_surface(
+        &self,
+        element: SemanticNodeId,
+        readonly: bool,
+    ) -> Option<SemanticNodeId> {
+        self.global_wrapper_read(if readonly { "ReadonlyArray" } else { "Array" }, &[element])
+    }
+
+    /// The global wrapper interface `name` over `args` whose members a
+    /// primitive, an array or a tuple reads
+    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]); `None` when
+    /// the project declares none or the lookup does not settle. The node
+    /// names no project: the lookup is scoped by the request, so whatever it
+    /// answers is transaction-local — never served from the shared memo to a
+    /// request of another project.
+    fn global_wrapper_read(&self, name: &str, args: &[SemanticNodeId]) -> Option<SemanticNodeId> {
+        self.dispatch.fold_into_top_build_local_taint(false, true);
+        match self.dispatch.global_wrapper_surface(name, args) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => Some(surface),
+            super::apparent_type::GlobalWrapper::Absent
+            | super::apparent_type::GlobalWrapper::Unsettled => None,
+        }
+    }
+
     /// Project a numeric demand into a tuple's element set.
     ///
     /// Reads follow `declaring_file`'s `strictNullChecks` as
@@ -1560,7 +1651,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             NumericIndexDemand::Position(position) => {
                 if let Some(rest_start) = elements.iter().position(|element| element.rest) {
                     if position >= rest_start {
-                        return None;
+                        let mut arms: Vec<SemanticNodeId> =
+                            Vec::with_capacity(elements.len() - rest_start);
+                        for element in &elements[rest_start..] {
+                            let read = if element.rest {
+                                self.rest_element_item_type(element.value)?
+                            } else {
+                                self.index_read(element.value, element.optional, declaring_file)
+                            };
+                            self.push_union_flattened(&mut arms, read);
+                        }
+                        return Some(
+                            self.dispatch
+                                .intern_normalized_union_or_intersection(&arms, true),
+                        );
                     }
                 }
                 let element = elements.get(position)?;
@@ -1730,6 +1834,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
                     name: Arc::from("depth-budget-exceeded"),
+                    args: Arc::from([]),
                 }));
                 return;
             }
@@ -1995,7 +2100,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         .graph()
                         .node_scope(current)
                         .and_then(|scope| scope.canonical_file());
+                    // An ACCESSOR is a property: its read is the accessor's
+                    // VALUE type (the getter's return, else the setter's
+                    // parameter), whichever of a get/set pair came first.
+                    let graph = self.dispatch.graph();
                     let first_wins = |needle: &crate::semantic_query::PropertyKey| {
+                        if let Some(accessor) = surface.project_known_key_accessor(needle) {
+                            return accessor.read_value(graph);
+                        }
                         match surface.project_known_key(needle) {
                             crate::semantic_query::SurfaceKeyProjection::Exact(member)
                                 if member.visibility.is_public() =>
@@ -2992,8 +3104,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let typeof_context = self.context;
                     let typeof_key = self.dispatch.typeof_key_with_path(
-                        value_root,
-                        typeof_path,
+                        value_root.clone(),
+                        Arc::clone(&typeof_path),
                         typeof_context,
                     );
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
@@ -3013,8 +3125,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     #[cfg(test)]
                     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(Some(resolved)));
                     if resolved == current {
-                        results.push(current);
-                        return;
+                        // A carrier that stays deferred (the global object,
+                        // whose whole surface is not enumerated) reads a
+                        // pending MEMBER through its own root: `(typeof x).m`
+                        // is `typeof x.m`.
+                        let member = match segment {
+                            PathSegment::Member(key) if type_args.is_empty() => {
+                                key.as_string().map(Arc::<str>::from)
+                            }
+                            _ => None,
+                        };
+                        let Some(member) = member else {
+                            results.push(current);
+                            return;
+                        };
+                        let mut extended = typeof_path.to_vec();
+                        extended.push(member);
+                        let member_key = self.dispatch.typeof_key_with_path(
+                            value_root,
+                            Arc::from(extended.into_boxed_slice()),
+                            typeof_context,
+                        );
+                        current = match self.execute_read_folding_partial(member_key) {
+                            QueryResult::Value(id) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                        index += 1;
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
                     }
                     current = resolved;
                 }
@@ -3118,6 +3259,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         return;
                     }
                     current = expanded;
+                }
+                // A declaration's self-reference inside its own body
+                // (`interface Chain { next: Chain }` — the `Chain` of
+                // `next`) is the application it records: continue the walk
+                // from that carrier, exactly as from the same reference
+                // written anywhere else. One that names no addressable
+                // application keeps the terminal miss.
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => {
+                    drop(data);
+                    match self.dispatch.self_reference_declaration(current) {
+                        Some(carrier) => current = carrier,
+                        None => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
                 }
                 // D26 lazy carriers.
                 // DeclRef in any mode resolves through ResolveDecl
@@ -3288,7 +3445,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
-                SemanticNodeData::Tuple { elements, .. } => {
+                SemanticNodeData::Tuple { elements, readonly } => {
                     // Tuple slot projection. A literal integer position
                     // projects element `i`'s VALUE type — the label is
                     // dropped by construction (only `element.value`
@@ -3298,12 +3455,73 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // projects the union of every element's contribution
                     // (optional slots contribute `undefined`, a rest
                     // element contributes its array ELEMENT type). On a
-                    // rest-bearing tuple, fixed positions BEFORE the rest
-                    // start resolve exactly; positions at/after the rest
-                    // start miss conservatively (suffix-dependent
-                    // arithmetic is never guessed).
+                    // rest-bearing tuple, a position before the rest start
+                    // resolves exactly and one at or past it reads every
+                    // element from the rest start on (the rest may be
+                    // empty). `length` is the tuple's possible lengths;
+                    // any other key is a member of the tuple's apparent
+                    // `Array`.
                     let elements = elements.clone();
+                    let readonly = *readonly;
                     drop(data);
+                    if self.segment_string_name(segment).as_deref() == Some("length") {
+                        let length = self.tuple_length(&elements);
+                        let (edge_kind, meta) = match segment {
+                            PathSegment::Index(ix) => {
+                                (OriginEdgeKind::ProjectIndex, OriginMeta::Index(ix.clone()))
+                            }
+                            PathSegment::Member(key) => (
+                                OriginEdgeKind::ProjectMember,
+                                OriginMeta::ProjectedMember {
+                                    key: key.clone(),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                            ),
+                        };
+                        self.graph().record_origin_edge(
+                            length,
+                            edge_kind,
+                            Arc::from(vec![current].into_boxed_slice()),
+                            meta,
+                            Arc::clone(self.fence),
+                        );
+                        current = length;
+                        index += 1;
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
+                    }
+                    if self.classify_numeric_index_segment(segment).is_none()
+                        && self.segment_string_name(segment).is_some()
+                    {
+                        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len());
+                        for element in elements.iter() {
+                            let value = if element.rest {
+                                match self.rest_element_item_type(element.value) {
+                                    Some(item) => item,
+                                    None => {
+                                        results.push(self.opaque_miss());
+                                        return;
+                                    }
+                                }
+                            } else {
+                                element.value
+                            };
+                            self.push_union_flattened(&mut arms, value);
+                        }
+                        let element = self
+                            .dispatch
+                            .intern_normalized_union_or_intersection(&arms, true);
+                        match self.array_apparent_surface(element, readonly) {
+                            Some(surface) => {
+                                current = surface;
+                                continue;
+                            }
+                            None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     let projected = self
                         .classify_numeric_index_segment(segment)
                         .and_then(|demand| {
@@ -3339,12 +3557,28 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                     }
                 }
-                SemanticNodeData::Array { element, .. } => {
+                SemanticNodeData::Array { element, readonly } => {
                     // Array indexed access: any numeric demand — a
                     // literal position or the broad `number` key —
-                    // projects the element type.
+                    // projects the element type; any other key is a
+                    // member of the apparent `Array` (`length`, `map`).
                     let element = *element;
+                    let readonly = *readonly;
                     drop(data);
+                    if self.classify_numeric_index_segment(segment).is_none()
+                        && self.segment_string_name(segment).is_some()
+                    {
+                        match self.array_apparent_surface(element, readonly) {
+                            Some(surface) => {
+                                current = surface;
+                                continue;
+                            }
+                            None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     match self.classify_numeric_index_segment(segment) {
                         Some(_) => {
                             let meta = match segment {
@@ -3422,6 +3656,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                     }
                 }
+                // A primitive's members are its apparent wrapper's
+                // (`string['length']` is `String['length']`, `number`),
+                // read with the same segment.
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                    if primitive_wrapper_name(&data).is_some() =>
+                {
+                    let wrapper = primitive_wrapper_name(&data).expect("guarded above");
+                    drop(data);
+                    match self.global_wrapper_read(wrapper, &[]) {
+                        Some(surface) if surface != current => {
+                            current = surface;
+                            continue;
+                        }
+                        _ => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
@@ -3443,6 +3698,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     results.push(self.opaque_miss());
                     return;
                 }
+            }
+        }
+        // A projected member that is its declaration's self-reference
+        // (`Chain['next']`) is the application it records, under every
+        // mode — the terminal rules below then treat it like any other
+        // declaration carrier.
+        if self.original_path_non_empty {
+            if let Some(carrier) = self.dispatch.self_reference_declaration(current) {
+                current = carrier;
             }
         }
         // For `mode: Expanded` with empty path, expand terminal
@@ -4635,7 +4899,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// Whether a projected path's terminal has a one-level surface to
     /// synthesise (see [`ProjectedTerminalSurface`]). Syntactic over the
     /// terminal's own node: a transparent `Alias` classifies its target,
-    /// a union classifies from its arms, and nothing is dispatched.
+    /// a union or an intersection classifies from its arms (`1 & (1 | 2)`
+    /// and `string & { tag: 1 }` are types of their own, not the members
+    /// of a surface), and nothing is dispatched.
     fn projected_terminal_surface(&self, node: SemanticNodeId) -> ProjectedTerminalSurface {
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack = vec![node];
@@ -4649,11 +4915,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             };
             match &*data {
                 SemanticNodeData::Object(_)
-                | SemanticNodeData::Intersection(_)
                 | SemanticNodeData::MergedDecl { .. }
                 | SemanticNodeData::ObjectSpreadProgram(_) => {}
                 SemanticNodeData::Alias(target) => stack.push(*target),
                 SemanticNodeData::Union(arms) => stack.extend(arms.iter().copied()),
+                SemanticNodeData::Intersection(arms) => stack.extend(arms.iter().copied()),
                 SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::InstantiationRef { .. }
                 | SemanticNodeData::BareRef(_)

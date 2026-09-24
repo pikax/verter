@@ -1047,6 +1047,7 @@ mod carrier_descent_tests {
         let target: Arc<str> = Arc::from("SelfRef");
         let rec = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::clone(&target),
+            args: std::sync::Arc::from([]),
         }));
 
         for carrier in carriers_wrapping(&graph, rec) {
@@ -1062,6 +1063,7 @@ mod carrier_descent_tests {
         // the actual name, not a blanket true).
         let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("OtherName"),
+            args: std::sync::Arc::from([]),
         }));
         for carrier in carriers_wrapping(&graph, other) {
             let mut reasons = Vec::new();

@@ -526,40 +526,10 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
     /// resolved global population of the request's project. An absent global
     /// (`noLib`) is the checker's empty apparent type: a complete negative.
     fn apparent(&mut self, name: &str, args: &[SemanticNodeId]) -> Found {
-        let d = self.dispatch();
-        let Some(canonical) = crate::request_context::current_request_canonical()
-            .or_else(|| d.lexical_demand_scope.borrow().last().cloned())
-        else {
-            return unsettled();
-        };
-        let Some(project) = d.project_stable_key_for_canonical(canonical.as_ref()) else {
-            return unsettled();
-        };
-        let Some(hit) = d.ctx.lookup_ambient_symbol(project, name) else {
-            return Ok(Vec::new());
-        };
-        d.ctx
-            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
-        let slot = d.type_slot_for(
-            Arc::clone(&hit.virtual_id),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
-        );
-        let surface = d.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(args.to_vec().into_boxed_slice()),
-                d.instantiate_context_for(
-                    hit.virtual_id.as_ref(),
-                    ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
-                    ),
-                ),
-            ),
-        ));
-        match surface.value {
-            crate::semantic_query::QueryResult::Value(surface) => self.discover(surface),
-            _ => unsettled(),
+        match self.dispatch().global_wrapper_surface(name, args) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
+            super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
+            super::apparent_type::GlobalWrapper::Unsettled => unsettled(),
         }
     }
 
@@ -1373,6 +1343,10 @@ pub(super) enum PositionalArgument {
         /// non-union is its own single arm, and an all-nullish type is the
         /// empty list.
         non_nullish_arms: Vec<SemanticNodeId>,
+        /// The position is optional and its type therefore includes
+        /// `undefined` beside `ty` (an optional parameter under
+        /// `strictNullChecks`).
+        includes_undefined: bool,
     },
 }
 
@@ -1380,8 +1354,9 @@ pub(super) enum PositionalArgument {
 /// any semantics is dispatched over them.
 struct RawPositional {
     receiver: Option<SemanticNodeId>,
-    /// `None` when the candidate declares nothing at the position.
-    argument: Option<SemanticNodeId>,
+    /// `None` when the candidate declares nothing at the position; else the
+    /// declared type and whether its optionality adds `undefined`.
+    argument: Option<(SemanticNodeId, bool)>,
 }
 
 /// One shared candidate's positional read.
@@ -1696,9 +1671,10 @@ impl ProjectSemanticDispatch<'_> {
                 receiver: raw.receiver,
                 argument: match raw.argument {
                     None => PositionalArgument::Absent,
-                    Some(ty) => PositionalArgument::Type {
+                    Some((ty, includes_undefined)) => PositionalArgument::Type {
                         ty,
                         non_nullish_arms: self.non_nullish_arms(ty),
+                        includes_undefined,
                     },
                 },
             })
@@ -1766,7 +1742,7 @@ impl ProjectSemanticDispatch<'_> {
                 let argument = match positional.type_at(position) {
                     TypeAt::Absent => None,
                     TypeAt::One(slot) => match view.type_token_node(slot.ty) {
-                        Ok(node) => Some(node),
+                        Ok(node) => Some((node, slot.optionality.includes_undefined)),
                         Err(_) => {
                             failed = true;
                             break;

@@ -892,7 +892,14 @@ fn comparable_shared_members_use_one_relation_check() {
 /// `DoesNotHold` (a disjointness proof from an unread operand, which the
 /// flow consumer publishes as a complete warm `never`). The exact verdict —
 /// `Undecided` — also pins the admission consequence below: zero candidates,
-/// so an unread operand can never warm-serve either answer.
+/// so an unread operand can never warm-serve either answer. A `keyof` over
+/// an import that does not resolve is such an operand.
+///
+/// A `keyof` whose keys settle IS read: it is that key set. Measured on
+/// TypeScript 7.0.2 (`tsc --noEmit --strict`): over `x: keyof SingleKey`
+/// (`{ a: number }`) and `x: keyof Partial<SingleKey>`, `x === b` with
+/// `b: "b"` is TS2367 quoting `'"a"' and '"b"'` while `x === a` is
+/// accepted.
 ///
 /// An indexed access over a type that is not generic IS read: it is the
 /// property type (`Holder["kind"]` is `"a"`), comparable with `"a"` and
@@ -915,7 +922,8 @@ fn comparable_treats_unreduced_operands_as_undecided() {
          type MappedHolder = { [K in keyof Holder]: Holder[K] };\n\
          type SingleKey = { a: number };\n\
          type LiteralA = \"a\";\n\
-         type LiteralB = \"b\";",
+         type LiteralB = \"b\";\n\
+         import type { Missing } from \"./missing-keyof-module\";",
     );
     let node = |name: &str| {
         dispatch_resolve_type_decl_for_tests(&host, "/relation-authority/deferred.ts", name)
@@ -944,8 +952,8 @@ fn comparable_treats_unreduced_operands_as_undecided() {
     };
 
     for (subject, boundary) in [(
-        lower(&TypeExpr::KeyOf(Arc::new(type_ref("SingleKey")))),
-        "a keyof operator",
+        lower(&TypeExpr::KeyOf(Arc::new(type_ref("Missing")))),
+        "a keyof over an unresolved import",
     )] {
         for other in ["LiteralA", "LiteralB"] {
             assert_eq!(
@@ -958,6 +966,33 @@ fn comparable_treats_unreduced_operands_as_undecided() {
                 RelateVerdictForTests::Undecided,
                 "{boundary} is unread content: the oracle reports NO fact, never a \
                  permissive positive and never a proof",
+            );
+        }
+    }
+
+    // A `keyof` whose keys settle is that key set.
+    let partial_single_key = TypeExpr::Ref {
+        name: Arc::from("Partial"),
+        type_arguments: Arc::from(vec![type_ref("SingleKey")].into_boxed_slice()),
+    };
+    for (operand, subject) in [
+        ("keyof SingleKey", type_ref("SingleKey")),
+        ("keyof Partial<SingleKey>", partial_single_key),
+    ] {
+        let keys = lower(&TypeExpr::KeyOf(Arc::new(subject)));
+        for (other, verdict) in [
+            ("LiteralA", RelateVerdictForTests::Holds),
+            ("LiteralB", RelateVerdictForTests::DoesNotHold),
+        ] {
+            assert_eq!(
+                dispatch_execute_relate_verdict_for_tests(
+                    &host,
+                    keys,
+                    node(other),
+                    RelationKind::Comparable,
+                ),
+                verdict,
+                "`{operand}` compared with {other}",
             );
         }
     }
@@ -985,7 +1020,7 @@ fn comparable_treats_unreduced_operands_as_undecided() {
 
     // The admission consequence: an undecided comparability verdict admits
     // no candidate, so it cannot be warm-served as either answer.
-    let subject = lower(&TypeExpr::KeyOf(Arc::new(type_ref("SingleKey"))));
+    let subject = lower(&TypeExpr::KeyOf(Arc::new(type_ref("Missing"))));
     let key =
         relate_query_key_for_tests(&host, subject, node("LiteralB"), RelationKind::Comparable);
     assert_eq!(
