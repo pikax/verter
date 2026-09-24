@@ -62,6 +62,7 @@ impl<T: Clone + Eq + Hash, Id: Copy + From<u32>> InternTable<T, Id> {
 
     /// The value at `ordinal`; `None` for an ordinal never handed out and
     /// for a released one.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn get(&self, ordinal: u32) -> Option<&T> {
         self.by_ordinal.get(&ordinal)
     }

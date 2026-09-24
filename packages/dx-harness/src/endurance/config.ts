@@ -92,26 +92,6 @@ function readRoute(env: NodeJS.ProcessEnv): EnduranceProviderRoute {
 }
 
 /** Resolve the endurance configuration from the environment (defaults are CI-sized). */
-/** `<cycle>:<path>[:<settleMs>]`; a Windows drive letter in `path` is kept whole. */
-function readCheckpointHook(raw: string | undefined): EnduranceConfig["churnCheckpointHook"] {
-  if (!raw || raw.length === 0) return null;
-  const first = raw.indexOf(":");
-  if (first <= 0)
-    throw new Error(`VERTER_ENDURANCE_CHURN_CHECKPOINT_HOOK wants <cycle>:<path>, got ${raw}`);
-  const cycle = Number(raw.slice(0, first));
-  let rest = raw.slice(first + 1);
-  let settleMs = 8000;
-  const tail = /:(\d+)$/.exec(rest);
-  if (tail && rest.length - tail[0].length > 1) {
-    settleMs = Number(tail[1]);
-    rest = rest.slice(0, rest.length - tail[0].length);
-  }
-  if (!Number.isInteger(cycle) || cycle < 0 || rest.length === 0) {
-    throw new Error(`VERTER_ENDURANCE_CHURN_CHECKPOINT_HOOK wants <cycle>:<path>, got ${raw}`);
-  }
-  return { cycle, path: rest, settleMs };
-}
-
 export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): EnduranceConfig {
   const route = readRoute(env);
   const corpusDirRaw = env.VERTER_ENDURANCE_CORPUS_DIR;
@@ -188,7 +168,6 @@ export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): Endur
       4,
       { min: 0 },
     ),
-    churnCheckpointHook: readCheckpointHook(env.VERTER_ENDURANCE_CHURN_CHECKPOINT_HOOK),
     receiptPath:
       env.VERTER_ENDURANCE_RECEIPT && env.VERTER_ENDURANCE_RECEIPT.length > 0
         ? env.VERTER_ENDURANCE_RECEIPT

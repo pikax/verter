@@ -38,7 +38,6 @@
  * real provider-backed request, and the lane ends with a strict convergence
  * probe proving the session still answers correctly after the churn.
  */
-import { writeFileSync } from "node:fs";
 import { createWarnLineDrainer, GET_STATISTICS_METHOD } from "../../core/startupGate.js";
 import {
   extractQuiescenceCounters,
@@ -1432,13 +1431,6 @@ export async function runChurnScenario(
         wireBytes: context.session.client.wireBytes,
       };
       checkpoints.push(checkpoint);
-      const hook = context.config.churnCheckpointHook;
-      if (hook !== null && hook.cycle === cyclesCompleted) {
-        // A profiler flush at a quiesced checkpoint: the profile then
-        // describes the reading just taken, not a cycle in flight.
-        writeFileSync(hook.path, `${cyclesCompleted}\n`);
-        await new Promise((resolve) => setTimeout(resolve, hook.settleMs));
-      }
       return checkpoint;
     };
 
