@@ -1741,6 +1741,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             mapper.optionality.hash(hasher);
             mapper.readonly.hash(hasher);
             mapper.kind.hash(hasher);
+            mapper.over_type_variable.hash(hasher);
             mapper.name_remap.is_some().hash(hasher);
         }
         carrier @ (D::TypeOf(_) | D::BareRef(_) | D::ImportType(_)) => {

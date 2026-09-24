@@ -20,9 +20,10 @@ mod substitution;
 
 #[allow(unused_imports)]
 pub use discovery::{
-    append_signatures, heritage_signatures, intersection_signatures, publish_signature,
-    set_from_candidates, signatures_identical, union_signatures, BinderInput, DiscoveryError,
-    DiscoveryTypes, MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
+    append_signatures, heritage_signatures, intersection_signatures, merged_declaration_signatures,
+    publish_signature, resolution_order, set_from_candidates, signatures_identical,
+    union_signatures, BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput,
+    RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
 pub use lifetime::{SignatureStore, StoreError};

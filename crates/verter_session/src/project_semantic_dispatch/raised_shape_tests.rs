@@ -1140,6 +1140,7 @@ fn parity_deferred_operator_shells() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: tp,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: tp,
             key_space: keyspace,
             value_expr: value_tp,
@@ -2389,6 +2390,7 @@ fn mapped_fixture(
     graph.intern_node(SemanticNodeData::Mapped {
         source,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: source,
             key_space,
             value_expr,

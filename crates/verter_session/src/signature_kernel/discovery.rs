@@ -20,8 +20,8 @@ use crate::semantic_query::{
 use super::lifetime::{SignatureStore, StoreError};
 use super::positional::{PositionalMode, PositionalShape, SlotTypeFacts, TypeAt};
 use super::provenance::{
-    ArmIdentity, ConstituentSequence, MappedConstituent, OriginRelation, OverloadOrder,
-    SignatureProvenance,
+    ArmIdentity, ConstituentSequence, DeclarationGroupId, DeclarationParentId, MappedConstituent,
+    OriginRelation, OverloadOrder, SignatureProvenance,
 };
 use super::read_view::{ReadError, SemanticReadView};
 use super::records::{
@@ -1159,6 +1159,109 @@ pub fn heritage_signatures(members: &[Vec<SignatureCandidate>]) -> Vec<Signature
         return Vec::new();
     };
     own.iter().chain(bases.iter().flatten()).copied().collect()
+}
+
+/// The signatures of one symbol declared by several declarations —
+/// interface declarations merged into one, a class and an interface of the
+/// same name, a method overloaded across them. `declarations` are the
+/// per-declaration candidate lists in declaration order, and the answer is
+/// their concatenation (TypeScript's `getSignaturesOfSymbol` keeps every
+/// declaration's signatures, identical ones included), each candidate
+/// attributed to ONE declaration group — the merged symbol — and to its own
+/// declaration inside it. Call resolution orders a merged symbol's
+/// candidates by those identities ([`resolution_order`]).
+pub fn merged_declaration_signatures(
+    store: &SignatureStore,
+    declarations: &[Vec<SignatureCandidate>],
+) -> Res<Vec<SignatureCandidate>> {
+    let view = SemanticReadView::pin(store);
+    let Some(first) = declarations.iter().flatten().next() else {
+        return Ok(Vec::new());
+    };
+    // The symbol's group derives from its first signature's own group, so
+    // it is as schedule-independent as that group, and never equal to it.
+    let seed = view.provenance(first.provenance)?.declaration_group;
+    let group = DeclarationGroupId::from_raw(merged_group_of(seed));
+    let mut out = Vec::with_capacity(declarations.iter().map(Vec::len).sum());
+    for (ordinal, list) in declarations.iter().enumerate() {
+        let parent = DeclarationParentId::from_raw(ordinal as u64);
+        for &candidate in list {
+            let base = *view.provenance(candidate.provenance)?;
+            let provenance = store.intern_provenance(
+                SignatureProvenance {
+                    declaration_group: group,
+                    declaration_parent: parent,
+                    effective_overload_order: OverloadOrder {
+                        group,
+                        ordinal: base.overload_ordinal,
+                    },
+                    ..base
+                },
+                None,
+            )?;
+            out.push(store.candidate(candidate.signature, provenance)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The declaration group of a merged symbol whose first signature's group
+/// is `seed` (a fixed mix of it, distinct from it).
+fn merged_group_of(seed: DeclarationGroupId) -> u64 {
+    (seed.as_u64() ^ 0x6D65_7267_6564_5F73).rotate_left(29)
+}
+
+/// The order call resolution tries `candidates` in — TypeScript's
+/// `reorderCandidates`, as a permutation of candidate positions.
+///
+/// Consecutive candidates of one declaration group (one symbol) whose
+/// declaration changes start a new run at the front of that symbol's
+/// candidates, so a later declaration of a merged symbol is tried first
+/// while each declaration keeps its own order; a candidate of another
+/// symbol starts after everything placed so far. A candidate that declares
+/// a parameter of a literal type (`LITERAL_SPECIALIZATION`) is tried
+/// before every non-specialized one, whatever its symbol. The candidate
+/// list itself — the list conditional inference reads the LAST signature
+/// of — keeps declaration order.
+pub fn resolution_order(
+    view: &SemanticReadView,
+    candidates: &[SignatureCandidate],
+) -> Res<Vec<usize>> {
+    let mut order: Vec<usize> = Vec::with_capacity(candidates.len());
+    let mut last_group: Option<DeclarationGroupId> = None;
+    let mut last_parent: Option<DeclarationParentId> = None;
+    let mut cutoff = 0usize;
+    let mut index = 0usize;
+    let mut specialized = 0usize;
+    for (position, candidate) in candidates.iter().enumerate() {
+        let provenance = view.provenance(candidate.provenance)?;
+        let (group, parent) = (provenance.declaration_group, provenance.declaration_parent);
+        if last_group.is_none() || last_group == Some(group) {
+            if last_parent == Some(parent) {
+                index += 1;
+            } else {
+                last_parent = Some(parent);
+                index = cutoff;
+            }
+        } else {
+            cutoff = order.len();
+            index = cutoff;
+            last_parent = Some(parent);
+        }
+        last_group = Some(group);
+        let descriptor = view.descriptor(candidate.signature)?;
+        let template = view.template(descriptor.template)?;
+        let flags = view.shape(template.input_shape)?.signature_semantic_flags;
+        let splice = if flags.contains(SignatureSemanticFlags::LITERAL_SPECIALIZATION) {
+            specialized += 1;
+            cutoff += 1;
+            specialized - 1
+        } else {
+            index
+        };
+        order.insert(splice.min(order.len()), position);
+    }
+    Ok(order)
 }
 
 /// Intersection signatures for one kind. `members` are the per-member

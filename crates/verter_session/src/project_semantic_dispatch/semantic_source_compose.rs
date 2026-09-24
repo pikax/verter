@@ -744,6 +744,8 @@ impl ProjectSemanticDispatch<'_> {
                 optional: param.optional,
                 rest: param.rest,
                 span: None,
+                // A raised body slot carries no authored type syntax.
+                declared_literal: false,
             })
             .collect();
         let (return_type, return_carrier) = match &signature.return_source {

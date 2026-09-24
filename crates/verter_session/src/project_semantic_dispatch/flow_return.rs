@@ -13791,6 +13791,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     optional: param.optional,
                     rest: param.rest,
                     span: None,
+                    declared_literal: crate::semantic_query::declares_literal_type(param.ty.ty()),
                 });
                 continue;
             }
@@ -13813,6 +13814,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 optional: param.optional,
                 rest: param.rest,
                 span: None,
+                declared_literal: crate::semantic_query::declares_literal_type(param.ty.ty()),
             });
         }
         // A DECLARED return annotation wins over the body join, full stop:

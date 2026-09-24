@@ -686,9 +686,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                let mut over_type_variable = false;
                 let (source_node, key_space, base_infer_name) = match source.as_ref() {
                     TypeExpr::KeyOf(inner) => {
                         let inner_id = self.lower_locator_shape_node(inner, ctx);
+                        over_type_variable =
+                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
                         let key_space = graph.intern_node_with_scope(
                             SemanticNodeData::KeyOf { base: inner_id },
                             scope.clone(),
@@ -756,6 +759,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             readonly,
                             name_remap,
                             kind,
+                            over_type_variable,
                         },
                     },
                     scope.clone(),
@@ -1294,6 +1298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional: p.optional,
                 rest: p.rest,
                 span: p.span,
+                declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
             })
             .collect();
         let (return_type, return_carrier) = match &func.flow_return {
