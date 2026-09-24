@@ -6266,6 +6266,10 @@ fn expression_write_tree(
                     walk(arm, out);
                 }
             }
+            SliceExpr::Logical { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
             }
@@ -11294,6 +11298,187 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// The value of `left && right` (`conjunction`) or `left || right`, the
+    /// right operand already evaluated under the left's narrowing — the
+    /// checker's `checkBinaryLikeExpression`. `&&` is the left alone when
+    /// it cannot be truthy, else the definitely-falsy part of the left
+    /// (of the widened right without `strictNullChecks`) joined with the
+    /// right. `||` is the left alone when it cannot be falsy, else the
+    /// left's possibly-truthy arms, `boolean` read as `true` and without
+    /// `undefined`, joined with the right. An arm whose truthiness is not
+    /// decided keeps the join a superset and degrades.
+    fn logical_value(
+        &mut self,
+        conjunction: bool,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::TruthinessInhabitance;
+        let arms = self.enumerated_union_arms_or_self(left);
+        let mut reachable = TruthinessInhabitance::No;
+        for arm in &arms {
+            reachable = reachable.or(self.arm_truthiness_edge(*arm, !conjunction));
+        }
+        match reachable {
+            TruthinessInhabitance::No => return left,
+            TruthinessInhabitance::Yes => {}
+            TruthinessInhabitance::Undecided => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return self.union(&[left, right]);
+            }
+        }
+        let kept = if conjunction {
+            let source = if self.nullability.is_strict() {
+                left
+            } else {
+                widen_literal_node(self.dispatch, right)
+            };
+            self.definitely_falsy_part(source)
+        } else {
+            self.possibly_truthy_part(&arms)
+        };
+        match kept {
+            Some(kept) if conjunction => self.union(&[kept, right]),
+            Some(kept) => self.subtype_reduced_union(&[kept, right]),
+            None => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                self.union(&[left, right])
+            }
+        }
+    }
+
+    /// The union of `nodes` under the checker's subtype reduction
+    /// (`UnionReduction.Subtype`): an arm assignable to another, distinct
+    /// arm that is not assignable back is dropped. A relation the
+    /// authority does not decide keeps the arm and degrades.
+    fn subtype_reduced_union(&mut self, nodes: &[SemanticNodeId]) -> SemanticNodeId {
+        let mut arms: Vec<SemanticNodeId> = Vec::new();
+        for node in nodes {
+            for arm in self.enumerated_union_arms_or_self(*node) {
+                if !arms.contains(&arm) {
+                    arms.push(arm);
+                }
+            }
+        }
+        let mut undecided = false;
+        let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            let mut subsumed = false;
+            for other in &arms {
+                if other == arm {
+                    continue;
+                }
+                match (self.assignable(*arm, *other), self.assignable(*other, *arm)) {
+                    (Some(true), Some(false)) => subsumed = true,
+                    (None, _) | (Some(true), None) => undecided = true,
+                    _ => {}
+                }
+            }
+            if !subsumed {
+                kept.push(*arm);
+            }
+        }
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::NominalRelation,
+            ));
+        }
+        self.union(&kept)
+    }
+
+    /// The checker's `extractDefinitelyFalsyTypes`: each arm's value that
+    /// is falsy for certain — `""`, `0`, `0n` and `false` for `string`,
+    /// `number`, `bigint` and `boolean`, a falsy literal, `null`,
+    /// `undefined`, `void`, `any` and `unknown` as themselves — and
+    /// nothing for an arm that cannot be falsy. `None` when an arm can be
+    /// falsy but its falsy value is not read here.
+    fn definitely_falsy_part(&mut self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use crate::semantic_query::{LiteralValue, TruthinessInhabitance};
+        let graph = self.dispatch.graph();
+        let mut parts: Vec<SemanticNodeId> = Vec::new();
+        for arm in self.enumerated_union_arms_or_self(node) {
+            let literal =
+                |value: LiteralValue| Some(graph.intern_node(SemanticNodeData::Literal(value)));
+            let part = match graph.node_data(arm).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
+                    literal(LiteralValue::String(String::new()))
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {
+                    literal(LiteralValue::Number(0.0))
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => {
+                    literal(LiteralValue::BigInt("0".to_owned()))
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => {
+                    literal(LiteralValue::Boolean(false))
+                }
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Null
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Void
+                    | PrimitiveKind::Any
+                    | PrimitiveKind::Unknown,
+                )) => Some(arm),
+                Some(SemanticNodeData::Literal(value)) => match value {
+                    LiteralValue::String(text) if text.is_empty() => Some(arm),
+                    LiteralValue::Number(number) if *number == 0.0 => Some(arm),
+                    LiteralValue::BigInt(digits) if digits.trim_start_matches('0').is_empty() => {
+                        Some(arm)
+                    }
+                    LiteralValue::Boolean(false) => Some(arm),
+                    _ => None,
+                },
+                _ => match self.arm_truthiness_edge(arm, true) {
+                    TruthinessInhabitance::No => None,
+                    TruthinessInhabitance::Yes | TruthinessInhabitance::Undecided => return None,
+                },
+            };
+            parts.extend(part);
+        }
+        Some(self.union(&parts))
+    }
+
+    /// The checker's `getNonUndefinedType(removeDefinitelyFalsyTypes(…))`
+    /// over `arms`: the arms that can be truthy, `boolean` read as `true`.
+    /// `None` when an arm's truthiness is not decided.
+    fn possibly_truthy_part(&mut self, arms: &[SemanticNodeId]) -> Option<SemanticNodeId> {
+        use crate::semantic_query::TruthinessInhabitance;
+        let graph = self.dispatch.graph();
+        let mut kept: Vec<SemanticNodeId> = Vec::new();
+        for arm in arms {
+            match graph.node_data(*arm).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => {
+                    kept.push(graph.intern_node(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Boolean(true),
+                    )));
+                    continue;
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => continue,
+                // `unknown` is `{} | null | undefined` to the checker, whose
+                // possibly-truthy part is `{}` under `strictNullChecks`.
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                    if self.nullability.is_strict() =>
+                {
+                    kept.push(
+                        self.unknown_without(&[PrimitiveKind::Null, PrimitiveKind::Undefined]),
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+            match self.arm_truthiness_edge(*arm, false) {
+                TruthinessInhabitance::Yes => kept.push(*arm),
+                TruthinessInhabitance::No => {}
+                TruthinessInhabitance::Undecided => return None,
+            }
+        }
+        Some(self.union(&kept))
+    }
+
     fn arm_truthiness_edge(
         &mut self,
         arm: SemanticNodeId,
@@ -13234,37 +13419,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.assignable(source, target)
     }
 
-    /// Whether `node` is the global `Object` or `Function` interface: the
-    /// declaration the project's lib environment gives that name, or the
-    /// builtin `Function` carrier.
-    fn is_global_object_or_function(&self, node: SemanticNodeId) -> bool {
+    /// Whether `node` is the global `Object` or `Function` interface.
+    /// `Some(true)` for the builtin `Function` carrier; `None` for a name
+    /// nothing resolved and for any other type named `Object` or
+    /// `Function`, whose global identity is not read here; `Some(false)`
+    /// otherwise.
+    fn is_global_object_or_function(&self, node: SemanticNodeId) -> Option<bool> {
         let identity = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::BareRef(_)) => return None,
             Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
             Some(SemanticNodeData::InstantiationRef { base, args }) if args.is_empty() => {
                 base.clone()
             }
-            _ => return false,
+            _ => return Some(false),
         };
-        let name = identity.decl_name.as_ref();
-        if !matches!(name, "Object" | "Function") {
-            return false;
-        }
         if self.dispatch.is_function_global_identity(&identity) {
-            return true;
+            return Some(true);
         }
-        let Some(project) = self
-            .dispatch
-            .project_stable_key_for_canonical(self.canonical)
-        else {
-            return false;
-        };
-        let Some(hit) = self.dispatch.ctx.lookup_ambient_symbol(project, name) else {
-            return false;
-        };
-        self.dispatch
-            .ctx
-            .record_ambient_dependency(self.canonical, hit.virtual_id.as_ref());
-        hit.virtual_id == identity.canonical_id
+        (!matches!(identity.decl_name.as_ref(), "Object" | "Function")).then_some(false)
     }
 
     /// The narrow of a subject with a type-parameter arm to `candidate`
@@ -13477,16 +13649,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if negated {
                 return (GuardNarrowing::Unchanged, Consumption::Decided);
             }
-            // A target name nothing resolved could be the global `Object`
-            // or `Function`: the narrow is not decided.
-            if matches!(
-                self.dispatch.graph().node_data(target_node).as_deref(),
-                Some(SemanticNodeData::BareRef(_))
-            ) {
-                return (GuardNarrowing::Unchanged, Consumption::Undecided);
-            }
-            if self.is_global_object_or_function(target_node) {
-                return (GuardNarrowing::Unchanged, Consumption::Decided);
+            // A target not read as, or as other than, the global `Object`
+            // or `Function` leaves the narrow undecided.
+            match self.is_global_object_or_function(target_node) {
+                Some(true) => return (GuardNarrowing::Unchanged, Consumption::Decided),
+                Some(false) => {}
+                None => return (GuardNarrowing::Unchanged, Consumption::Undecided),
             }
             return (
                 GuardNarrowing::Narrowed(subject.clone(), target_node),
@@ -13619,7 +13787,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // declaration of the name in the program merges into it, which the
         // served signature set does not carry. A module's exported function
         // is served with the overloads its augmenting `declare module`
-        // blocks add.
+        // blocks add, and a lib environment's declaration is read only when
+        // no program file declares the name.
         if occurrence.is_some_and(|occurrence| {
             let function = &occurrence.function;
             matches!(
@@ -13628,6 +13797,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             ) && function.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value
                 && function.anchor.canonical_id.as_ref() != self.canonical
                 && !self.declared_in_a_module(function.anchor.canonical_id.as_ref())
+                && !self
+                    .dispatch
+                    .is_lib_environment_canonical(function.anchor.canonical_id.as_ref())
         }) {
             return undecided(self);
         }
@@ -17015,6 +17187,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Hold => Positional::Hold,
                     Positional::Unmodeled => Positional::Unmodeled,
                 }
+            }
+            crate::flow_slice_content::SliceExpr::Logical {
+                conjunction,
+                left,
+                right,
+                guard,
+            } => {
+                let holds_before = self.holds.len();
+                let left_outcome = self.eval_expr(left);
+                let left_value = self.settle_composite_part(left_outcome, holds_before);
+                let holds_before = self.holds.len();
+                let mark = self.narrowing_snapshot();
+                self.apply_guard_scoped(guard, *conjunction);
+                let right_outcome = self.eval_expr(right);
+                self.restore_narrowings(mark);
+                let right_value = self.settle_composite_part(right_outcome, holds_before);
+                Positional::Value(self.logical_value(*conjunction, left_value, right_value))
             }
             crate::flow_slice_content::SliceExpr::Gap(gap) => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(*gap));

@@ -1460,3 +1460,243 @@ fn a_type_parameter_narrows_through_its_constraint() {
         }
     }
 }
+
+const LOGICAL_VALUES: &str = r#"
+export function l1(x: boolean) { return x && "a"; }
+export function l2(x: string) { return x && 1; }
+export function l3(x: string | undefined) { return x || "d"; }
+export function l4(x: number) { return x || "z"; }
+export function l5(x: boolean) { const v = x && "a"; return v; }
+export function l6(x: boolean) { return { v: x && "a" }; }
+export function l8(x: null) { return x && 1; }
+export function l9(x: { a: 1 }) { return x || 2; }
+export function l10(x: boolean, y: boolean) { return x && y; }
+export function l11(x: 0 | 1) { return x && "a"; }
+export function l12(x: string | number) { return typeof x === "string" && x !== ""; }
+export function l13(x: any) { return x && 1; }
+export function l14(x: unknown) { return x || 1; }
+export function l15(x: string | undefined) { let v = x || "d"; return v; }
+export function l17(x: {} | null) { return x || 1; }
+export function l18(x: string | number) { return typeof x === "string" || x > 0; }
+"#;
+
+/// A `&&` / `||` in value position is typed as the checker types it
+/// (`checkBinaryLikeExpression`): the right operand reads under the left's
+/// truthy (`&&`) or falsy (`||`) narrowing; `&&` joins the left's
+/// definitely-falsy part — of the widened right without
+/// `strictNullChecks` — with the right, or is the left alone when it
+/// cannot be truthy; `||` joins the left's possibly-truthy part
+/// (`boolean` as `true`, `unknown` as `{}`, no `undefined`) with the
+/// right under subtype reduction, or is the left alone when it cannot be
+/// falsy. A mutable slot widens the operands' fresh literals, never the
+/// falsy part. Measured on 7.0.2 (the `.d.ts` line, strict and without
+/// `strictNullChecks`).
+#[test]
+fn a_logical_expression_value_is_typed_like_the_checker() {
+    let rows = [
+        ("l1", "\"a\" | false", "\"\" | \"a\""),
+        ("l2", "\"\" | 1", "0 | 1"),
+        ("l3", "string", "string"),
+        ("l4", "number | \"z\"", "number | \"z\""),
+        ("l5", "\"a\" | false", "\"\" | \"a\""),
+        ("l6", "{ v: string | false; }", "{ v: string; }"),
+        ("l8", "null", "null"),
+        ("l9", "{ a: 1; }", "2 | { a: 1; }"),
+        ("l10", "boolean", "boolean"),
+        ("l11", "\"a\" | 0", "\"\" | \"a\""),
+        ("l12", "boolean", "boolean"),
+        ("l13", "any", "0 | 1"),
+        ("l14", "{}", "unknown"),
+        ("l15", "string", "string"),
+        ("l17", "{}", "{}"),
+        ("l18", "boolean", "boolean"),
+    ];
+    check_rows(LOGICAL_VALUES, &rows);
+}
+
+/// The lib environment the logical-predicate rows register: the pinned
+/// lib's own declarations of the globals they read (`lib.es5.d.ts` and
+/// `lib.es2015.core.d.ts`), each narrowed to the members read.
+const LOGICAL_LIB: &str = r#"
+interface Array<T> { length: number; }
+interface ArrayConstructor { isArray(arg: any): arg is any[]; }
+declare var Array: ArrayConstructor;
+interface NumberConstructor { isFinite(number: unknown): boolean; }
+declare var Number: NumberConstructor;
+declare function isNaN(number: number): boolean;
+interface Math { abs(x: number): number; }
+declare var Math: Math;
+interface JSON { parse(text: string, reviver?: (this: any, key: string, value: any) => any): any; }
+declare var JSON: JSON;
+"#;
+
+const LOGICAL_PREDICATES: &str = r#"
+export function a07(x: string | number | boolean[]) { return typeof x === "string" || Array.isArray(x); }
+export function a10(x: unknown) { return typeof x === "number" && Number.isFinite(x); }
+export function a11(x: string | number) { return typeof x === "number" && !isNaN(x); }
+export function a12(x: string | number[]) { return Array.isArray(x) && x.length > 0; }
+export function a14(x: string | number) { return typeof x === "string" && JSON.parse(x) !== null; }
+export function a15(x: string | number) { return typeof x === "number" && Math.abs(x) > 1; }
+"#;
+
+/// A returned `&&` / `||` that calls a lib global (`Array.isArray`,
+/// `Number.isFinite`, the global `isNaN`, `Math.abs`, `JSON.parse`) is a
+/// `boolean` value, so the checker infers the predicate its test
+/// establishes, or none: only `Array.isArray`'s `arg is any[]` narrows,
+/// and a call inside a comparison is off the narrowing spine. The lib's
+/// own declaration is a global's only one when no program file declares
+/// it. Measured on 7.0.2, identically without `strictNullChecks`: `a07`
+/// is `(x: string | number | boolean[]) => x is string | boolean[]`, the
+/// rest return `boolean` with no predicate.
+#[test]
+fn a_returned_logical_test_over_lib_calls_infers_like_the_checker() {
+    let rows = [
+        (
+            "a07",
+            "(x: string | number | boolean[]) => x is string | boolean[]",
+        ),
+        ("a10", "(x: unknown) => boolean"),
+        ("a11", "(x: string | number) => boolean"),
+        ("a12", "(x: string | number[]) => boolean"),
+        ("a14", "(x: string | number) => boolean"),
+        ("a15", "(x: string | number) => boolean"),
+    ];
+    let mut source = String::from(LOGICAL_PREDICATES);
+    for (name, _) in &rows {
+        source.push_str(&format!(
+            "export function sig_{name}() {{ return {name}; }}\n"
+        ));
+    }
+    let host =
+        super::signature_predicate_inference_tests::host_with_lib_source(&source, LOGICAL_LIB);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (name, printed) in rows {
+            super::signature_predicate_inference_tests::assert_complete(&host, root, name);
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
+            assert_predicate(&host, root, &format!("sig_{name}"), printed);
+        }
+    }
+}
+
+const ENTERED_CALLS: &str = r#"
+declare function assertString(x: unknown): asserts x is string;
+declare function g(v: unknown): void;
+export function n1(x: string | number) { g(assertString(x)); return x; }
+export function n2(x: string | number) { const y = assertString(x); return x; }
+export function n3(x: string | number) { const y = [assertString(x)]; return { y, x }; }
+export function n4(x: string | number) { void assertString(x); return x; }
+export function n5(x: string | number) { `${assertString(x)}`; return x; }
+export function n6(x: string | number) { const y = (0, assertString(x)); return { y, x }; }
+export function n7(x: string | number) { g((0, assertString(x))); return x; }
+"#;
+
+/// The checker enters a call into control flow — where an `asserts`
+/// callee narrows what follows — only when it is an expression
+/// statement's own call or a comma operator's operand
+/// (`maybeBindExpressionFlowIfCall`). Measured on 7.0.2, identically
+/// without `strictNullChecks`: an argument (`n1`), an initializer (`n2`),
+/// an array element (`n3`), a `void` operand (`n4`) and a template
+/// interpolation (`n5`) leave `x` as `string | number`, so each answer is
+/// complete; a comma operand narrows `x` to `string` (`n6`, `n7`), which
+/// the flow lane does not apply, so each degrades.
+#[test]
+fn only_an_entered_call_can_assert() {
+    let rows = [
+        ("n1", "string | number", "string | number"),
+        ("n2", "string | number", "string | number"),
+        (
+            "n3",
+            "{ y: void[]; x: string | number; }",
+            "{ y: void[]; x: string | number; }",
+        ),
+        ("n4", "string | number", "string | number"),
+        ("n5", "string | number", "string | number"),
+    ];
+    check_rows(ENTERED_CALLS, &rows);
+    let host = host_with(ENTERED_CALLS);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for function in ["n6", "n7"] {
+            super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
+        }
+    }
+}
+
+const EMPTY_OBJECT_TARGETS: &str = r#"
+export function e1() { const v: 1 extends {} ? 1 : 0 = null as any; return v; }
+export function e2() { const v: "a" extends {} ? 1 : 0 = null as any; return v; }
+export function e3() { const v: number extends {} ? 1 : 0 = null as any; return v; }
+export function e4() { const v: null extends {} ? 1 : 0 = null as any; return v; }
+export function e5() { const v: number[] extends {} ? 1 : 0 = null as any; return v; }
+export function e6() { const v: [1] extends {} ? 1 : 0 = null as any; return v; }
+export function e7() { const v: (() => void) extends {} ? 1 : 0 = null as any; return v; }
+export function e8() { const v: undefined extends {} ? 1 : 0 = null as any; return v; }
+export function z5(x: unknown) { return x === null || Array.isArray(x); }
+export function z6(x: unknown) { if (x === null || Array.isArray(x)) { return x; } throw 0; }
+export function sig_z5() { return z5; }
+"#;
+
+/// Every value but `null`, `undefined` and `void` is assignable to the
+/// empty object type `{}` — a primitive or literal through its empty
+/// apparent surface, an array, a tuple or a function because it is an
+/// object — so `unknown` narrowed past `null` (`{} | undefined`) narrows
+/// to `any[]` under `Array.isArray`, the `{}` arm taking the narrower
+/// target (`getNarrowedType`). Measured on 7.0.2: `e1`–`e3` and `e5`–`e7`
+/// are `1`; `e4` and `e8` are `0` (`1` without `strictNullChecks`); `z5`
+/// is `(x: unknown) => x is any[] | null` and `z6` `any[] | null`
+/// (`boolean` and `unknown` without `strictNullChecks`, where `x === null`
+/// narrows nothing).
+#[test]
+fn every_non_nullish_value_is_assignable_to_the_empty_object_type() {
+    let rows = [
+        ("e1", "1", "1"),
+        ("e2", "1", "1"),
+        ("e3", "1", "1"),
+        ("e4", "0", "1"),
+        ("e5", "1", "1"),
+        ("e6", "1", "1"),
+        ("e7", "1", "1"),
+        ("e8", "0", "1"),
+        ("z6", "any[] | null", "unknown"),
+    ];
+    let host = super::signature_predicate_inference_tests::host_with_lib(EMPTY_OBJECT_TARGETS);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, strict, loose) in rows {
+            let printed = if root == STRICT_ROOT { strict } else { loose };
+            assert_prints(&host, root, function, printed);
+        }
+    }
+    for (root, printed) in [
+        (STRICT_ROOT, "(x: unknown) => x is any[] | null"),
+        (LOOSE_ROOT, "(x: unknown) => boolean"),
+    ] {
+        assert_prints(&host, root, "sig_z5", printed);
+        assert_predicate(&host, root, "sig_z5", printed);
+    }
+}
+
+const OFF_SPINE_CALLS: &str = r#"
+function touch() {}
+export function s1(x: string | number) { if (typeof x === "number" && Math.abs(x) > 1) { return x; } throw 0; }
+export function s2(x: string | number) { if (typeof x === "string" && JSON.parse(x) !== null) { return x; } throw 0; }
+export function s3(x: "a" | "b") { if ((touch(), x) === "a") { return x; } throw 0; }
+"#;
+
+/// A call inside a comparison operand of an `if` test is off the narrowing
+/// spine: its predicate narrows nothing, and it is never entered into
+/// control flow, so the test narrows exactly as its spine does. Measured
+/// on 7.0.2, identically without `strictNullChecks`: `s1` is `number`,
+/// `s2` `string`. A comparison whose reference sits behind a comma
+/// sequence narrows that reference in the checker (`s3` is `"a"`), which
+/// this lane does not carry through the sequence: it degrades.
+#[test]
+fn a_call_off_the_narrowing_spine_narrows_nothing() {
+    let host = super::signature_predicate_inference_tests::host_with_lib_source(
+        OFF_SPINE_CALLS,
+        LOGICAL_LIB,
+    );
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        assert_prints(&host, root, "s1", "number");
+        assert_prints(&host, root, "s2", "string");
+        super::signature_predicate_inference_tests::assert_degrades(&host, root, "s3");
+    }
+}

@@ -7698,6 +7698,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(identity)
     }
 
+    /// Whether `canonical` is a file of the project's lib environment (an
+    /// automatic lib's virtual id). A free name resolves there only when no
+    /// program file declares it (the `typeof` builder's global root reads
+    /// the program first), so a lib declaration reached that way is the
+    /// name's only one.
+    pub(super) fn is_lib_environment_canonical(&self, canonical: &str) -> bool {
+        crate::global_contributors::is_automatic_lib_canonical(canonical)
+    }
+
     /// Whether `identity` is the builtin-sentinel `Function` carrier the
     /// lowering fast path interns for an unshadowed global `Function`
     /// reference.

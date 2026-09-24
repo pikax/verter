@@ -7125,6 +7125,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
 
+        // ── A non-nullable primitive against an EMPTY object type (`{}`):
+        //    every such value has the empty apparent surface, so it
+        //    relates in every relation (`string` is assignable to `{}`
+        //    and below it in the strict subtype relation). ─────────────
+        if let (
+            SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_),
+            SemanticNodeData::Object(t_surf),
+        ) = (&*source_data, &*target_data)
+        {
+            if t_surf.closed().is_empty()
+                && !matches!(
+                    &*source_data,
+                    SemanticNodeData::Primitive(
+                        PrimitiveKind::Null
+                            | PrimitiveKind::Undefined
+                            | PrimitiveKind::Void
+                            | PrimitiveKind::Unknown
+                    )
+                )
+            {
+                drop(source_data);
+                drop(target_data);
+                results.push(assignable(bindings));
+                return;
+            }
+        }
+
+        // ── An array, a tuple or a bare signature against an EMPTY object
+        //    type (`{}`): every such value is an object, and the empty
+        //    surface asks for no member, so it relates in every relation
+        //    (`any[]` is assignable to `{}` and below it in the strict
+        //    subtype relation). ─────────────────────────────────────────
+        if let (
+            SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Signature { .. },
+            SemanticNodeData::Object(t_surf),
+        ) = (&*source_data, &*target_data)
+        {
+            if t_surf.closed().is_empty() {
+                drop(source_data);
+                drop(target_data);
+                results.push(assignable(bindings));
+                return;
+            }
+        }
+
         // Different concrete kinds → NotAssignable.
         results.push(RelationResult::NotAssignable);
     }

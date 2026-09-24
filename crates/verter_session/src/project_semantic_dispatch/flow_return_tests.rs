@@ -8432,6 +8432,52 @@ fn assert_object_read_gaps_unwarmed(
     );
 }
 
+/// `name`'s read of `x` (the whole return, or its object's `x` member when
+/// `member` is set) keeps the declared `string | number` exactly, and the
+/// answer is complete: a call the checker never enters into control flow
+/// narrows nothing.
+fn assert_never_entered_call_keeps_the_read(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    member: bool,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key);
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let read = if member {
+        object_prop(&expr, "x")
+    } else {
+        &expr
+    };
+    let verter_type_expr::TypeExpr::Union(arms) = read else {
+        panic!("{name}: the read of `x` is the declared union, got {expr:?}");
+    };
+    assert_eq!(
+        arms.len(),
+        2,
+        "{name}: exactly the declared arms, got {expr:?}"
+    );
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: a never-entered call leaves the read complete"
+    );
+}
+
 /// A class DECLARATION statement is not transparent: its static block
 /// runs at class evaluation — in THIS frame, at the statement — so the
 /// assertion in `class C { static { assertString(x); } }` narrows `x` to
@@ -8463,16 +8509,13 @@ function f(x: string | number) {
     });
 }
 
-/// A COMPUTED member key evaluates at class definition — the enclosing
-/// frame — so the assertion in `class C { [assertString(x)]() {} }`
-/// narrows `x` for every read that follows in the checker. Guarding the
-/// key with the class body blanket-certified the call decided-above and
-/// the unnarrowed superset sealed complete and warm. The key takes the
-/// same-frame discipline: the unprovable assertion keeps the return's
-/// read of `x` unnarrowed, the demand carries the typed `GuardNarrowing`
-/// gap, and the family slot holds zero candidates.
+/// A COMPUTED member key evaluates at class definition, but the checker
+/// never enters a call there into control flow, so the assertion in
+/// `class C { [assertString(x)]() {} }` narrows nothing. Measured on 7.0.2
+/// (`--strict`, and without `strictNullChecks`): `f` returns `string |
+/// number`, complete.
 #[test]
-fn class_declaration_computed_key_call_never_seals_unnarrowed() {
+fn class_declaration_computed_key_call_narrows_nothing() {
     const CANONICAL: &str = "/ws/class-decl-computed-key/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8487,18 +8530,17 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
-/// A member DECORATOR evaluates at class definition — the enclosing
-/// frame — so the assertion in `class C { @assertString(x) m() {} }`
-/// narrows `x` for every read that follows in the checker. The same
-/// same-frame discipline applies: the unprovable assertion keeps the
-/// return's read of `x` unnarrowed, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// A member DECORATOR evaluates at class definition, but the checker
+/// never enters a call there into control flow, so the assertion in
+/// `class C { @assertString(x) m() {} }` narrows nothing. Measured on
+/// 7.0.2 (`--strict`, and without `strictNullChecks`): `f` returns
+/// `string | number`, complete.
 #[test]
-fn class_declaration_member_decorator_call_never_seals_unnarrowed() {
+fn class_declaration_member_decorator_call_narrows_nothing() {
     const CANONICAL: &str = "/ws/class-decl-member-decorator/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8513,19 +8555,17 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
-/// A STATIC auto-accessor initializer runs at class evaluation — the
-/// enclosing frame — exactly as a static property initializer does, so
-/// the assertion in `class C { static accessor p = assertString(x); }`
-/// narrows `x` for every read that follows in the checker. The same
-/// same-frame discipline applies: the unprovable assertion keeps the
-/// return's read of `x` unnarrowed, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// A STATIC auto-accessor initializer runs at class evaluation, but the
+/// checker never enters a call there into control flow, so the assertion
+/// in `class C { static accessor p = assertString(x); }` narrows nothing.
+/// Measured on 7.0.2 (`--strict`, and without `strictNullChecks`): `f`
+/// returns `string | number`, complete.
 #[test]
-fn class_declaration_static_accessor_initializer_never_seals_unnarrowed() {
+fn class_declaration_static_accessor_initializer_call_narrows_nothing() {
     const CANONICAL: &str = "/ws/class-decl-static-accessor/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8540,7 +8580,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
     });
 }
 
@@ -9028,16 +9068,12 @@ function f(x: string | number) {
     });
 }
 
-/// A type carrier folds a non-object operand into ONE shallow-pass answer
-/// without visiting it, so a direct assertion call under the carrier —
-/// `(assertString(x) as void)` — never reaches a structural arm and would
-/// be blanket-certified decided-above while the checker narrows every read
-/// that follows. The call takes the per-callee certification instead: an
-/// `asserts` callee is unprovable, so the later read of `x` keeps the
-/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
-/// the family slot holds zero candidates.
+/// A call a type carrier wraps directly — `(assertString(x) as void)` —
+/// is never entered into control flow, so it narrows nothing. Measured on
+/// 7.0.2 (`--strict`, and without `strictNullChecks`): `f` returns `{ y:
+/// void; x: string | number; }`, and the read of `x` is complete.
 #[test]
-fn leaf_carrier_wrapped_assertion_never_certifies_decided_above() {
+fn leaf_carrier_wrapped_assertion_narrows_nothing() {
     const CANONICAL: &str = "/ws/carrier-wrapped-assertion/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -9052,7 +9088,7 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", true);
     });
 }
 

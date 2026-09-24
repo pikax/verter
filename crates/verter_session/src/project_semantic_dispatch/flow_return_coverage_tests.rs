@@ -2374,23 +2374,10 @@ fn jsx_element_fragment_and_attribute_call_returns_are_not_any() {
     for name in ["jsxElem", "jsxFrag"] {
         assert_clean_warm(&host, JSX, name, type_ref("JSX.Element"));
     }
-    // `jsxAttrCall`'s attribute value is itself a call the surrounding
-    // narrowing pass cannot model precisely, so the whole return degrades
-    // with the unrelated `FlowGap::GuardNarrowing` gap (a general
-    // narrowing limitation, not specific to JSX or to this charter). The
-    // JSX leaf's own answer still resolves to the same typed
-    // `JSX.Element` reference rather than a fabricated `any`, so the full
-    // outcome is pinned exactly — still discriminating the typed leaf
-    // from both `any` and the `UnmodeledExpression` gap marker.
-    assert_eq!(
-        eval(&host, JSX, "jsxAttrCall"),
-        Outcome::Value {
-            ty: type_ref("JSX.Element"),
-            degradation: Some(FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing)),
-            candidates: 0,
-        },
-        "jsxAttrCall"
-    );
+    // `jsxAttrCall`'s attribute value is itself a call, which the checker
+    // never enters into control flow: it narrows nothing, so the element
+    // publishes the same typed `JSX.Element` reference, clean and warm.
+    assert_clean_warm(&host, JSX, "jsxAttrCall", type_ref("JSX.Element"));
     // Negative control: with no `JSX` namespace configured anywhere in
     // scope, the leaf still publishes the same honest unresolved
     // `Ref { name: "JSX.Element" }` carrier — never a fabricated `any`,

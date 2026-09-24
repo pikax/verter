@@ -1156,6 +1156,21 @@ pub enum SliceExpr {
         /// `let` / `var` initializer or an object member.
         widen: bool,
     },
+    /// `left && right` / `left || right` in value position. The right
+    /// operand evaluates under the left's truthy (`&&`) or falsy (`||`)
+    /// narrowing, and the value is the checker's: for `&&`, the left's
+    /// definitely-falsy part joined with the right, or the left alone
+    /// when it cannot be truthy; for `||`, the left's possibly-truthy,
+    /// non-`undefined` part joined with the right, or the left alone when
+    /// it cannot be falsy.
+    Logical {
+        /// `&&` (`true`) or `||` (`false`).
+        conjunction: bool,
+        left: Box<SliceExpr>,
+        right: Box<SliceExpr>,
+        /// The narrowing the left operand establishes as a test.
+        guard: SliceGuard,
+    },
     Gap(crate::semantic_query::FlowGap),
     /// A read (or call) of a name the frame's lexical authority resolves
     /// to a FUNCTION-LOCAL binding this content half does not model: a
@@ -2726,6 +2741,56 @@ impl GuardDisposition {
     }
 }
 
+/// The calls on a test's narrowing spine — the positions the checker's
+/// `narrowType` reads a call's type predicate from: the test itself through
+/// parentheses and non-null assertions, a `!` operand, `&&` / `||` / `??`
+/// operands, a comma sequence's last operand, an assignment's right-hand
+/// side and the side of an equality against a boolean literal — plus a
+/// comma sequence's earlier operands, where a call may assert. A call
+/// anywhere else (an argument, a comparison or arithmetic operand) narrows
+/// nothing through its predicate.
+fn narrowing_spine_calls<'e, 'a>(
+    expression: &'e Expression<'a>,
+    out: &mut Vec<&'e oxc_ast::ast::CallExpression<'a>>,
+) {
+    match expression {
+        Expression::ParenthesizedExpression(inner) => narrowing_spine_calls(&inner.expression, out),
+        Expression::TSNonNullExpression(inner) => narrowing_spine_calls(&inner.expression, out),
+        Expression::CallExpression(call) => out.push(call),
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            narrowing_spine_calls(&unary.argument, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            narrowing_spine_calls(&logical.left, out);
+            narrowing_spine_calls(&logical.right, out);
+        }
+        Expression::SequenceExpression(sequence) => {
+            for operand in &sequence.expressions {
+                narrowing_spine_calls(operand, out);
+            }
+        }
+        Expression::AssignmentExpression(assignment) => {
+            narrowing_spine_calls(&assignment.right, out)
+        }
+        Expression::BinaryExpression(binary)
+            if matches!(
+                binary.operator,
+                oxc_ast::ast::BinaryOperator::Equality
+                    | oxc_ast::ast::BinaryOperator::Inequality
+                    | oxc_ast::ast::BinaryOperator::StrictEquality
+                    | oxc_ast::ast::BinaryOperator::StrictInequality
+            ) =>
+        {
+            if literal_boolean_value(&binary.right).is_some() {
+                narrowing_spine_calls(&binary.left, out);
+            } else if literal_boolean_value(&binary.left).is_some() {
+                narrowing_spine_calls(&binary.right, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn literal_boolean_value(expression: &Expression<'_>) -> Option<bool> {
     match unwrap_parenthesized(expression) {
         Expression::BooleanLiteral(literal) => Some(literal.value),
@@ -3087,6 +3152,17 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
             operand,
             widen: true,
         },
+        SliceExpr::Logical {
+            conjunction,
+            left,
+            right,
+            guard,
+        } => SliceExpr::Logical {
+            conjunction,
+            left: Box::new(widen_mutable_slot_literals(*left)),
+            right: Box::new(widen_mutable_slot_literals(*right)),
+            guard,
+        },
         SliceExpr::Union { arms, guard } => SliceExpr::Union {
             arms: Arc::from(
                 arms.iter()
@@ -3098,6 +3174,7 @@ fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
                             operand: operand.clone(),
                             widen: true,
                         },
+                        SliceExpr::Logical { .. } => widen_mutable_slot_literals(arm.clone()),
                         other => other.clone(),
                     })
                     .collect::<Vec<_>>()
@@ -6442,34 +6519,64 @@ impl Lowerer<'_> {
     /// its callee is a closed same-file declaration with a non-predicate
     /// return annotation — the control-test rule, read here without
     /// recording anything.
-    fn holds_unprovable_narrowing_call(&self, argument: &Expression<'_>) -> bool {
-        let mut scanner = LeafCallScanner {
-            control_nesting: 1,
-            ..LeafCallScanner::default()
+    /// Whether an entered call could carry an `asserts` narrowing of a
+    /// frame-owned binding: a parameter or local among its assertion
+    /// subjects, and a callee that is not a provably closed same-file
+    /// declaration whose return annotation rules an assertion out.
+    fn call_may_assert_a_frame_binding(&self, call: &oxc_ast::ast::CallExpression<'_>) -> bool {
+        let ControlCall::Call {
+            callee,
+            assertion_subject_roots,
+            ..
+        } = ControlCall::of_call(call)
+        else {
+            return false;
         };
-        scanner.visit_expression(argument);
-        scanner.control.iter().any(|call| match call {
-            ControlCall::Construct(_) | ControlCall::TaggedTemplate(_) => false,
-            ControlCall::Call {
-                span,
-                callee,
-                assertion_subject_roots,
-            } => {
-                assertion_subject_roots.iter().any(|(_, root)| {
-                    matches!(self.classify_occurrence(*root), NameBinding::Param(_))
-                }) && !self.predicate_guard_call_spans.contains(span)
-                    && !self.non_narrowing_call_spans.contains(span)
-                    && !callee.as_ref().is_some_and(|(name, callee_span)| {
-                        matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
-                            && self
-                                .closed_callee_declaration(name)
-                                .is_some_and(|function| {
-                                    ResultIndependentPosition::ControlTest
-                                        .certifies_closed_return(function.return_type.as_deref())
-                                })
+        assertion_subject_roots.iter().any(|(_, root)| {
+            matches!(
+                self.classify_occurrence(*root),
+                NameBinding::Param(_) | NameBinding::Local(_)
+            )
+        }) && !callee.as_ref().is_some_and(|(name, callee_span)| {
+            matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
+                && self
+                    .closed_callee_declaration(name)
+                    .is_some_and(|function| {
+                        ResultIndependentPosition::DiscardedOperand
+                            .certifies_closed_return(function.return_type.as_deref())
                     })
-            }
         })
+    }
+
+    fn holds_unprovable_narrowing_call(&self, argument: &Expression<'_>) -> bool {
+        let mut spine = Vec::new();
+        narrowing_spine_calls(argument, &mut spine);
+        spine
+            .into_iter()
+            .any(|call| match &ControlCall::of_call(call) {
+                ControlCall::Construct(_) | ControlCall::TaggedTemplate(_) => false,
+                ControlCall::Call {
+                    span,
+                    callee,
+                    assertion_subject_roots,
+                } => {
+                    assertion_subject_roots.iter().any(|(_, root)| {
+                        matches!(self.classify_occurrence(*root), NameBinding::Param(_))
+                    }) && !self.predicate_guard_call_spans.contains(span)
+                        && !self.non_narrowing_call_spans.contains(span)
+                        && !callee.as_ref().is_some_and(|(name, callee_span)| {
+                            matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
+                                && self
+                                    .closed_callee_declaration(name)
+                                    .is_some_and(|function| {
+                                        ResultIndependentPosition::ControlTest
+                                            .certifies_closed_return(
+                                                function.return_type.as_deref(),
+                                            )
+                                    })
+                        })
+                }
+            })
     }
 
     /// The tri-state classification behind [`Self::lower_guard`] — the
@@ -7109,6 +7216,23 @@ impl Lowerer<'_> {
             NarrowDestination::Represented
         } else if self.reference_root_is_represented(expression) {
             NarrowDestination::Unrepresented
+        } else if let Expression::SequenceExpression(sequence) =
+            unwrap_reference_transparent(expression)
+        {
+            // The checker's reference candidate reads a comma sequence as
+            // its last operand (`getReferenceCandidate`): a narrow of
+            // `(f(), x)` lands on `x`, which this half does not carry
+            // through the sequence.
+            match sequence
+                .expressions
+                .last()
+                .map(|last| self.narrow_destination_of(last))
+            {
+                Some(NarrowDestination::Represented | NarrowDestination::Unrepresented) => {
+                    NarrowDestination::Unrepresented
+                }
+                _ => NarrowDestination::Absent,
+            }
         } else {
             NarrowDestination::Absent
         }
@@ -8372,6 +8496,9 @@ impl Lowerer<'_> {
         expression: &Expression<'_>,
     ) -> Option<SliceStatement> {
         let mut scanner = LeafCallScanner::default();
+        if let Expression::CallExpression(call) = expression {
+            scanner.statement_calls.insert(call.span);
+        }
         scanner.visit_expression(expression);
         if self.drain_scanned_same_frame_effects(
             scanner,
@@ -8448,6 +8575,40 @@ impl Lowerer<'_> {
             Expression::AwaitExpression(awaited) => SliceExpr::Awaited {
                 operand: Box::new(self.lower_expr(&awaited.argument, mode)),
             },
+            // `a && b` / `a || b`: the left operand is a control position
+            // exactly as a ternary's test is, and the right operand is read
+            // under its narrowing (a closure created there captures the
+            // guarded reading, as in a ternary's arm).
+            Expression::LogicalExpression(logical)
+                if matches!(
+                    logical.operator,
+                    oxc_ast::ast::LogicalOperator::And | oxc_ast::ast::LogicalOperator::Or
+                ) =>
+            {
+                let guard = self.lower_guard(&logical.left);
+                if self.record_control_position_calls(&logical.left) {
+                    self.control_test_gap = true;
+                }
+                let left = self.lower_expr(&logical.left, mode);
+                let active_guard_base = self.active_guard_bindings.len();
+                let active_guard_subject_base = self.active_guard_subjects.len();
+                let guard_bindings = self.guard_bindings(&guard, logical.left.span());
+                let guard_name = self.predicate_subject_binding(&logical.left);
+                self.active_guard_bindings
+                    .extend(guard_bindings.iter().copied());
+                self.active_guard_subjects
+                    .extend(guard_name.iter().cloned());
+                let right = self.lower_expr(&logical.right, mode);
+                self.active_guard_bindings.truncate(active_guard_base);
+                self.active_guard_subjects
+                    .truncate(active_guard_subject_base);
+                SliceExpr::Logical {
+                    conjunction: logical.operator == oxc_ast::ast::LogicalOperator::And,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    guard,
+                }
+            }
             // `!x`: the operand keeps its top-level literal — `!""` is
             // `true` — so it lowers in the literal-preserving mode.
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
@@ -8645,6 +8806,16 @@ impl Lowerer<'_> {
                     .expect("the guard proved a last operand");
                 for discarded in &sequence.expressions[..sequence.expressions.len() - 1] {
                     if self.record_discarded_operand_calls(discarded) {
+                        self.control_test_gap = true;
+                    }
+                }
+                // The checker enters the LAST operand's call into control
+                // flow too (`const y = (0, assertString(x))` narrows `x`),
+                // while the rails read only its value: an assertion that
+                // could narrow a frame-owned binding there is not applied,
+                // so it takes the typed gap.
+                if let Expression::CallExpression(call) = last {
+                    if self.call_may_assert_a_frame_binding(call) {
                         self.control_test_gap = true;
                     }
                 }
@@ -9741,8 +9912,14 @@ impl Lowerer<'_> {
         position: ResultIndependentPosition,
     ) -> bool {
         let mut scanner = LeafCallScanner::default();
-        if matches!(position, ResultIndependentPosition::ControlTest) {
-            scanner.control_nesting = 1;
+        match position {
+            ResultIndependentPosition::ControlTest => scanner.control_nesting = 1,
+            // A comma operator's left operand: its own call is entered.
+            ResultIndependentPosition::DiscardedOperand => {
+                if let Expression::CallExpression(call) = expr {
+                    scanner.comma_operand_calls.insert(call.span);
+                }
+            }
         }
         scanner.visit_expression(expr);
         self.drain_scanned_same_frame_effects(
@@ -10311,10 +10488,15 @@ impl ControlCall {
 /// position (a ternary test, a `&&` / `||` left operand, a statement test
 /// inside an immediately-evaluated class static block) is `control` (its
 /// result can decide the narrowing a branch evaluates under, so it takes
-/// the [`ResultIndependentPosition::ControlTest`] rule); every other
-/// same-frame call is `discarded` (the leaf answer provably does not
-/// derive from it, so only an `asserts` callee narrows what follows — the
-/// [`ResultIndependentPosition::DiscardedOperand`] rule). Both channels
+/// the [`ResultIndependentPosition::ControlTest`] rule) — but an operand
+/// of a comparison or arithmetic operator inside one is not: the checker
+/// reads a call's predicate only on the test's narrowing spine, never from
+/// such an operand. A same-frame call the checker enters into control
+/// flow — an expression statement's own call or a comma operator's
+/// operand (the binder's `maybeBindExpressionFlowIfCall`) — is
+/// `discarded` (its value is unused, so only an `asserts` callee narrows
+/// what follows — the [`ResultIndependentPosition::DiscardedOperand`]
+/// rule). Both channels
 /// certify per-callee through
 /// [`Lowerer::certify_result_independent_calls`]; an unprovable call
 /// flags the enclosing statement's typed `GuardNarrowing` gap.
@@ -10343,18 +10525,15 @@ impl ControlCall {
 /// frame's lexical authority: a target the frame OWNS flags the enclosing
 /// statement's typed `GuardNarrowing` gap, a FREE target stays silent.
 ///
-/// A `void` operand's value is discarded, and the checker enters a call
-/// into control flow — where an `asserts` callee narrows what follows and
-/// a never-returning one ends the path — only when the call is an
-/// expression statement's own expression or a comma operator's left
-/// operand (the binder's `maybeBindExpressionFlowIfCall`). So a
-/// same-frame call inside a `void` operand that is no comma's left
-/// operand and sits in no control position narrows nothing and is
-/// `unentered`: decided above with no certification (TypeScript 7.0.2:
-/// `void assertString(x); return x` keeps `x` unnarrowed). A
-/// skeleton-visible write there is not collected either: the operand's
-/// value cannot depend on it, and a read after it rides the slice's
-/// unapplied-write ledger like any statement write's.
+/// Every other same-frame call — an argument, an initializer, an operand
+/// whose value something consumes, a `void` operand — is never entered
+/// into control flow, so it narrows nothing and is `unentered`: decided
+/// above with no certification (TypeScript 7.0.2: `g(assertString(x))`,
+/// `const y = assertString(x)` and `void assertString(x)` each keep `x`
+/// unnarrowed, while `assertString(x);`, `(assertString(x), 0)` and
+/// `const y = (0, assertString(x))` narrow it). A skeleton-visible write inside a `void` operand is not collected
+/// either: the operand's value cannot depend on it, and a read after it
+/// rides the slice's unapplied-write ledger like any statement write's.
 #[derive(Default)]
 struct LeafCallScanner<'a> {
     decided: Vec<verter_span::Span>,
@@ -10363,8 +10542,12 @@ struct LeafCallScanner<'a> {
     unentered: Vec<verter_span::Span>,
     /// `void` operand nesting.
     void_nesting: usize,
-    /// The spans of calls that are a comma operator's left operand.
+    /// The spans of calls that are a comma operator's operand.
     comma_operand_calls: FxHashSet<oxc_span::Span>,
+    /// The spans of calls that are an expression statement's own
+    /// expression (the scanned position's own, or one inside a class
+    /// static block).
+    statement_calls: FxHashSet<oxc_span::Span>,
     discarded: Vec<ControlCall>,
     control: Vec<ControlCall>,
     /// Same-frame whole-binding write targets: `(name, identifier span,
@@ -10691,10 +10874,12 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.decided.push(call.span.into());
         } else if self.control_nesting > 0 {
             self.control.push(ControlCall::of_call(call));
-        } else if self.void_nesting > 0 && !self.comma_operand_calls.contains(&call.span) {
-            self.unentered.push(call.span.into());
-        } else {
+        } else if self.comma_operand_calls.contains(&call.span)
+            || self.statement_calls.contains(&call.span)
+        {
             self.discarded.push(ControlCall::of_call(call));
+        } else {
+            self.unentered.push(call.span.into());
         }
         walk::walk_call_expression(self, call);
     }
@@ -10727,6 +10912,31 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         }
         walk::walk_tagged_template_expression(self, tagged);
     }
+    fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        if let Expression::CallExpression(call) = &it.expression {
+            self.statement_calls.insert(call.span);
+        }
+        walk::walk_expression_statement(self, it);
+    }
+    fn visit_binary_expression(&mut self, it: &oxc_ast::ast::BinaryExpression<'a>) {
+        // A comparison against a boolean literal keeps its other side on
+        // the narrowing spine; every other operator's operands leave it.
+        let boolean_comparison = matches!(
+            it.operator,
+            oxc_ast::ast::BinaryOperator::Equality
+                | oxc_ast::ast::BinaryOperator::Inequality
+                | oxc_ast::ast::BinaryOperator::StrictEquality
+                | oxc_ast::ast::BinaryOperator::StrictInequality
+        ) && (literal_boolean_value(&it.left).is_some()
+            || literal_boolean_value(&it.right).is_some());
+        if self.control_nesting == 0 || boolean_comparison {
+            walk::walk_binary_expression(self, it);
+            return;
+        }
+        let control = std::mem::replace(&mut self.control_nesting, 0);
+        walk::walk_binary_expression(self, it);
+        self.control_nesting = control;
+    }
     fn visit_unary_expression(&mut self, it: &oxc_ast::ast::UnaryExpression<'a>) {
         let void = it.operator == UnaryOperator::Void;
         self.void_nesting += usize::from(void);
@@ -10734,11 +10944,11 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         self.void_nesting -= usize::from(void);
     }
     fn visit_sequence_expression(&mut self, it: &oxc_ast::ast::SequenceExpression<'a>) {
-        if let Some((_, operands)) = it.expressions.split_last() {
-            for operand in operands {
-                if let Expression::CallExpression(call) = operand {
-                    self.comma_operand_calls.insert(call.span);
-                }
+        // The checker enters a call that is a comma operator's operand —
+        // either side — into control flow.
+        for operand in &it.expressions {
+            if let Expression::CallExpression(call) = operand {
+                self.comma_operand_calls.insert(call.span);
             }
         }
         walk::walk_sequence_expression(self, it);

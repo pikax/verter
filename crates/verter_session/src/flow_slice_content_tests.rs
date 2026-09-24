@@ -1733,8 +1733,9 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
     }
 
     // A provably non-narrowing OUTER call is certified on its own
-    // account; the unprovable assertion nested in its argument is not,
-    // and still gaps the statement.
+    // account, and the assertion nested in its argument is never entered
+    // into control flow (TypeScript 7.0.2: `(touch(assertString(x)), x)`
+    // is `string | number`), so it is decided above too.
     let nested_source = "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
                          function touch(_v: unknown) {}\n\
                          function f(x: string | number) { return (touch(assertString(x)), x) }";
@@ -1746,13 +1747,13 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
         .collect();
     assert_eq!(
         certified_texts,
-        ["touch(assertString(x))"],
-        "only the outer non-narrowing call is certified: {nested:?}"
+        ["assertString(x)", "touch(assertString(x))"],
+        "the outer call and the never-entered nested one are decided above: {nested:?}"
     );
     assert_eq!(
         guard_gap_count(&nested),
-        1,
-        "the nested assertion gaps the statement: {nested:?}"
+        0,
+        "the nested assertion narrows nothing: {nested:?}"
     );
 
     let certified = [
@@ -2015,34 +2016,27 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
     }
 }
 
-/// An assertion call hides in a leaf-lowered VALUE position whenever a
-/// type carrier folds the whole form without visiting it: `(assertString(x)
-/// as void)` is `void` to the shallow pass, and the carrier arm keeps the
-/// whole-carrier leaf lowering for a non-object operand — so the call never
-/// reaches a structural arm and would be blanket-certified decided-above
-/// while the checker narrows every read that follows. The rightmost operand
-/// of a folded sequence is the same leak one position over: `((0,
-/// assertString(x)) as unknown)` discards nothing syntactically, but the
-/// assertion still runs. Both take the per-callee certification: only a
-/// provably non-asserting callee certifies; anything else gaps the
-/// enclosing statement.
+/// A type carrier folds the whole form into one leaf without visiting it,
+/// so the calls under it are sorted by the checker's entry rule. A call
+/// the carrier wraps directly (`(assertString(x) as void)`) is never
+/// entered into control flow and narrows nothing (TypeScript 7.0.2: `x`
+/// stays `string | number`), so it is decided above. A call that is a
+/// comma operand under the carrier (`((0, assertString(x)) as unknown)`)
+/// IS entered — the checker narrows `x` to `string` there — so it takes
+/// the per-callee certification: only a provably non-asserting callee
+/// certifies; anything else gaps the enclosing statement.
 #[test]
 fn leaf_carrier_wrapped_assertion_calls_are_never_blanket_certified() {
     let refused = [
-        (
-            "a closed same-file assertion under a carrier",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { const y = (assertString(x) as void); return { y, x } }",
-        ),
         (
             "a closed same-file assertion as a folded sequence's LAST operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { const y = ((0, assertString(x)) as unknown); return { y, x } }",
         ),
         (
-            "an imported callee under a carrier",
+            "an imported callee as a folded sequence's LAST operand",
             "import { touch } from \"./touch\";\n\
-             function f(x: string | number) { const y = (touch() as void); return { y, x } }",
+             function f(x: string | number) { const y = ((0, touch()) as void); return { y, x } }",
         ),
     ];
     for (case, source) in refused {
@@ -2059,6 +2053,16 @@ fn leaf_carrier_wrapped_assertion_calls_are_never_blanket_certified() {
     }
 
     let certified = [
+        (
+            "a closed same-file assertion the carrier wraps directly",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const y = (assertString(x) as void); return { y, x } }",
+        ),
+        (
+            "an imported callee the carrier wraps directly",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { const y = (touch() as void); return { y, x } }",
+        ),
         (
             "a closed unannotated same-file callee under a carrier",
             "export {};\nfunction touch() {}\n\
@@ -2294,16 +2298,16 @@ fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
 /// initializers: a COMPUTED member key (`class { [key()]() {} }`), a
 /// member's DECORATORS (`@dec method() {}`), and a STATIC auto-accessor
 /// initializer (`static accessor p = expr`) all run in the enclosing
-/// frame at class evaluation. Guarding them with the class body
-/// blanket-certified their calls decided-above while the checker narrows
-/// what follows. Each takes the same same-frame discipline: certified
-/// only when the callee provably establishes no narrowing, otherwise the
-/// typed gap. Deferred positions (a method body, an INSTANCE
+/// frame at class evaluation. None of them is entered into control flow,
+/// so a call there narrows nothing (TypeScript 7.0.2: an `asserts` callee
+/// in a computed key, a member decorator or a static auto-accessor
+/// initializer leaves `x` as `string | number`), and each is decided above
+/// with no gap. Deferred positions (a method body, an INSTANCE
 /// auto-accessor initializer at construction) keep the nested-frame
 /// blanket treatment.
 #[test]
 fn class_definition_phase_positions_take_enclosing_frame_discipline() {
-    let refused = [
+    let not_entered = [
         (
             "a computed method key",
             "import { touch } from \"./touch\";\n\
@@ -2330,16 +2334,17 @@ fn class_definition_phase_positions_take_enclosing_frame_discipline() {
              function f(x: string | number) { return (class { static accessor p = touch(); } as object) }",
         ),
     ];
-    for (case, source) in refused {
+    for (case, source) in not_entered {
         let node = content_for(source, "f");
-        assert!(
-            node.decided_above_call_spans.is_empty(),
-            "{case}: an unprovable class-definition call is never certified: {node:?}"
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a class-definition call is never entered, so it is decided above: {node:?}"
         );
         assert_eq!(
             guard_gap_count(&node),
-            1,
-            "{case}: the statement takes the typed gap: {node:?}"
+            0,
+            "{case}: it mints no gap: {node:?}"
         );
     }
 
@@ -2558,8 +2563,8 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
 /// statement: the initializer of a destructuring declarator, the
 /// initializer of a binding the demand slice did not value-select, and
 /// every enum member initializer all run in THIS frame. An assertion call
-/// or a whole-binding write there narrows / retypes every read that
-/// follows in the checker while neither the obligation plan (the slice
+/// that is a comma operand there, or a whole-binding write, narrows /
+/// retypes every read that follows in the checker while neither the obligation plan (the slice
 /// pruned the position) nor a scanner saw it — the unnarrowed superset
 /// would seal complete and warm. Each position takes the same fail-closed
 /// discipline the class-declaration arm applies: an effect that is not
@@ -2596,11 +2601,6 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
             "an assertion in an enum member initializer",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { enum E { A = (assertString(x), 1) } return x }",
-        ),
-        (
-            "an imported callee with a frame-owned subject in an enum member initializer",
-            "import { check } from \"./check\";\n\
-             function f(x: string | number) { enum E { A = check(x) } return x }",
         ),
         (
             "a write in an enum member initializer",
@@ -2650,6 +2650,11 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
             "a call whose only argument is not a reference",
             "import { check } from \"./check\";\n\
              function f(x: string | number) { const unused = (check(1), 0); return x }",
+        ),
+        (
+            "a call an enum member initializer is (never entered into control flow)",
+            "import { check } from \"./check\";\n\
+             function f(x: string | number) { enum E { A = check(x) } return x }",
         ),
         (
             "a nested-frame call in an unselected initializer stays deferred",
@@ -4306,8 +4311,8 @@ fn locator_miss_is_typed_none() {
 /// The expression-statement fallthrough — every shape that is neither a
 /// modeled whole-binding write nor a bare assertion call — still EXECUTES
 /// at the statement: a discarded sequence operand (`(assertString(x),
-/// 0);`), a comma operand inside a `void`, a template interpolation, a call's ARGUMENT
-/// (`touch((assertString(x), 0));`), and an assignment the modeled arm
+/// 0);`), a comma operand inside a `void`, a comma operand in a call's
+/// ARGUMENT (`touch((assertString(x), 0));`), and an assignment the modeled arm
 /// refused (a member target, or a right-hand side the slice did not
 /// select) can all carry an `asserts` narrowing of a frame-owned binding,
 /// and a class subtree hides a write from the skeleton entirely. Each
@@ -4331,11 +4336,6 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
             "a comma operand inside a `void` operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { void (assertString(x), 0); return x }",
-        ),
-        (
-            "a template interpolation",
-            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { `${assertString(x)}`; return x }",
         ),
         (
             "a logical right operand",
@@ -4415,6 +4415,11 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
         (
             "a compound write the ledger already covers",
             "export {};\nfunction f(x: number) { x += 1; return x }",
+        ),
+        (
+            "an assertion call in a template interpolation (never entered)",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { `${assertString(x)}`; return x }",
         ),
         (
             "an assertion call that is a `void` operand",

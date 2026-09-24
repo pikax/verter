@@ -5916,9 +5916,9 @@ fn top_types_under_a_runtime_guard_narrow_like_the_checker() {
             id: "guard_typeof_unknown_negated_undefined",
             script: "export function f(x: unknown) { if (typeof x !== \"undefined\") return x; return 0; }",
             checker: "{} | null",
-            // Extensionally the checker's answer: its return reunion
-            // absorbs `0` into `{}`, which this join keeps as an arm.
-            rendered: "Union({  } | null | 0)",
+            // The return reunion absorbs `0` into `{}`, as the checker's
+            // does.
+            rendered: "Union({  } | null)",
             degradation: Degr::None,
             warm: true,
         },
