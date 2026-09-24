@@ -1231,6 +1231,11 @@ struct SkeletonBuilder<'entry> {
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
     capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
     capture_names: FxHashSet<(SkeletonExprSiteId, FlowNameId)>,
+    /// How many class expressions' value positions enclose the walk. Their
+    /// reads are the class site's footprint, but no write there is one this
+    /// frame's flow applies: an instance initializer's runs at construction,
+    /// and the class lowering answers every class write with its typed gap.
+    class_values: u32,
 }
 
 impl<'entry> SkeletonBuilder<'entry> {
@@ -1262,6 +1267,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             writes: Vec::new(),
             capture_subjects: FxHashSet::default(),
             capture_names: FxHashSet::default(),
+            class_values: 0,
             nested_captures: entry
                 .map(|entry| {
                     entry
@@ -1673,6 +1679,9 @@ impl<'entry> SkeletonBuilder<'entry> {
         span: verter_span::Span,
         target_span: Option<verter_span::Span>,
     ) {
+        if self.class_values > 0 {
+            return;
+        }
         let site = self.footprint_site(span);
         let region = self.current_region();
         let span = self.frame_span(span);
@@ -2127,11 +2136,59 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     // A class expression is itself a callable (its constructor) and
-    // creates more (members, field initializers); no index record serves
-    // any of them. A class DECLARATION binds a name instead and is never
+    // creates more; no index record serves its constructor or its field
+    // initializers. A class DECLARATION binds a name instead and is never
     // walked here.
+    //
+    // The class's VALUE positions read this frame: its decorators, its
+    // `extends` value, its computed keys and its static initializers run
+    // at class evaluation, and its instance initializers read this frame's
+    // lexical scope at construction. The flow lane types every one of them
+    // in this frame, so their reads are this site's footprint — their
+    // writes are not this frame's (see `Self::class_values`). Its methods
+    // and accessors are nested callables the function index serves. A
+    // static block keeps its own lexical scope and stays unwalked.
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
         self.push_unserved_callable(it.span.into());
+        self.class_values += 1;
+        self.visit_decorators(&it.decorators);
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
+        for element in &it.body.body {
+            match element {
+                oxc_ast::ast::ClassElement::MethodDefinition(method) => {
+                    self.visit_decorators(&method.decorators);
+                    if method.computed {
+                        self.visit_property_key(&method.key);
+                    }
+                    if method.value.body.is_some() {
+                        self.push_nested_callable(method.value.span.into());
+                    }
+                }
+                oxc_ast::ast::ClassElement::PropertyDefinition(property) => {
+                    self.visit_decorators(&property.decorators);
+                    if property.computed {
+                        self.visit_property_key(&property.key);
+                    }
+                    if let Some(value) = &property.value {
+                        self.visit_expression(value);
+                    }
+                }
+                oxc_ast::ast::ClassElement::AccessorProperty(property) => {
+                    self.visit_decorators(&property.decorators);
+                    if property.computed {
+                        self.visit_property_key(&property.key);
+                    }
+                    if let Some(value) = &property.value {
+                        self.visit_expression(value);
+                    }
+                }
+                oxc_ast::ast::ClassElement::StaticBlock(_)
+                | oxc_ast::ast::ClassElement::TSIndexSignature(_) => {}
+            }
+        }
+        self.class_values -= 1;
     }
 
     fn visit_statement(&mut self, it: &Statement<'a>) {

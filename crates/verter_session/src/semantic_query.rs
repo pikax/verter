@@ -1097,10 +1097,11 @@ impl DeclIdentity {
 ///
 /// A class expression declares nothing a [`DeclIdentity`] could name, so it
 /// is identified by where it was authored: the defining file and owner, and
-/// the expression's offset in that file. The two print fields are what the
-/// checker spells the instance type as — `Mixin.(Anonymous class)` for
-/// `function Mixin<S …>(Base: S) { return class extends Base { … } }`,
-/// measured on TypeScript 7.0.2.
+/// the expression's offset in that file. The print fields are what the
+/// checker spells a reference to the instance type with (measured on
+/// TypeScript 7.0.2): the class's own name, and every type-parameter clause
+/// that encloses it, whose declaration qualifies a reference that
+/// instantiates that clause.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassExpressionIdentity {
     /// The file the class expression is authored in.
@@ -1110,26 +1111,95 @@ pub struct ClassExpressionIdentity {
     /// The class expression's start offset in `canonical_id`.
     pub offset: u32,
     /// The class's own printed name: its binding identifier
-    /// (`class Foo {}`), else the variable it directly initializes
-    /// (`const C = class {}`), else the checker's `(Anonymous class)`.
+    /// (`class Foo {}`), else the name it is assigned to (`const C = class
+    /// {}`, `{ C: class {} }`, `C = class {}`), else the checker's
+    /// `(Anonymous class)`.
     pub name: Arc<str>,
-    /// The declaration whose type-parameter clause encloses the class
-    /// (`Mixin` above), when one does. The class then has OUTER type
-    /// parameters, and the checker qualifies every instantiated reference
-    /// with their declaring container (`Mixin.(Anonymous class)`); a class
-    /// no clause encloses prints its bare name (`(Anonymous class)`).
-    pub qualifier: Option<Arc<str>>,
+    /// The type-parameter clauses that enclose the class — its OUTER type
+    /// parameters, outermost clause first, a class member's class clause
+    /// before the member's own.
+    pub outer_clauses: Arc<[ClassExpressionClause]>,
+    /// How many type parameters the class declares itself; a reference
+    /// prints their arguments after the name (`(Anonymous class)<string>`).
+    pub own_arity: u32,
+}
+
+/// One type-parameter clause enclosing a class expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassExpressionClause {
+    /// The name the checker prints for the clause's declaration when it
+    /// qualifies a reference: `outer` for a function, `Holder.make` for a
+    /// class method, `o.m` for a method of an object literal a variable
+    /// holds, `arrow` for the arrow a variable holds, `GHolder` for a
+    /// class.
+    pub container: Arc<str>,
+    /// The clause's type parameters, in declaration order.
+    pub parameters: Arc<[Arc<str>]>,
 }
 
 impl ClassExpressionIdentity {
-    /// The printed name the checker spells an instantiated reference to
-    /// this class as.
+    /// The name the checker prints for a reference to this class with
+    /// `type_arguments` (one per outer type parameter, then one per own
+    /// type parameter), without the own arguments' list.
+    ///
+    /// The checker's `typeReferenceToTypeNode`: each enclosing clause whose
+    /// arguments are not exactly its own parameters prints its
+    /// declaration, in order, before the class's name — so a reference
+    /// read inside the declaring body (`C`) stays unqualified, and an
+    /// instantiated one (`outer.(Anonymous class)`,
+    /// `outer3.inner.(Anonymous class)`) is qualified by every clause it
+    /// instantiates.
     #[must_use]
-    pub fn printed_name(&self) -> String {
-        match &self.qualifier {
-            Some(qualifier) => format!("{qualifier}.{}", self.name),
-            None => self.name.to_string(),
+    pub fn printed_name(
+        &self,
+        type_arguments: &[SemanticNodeId],
+        is_parameter: impl Fn(SemanticNodeId, &str) -> bool,
+    ) -> String {
+        let mut printed = String::new();
+        let mut start = 0;
+        for clause in self.outer_clauses.iter() {
+            let end = start + clause.parameters.len();
+            let instantiated = clause.parameters.iter().enumerate().any(|(index, name)| {
+                type_arguments
+                    .get(start + index)
+                    .is_none_or(|argument| !is_parameter(*argument, name))
+            });
+            if instantiated {
+                printed.push_str(&clause.container);
+                printed.push('.');
+            }
+            start = end;
         }
+        printed.push_str(&self.name);
+        printed
+    }
+
+    /// [`Self::printed_name`] over `store`: an argument is its clause's
+    /// parameter when it is the type parameter of that name.
+    #[must_use]
+    pub(crate) fn printed_name_in(
+        &self,
+        store: &crate::semantic_query_memo::SemanticGraphStore,
+        type_arguments: &[SemanticNodeId],
+    ) -> String {
+        self.printed_name(type_arguments, |argument, name| {
+            matches!(
+                store.node_data(argument).as_deref(),
+                Some(SemanticNodeData::TypeParam { display_name, .. })
+                    if display_name.as_ref() == name
+            )
+        })
+    }
+
+    /// The arguments a reference passes to the class's OWN type
+    /// parameters (the trailing `own_arity` of `type_arguments`).
+    #[must_use]
+    pub fn own_type_arguments<'a>(
+        &self,
+        type_arguments: &'a [SemanticNodeId],
+    ) -> &'a [SemanticNodeId] {
+        let own = (self.own_arity as usize).min(type_arguments.len());
+        &type_arguments[type_arguments.len() - own..]
     }
 }
 
@@ -9376,13 +9446,20 @@ pub enum SemanticNodeData {
     /// is nominal exactly where a `DeclRef` is: display, stable keys and a
     /// declaration-keeping read keep the identity, and a structural read
     /// reads through to `surface` exactly as a `DeclRef` read resolves its
-    /// declaration's body. Instantiating the class's outer type parameters
-    /// substitutes into `surface` under the same identity.
+    /// declaration's body. Instantiating a type parameter the class can see
+    /// substitutes into `type_arguments` and `surface` under the same
+    /// identity — the checker's type reference to the class, whose
+    /// arguments decide how it prints.
     ///
     /// Raises to the raised `surface` — the declaration emitter's own
     /// spelling of a class expression's instance type.
     ClassExpressionInstance {
         identity: Arc<ClassExpressionIdentity>,
+        /// The reference's arguments: one per outer type parameter (in
+        /// [`ClassExpressionIdentity::outer_clauses`] order), then one per
+        /// own type parameter. Where the class is authored each is its
+        /// parameter itself.
+        type_arguments: Arc<[SemanticNodeId]>,
         surface: SemanticNodeId,
     },
 
@@ -9743,13 +9820,15 @@ impl PartialEq for SemanticNodeData {
             (
                 Self::ClassExpressionInstance {
                     identity: ai,
+                    type_arguments: ata,
                     surface: asf,
                 },
                 Self::ClassExpressionInstance {
                     identity: bi,
+                    type_arguments: bta,
                     surface: bsf,
                 },
-            ) => ai == bi && asf == bsf,
+            ) => ai == bi && ata == bta && asf == bsf,
             (
                 Self::IntrinsicApplication { op: ao, args: aa },
                 Self::IntrinsicApplication { op: bo, args: ba },
@@ -9910,8 +9989,13 @@ impl std::hash::Hash for SemanticNodeData {
                 base.hash(state);
                 args.hash(state);
             }
-            Self::ClassExpressionInstance { identity, surface } => {
+            Self::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
                 identity.hash(state);
+                type_arguments.hash(state);
                 surface.hash(state);
             }
             Self::IntrinsicApplication { op, args } => {

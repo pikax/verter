@@ -3418,7 +3418,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(args.iter().copied());
                 }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());

@@ -122,6 +122,8 @@ pub(crate) mod dispatch_txn;
 pub(crate) mod flow_return;
 pub(crate) mod flow_return_callee;
 #[cfg(test)]
+mod flow_return_class_tests;
+#[cfg(test)]
 mod flow_return_construct_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_coverage_tests;

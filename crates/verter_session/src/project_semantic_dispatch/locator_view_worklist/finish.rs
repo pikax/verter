@@ -127,16 +127,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Alias(target) => projected(memo, *target, context),
-            // The same class expression over its projected instance surface.
-            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            // The same class expression over its projected type arguments
+            // and instance surface.
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let projected_arguments: Vec<SemanticNodeId> = type_arguments
+                    .iter()
+                    .map(|argument| projected(memo, *argument, context))
+                    .collect();
                 let projected_surface = projected(memo, *surface, context);
-                if projected_surface == *surface {
+                if projected_surface == *surface && projected_arguments[..] == type_arguments[..] {
                     node
                 } else {
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::ClassExpressionInstance {
                             identity: Arc::clone(identity),
+                            type_arguments: Arc::from(projected_arguments.into_boxed_slice()),
                             surface: projected_surface,
                         },
                     )

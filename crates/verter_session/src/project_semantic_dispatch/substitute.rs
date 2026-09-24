@@ -275,13 +275,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
-            // Instantiating the outer type parameters of the declaration a
-            // class expression is authored under substitutes into its
+            // Instantiating a type parameter a class expression can see
+            // substitutes into the reference's type arguments and its
             // instance surface; the class identity is unchanged.
-            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let mut any_changed = false;
+                let mut new_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments.iter() {
+                    let (sub, changed) =
+                        self.substitute_with_change_tracking(*argument, parameter_node, arg);
+                    any_changed |= changed;
+                    new_arguments.push(sub);
+                }
                 let (sub, changed) =
                     self.substitute_with_change_tracking(*surface, parameter_node, arg);
-                if !changed {
+                if !changed && !any_changed {
                     return (node, false);
                 }
                 (
@@ -289,6 +301,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         node,
                         SemanticNodeData::ClassExpressionInstance {
                             identity: Arc::clone(identity),
+                            type_arguments: Arc::from(new_arguments.into_boxed_slice()),
                             surface: sub,
                         },
                     ),
@@ -1373,7 +1386,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
                 }
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
                     stack.push(*surface);
                 }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
