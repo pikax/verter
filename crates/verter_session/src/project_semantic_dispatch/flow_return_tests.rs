@@ -8800,18 +8800,16 @@ function f(x: string | number) {
     });
 }
 
-/// A CONTROL position nested inside a leaf-lowered expression is still a
-/// control position: the checker binds the predicate call in the ternary
-/// test into the branch narrowing even though the WHOLE array folds into
-/// one shallow-pass leaf answer — `[isString(x) ? x : false]` is
-/// `(string | boolean)[]` in the checker. Blanket-certifying the nested
-/// test call decided-above dropped that narrowing and the unnarrowed
-/// superset sealed complete and warm. The nested control call takes the
-/// per-callee certification instead: a predicate callee is unprovable
-/// here, so the element keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// An array element that is a CONDITIONAL narrows its branches through a
+/// predicate test exactly as a returned conditional does: the array
+/// literal lowers structurally, so the element is the branch join and the
+/// predicate call is the guard's own evidence — `[isString(x) ? x :
+/// false]` is the checker's `(string | boolean)[]` (TypeScript 7.0.2),
+/// clean and warm. (The same conditional folded into a LEAF answer keeps
+/// the per-callee certification and its typed gap:
+/// `flow_slice_content_tests::leaf_nested_control_position_calls_are_never_blanket_certified`.)
 #[test]
-fn leaf_nested_conditional_predicate_never_certifies_decided_above() {
+fn array_element_conditional_narrows_through_its_predicate() {
     const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8835,37 +8833,26 @@ function f(x: string | number) {
         let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
             panic!("f: the return is an array, got {expr:?}");
         };
-        // The dropped branch narrowing never collapses the element to the
-        // narrowed branch read: the `false` arm survives and no arm is the
-        // narrowed `string`. (The consequent's bare `typeof x` root rides
-        // its own typed miss carrier — bare frame-rooted `typeof` roots
-        // are not path-projected, before and after this change.)
         let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
-            panic!("f: the element keeps the unnarrowed join, got {expr:?}");
+            panic!("f: the element is the branch join, got {expr:?}");
         };
-        assert!(
-            arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)),
-            "f: the `false` arm survives, got {expr:?}"
-        );
-        assert!(
-            !arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
-            "f: the narrowed branch read never publishes, got {expr:?}"
-        );
+        let mut arms: Vec<_> = arms.iter().cloned().collect();
+        arms.sort_by_key(|arm| format!("{arm:?}"));
         assert_eq!(
-            result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "f: the nested control call degrades to the typed guard-narrowing gap"
+            arms,
+            vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ],
+            "f: the consequent reads the narrowed `string`, got {expr:?}"
         );
+        assert_eq!(result.degradation(), None, "f: {expr:?}");
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "f: an unprovable nested control call never warms"
+            1,
+            "f: a clean complete result admits warm"
         );
     });
 }

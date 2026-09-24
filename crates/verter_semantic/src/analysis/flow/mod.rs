@@ -507,6 +507,13 @@ pub enum SkeletonExprShape {
         /// The arm sites, in authored order (consequent, alternate).
         arms: Arc<[SkeletonExprSiteId]>,
     },
+    /// An array literal: every element site (a spread's argument site for
+    /// a spread element) is a whole-value input of this site's value,
+    /// whatever part of the array is demanded.
+    ArrayLiteral {
+        /// The element sites, in authored order (elisions have none).
+        elements: Arc<[SkeletonExprSiteId]>,
+    },
     /// Any other expression shape (footprint-only).
     Other,
 }
@@ -723,6 +730,11 @@ pub struct FunctionBodySkeleton {
     pub expr_sites: Arc<[SkeletonExprSite]>,
     /// The return-site index, in source order.
     pub return_sites: Arc<[SkeletonReturnSite]>,
+    /// The argument site of every statement-position `yield x` (not
+    /// `yield*`), in source order. A generator's yield type is the join of
+    /// these values, so a whole-return demand is a demand for each of them
+    /// as well as for the return sites.
+    pub yield_sites: Arc<[SkeletonExprSiteId]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
 }
@@ -1227,6 +1239,7 @@ struct SkeletonBuilder<'entry> {
     site_stack: Vec<usize>,
     read_kind: FlowReadKind,
     return_sites: Vec<SkeletonReturnSite>,
+    yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
     capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
@@ -1264,6 +1277,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             site_stack: Vec::new(),
             read_kind: FlowReadKind::Input,
             return_sites: Vec::new(),
+            yield_sites: Vec::new(),
             writes: Vec::new(),
             capture_subjects: FxHashSet::default(),
             capture_names: FxHashSet::default(),
@@ -1427,6 +1441,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             // span), exactly as a parenthesized expression's does.
             ValueDescent::Awaited(awaited) => self.open_site_at(&awaited.argument, parent, span),
             ValueDescent::Object(object) => self.open_object_site(object, parent, span),
+            ValueDescent::Array(array) => self.open_array_site(array, parent, span),
             ValueDescent::Branches(conditional) => self.open_branch_site(conditional, parent, span),
             // An unmodeled CALL POSITION has no value-providing child
             // either — a call's arguments do not provide its value — so
@@ -1477,6 +1492,34 @@ impl<'entry> SkeletonBuilder<'entry> {
         let alternate = self.open_site(&conditional.alternate, Some(id));
         self.sites[id.index()].shape = SkeletonExprShape::BranchJoin {
             arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+        };
+        id
+    }
+
+    /// An ARRAY site: each element (a spread's argument for a spread
+    /// element) opens as its own child site, so the element structure the
+    /// content half lowers is the structure the graph selects.
+    fn open_array_site(
+        &mut self,
+        array: &oxc_ast::ast::ArrayExpression<'_>,
+        parent: Option<SkeletonExprSiteId>,
+        span: verter_span::Span,
+    ) -> SkeletonExprSiteId {
+        let id = self.alloc_site(span, parent);
+        let mut elements = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let value = match element {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => continue,
+                other => match other.as_expression() {
+                    Some(expression) => expression,
+                    None => continue,
+                },
+            };
+            elements.push(self.open_site(value, Some(id)));
+        }
+        self.sites[id.index()].shape = SkeletonExprShape::ArrayLiteral {
+            elements: Arc::from(elements.into_boxed_slice()),
         };
         id
     }
@@ -2103,6 +2146,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                     .into_boxed_slice(),
             ),
             return_sites: Arc::from(self.return_sites.into_boxed_slice()),
+            yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
         }
     }
@@ -2432,6 +2476,22 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        // A statement-position `yield x` provides the generator's yield
+        // type exactly as a return argument provides its return type: the
+        // ARGUMENT is the tracked root, so its structure opens the way a
+        // return argument's does and a whole-return demand selects it. A
+        // `yield*` delegation keeps the whole expression as one site.
+        let mut expression = &it.expression;
+        while let Expression::ParenthesizedExpression(paren) = expression {
+            expression = &paren.expression;
+        }
+        if let Expression::YieldExpression(yield_expr) = expression {
+            if let (false, Some(argument)) = (yield_expr.delegate, yield_expr.argument.as_ref()) {
+                let site = self.open_root_site(argument);
+                self.yield_sites.push(site);
+                return;
+            }
+        }
         self.open_root_site(&it.expression);
     }
 
@@ -2456,9 +2516,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     fn visit_expression(&mut self, it: &Expression<'a>) {
         let previous = self.read_kind;
+        // An array walked inside another site's footprint reads its
+        // elements whole, exactly as its own site's element edges do.
         if matches!(
             value_descent(it),
-            ValueDescent::Leaf | ValueDescent::UnmodeledCall
+            ValueDescent::Leaf | ValueDescent::UnmodeledCall | ValueDescent::Array(_)
         ) {
             self.read_kind = FlowReadKind::Input;
         }

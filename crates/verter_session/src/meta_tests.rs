@@ -2322,7 +2322,7 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
         ),
         (
             "/src/U1HelperArray.vue",
-            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
+            "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => [\"s\", box`b`]; return { label: \"x\", made: f() } }",
             "{ label: string; made: (string | Box)[] }",
         ),
         // A `switch` whose DISCRIMINANT is not a reference this half

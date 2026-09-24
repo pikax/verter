@@ -3513,12 +3513,10 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
     // The same read at the nesting depths the evaluation composes as
-    // FLOW expressions: an object-literal member value and a nested
-    // function's return. Each resolves through the parameter's
-    // annotation — clean, warm, the checker's own answer (`{ q: string }`,
-    // `() => string`). (An ARRAY element rides inside the array literal's
-    // single composite leaf — a different ingress, still declined; see
-    // `a_value_reaching_a_miss_carrier_is_never_admitted_warm`.)
+    // FLOW expressions: an object-literal member value, an array element
+    // and a nested function's return. Each resolves through the
+    // parameter's annotation — clean, warm, the checker's own answer
+    // (`{ q: string }`, `string[]`, `() => string`).
     let assert_clean = |name: &str| -> TypeExpr {
         match eval(&host, TL, name) {
             Outcome::Value {
@@ -3540,6 +3538,15 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     assert_eq!(
         projected_member(&object, "q"),
         &TypeExpr::Primitive(PrimitiveName::String)
+    );
+    let array = assert_clean("tlMissCarrierInArray");
+    assert!(
+        matches!(
+            &array,
+            TypeExpr::Array { element, readonly: false }
+                if **element == TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "tlMissCarrierInArray: {array:?}"
     );
     let nested = assert_clean("tlMissCarrierInNestedFunction");
     assert_eq!(
@@ -4092,28 +4099,24 @@ fn assert_unresolved_value(
 /// function's return): each declined a frame-rooted `x.q` read as a
 /// miss-carrier value. The frame-rooted member-path projection now
 /// resolves the reads the evaluation composes as FLOW expressions (the
-/// plain read, the object member, the nested-function return — clean,
-/// warm, the checker's own `string`), so those moved to the canary
+/// plain read, the object member, the array element, the nested-function
+/// return — clean, warm, the checker's own `string`), so those moved to
+/// the canary
 /// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`.
-/// What remains is the genuinely unresolvable read and the
-/// composite-leaf interior the projection never sees:
+/// What remains is the genuinely unresolvable read:
 ///
 /// ```text
 /// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
 ///                                carrier is involved at all
-/// tlMissCarrierInArray           nested inside ONE leaf lowering's own
-///                                answer (`Array{element}`), which no
-///                                shallow ingress check could see
 /// ```
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
-/// to publish for it at all. The array row's `string[]` is the answer
-/// the composite-leaf ingress still declines to produce.
+/// to publish for it at all.
 ///
 /// Mutation recipe: returning `false` unconditionally from
-/// `flow_return_value_is_unresolved` flips each row to a warm
+/// `flow_return_value_is_unresolved` flips the row to a warm
 /// `candidates: 1`.
 #[test]
 fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
@@ -4122,19 +4125,6 @@ fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
     // Top-level miss, reached through the FREE-leaf arm.
     assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
         assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
-    });
-    // Nested inside ONE leaf lowering's own composite answer: the array
-    // literal lowers as ONE leaf (`Array{element: typeof x.q}`), so the
-    // frame-rooted member path never reaches the evaluator's projection
-    // — a composite-leaf interior is a distinct, still-declined ingress.
-    assert_unresolved_value(&host, TL, "tlMissCarrierInArray", |dispatch, node| {
-        let data = dispatch.graph().node_data(node);
-        let Some(SemanticNodeData::Array { element, .. }) = data.as_deref() else {
-            panic!("the array row must still produce an Array node");
-        };
-        let element = *element;
-        drop(data);
-        assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
     });
 }
 

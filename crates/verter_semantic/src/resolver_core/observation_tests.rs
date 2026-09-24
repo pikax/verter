@@ -584,6 +584,7 @@ fn empty_skeleton() -> FunctionBodySkeleton {
         bindings: Arc::from([]),
         expr_sites: Arc::from([]),
         return_sites: Arc::from([]),
+        yield_sites: Arc::from([]),
         writes: Arc::from([]),
     }
 }

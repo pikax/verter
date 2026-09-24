@@ -1213,11 +1213,19 @@ pub enum WideningMembership {
 /// Predecessors arrive in the control interpreter's source/edge order;
 /// canonical semantic algebra owns structural deduplication and the final
 /// member representation. Literal widening provenance follows these values.
+///
+/// `widening_nullish` is the same kind of provenance for the checker's
+/// WIDENING `null` / `undefined` (the value of a bare `null` written to
+/// an auto-typed variable): it holds only when EVERY path's value is one.
+/// A path holding a declared nullable — or anything else — clears it,
+/// exactly as the checker's union of a widening and a non-widening
+/// `null` is the non-widening `null`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReachingTypeProduct {
     contributors: Arc<[SemanticNodeId]>,
     united: Option<SemanticNodeId>,
     widening: Option<WideningMembership>,
+    widening_nullish: bool,
 }
 
 impl ReachingTypeProduct {
@@ -1229,7 +1237,22 @@ impl ReachingTypeProduct {
             contributors: Arc::from(vec![contributor].into_boxed_slice()),
             united: Some(contributor),
             widening: None,
+            widening_nullish: false,
         }
+    }
+
+    /// Mark whether this reaching value is the checker's widening
+    /// nullable type.
+    #[must_use]
+    pub fn with_widening_nullish(mut self, widening_nullish: bool) -> Self {
+        self.widening_nullish = widening_nullish;
+        self
+    }
+
+    /// Whether every path's value is the checker's widening nullable type.
+    #[must_use]
+    pub fn widening_nullish(&self) -> bool {
+        self.widening_nullish
     }
 
     /// Literal membership retained by this reaching value.
@@ -1906,6 +1929,7 @@ fn join_reaching_types(
         contributors: contributors.into(),
         united,
         widening,
+        widening_nullish: products.iter().all(|product| product.widening_nullish),
     };
     if let Some(WideningMembership::Partial(members)) = &product.widening {
         if let Some(exceeded) = width_exceeded(budget, members.len()) {

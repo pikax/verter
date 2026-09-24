@@ -444,7 +444,9 @@ fn object_entries(
 ) -> Vec<SkeletonObjectEntry> {
     match &skeleton.expr_site(site).shape {
         SkeletonExprShape::ObjectLiteral { entries } => entries.to_vec(),
-        SkeletonExprShape::BranchJoin { .. } | SkeletonExprShape::Other => {
+        SkeletonExprShape::BranchJoin { .. }
+        | SkeletonExprShape::ArrayLiteral { .. }
+        | SkeletonExprShape::Other => {
             panic!("site must be an object literal")
         }
     }
@@ -1081,7 +1083,7 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 
 /// A site is not a callback identity. Several callables share one
 /// expression site whenever the site is a compound the skeleton does not
-/// open per element — a call's argument list, an array literal — so the
+/// open per operand — a call's argument list, a logical expression — so the
 /// site-level capture union answers "is this cell retained here" and can
 /// never answer "which callback retains it". The per-callable inventory
 /// is the partition that can: exactly one record per authored callable,
@@ -1092,7 +1094,7 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
     for source in [
         "function root() { const a = 1; const b = 2; sink(() => a, () => b); return 1; }",
-        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+        "function root() { const a = 1; const b = 2; return (() => a) || (() => b); }",
     ] {
         let prepared = indexed_structure_of(source);
         let skeleton = prepared.skeleton();
@@ -1371,4 +1373,26 @@ fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure]
     let site = sites.next().expect("the fixture authors one callable");
     assert!(sites.next().is_none(), "exactly one site holds a callable");
     &site.closures
+}
+
+/// An array literal opens one child site per element, but a nest of array
+/// literals deeper than the shallow inference's nesting budget is a leaf:
+/// that inference answers it whole and reports the typed budget
+/// exhaustion, so neither half descends it level by level. Sixty-four
+/// levels are structural; sixty-five are one leaf.
+#[test]
+fn array_nests_past_the_inference_budget_are_leaves() {
+    let nest = |levels: usize| format!("{}0{}", "[".repeat(levels), "]".repeat(levels));
+    let return_shape = |levels: usize| {
+        let skeleton = skeleton_of(&format!("function f() {{ return {}; }}", nest(levels)));
+        let site = skeleton.return_sites[0]
+            .argument
+            .expect("the return carries a value");
+        matches!(
+            skeleton.expr_site(site).shape,
+            SkeletonExprShape::ArrayLiteral { .. }
+        )
+    };
+    assert!(return_shape(64), "a 64-level nest opens its array sites");
+    assert!(!return_shape(65), "a 65-level nest is one leaf");
 }

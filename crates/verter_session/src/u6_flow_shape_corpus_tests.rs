@@ -1696,12 +1696,20 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "d7b616ee9e42758ab6c958c3f50839790cbd088d0441663fa5c4a7c6d64ac479",
     ),
     (
+        "X94_evolving_let_one_branch_keeps_undefined",
+        "bcc20072aa44a2ef81dc8f9807fffa538a5623d081de18d3d237b86d71135f8a",
+    ),
+    (
         "X95_evolving_let_both_branches_join",
         "7f27ccc7b5bbe32c1600e75488c6bd1d9ba20c285fe253808bc3ffbfd7514ff0",
     ),
     (
         "X96_evolving_let_explicit_undefined_initializer",
         "d9b0fe4086b5f843feae02f14f3bafd6778fc07268f7a4da0895193396903f95",
+    ),
+    (
+        "X97_evolving_let_switch_without_default_keeps_undefined",
+        "f729379bc5e66e7f775532e5842cd18a1bd2008d386f5b049f2373072d407ef8",
     ),
     (
         "X99_nested_try_finally_collects_every_return",
@@ -3338,11 +3346,11 @@ mod corpus_suite {
             ),
             (
                 "X94_evolving_let_one_branch_keeps_undefined",
-                "the renderer spells the (KnownOwed-divergent) node `{ v: \"q\" }` where the checker prints `{ v: \"q\" | undefined; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"q\" | undefined; }`; the renderer spells the same node `{ v: Union(\"q\" | undefined) }` — union spelling and member terminators differ",
             ),
             (
                 "X97_evolving_let_switch_without_default_keeps_undefined",
-                "the renderer spells the (KnownOwed-divergent) node `{ v: Union(\"s\" | 3) }` where the checker prints `{ v: \"s\" | 3 | undefined; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"s\" | 3 | undefined; }`; the renderer spells the same node `{ v: Union(\"s\" | undefined | 3) }` — union spelling, arm order, and member terminators differ",
             ),
             (
                 "X99_nested_try_finally_collects_every_return",
@@ -3616,7 +3624,7 @@ mod corpus_suite {
             ),
             (
                 "X19_generator_yield",
-                "checker prints `Generator<{ label: string; }, void, unknown>`; the renderer spells the flow surface `void` — print syntax AND semantics differ; the KnownOwed divergence is held by the semantic test",
+                "checker prints `Generator<{ label: string; }, void, unknown>`; the renderer spells the flow surface `Opaque(UnmodeledPosition)` — print syntax AND semantics differ; the KnownOwed divergence is held by the semantic test",
             ),
             (
                 "X27_finally_fallthrough_break_override",
@@ -5037,8 +5045,9 @@ const OPEN_DEBTS: &[&str] = &[
     "X12_class_getter_member",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
-    // The macro lane correctly rejects a generator return, but the TSX lane
-    // faults with the same code — the consumer-reach debt class.
+    // A generator return: the generator wrap has no lib `Generator` head to
+    // resolve in this standalone environment, so the return is the typed
+    // unmodelled-position marker.
     "X19_generator_yield",
     // A return-bearing loop remains outside the value-inference surface. The
     // NoValue refusal is honest until loop-owned break/return joining exists.
@@ -5111,8 +5120,6 @@ const OPEN_DEBTS: &[&str] = &[
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.
     "X91_assert_never_default_arm_contributes_nothing",
-    "X94_evolving_let_one_branch_keeps_undefined",
-    "X97_evolving_let_switch_without_default_keeps_undefined",
     "X101_optional_chain_nullish_coalesce",
     "X105_closure_captures_narrowed_binding_in_guarded_arm",
     "X108_record_index_read_has_no_undefined",
@@ -5155,8 +5162,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // owner at 93 rows, 80 matching and 10 parked on the merged tree. A
     // free `undefined` read as the `undefined` type moves X96 — the
     // evolving `let` with an explicit `= undefined` initializer — to
-    // MatchesChecker: 81 matching, 9 parked.
-    (Owner::U6ValueInference, 93, 81, 9),
+    // MatchesChecker: 81 matching, 9 parked. An initializer-less evolving
+    // `let` holding `undefined` until its first write moves X94 and X97 —
+    // the one-branch and default-less-switch joins that keep `undefined` —
+    // to MatchesChecker: 83 matching, 7 parked.
+    (Owner::U6ValueInference, 93, 83, 7),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
@@ -5325,7 +5335,8 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     // the checker's union normal form carries `?: undefined` cross
     // members the composed spread alternatives omit.
     "H02_union_spread_source",
-    // The generator-return shape: the macro lane's rejection is correct, the
-    // TSX lane fault is not.
+    // The generator-return shape: the macro lane's rejection and the TSX
+    // projection are both correct; the return wrap's lib head is not
+    // resolvable in this environment.
     "X19_generator_yield",
 ];
