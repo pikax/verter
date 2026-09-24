@@ -14603,11 +14603,14 @@ fn subtype_refuses_any_source_that_assignability_accepts() {
     );
 }
 
-/// V4-AC4 — `StrictSubtype` demands a PROPER subtype: the mutual pair
-/// `string ≡ string` is accepted by `Subtype` and refused by
-/// `StrictSubtype`, while a genuinely narrower literal survives both.
+/// `StrictSubtype` is the checker's strict subtype relation — the one its
+/// union subtype reduction asks — not a proper-subtype test: a type is
+/// below itself, a literal below its primitive, and `any`, below `unknown`
+/// in the subtype relation, is not below it here. Measured on TypeScript
+/// 7.0.2 through the reduction: `c ? a : b` over `a: any[]` and `b:
+/// unknown[]` is `any[]` (`unknown[]` is absorbed, `any[]` is not).
 #[test]
-fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
+fn strict_subtype_is_the_checkers_strict_subtype_relation() {
     use crate::semantic_query::{LiteralValue, RelationKind};
 
     let host = host();
@@ -14628,9 +14631,9 @@ fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
     assert!(
         matches!(
             dispatch.execute_relate_pair_kind(string, string, RelationKind::StrictSubtype),
-            RelationStep::NotAssignable
+            RelationStep::Assignable { .. }
         ),
-        "StrictSubtype must refuse the mutual pair: no proper subtype exists"
+        "a type is below itself in the strict subtype relation"
     );
     assert!(
         matches!(
@@ -14645,6 +14648,22 @@ fn strict_subtype_rejects_mutual_pair_that_subtype_accepts() {
             RelationStep::Assignable { .. }
         ),
         "StrictSubtype keeps the genuinely narrower literal: \"a\" < string"
+    );
+    let any = primitive(&graph, PrimitiveKind::Any);
+    let unknown = primitive(&graph, PrimitiveKind::Unknown);
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(any, unknown, RelationKind::Subtype),
+            RelationStep::Assignable { .. }
+        ),
+        "control: any is below unknown in the subtype relation"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(any, unknown, RelationKind::StrictSubtype),
+            RelationStep::NotAssignable
+        ),
+        "any is not below unknown in the strict subtype relation"
     );
 }
 

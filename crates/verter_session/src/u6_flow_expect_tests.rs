@@ -5183,20 +5183,20 @@ mod expectation_controls {
 
         // (h) Refusal IDENTITY drift across the replay: the real trace
         // with ONLY the second call's typed kind substituted by a
-        // DIFFERENT program's real measured refusal kind (a
-        // return-bearing loop, which refuses with a distinct typed
-        // kind). Only the identity-drift clause may fire.
+        // DIFFERENT program's real measured refusal kind (a `for await`
+        // loop, which refuses with a distinct typed kind). Only the
+        // identity-drift clause may fire.
         let loop_refused = drive_expect_boundary(
             "",
             "ctl_refusal_loop",
-            "function makeProps() { while (true) { return \"a\" as const } }",
+            "async function makeProps(xs: string[]) { for await (const x of xs) { return x } return \"b\" as const }",
             "makeProps",
             None,
         );
         let lr = &loop_refused.boundary;
         assert!(
             lr.error_kind.is_some() && lr.error_kind != r.error_kind,
-            "control precondition: the return-bearing loop refuses with a DIFFERENT typed \
+            "control precondition: the `for await` loop refuses with a DIFFERENT typed \
              kind than the IIFE-write program; measured loop {:?} vs iife {:?}",
             lr.error_kind,
             r.error_kind
@@ -5811,9 +5811,9 @@ fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
             id: "guard_typeof_unknown_negated_undefined",
             script: "export function f(x: unknown) { if (typeof x !== \"undefined\") return x; return 0; }",
             checker: "{} | null",
-            // Extensionally the checker's answer: its return reunion
-            // absorbs `0` into `{}`, which this join keeps as an arm.
-            rendered: "Union({  } | null | 0)",
+            // The return reunion absorbs `0` into the `{}` member of the
+            // narrowed `{} | null`.
+            rendered: "Union({  } | null)",
             degradation: Degr::None,
             warm: true,
         },

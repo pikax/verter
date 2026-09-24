@@ -240,7 +240,9 @@ impl ProjectSemanticDispatch<'_> {
     /// 1. `error extends T` ⇒ `error` (the error CARRIER dominates any/never
     ///    and both branches — stays FIRST).
     /// 2. `any extends T ? X : Y` ⇒ `X | Y` — the union of BOTH branches,
-    ///    mode-INDEPENDENT (distributive and non-distributive alike). Built
+    ///    mode-INDEPENDENT (distributive and non-distributive alike) — and
+    ///    `X` alone when `T` is `any` or `unknown`, which every check type
+    ///    satisfies. Built
     ///    via [`intern_normalized_union_or_intersection`](Self::intern_normalized_union_or_intersection)
     ///    (the `ReduceUnion` intern) so `X | X` folds to `X` with canonical
     ///    dedup/order — NOT a raw `Union`. The relation engine would instead
@@ -277,6 +279,16 @@ impl ProjectSemanticDispatch<'_> {
             //     would be involved (then fall through to the infer path).
             (SpecialKind::Any, _) if !self.extends_is_infer_pattern(extends) => {
                 let true_branch = force_branch(true);
+                // An `any` or `unknown` extends type admits every check
+                // type, so the false branch never joins: `any extends
+                // unknown ? X : Y` is `X` (the checker adds the false branch
+                // only when the extends type is neither).
+                if matches!(
+                    self.peek_special(extends),
+                    Some((SpecialKind::Any | SpecialKind::Unknown, _))
+                ) {
+                    return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));
+                }
                 let false_branch = force_branch(false);
                 let union = self
                     .intern_normalized_union_or_intersection(&[true_branch, false_branch], true);

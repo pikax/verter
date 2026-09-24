@@ -2183,9 +2183,9 @@ import { obj } from './obj'
 /// PUBLIC BOUNDARY — a DEGRADED SUCCESS whose value is fully usable still
 /// gates the ENCLOSING result: partial, and nothing warms.
 ///
-/// This is the arm the marker cannot cover. `makeProps` compound-assigns
-/// to its own parameter before returning — a plain `=` write at
-/// statement position is APPLIED by the evaluator and stays clean, so
+/// This is the arm the marker cannot cover. `makeProps` logically assigns
+/// to its own parameter before returning — a plain `=` or compound write
+/// at statement position is APPLIED by the evaluator and stays clean, so
 /// the degradation fixture rides the operator form nobody applies —
 /// so the evaluation carries the typed `UnappliedWriteEffect` degradation
 /// — but its VALUE is a perfectly ordinary `{ label: string }` with no
@@ -2217,7 +2217,7 @@ fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
             "/src/C2.vue",
             r#"<script setup lang="ts">
 function makeProps(seed: string) {
-  seed += "y"
+  seed ||= "y"
   return { label: seed }
 }
 defineProps<ReturnType<typeof makeProps>>()
@@ -2308,13 +2308,13 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
     /// not warm.
     const NO_ANSWER: &[(&str, &str, &str)] = &[
         (
-            "/src/U1Loop.vue",
-            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+            "/src/U1Invoked.vue",
+            "function makeProps() { let label = \"x\"; (() => { label = \"y\" })(); return { label } }",
             "{ label: string }",
         ),
         (
-            "/src/U1LoopArrow.vue",
-            "function makeProps() { return { label: \"x\", go: (n: number) => { while (n > 0) { return n } return 0 } } }",
+            "/src/U1InvokedArrow.vue",
+            "function makeProps() { return { label: \"x\", go: (n: number) => { let r = n; (() => { r = 0 })(); return r } } }",
             "{ label: string; go: (n: number) => number }",
         ),
         (
@@ -3365,8 +3365,9 @@ fn runtime_props_derive_each_member_from_that_members_own_evidence() {
 /// strictly worse than refusing, because refusing is loud and the TSX lane
 /// still type-checks the file.
 ///
-/// Two families reach the root: a NO-VALUE outcome (`R2Loop`: a
-/// return-bearing loop the substrate does not model) and an object literal
+/// Two families reach the root: a NO-VALUE outcome (`R2Invoked`: an
+/// invoked closure writing a captured binding, which the substrate does not
+/// model) and an object literal
 /// whose SPREAD SOURCE the substrate cannot type — directly
 /// (`S5UndeclaredSpread`) or one call away (`S6MarkerSpread`, whose
 /// callee's own frame is what cannot type its return). Both sources call
@@ -3405,8 +3406,8 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
     /// `(canonical, script)` — the runtime lane must REFUSE.
     const REFUSES: &[(&str, &str)] = &[
         (
-            "/src/R2Loop.vue",
-            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+            "/src/R2Invoked.vue",
+            "function makeProps() { let label = \"x\"; (() => { label = \"y\" })(); return { label } }",
         ),
         (
             "/src/S5UndeclaredSpread.vue",
@@ -3533,11 +3534,12 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 /// are ordinary TypeScript that the previous implementation compiled
 /// correctly.
 ///
-/// The fixtures ride COMPOUND assignments (`+=`): a plain `=` write at
-/// statement position is applied by the evaluator and verified, so the
-/// unverified class is exercised through the operator form nobody applies
-/// (the destructured-parameter row included — its plain element binding
-/// is modelled, so it too needs the compound form to stay unverified).
+/// The fixtures ride LOGICAL assignments (`||=`): a plain `=` or compound
+/// write at statement position is applied by the evaluator and verified, so
+/// the unverified class is exercised through the operator form nobody
+/// applies (the destructured-parameter row included — its plain element
+/// binding is modelled, so it too needs the logical form to stay
+/// unverified).
 ///
 /// The degradation is a property of the FRAME (it is seeded from the lowered
 /// slice's effect list before any member is evaluated), so it applies to
@@ -3561,17 +3563,17 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
     const ROWS: &[(&str, &str, &[&str])] = &[
         (
             "/src/W1Param.vue",
-            "function makeProps(seed: string) { seed += \"y\"; return { label: seed } }",
+            "function makeProps(seed: string) { seed ||= \"y\"; return { label: seed } }",
             &["label"],
         ),
         (
             "/src/W2CondVar.vue",
-            "function makeProps(k: boolean) { var v = 1; if (k) { v += 2 } return { label: \"x\", n: v } }",
+            "function makeProps(k: boolean) { var v = 1; if (k) { v ||= 2 } return { label: \"x\", n: v } }",
             &["label", "n"],
         ),
         (
             "/src/W3Destructure.vue",
-            "function makeProps({ seed }: {seed: string}) { seed += \"y\"; return { label: seed, n: 1 } }",
+            "function makeProps({ seed }: {seed: string}) { seed ||= \"y\"; return { label: seed, n: 1 } }",
             &["label", "n"],
         ),
     ];
@@ -3624,7 +3626,7 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
 ///
 /// Discrimination: making the TSX lane fault on any flow-return class fails
 /// the row for that class — `R1Helper` for the uninferred class, `R4Write` for
-/// the unverified class, `R2Loop` for the no-value class, `S1Spread` for a
+/// the unverified class, `R2Invoked` for the no-value class, `S1Spread` for a
 /// root-position marker. `R3Clean` fails nothing on its own and is the
 /// control that a blanket "always emit" change is not what passed.
 #[cfg(not(target_arch = "wasm32"))]
@@ -3639,8 +3641,8 @@ fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
         ),
         // A NO-VALUE outcome.
         (
-            "/src/R2Loop.vue",
-            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+            "/src/R2Invoked.vue",
+            "function makeProps() { let label = \"x\"; (() => { label = \"y\" })(); return { label } }",
         ),
         // The clean control.
         (
@@ -34473,8 +34475,8 @@ fn render_runtime_composed(
 ///
 /// The refusal that protects the runtime lane has to be asked
 /// per-CONTRIBUTION, not per-SURFACE. A no-value flow return
-/// (`for (…) { return … }` — a return-bearing loop the substrate does not
-/// model) produces no member set at all; when it is the macro's ONLY
+/// (`(() => { x = … })()` — an invoked closure writing a captured binding,
+/// which the substrate does not model) produces no member set at all; when it is the macro's ONLY
 /// producer the assembled surface is empty and a structural "is the surface
 /// empty" check catches it. Compose it with ONE authored arm and that check
 /// is defeated: the surface is non-empty, so the module publishes the
@@ -34507,13 +34509,13 @@ fn render_runtime_composed(
 #[test]
 fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
     /// A helper whose return the substrate cannot produce a surface for:
-    /// a return-bearing loop.
+    /// an invoked closure writing a captured binding.
     const NO_SURFACE_PROPS: &str =
-        "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } \
-         return { label: \"y\" } }";
+        "function makeProps() { let label = \"x\"; (() => { label = \"y\" })(); \
+         return { label } }";
     const NO_SURFACE_EMITS: &str =
-        "function makeEmits() { for (let i = 0; i < 1; i++) { return { evA: (p: string) => true } } \
-         return { evA: (p: string) => true } }";
+        "function makeEmits() { let ok = true; (() => { ok = false })(); \
+         return { evA: (p: string) => ok } }";
 
     /// `(canonical, script, macro call, option key)` — the runtime lane must
     /// REFUSE, because one of the composed producers has no member set.
@@ -34548,8 +34550,8 @@ fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
         // declared interface rather than a type-argument intersection.
         (
             "/src/X4Heritage.vue",
-            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } \
-             return { label: \"y\" } }\n\
+            "function makeProps() { let label = \"x\"; (() => { label = \"y\" })(); \
+             return { label } }\n\
              interface Props extends ReturnType<typeof makeProps> { extra: string }",
             "defineProps<Props>()",
             "props: ",
@@ -34642,8 +34644,8 @@ fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
 fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
     let RenderedRuntime::Props(props) = render_runtime_composed(
         "/src/X7MemberNoSurface.vue",
-        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
-         return { q: \"y\" } }",
+        "function makeProps() { let q = \"x\"; (() => { q = \"y\" })(); \
+         return { q } }",
         "defineProps<{ a: ReturnType<typeof makeProps>; b: string }>()",
         "props: ",
     ) else {
@@ -34667,8 +34669,8 @@ fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
     // binding with validation off — not a deleted module.
     let RenderedRuntime::Props(model) = render_runtime_composed(
         "/src/X8ModelNoSurface.vue",
-        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
-         return { q: \"y\" } }",
+        "function makeProps() { let q = \"x\"; (() => { q = \"y\" })(); \
+         return { q } }",
         "defineModel<ReturnType<typeof makeProps>>()",
         "props: ",
     ) else {
@@ -34684,8 +34686,8 @@ fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
     // must not be read as if it had.
     let RenderedRuntime::Props(emits) = render_runtime_composed(
         "/src/X9EmitsMemberNoSurface.vue",
-        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
-         return { q: \"y\" } }",
+        "function makeProps() { let q = \"x\"; (() => { q = \"y\" })(); \
+         return { q } }",
         "defineEmits<{ evA: [p: ReturnType<typeof makeProps>]; evB: [n: number] }>()",
         "emits: ",
     ) else {

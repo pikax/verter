@@ -7251,8 +7251,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ))
                     )
                 };
+                // An interface or class reference names an object type,
+                // which is never nullish: `NonNullable<Foo | null>` is
+                // `Foo` (measured on TypeScript 7.0.2).
+                let names_object_declaration = |id: SemanticNodeId| {
+                    let identity = match graph.node_data(id).as_deref() {
+                        Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+                        Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+                        _ => return false,
+                    };
+                    self.ctx
+                        .prepared_type_decl_return_only(
+                            &identity.canonical_id,
+                            identity.owner,
+                            &identity.decl_name,
+                        )
+                        .is_some_and(|prepared| {
+                            matches!(
+                                prepared.kind,
+                                verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                                    | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                            )
+                        })
+                };
                 let settled_non_nullable = |id: SemanticNodeId| {
-                    matches!(
+                    (matches!(
                         graph.node_data(id).as_deref(),
                         Some(
                             SemanticNodeData::Signature { .. }
@@ -7264,7 +7287,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 | SemanticNodeData::Array { .. }
                                 | SemanticNodeData::Tuple { .. }
                         )
-                    ) && !nullish(id)
+                    ) || names_object_declaration(id))
+                        && !nullish(id)
                 };
                 let reduced: Option<SemanticNodeId> = match graph.node_data(arg).as_deref() {
                     Some(SemanticNodeData::Union(arms))

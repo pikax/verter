@@ -1007,11 +1007,16 @@ fn spread_index_signature_never_manufactures_required_named_presence() {
         ),
         "optional absence succeeds and the index value is compatible"
     );
+    // The index value is never related to an optional member the source
+    // does not name. TypeScript 7.0.2 accepts `const t: { x?: string } = {
+    // ...rec }` over `rec: { [k: string]: number }` with no diagnostic.
     let optional_bad = object(graph, [surface_member("x", string, true)]);
-    assert_eq!(
-        relate(&dispatch, spread_record, optional_bad),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "a present-via-index x would carry the index value type"
+    assert!(
+        matches!(
+            relate(&dispatch, spread_record, optional_bad),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "an optional member the source does not name relates no index value"
     );
 
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -2441,12 +2446,18 @@ fn program_index_obligations_cover_cross_domain_contributions() {
         "a numeric-string named member is inside the number index domain"
     );
 
+    // An optional target member the source does not name is satisfied
+    // without relating the covering index value to it. TypeScript 7.0.2
+    // accepts `const t: { 42?: number } = { ...c }` over `c: { [k:
+    // number]: string }` with no diagnostic.
     let optional_42 = object(graph, [surface_member("42", number, true)]);
     let number_index_string_value2 = spread(index_object(graph, number, string));
-    assert_eq!(
-        relate(&dispatch, number_index_string_value2, optional_42),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "an optional numeric target relates the covering index value and rejects"
+    assert!(
+        matches!(
+            relate(&dispatch, number_index_string_value2, optional_42),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "an optional numeric target member is satisfied without relating the covering index"
     );
 
     let number_index_number_source = spread(index_object(graph, number, number));
@@ -3996,15 +4007,17 @@ fn program_index_obligations_relate_every_overlapping_source_index() {
         "every domain-overlapping source index relates — the refuting number index rejects"
     );
 
-    // Named fill: an optional numeric target member falls to the source
-    // index fill, where the same all-overlapping rule applies — the
-    // number-domain index value `string` refutes even though the
-    // string-domain index accepts via `any`.
+    // An optional numeric target member the source does not name relates
+    // no source index at all. TypeScript 7.0.2 accepts `const t: { 42?:
+    // number } = { ...m }` over `m: { [s: string]: any; [n: number]:
+    // string }` with no diagnostic.
     let target_named = object(graph, [surface_member("42", number, true)]);
-    assert_eq!(
-        relate(&dispatch, source, target_named),
-        crate::semantic_query::RelationResult::NotAssignable,
-        "the named index fill relates every applicable source index"
+    assert!(
+        matches!(
+            relate(&dispatch, source, target_named),
+            crate::semantic_query::RelationResult::Assignable { .. }
+        ),
+        "an optional target member relates no source index"
     );
 }
 

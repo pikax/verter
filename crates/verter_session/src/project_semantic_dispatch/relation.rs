@@ -3322,15 +3322,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .is_some_and(|session| session.is_projection_target(node))
     }
 
-    /// Whether the active inference session declares `node` as one of its
-    /// frozen inference parameters (a deposit target).
-    pub(super) fn relation_session_declares(&self, node: SemanticNodeId) -> bool {
-        self.dispatch_txn
-            .borrow()
-            .active_session()
-            .is_some_and(|session| session.declares(node))
-    }
-
     /// Deposit the assembled reverse candidate through the same frame/session
     /// ownership gate as ordinary and projection candidates. A nested frame
     /// mutating an outer session is a session-local delta and therefore cannot
@@ -3436,10 +3427,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .all(|element| self.relation_reverse_input_is_semantically_resolved(element.value)),
             _ => false,
         }
-    }
-
-    fn relation_subtree_contains_projection(&self, root: SemanticNodeId) -> bool {
-        self.relation_subtree_matches(root, |node, _| self.relation_projection_target(node))
     }
 
     fn relation_subtree_matches(
@@ -5225,22 +5212,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             RelationKind::Assignable => {}
             RelationKind::Identity => return self.reduce_identity(key),
             RelationKind::Comparable => return self.reduce_comparable(key),
-            RelationKind::Subtype => {}
-            RelationKind::StrictSubtype => {
-                let mut sub = key.clone();
-                sub.relation = RelationKind::Subtype;
-                let forward = self.reduce_relation(&sub, bindings);
-                if !matches!(forward, RelationResult::Assignable { .. }) {
-                    return forward;
-                }
-                std::mem::swap(&mut sub.source, &mut sub.target);
-                let mut reverse_bindings = Vec::new();
-                let reverse = self.reduce_relation(&sub, &mut reverse_bindings);
-                if matches!(reverse, RelationResult::Assignable { .. }) {
-                    return RelationResult::NotAssignable;
-                }
-                return forward;
-            }
+            RelationKind::Subtype | RelationKind::StrictSubtype => {}
         }
         let occurrence = self.relation_current_occurrence();
         if let Some(result) =
@@ -5379,6 +5351,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             (Some(SemanticNodeData::Primitive(PrimitiveKind::Never)), _) => {
                 return Some(assignable(bindings));
+            }
+            (
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+            ) if self.strict_subtype_mode() => {
+                return Some(RelationResult::NotAssignable);
             }
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))) => {
                 return Some(assignable(bindings));
@@ -5678,37 +5656,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             RelationResult::NotAssignable
                         }
                     } else {
-                        // Optional target member satisfied by source index
-                        // evidence: EVERY applicable source index relates
-                        // (mirroring the legacy
-                        // `relate_property_via_source_index` loop) — the
-                        // first match alone would let an `any` index
-                        // swallow a refuting narrower index.
-                        let mut matched = false;
-                        let mut pair = assignable(bindings);
-                        for index in source.indices.iter().filter(|index| {
+                        // An optional target member the source does not
+                        // name is satisfied without relating a source index
+                        // signature to it (the checker's
+                        // `getUnmatchedProperty`); a source whose key set is
+                        // open may still carry the key with any value.
+                        let indexed = source.indices.iter().any(|index| {
                             index_signature_applies_to_property(
                                 self.graph(),
                                 index.key_type,
                                 &target_member.key,
                             )
-                        }) {
-                            matched = true;
-                            pair = result_and(
-                                pair,
-                                self.relate_projected_values(
-                                    &index.value,
-                                    &target_member.value,
-                                    bindings,
-                                ),
-                            );
-                            if matches!(pair, RelationResult::NotAssignable) {
-                                break;
-                            }
-                        }
-                        if matched {
-                            pair
-                        } else if source.open {
+                        });
+                        if source.open && !indexed {
                             RelationResult::Unknown
                         } else {
                             assignable(bindings)
@@ -5939,6 +5899,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ShallowRelation::Assignable
             }
             (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => ShallowRelation::Assignable,
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Any),
+                SemanticNodeData::Primitive(PrimitiveKind::Unknown),
+            ) if self.strict_subtype_mode() => ShallowRelation::NotAssignable,
             (_, SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => ShallowRelation::Assignable,
             (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => ShallowRelation::Assignable,
             (SemanticNodeData::Primitive(PrimitiveKind::Any), _) => {
@@ -6147,18 +6111,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// A declaration CARRIER (a `DeclRef` / `InstantiationRef` / an
     /// unexpanded declaration or recursive-reference placeholder) or a
-    /// mapped type must too: the checker relates the type a carrier names,
-    /// which only the canonical frame's identity unwrap reveals — an
-    /// intersection target `QA & QB` distributes into pairs whose arms are
-    /// declarations, and a nominal pair compares DECLARING identities. The
-    /// canonical frame's memo also closes a recursive declaration's cycle
-    /// coinductively.
+    /// mapped type on either side must too: the checker relates the type a
+    /// carrier names, which only the canonical frame's identity unwrap
+    /// reveals — an intersection target `QA & QB` distributes into pairs
+    /// whose arms are declarations, a nominal pair compares DECLARING
+    /// identities, and expanded inline a carrier answers `Unknown`, which a
+    /// subtype reduction reads as undecided (`A1[]` below `{ x: string }[]`
+    /// relates `A1` to `{ x: string }`, `{ v: A1 }` below `{ v: D1 }`
+    /// relates `A1` to `D1`). The canonical frame's memo also closes a
+    /// recursive declaration's cycle coinductively. An intersection source
+    /// whose members relate to the target alone relates through the object
+    /// they compose after them ([`Self::relate_composed_intersection`]).
     ///
     /// This runs on EVERY `RelateWork::Eval`, so its cost is the relation
-    /// engine's per-pair floor: each side's node data is read AT MOST ONCE
-    /// and the nominal axis is decided from those same two borrows. A
-    /// `Conditional` source short-circuits after a single read — the axis
-    /// adds no graph read to any pair.
+    /// engine's per-pair floor: each side's node data is read AT MOST ONCE.
+    /// A `Conditional` source short-circuits after a single read.
     fn relation_eval_requires_canonical_frame(
         &self,
         source: SemanticNodeId,
@@ -6190,6 +6157,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
         };
         is_carrier(&source_data) || is_carrier(&target_data)
+    }
+
+    /// Whether `target` is a declaration carrier naming an object type —
+    /// a target an intersection source relates to through the object its
+    /// members compose ([`Self::relate_composed_intersection`]), as it does
+    /// to an object literal type.
+    fn carrier_names_object(&self, target: SemanticNodeId) -> bool {
+        match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(resolved) => {
+                resolved != target
+                    && matches!(
+                        self.graph().node_data(resolved).as_deref(),
+                        Some(SemanticNodeData::Object(_))
+                    )
+            }
+            IdentityCarrierUnwrap::Unresolvable => false,
+        }
     }
 
     /// Expand a single relate pair into direct result(s) or sub-work
@@ -6423,6 +6407,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(assignable(bindings));
                 return;
             }
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => {
+                results.push(assignable(bindings));
+                return;
+            }
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Any),
+                SemanticNodeData::Primitive(PrimitiveKind::Unknown),
+            ) if self.strict_subtype_mode() => {
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
             (_, SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => {
                 results.push(assignable(bindings));
                 return;
@@ -6433,10 +6428,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     results.push(assignable(bindings));
                 }
-                return;
-            }
-            (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => {
-                results.push(assignable(bindings));
                 return;
             }
             (_, SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
@@ -6505,6 +6496,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.relate_string_literal_and_template(&source_data, &target_data, bindings)
         {
             results.push(result);
+            return;
+        }
+        // ── A template literal type is a string type: below `string`,
+        //    and never related to a primitive or literal of another kind
+        //    in either direction (`number` is not assignable to
+        //    ``item-${string}``), decided before the deferred gate. ────────
+        if let Some(result) = template_literal_kind_verdict(&source_data, &target_data) {
+            results.push(match result {
+                true => assignable(bindings),
+                false => RelationResult::NotAssignable,
+            });
             return;
         }
 
@@ -6682,8 +6684,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             let result =
                 self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant);
+            // No member relates alone: the one object the members compose
+            // still may, as the checker relates an intersection source
+            // structurally after its members — against an object target or
+            // a declaration carrier naming one.
             results.push(match result {
-                RelationResult::NotAssignable if object_target => {
+                RelationResult::NotAssignable
+                    if object_target || self.carrier_names_object(target) =>
+                {
                     self.relate_composed_intersection(source, target, bindings)
                 }
                 other => other,
@@ -6758,38 +6766,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(RelationResult::NotAssignable);
                     return;
                 }
-                // An INFERENCE element position under an active session is
-                // covariant-only: the forward arm's deposit IS the binding,
-                // and an invariant reverse arm against the binding node
-                // (`Infer ≤ element`, `T ≤ element`) is undecidable and
-                // would defer the whole pattern. This covers `infer`
-                // declarations AND the session's own declared type-parameter
-                // binders (a call argument against a generic `T[]`
-                // parameter). Other mutable arrays KEEP the invariant
-                // bidirectional check.
-                let inference_element = match occurrence.variance {
-                    VariancePhase::Covariant | VariancePhase::Invariant => t_el,
-                    VariancePhase::Contravariant => s_el,
-                };
-                let infer_element = self.relation_session_active()
-                    && (matches!(
-                        graph.node_data(inference_element).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) || (matches!(
-                        graph.node_data(inference_element).as_deref(),
-                        Some(SemanticNodeData::TypeParam { .. })
-                    ) && self.relation_session_declares(inference_element))
-                        || self.relation_subtree_contains_projection(inference_element));
-                if t_ro || s_ro || infer_element {
-                    work.push(RelateWork::Eval(s_el, t_el));
-                } else {
-                    let forward = vec![
-                        RelateWork::Eval(s_el, t_el),
-                        RelateWork::Eval(t_el, s_el),
-                        RelateWork::ReduceAnd(2),
-                    ];
-                    push_forward_work(work, forward);
-                }
+                // An array relates its element types COVARIANTLY, mutable
+                // arrays included: the checker's measured variance of
+                // `Array<T>` and `ReadonlyArray<T>` is covariant
+                // (`string[]` is assignable to `(string | number)[]`, the
+                // reverse is not).
+                work.push(RelateWork::Eval(s_el, t_el));
                 return;
             }
             (
@@ -6828,21 +6810,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     None
                 };
-                let required_source_len = s_els.iter().filter(|e| !e.optional && !e.rest).count();
-                let required_target_len = t_els.iter().filter(|e| !e.optional && !e.rest).count();
-                let required_lengths_compatible = if session_rest.is_some() {
+                if session_rest.is_some() {
+                    let required_source_len =
+                        s_els.iter().filter(|e| !e.optional && !e.rest).count();
+                    let required_target_len =
+                        t_els.iter().filter(|e| !e.optional && !e.rest).count();
                     let (required_inference_len, required_remainder_len) = if rest_on_source {
                         (required_source_len, required_target_len)
                     } else {
                         (required_target_len, required_source_len)
                     };
-                    required_remainder_len >= required_inference_len
-                } else {
-                    required_source_len >= required_target_len
-                };
-                if !required_lengths_compatible {
-                    results.push(RelationResult::NotAssignable);
-                    return;
+                    if required_remainder_len < required_inference_len {
+                        results.push(RelationResult::NotAssignable);
+                        return;
+                    }
                 }
                 let mut pairs: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
                 if let Some(rest_index) = session_rest {
@@ -6912,39 +6893,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                     }
                 } else {
-                    // An OPTIONAL element's type is its written type plus
-                    // `undefined` under `strictNullChecks` (the checker's
-                    // tuple type argument for `1?` is `1 | undefined`), so
-                    // `[(1 | undefined)?]` relates to `[1?]`; under
-                    // `exactOptionalPropertyTypes` the implied `undefined`
-                    // is the distinct missing type, removed when both
-                    // elements are optional (measured on the pinned
-                    // checker, with each option).
-                    let strict = self
-                        .dispatch_txn
-                        .borrow()
-                        .relation
-                        .strict
-                        .unwrap_or(StrictFamilyConfig::TS_STRICT);
-                    // The target element's missing type is removed whenever
-                    // it is optional, the source's only when both are.
-                    let read = |element: &crate::semantic_query::TupleElement, removed: bool| {
-                        let implied_undefined = element.optional
-                            && strict.strict_null_checks
-                            && !(strict.exact_optional_property_types && removed);
-                        if !implied_undefined {
-                            return element.value;
+                    let source_slots = self.tuple_slots(&s_els);
+                    let target_slots = self.tuple_slots(&t_els);
+                    match tuple_position_pairs(&source_slots, true, &target_slots) {
+                        Some(positions) => pairs.extend(positions),
+                        None => {
+                            results.push(RelationResult::NotAssignable);
+                            return;
                         }
-                        let undefined = graph
-                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-                        self.intern_normalized_union_or_intersection(
-                            &[element.value, undefined],
-                            true,
-                        )
-                    };
-                    pairs.extend(s_els.iter().zip(t_els.iter()).map(|(source, target)| {
-                        (read(source, target.optional), read(target, true))
-                    }));
+                    }
                 }
                 if pairs.is_empty() {
                     results.push(assignable(bindings));
@@ -6956,7 +6913,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // element (`[T, T]`) binds through the forward deposit. A
                 // reverse (`target-element ≤ source-element`) leg would
                 // reject literal-element sources and defer inference
-                // elements, so no element pair evaluates one.
+                // elements, so no element pair evaluates one. The positions
+                // pair up by the checker's arity rules
+                // ([`tuple_position_pairs`]).
                 let mut forward: Vec<RelateWork> = Vec::with_capacity(pairs.len() + 1);
                 for (source_element, target_element) in pairs.iter().copied() {
                     forward.push(RelateWork::Eval(source_element, target_element));
@@ -6967,7 +6926,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 push_forward_work(work, forward);
                 return;
             }
-            // Tuple ≤ Array (readonly): elementwise check.
+            // Tuple ≤ Array: the tuple's number index — the union of its
+            // element types — relates to the array's element.
             (
                 SemanticNodeData::Tuple {
                     elements: s_els,
@@ -6993,11 +6953,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return;
                 }
                 let mut forward: Vec<RelateWork> = Vec::with_capacity(s_els.len() + 1);
-                for s in s_els.iter() {
-                    forward.push(RelateWork::Eval(s.value, t_el));
+                for slot in self.tuple_slots(&s_els) {
+                    // A variadic element's number index is its whole
+                    // array-like value against the target array.
+                    forward.push(match slot.kind {
+                        TupleSlotKind::Variadic => RelateWork::Eval(slot.value, target),
+                        _ => RelateWork::Eval(slot.type_argument, t_el),
+                    });
                 }
                 if s_els.len() > 1 {
                     forward.push(RelateWork::ReduceAnd(s_els.len() as u32));
+                }
+                push_forward_work(work, forward);
+                return;
+            }
+            // Array ≤ Tuple: the array is one rest position, paired up by
+            // the checker's tuple arity rules.
+            (
+                SemanticNodeData::Array {
+                    element: s_el,
+                    readonly: s_ro,
+                },
+                SemanticNodeData::Tuple {
+                    elements: t_els,
+                    readonly: t_ro,
+                },
+            ) => {
+                let (s_el, s_ro, t_ro) = (*s_el, *s_ro, *t_ro);
+                let t_els = Arc::clone(t_els);
+                drop(source_data);
+                drop(target_data);
+                if !t_ro && s_ro {
+                    results.push(RelationResult::NotAssignable);
+                    return;
+                }
+                let source_slots = [TupleSlot {
+                    kind: TupleSlotKind::Rest,
+                    type_argument: s_el,
+                    missing_removed: s_el,
+                    value: source,
+                }];
+                let target_slots = self.tuple_slots(&t_els);
+                let Some(pairs) = tuple_position_pairs(&source_slots, false, &target_slots) else {
+                    results.push(RelationResult::NotAssignable);
+                    return;
+                };
+                if pairs.is_empty() {
+                    results.push(assignable(bindings));
+                    return;
+                }
+                let mut forward: Vec<RelateWork> = Vec::with_capacity(pairs.len() + 1);
+                for (source_element, target_element) in pairs.iter().copied() {
+                    forward.push(RelateWork::Eval(source_element, target_element));
+                }
+                if pairs.len() > 1 {
+                    forward.push(RelateWork::ReduceAnd(pairs.len() as u32));
                 }
                 push_forward_work(work, forward);
                 return;
@@ -7034,6 +7044,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             let s_params = Arc::clone(s_params);
             let t_params = Arc::clone(t_params);
+            // The strict subtype relation's arity rule (the checker's
+            // `StrictArity` mode): below a target without a rest
+            // parameter, a source with a rest parameter or with more
+            // parameters than the target takes is never a subtype —
+            // `(s?: string) => number` is not below `() => number`.
+            if self.strict_subtype_mode() {
+                let (_, source_positional) = crate::semantic_query::split_this_receiver(&s_params);
+                let (_, target_positional) = crate::semantic_query::split_this_receiver(&t_params);
+                if !target_positional.iter().any(|param| param.rest)
+                    && (source_positional.iter().any(|param| param.rest)
+                        || source_positional.len() > target_positional.len())
+                {
+                    drop(source_data);
+                    drop(target_data);
+                    results.push(RelationResult::NotAssignable);
+                    return;
+                }
+            }
             let source_result = FunctionResult {
                 return_type: *s_ret,
                 predicate: *s_predicate,
@@ -7093,6 +7121,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(target_data);
             results.push(self.relate_object_to_signature(&s_surf, t_kind, target, bindings));
             return;
+        }
+
+        // ── A non-nullable primitive against an EMPTY object type (`{}`):
+        //    every such value has the empty apparent surface, so it
+        //    relates in every relation (`string` is assignable to `{}`
+        //    and below it in the strict subtype relation). ─────────────
+        if let (
+            SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_),
+            SemanticNodeData::Object(t_surf),
+        ) = (&*source_data, &*target_data)
+        {
+            if t_surf.closed().is_empty()
+                && !matches!(
+                    &*source_data,
+                    SemanticNodeData::Primitive(
+                        PrimitiveKind::Null
+                            | PrimitiveKind::Undefined
+                            | PrimitiveKind::Void
+                            | PrimitiveKind::Unknown
+                    )
+                )
+            {
+                drop(source_data);
+                drop(target_data);
+                results.push(assignable(bindings));
+                return;
+            }
         }
 
         // Different concrete kinds → NotAssignable.
@@ -7188,7 +7243,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `"__builtin__"`-sentinel carrier the bare-name fast path interns
     /// for an UNSHADOWED global reference, never a userland declaration
     /// that happens to share the name.
-    fn is_global_function_carrier(&self, data: &SemanticNodeData) -> bool {
+    pub(super) fn is_global_function_carrier(&self, data: &SemanticNodeData) -> bool {
         let identity = match data {
             SemanticNodeData::DeclRef { identity } => identity,
             SemanticNodeData::InstantiationRef { base, .. } => base,
@@ -7731,9 +7786,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Number) => {
                 drop(key_data);
+                // The strict subtype relation infers no index signature for
+                // a source that declares none, an object literal's own type
+                // aside (the checker's `typeRelatedToIndexInfo`).
+                let applicable_source_index = source_view
+                    .index_signatures
+                    .iter()
+                    .any(|s_index| index_domains_overlap(graph, s_index.key_type, key_type));
+                if self.strict_subtype_mode()
+                    && !applicable_source_index
+                    && !surface_is_object_literal(source_view)
+                {
+                    return RelationResult::NotAssignable;
+                }
                 let mut acc = RelationResult::Assignable {
                     bindings: Arc::from(Vec::new().into_boxed_slice()),
                 };
+                for s_index in source_view.index_signatures.iter() {
+                    if !index_domains_overlap(graph, s_index.key_type, key_type) {
+                        continue;
+                    }
+                    let r = self.relate_member(
+                        s_index.value_type,
+                        value_type,
+                        bindings,
+                        InferPosition::Covariant,
+                    );
+                    acc = result_and(acc, r);
+                    if matches!(acc, RelationResult::NotAssignable) {
+                        return RelationResult::NotAssignable;
+                    }
+                }
                 for member in source_view.positive_members().iter() {
                     let r = self.relate_member(
                         member.value,
@@ -7777,6 +7860,81 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // full-key authority)
     // ──────────────────────────────────────────────────────────────────
 
+    /// The positions of a tuple in the checker's element vocabulary
+    /// ([`TupleSlot`]): a rest element over an array is a rest position
+    /// whose type argument is the array's element, any other rest element
+    /// is variadic, and an optional element's type argument carries
+    /// `undefined` under `strictNullChecks` as the checker's does.
+    fn tuple_slots(&self, elements: &[crate::semantic_query::TupleElement]) -> Vec<TupleSlot> {
+        let graph = self.graph();
+        // The relation root's snapshot of the strict family, as every
+        // other relation rule reads it.
+        let strict = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .strict
+            .unwrap_or(StrictFamilyConfig::TS_STRICT);
+        let strict_null_checks = strict.strict_null_checks;
+        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        elements
+            .iter()
+            .map(|element| {
+                if element.rest {
+                    let mut current = element.value;
+                    // bounded-loop: at most 8 transparent Alias hops.
+                    for _ in 0..8 {
+                        match graph.node_data(current).as_deref() {
+                            Some(SemanticNodeData::Alias(inner)) => current = *inner,
+                            _ => break,
+                        }
+                    }
+                    return match graph.node_data(current).as_deref() {
+                        Some(SemanticNodeData::Array { element: inner, .. }) => TupleSlot {
+                            kind: TupleSlotKind::Rest,
+                            type_argument: *inner,
+                            missing_removed: *inner,
+                            value: element.value,
+                        },
+                        _ => TupleSlot {
+                            kind: TupleSlotKind::Variadic,
+                            type_argument: element.value,
+                            missing_removed: element.value,
+                            value: element.value,
+                        },
+                    };
+                }
+                if element.optional {
+                    let type_argument = if strict_null_checks {
+                        self.intern_normalized_union(
+                            &[element.value, undefined],
+                            crate::semantic_query::NullabilityPolicy::Strict,
+                        )
+                    } else {
+                        element.value
+                    };
+                    let missing_removed = if strict.exact_optional_property_types {
+                        element.value
+                    } else {
+                        type_argument
+                    };
+                    return TupleSlot {
+                        kind: TupleSlotKind::Optional,
+                        type_argument,
+                        missing_removed,
+                        value: element.value,
+                    };
+                }
+                TupleSlot {
+                    kind: TupleSlotKind::Required,
+                    type_argument: element.value,
+                    missing_removed: element.value,
+                    value: element.value,
+                }
+            })
+            .collect()
+    }
+
     /// Relate two object `SurfaceView`s structurally. Every required
     /// target member must be satisfied by a matching source member (or an
     /// applicable source index signature).
@@ -7799,12 +7957,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
                     self.relate_property_pair(source_member, t_prop, bindings)
                 }
+                // The subtype relations require every target property of a
+                // source that is not an object literal, the optional ones
+                // included, and no index signature stands in for it
+                // (the checker's `requireOptionalProperties`): `{ x: string }`
+                // is not a subtype of `{ x: string; y?: number }`.
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                    if self.subtype_mode()
+                        && !(t_prop.optional && surface_is_object_literal(source)) =>
+                {
+                    RelationResult::NotAssignable
+                }
+                // A property the source does not declare: a required target
+                // property is unmatched, whatever index signature the source
+                // carries, and an optional one is satisfied without relating
+                // any index signature to it (the checker's
+                // `getUnmatchedProperty`: `{ [k: string]: string }` is not
+                // assignable to `{ a: string }`, and `{ [k: string]: number
+                // }` is assignable to `{ a?: string }`).
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                    if let Some(index_result) =
-                        self.relate_property_via_source_index(source, t_prop, bindings)
-                    {
-                        index_result
-                    } else if t_prop.optional {
+                    if t_prop.optional {
                         assignable(bindings)
                     } else {
                         RelationResult::NotAssignable
@@ -7908,22 +8080,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // mutable one) and on index signatures — distinct rules over
         // distinct carriers, not this member pair.
         //
-        // Optional-to-required: a source member that may be ABSENT cannot
-        // satisfy a required target member under `strictNullChecks` (the
-        // optional's implied `undefined` does not relate to the required
-        // value type). With strict null checks relaxed the implied
-        // `undefined` collapses and the pair relates on the value types
-        // alone (RI-10 behavioral branch).
-        if !target.optional && source.optional {
-            let strict = self
-                .dispatch_txn
-                .borrow()
-                .relation
-                .strict
-                .unwrap_or(StrictFamilyConfig::TS_STRICT);
-            if strict.strict_null_checks {
-                return RelationResult::NotAssignable;
-            }
+        // Optional-to-required: a source member that may be ABSENT never
+        // satisfies a required target member, whatever the value types and
+        // under both `strictNullChecks` settings — only the comparable
+        // relation skips the rule (the checker's `propertyRelatedTo`;
+        // measured on 7.0.2: `{ a?: string }` is not assignable to
+        // `{ a: string }`, `{ a: string | undefined }` or `{ a: any }`,
+        // with `strictNullChecks` on or off). The strict subtype relation
+        // also refuses a `readonly` member below a mutable one.
+        if !target.optional
+            && source.optional
+            && self.current_relation_kind() != RelationKind::Comparable
+        {
+            return RelationResult::NotAssignable;
+        }
+        if self.strict_subtype_mode() && source.readonly && !target.readonly {
+            return RelationResult::NotAssignable;
         }
         // A `RecursiveRef` member value rebinds to its declaration surface
         // through the shared dispatch so a genuinely recursive type
@@ -7941,37 +8113,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    pub(super) fn relate_property_via_source_index(
-        &self,
-        source: &SurfaceView,
-        target_prop: &crate::semantic_query::SurfaceMember,
-        bindings: &mut Vec<InferBinding>,
-    ) -> Option<RelationResult> {
-        let graph = self.graph();
-        let mut matched = false;
-        let mut acc = RelationResult::Assignable {
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
-        };
-        for s_index in source.index_signatures.iter() {
-            let target_key = target_prop.key.cloned_known()?;
-            if !index_signature_applies_to_property(graph, s_index.key_type, &target_key) {
-                continue;
-            }
-            matched = true;
-            let r = self.relate_member(
-                s_index.value_type,
-                target_prop.value,
-                bindings,
-                InferPosition::Covariant,
-            );
-            acc = result_and(acc, r);
-            if matches!(acc, RelationResult::NotAssignable) {
-                return Some(RelationResult::NotAssignable);
-            }
-        }
-        matched.then_some(acc)
-    }
-
     pub(super) fn relate_target_index_signature(
         &self,
         source: &SurfaceView,
@@ -7979,6 +8120,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         let graph = self.graph();
+        // The strict subtype relation infers no index signature for a
+        // source that declares none, an object literal's own type aside
+        // (the checker's `typeRelatedToIndexInfo`): `{ x: string }` is not
+        // below `{ [k: string]: string }`.
+        if self.strict_subtype_mode()
+            && !surface_is_object_literal(source)
+            && !source.index_signatures.iter().any(|s_index| {
+                index_domains_overlap(graph, s_index.key_type, target_index.key_type)
+            })
+        {
+            return RelationResult::NotAssignable;
+        }
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
@@ -8045,6 +8198,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::RelationKind::Subtype
                 | crate::semantic_query::RelationKind::StrictSubtype
         )
+    }
+
+    /// Whether the relation being decided is the checker's STRICT subtype
+    /// relation — the one its union subtype reduction asks
+    /// (`isTypeStrictSubtypeOf`). Beyond the subtype rules it refuses
+    /// `any` below `unknown`, a `readonly` property below a mutable one,
+    /// and a signature taking more parameters than its target.
+    fn strict_subtype_mode(&self) -> bool {
+        self.current_relation_kind() == crate::semantic_query::RelationKind::StrictSubtype
     }
 
     /// Relate two [`SemanticNodeData::Signature`] shells. Parameter
@@ -8472,6 +8634,175 @@ fn push_forward_work(work: &mut Vec<RelateWork>, forward: Vec<RelateWork>) {
     for item in forward.into_iter().rev() {
         work.push(item);
     }
+}
+
+/// The checker's element flag of one array or tuple position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TupleSlotKind {
+    /// A required element.
+    Required,
+    /// An optional element (`T?`).
+    Optional,
+    /// A rest element over an array (`...T[]`) — and an array itself, as
+    /// the one position an array source has.
+    Rest,
+    /// A variadic element over a generic (`...T`).
+    Variadic,
+}
+
+/// One array or tuple position: its flag, its TYPE ARGUMENT (the element
+/// type of a rest position; the type with `undefined` of an optional one
+/// under `strictNullChecks`), and the authored value it came from.
+#[derive(Debug, Clone, Copy)]
+struct TupleSlot {
+    kind: TupleSlotKind,
+    type_argument: SemanticNodeId,
+    /// The type argument with an optional element's implied `undefined`
+    /// removed where `exactOptionalPropertyTypes` makes it the distinct
+    /// missing type (the checker removes it from a target optional
+    /// element, and from a source optional element facing one).
+    missing_removed: SemanticNodeId,
+    value: SemanticNodeId,
+}
+
+/// Pair the positions of an array or tuple SOURCE with the positions of a
+/// tuple TARGET by the checker's tuple arity rules (`propertiesRelatedTo`
+/// over a tuple target): a source without a rest element must supply the
+/// target's required length, a target without a variable element must not
+/// be shorter than the source's required length nor accept a source rest,
+/// and each source position meets the target position counted from the
+/// front, or — past the target's leading fixed elements — from the back.
+/// A variadic position matches only a variable one, a required target
+/// position only a required source one. `None` is a decided
+/// `NotAssignable`; otherwise the `(source, target)` type pairs every one
+/// of which must relate. `source_is_tuple` is false for an array source,
+/// whose required length is zero.
+fn tuple_position_pairs(
+    source: &[TupleSlot],
+    source_is_tuple: bool,
+    target: &[TupleSlot],
+) -> Option<Vec<(SemanticNodeId, SemanticNodeId)>> {
+    let is_variable =
+        |kind: TupleSlotKind| matches!(kind, TupleSlotKind::Rest | TupleSlotKind::Variadic);
+    let min_length = |slots: &[TupleSlot]| {
+        slots
+            .iter()
+            .filter(|slot| matches!(slot.kind, TupleSlotKind::Required | TupleSlotKind::Variadic))
+            .count()
+    };
+    let source_arity = source.len();
+    let target_arity = target.len();
+    let source_has_rest = source.iter().any(|slot| slot.kind == TupleSlotKind::Rest);
+    let target_has_variable = target.iter().any(|slot| is_variable(slot.kind));
+    let source_min_length = if source_is_tuple {
+        min_length(source)
+    } else {
+        0
+    };
+    let target_min_length = min_length(target);
+    if !source_has_rest && source_arity < target_min_length {
+        return None;
+    }
+    if !target_has_variable
+        && (target_arity < source_min_length || source_has_rest || target_arity < source_arity)
+    {
+        return None;
+    }
+    let target_start = target
+        .iter()
+        .position(|slot| slot.kind == TupleSlotKind::Rest)
+        .unwrap_or(target_arity);
+    let target_end = target
+        .iter()
+        .rev()
+        .position(|slot| slot.kind == TupleSlotKind::Rest)
+        .unwrap_or(target_arity);
+    let mut pairs = Vec::with_capacity(source_arity);
+    for (position, source_slot) in source.iter().enumerate() {
+        let from_end = source_arity - 1 - position;
+        let target_position = if target_has_variable && position >= target_start {
+            target_arity - 1 - from_end.min(target_end)
+        } else {
+            position
+        };
+        let target_slot = target[target_position];
+        if target_slot.kind == TupleSlotKind::Variadic
+            && source_slot.kind != TupleSlotKind::Variadic
+        {
+            return None;
+        }
+        if source_slot.kind == TupleSlotKind::Variadic && !is_variable(target_slot.kind) {
+            return None;
+        }
+        if target_slot.kind == TupleSlotKind::Required
+            && source_slot.kind != TupleSlotKind::Required
+        {
+            return None;
+        }
+        let target_type = if source_slot.kind == TupleSlotKind::Variadic
+            && target_slot.kind == TupleSlotKind::Rest
+        {
+            target_slot.value
+        } else {
+            target_slot.missing_removed
+        };
+        let source_type = if target_slot.kind == TupleSlotKind::Optional {
+            source_slot.missing_removed
+        } else {
+            source_slot.type_argument
+        };
+        pairs.push((source_type, target_type));
+    }
+    Some(pairs)
+}
+
+/// The verdict a template literal type's string kind alone decides for a
+/// pair: `true` for a template below `string`, `false` for a template
+/// against a primitive or literal of another kind (either direction),
+/// `None` for every other pair.
+fn template_literal_kind_verdict(
+    source: &SemanticNodeData,
+    target: &SemanticNodeData,
+) -> Option<bool> {
+    let other_kind = |data: &SemanticNodeData| {
+        matches!(
+            data,
+            SemanticNodeData::Primitive(
+                PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Null
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Void
+            ) | SemanticNodeData::Literal(
+                LiteralValue::Number(_) | LiteralValue::Boolean(_) | LiteralValue::BigInt(_)
+            )
+        )
+    };
+    match (source, target) {
+        (
+            SemanticNodeData::TemplateLiteral { .. },
+            SemanticNodeData::Primitive(PrimitiveKind::String),
+        ) => Some(true),
+        (SemanticNodeData::TemplateLiteral { .. }, other)
+        | (other, SemanticNodeData::TemplateLiteral { .. })
+            if other_kind(other) =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a surface is an object literal's type: a member the literal
+/// itself authored (a spread-carried one included) marks it, where a
+/// declared object type's members are all non-literal.
+fn surface_is_object_literal(surface: &SurfaceView) -> bool {
+    surface
+        .positive_members()
+        .iter()
+        .any(|member| member.excess_origin != verter_type_expr::ExcessPropertyOrigin::NonLiteral)
 }
 
 /// Build and push the worklist fan-out for a distribution whose reducer
