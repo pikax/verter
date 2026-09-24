@@ -10,9 +10,9 @@
 //! [`SharedHost`] is the ONLY handle this crate keeps to a host it closes
 //! documents on, and its only accessor, [`SharedHost::host`], returns a
 //! [`HostRef`] that owns a guard. The handle is the session's own
-//! ([`verter_session::GuardedHost`]): the protocol is the crate that releases
+//! ([`verter_session::project_type_store::GuardedHost`]): the protocol is the crate that releases
 //! nodes offering it, and `verter_session`'s `semantic_activity_boundary` test
 //! pins that this crate stores no raw `Arc<VerterHost>` outside the files that
 //! build the handle or read project identity only.
 
-pub use verter_session::guarded_host::{GuardedHost as SharedHost, HostRef};
+pub use verter_session::project_type_store::guarded_host::{GuardedHost as SharedHost, HostRef};

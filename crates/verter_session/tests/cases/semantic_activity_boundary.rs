@@ -13,7 +13,7 @@
 //!    which build parse snapshots and registered envelopes only. If one of
 //!    those files ever reaches the semantic graph, the gate's premise breaks.
 //! 2. **A consumer that reaches the host from several threads holds it only
-//!    through the guarded handle** (`verter_session::GuardedHost`, the
+//!    through the guarded handle** (`verter_session::project_type_store::GuardedHost`, the
 //!    language server's `SharedHost`). The language server is the one
 //!    consumer that both runs concurrently and closes documents.
 //! 3. **The synchronous bindings stay synchronous.** The NAPI and WASM
@@ -178,7 +178,7 @@ fn the_language_server_holds_the_host_through_the_guarded_handle() {
             "main.rs" | "lib.rs" | "audit_harness.rs" | "documents/mod.rs"
             // Test-only host construction compiled into the crate.
             | "test_utils.rs"
-            // The handle itself (a re-export of `verter_session::GuardedHost`).
+            // The handle itself (a re-export of `verter_session::project_type_store::GuardedHost`).
             | "documents/guarded_host.rs"
             // Provider adapters: `AdmissionEpoch::current`, `resolve_carrier`
             // and project identity; they never read semantic nodes.
@@ -195,7 +195,7 @@ fn the_language_server_holds_the_host_through_the_guarded_handle() {
     assert!(
         found.is_empty(),
         "verter_lsp stores a raw Arc<VerterHost> outside the allowed files; hold it as \
-         `SharedHost` (verter_session::GuardedHost) so every call runs under a guard:\n{}",
+         `SharedHost` (verter_session::project_type_store::GuardedHost) so every call runs under a guard:\n{}",
         describe(&found)
     );
 }
@@ -226,7 +226,7 @@ fn the_synchronous_bindings_grow_no_concurrency() {
             found.is_empty(),
             "{binding} holds a raw Arc<VerterHost> and takes no SemanticActivityGuard, which is \
              safe only while every call runs to completion on one thread; it now spawns \
-             concurrent work, so hold the host as `verter_session::GuardedHost` and call it \
+             concurrent work, so hold the host as `verter_session::project_type_store::GuardedHost` and call it \
              through `host()`:\n{}",
             describe(&found)
         );
@@ -247,7 +247,7 @@ fn unguarded_consumers_never_close_a_document() {
             found.is_empty(),
             "{consumer} calls the host from several threads without a SemanticActivityGuard, \
              which is safe only because it never closes a document (nothing is ever queued on \
-             its gate); it now closes one, so hold the host as `verter_session::GuardedHost` \
+             its gate); it now closes one, so hold the host as `verter_session::project_type_store::GuardedHost` \
              and call it through `host()`:\n{}",
             describe(&found)
         );

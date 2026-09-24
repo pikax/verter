@@ -40,6 +40,8 @@ use crate::semantic_query_memo::SemanticGraphStore;
 
 pub mod semantic_activity;
 pub use semantic_activity::SemanticActivityGuard;
+pub mod guarded_host;
+pub use guarded_host::{GuardedHost, HostRef};
 
 // ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary

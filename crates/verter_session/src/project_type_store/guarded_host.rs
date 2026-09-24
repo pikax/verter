@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use crate::project_type_store::SemanticActivityGuard;
+use super::SemanticActivityGuard;
 use crate::VerterHost;
 
 /// An owned, cloneable handle to the session host. It deliberately does not

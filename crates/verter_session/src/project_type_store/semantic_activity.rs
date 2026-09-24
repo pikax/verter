@@ -43,7 +43,7 @@
 //!
 //! Every path into the host that can read semantic nodes must hold a guard for
 //! the whole call. The language server takes one per host access
-//! ([`crate::GuardedHost`], its `SharedHost`); work a guarded caller fans out
+//! ([`crate::project_type_store::GuardedHost`], its `SharedHost`); work a guarded caller fans out
 //! to the CPU pool is covered because the caller blocks on it; and the
 //! scheduler jobs that DO outlive a host call (the close-time background
 //! reload, dependency auto-ingest loads, a superseded load finishing on its
