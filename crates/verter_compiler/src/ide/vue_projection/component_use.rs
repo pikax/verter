@@ -134,11 +134,13 @@ impl MemberValue {
     fn render(&self) -> String {
         match self {
             Self::Expression { spelling, .. } => format!("({spelling})"),
+            // The line break ends a trailing line comment before the block
+            // closes.
             Self::InlineHandler {
                 spelling,
                 statements: true,
                 ..
-            } => format!("($event) => {{ {spelling}; }}"),
+            } => format!("($event) => {{ {spelling};\n}}"),
             Self::InlineHandler { spelling, .. } => {
                 format!("($event) => ({})", trim_handler_body(spelling))
             }

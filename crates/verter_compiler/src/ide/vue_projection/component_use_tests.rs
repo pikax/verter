@@ -271,7 +271,7 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
         format!("const {b}_check2: __VerterUseListener<typeof {b}, \"onChangeOnceCapture\"> = (count);\n"),
         format!("const {b}_check3: __VerterUseListener<typeof {b}, \"onChangeCaptureOnce\", \"onChangeCapture\"> = (count);\n"),
         format!("const {b}_check4: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (flag === true);\n"),
-        format!("const {b}_check5: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ a = 1; b = 2; }};\n"),
+        format!("const {b}_check5: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ a = 1; b = 2;\n}};\n"),
     ] {
         assert!(rendered.contains(&line), "missing {line} in {rendered}");
     }
@@ -300,6 +300,35 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
     );
     assert!(witness.observations.iter().any(|o| o.type_text
         == format!("__VerterUseListener<typeof {b}, \"onChangeOnce\", \"onChange\">")));
+}
+
+/// A statement-list handler ending in a line comment still closes its
+/// block, so the rendered module stays valid TypeScript for every later use.
+#[test]
+fn component_use_statement_handler_with_trailing_line_comment_closes_its_block() {
+    let projection = project(concat!(
+        "  <Table @close=\"a = 1; b = 2 // reset\" />\n",
+        "  <Table @change=\"log\" />",
+    ));
+    assert!(projection.complete);
+    assert_eq!(projection.witnesses.len(), 2);
+    assert!(projection.witnesses[0]
+        .transaction
+        .validations
+        .iter()
+        .any(|check| matches!(
+            &check.value,
+            MemberValue::InlineHandler { statements: true, spelling, .. }
+                if spelling == "a = 1; b = 2 // reset"
+        )));
+    let rendered: String = projection.witnesses.iter().map(|w| w.render()).collect();
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &rendered, oxc_span::SourceType::ts()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "rendered uses must parse: {:?}\n{rendered}",
+        parsed.errors
+    );
 }
 
 /// A static discriminant is a string-literal member of the construction,
