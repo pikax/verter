@@ -8122,6 +8122,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `{ a: string }`, `{ a: string | undefined }` or `{ a: any }`,
         // with `strictNullChecks` on or off). The strict subtype relation
         // also refuses a `readonly` member below a mutable one.
+        if let Some(decided) = self.property_accessibility_relation(source, target) {
+            return decided;
+        }
         if !target.optional
             && source.optional
             && self.current_relation_kind() != RelationKind::Comparable
@@ -8145,6 +8148,130 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bindings,
             InferPosition::Covariant,
         )
+    }
+
+    /// The accessibility half of the checker's `propertyRelatedTo`, decided
+    /// before the property types: a `private` property on either side
+    /// relates only to the same declaration; a `protected` target property
+    /// only to a property declared in a class derived from the target
+    /// property's declaring class (`isValidOverrideOf` — the same
+    /// declaration included); a `protected` source property never to a
+    /// public one. `None` when the pair passes and its types decide;
+    /// `Unknown` when a declaration or a declaring class the rule needs is
+    /// not read from the graph.
+    fn property_accessibility_relation(
+        &self,
+        source: &crate::semantic_query::SurfaceMember,
+        target: &crate::semantic_query::SurfaceMember,
+    ) -> Option<RelationResult> {
+        use verter_type_expr::MemberVisibility;
+        let same_declaration = || -> Option<bool> {
+            let (Some(source_span), Some(target_span)) =
+                (source.spans.declaration, target.spans.declaration)
+            else {
+                return None;
+            };
+            let (Some(source_file), Some(target_file)) = (
+                source.declaration_origin.as_deref(),
+                target.declaration_origin.as_deref(),
+            ) else {
+                return None;
+            };
+            Some(source_file == target_file && source_span == target_span)
+        };
+        if source.visibility == MemberVisibility::Private
+            || target.visibility == MemberVisibility::Private
+        {
+            return match same_declaration() {
+                Some(true) => None,
+                Some(false) => Some(RelationResult::NotAssignable),
+                None => Some(RelationResult::Unknown),
+            };
+        }
+        if target.visibility == MemberVisibility::Protected {
+            if same_declaration() == Some(true) {
+                return None;
+            }
+            let MemberOwner::Class(target_class) = self.member_owner(target) else {
+                return Some(RelationResult::Unknown);
+            };
+            return match self.member_owner(source) {
+                MemberOwner::NotAClass => Some(RelationResult::NotAssignable),
+                MemberOwner::Undecided => Some(RelationResult::Unknown),
+                MemberOwner::Class(source_class) => {
+                    if super::build::same_class_identity(&source_class, &target_class) {
+                        return None;
+                    }
+                    let ancestry = self.class_heritage_ancestry(&source_class);
+                    if ancestry
+                        .ancestors
+                        .iter()
+                        .any(|ancestor| super::build::same_class_identity(ancestor, &target_class))
+                    {
+                        None
+                    } else if ancestry.decided {
+                        Some(RelationResult::NotAssignable)
+                    } else {
+                        Some(RelationResult::Unknown)
+                    }
+                }
+            };
+        }
+        if source.visibility == MemberVisibility::Protected {
+            return Some(RelationResult::NotAssignable);
+        }
+        None
+    }
+
+    /// The declaration that declares `member`: the file-scope class whose
+    /// declaration contains the member's, or no class when a file-scope
+    /// interface or type alias declares it. A member declared anywhere else
+    /// (a local class, a class expression, a type literal inside a body)
+    /// is undecided.
+    fn member_owner(&self, member: &crate::semantic_query::SurfaceMember) -> MemberOwner {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        let (Some(span), Some(file)) =
+            (member.spans.declaration, member.declaration_origin.as_ref())
+        else {
+            return MemberOwner::Undecided;
+        };
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(file.as_ref())
+            .map(|serve| serve.indexed)
+        else {
+            return MemberOwner::Undecided;
+        };
+        let headers = indexed.shallow_state.decl_bodies().header_index();
+        let mut owner = MemberOwner::Undecided;
+        for (key, header) in headers.type_headers.iter() {
+            if header.span.start > span.start || span.end > header.span.end {
+                continue;
+            }
+            owner = match header.kind {
+                TypeDeclKind::Class => {
+                    let direct = member.key.as_known().is_some_and(|name| {
+                        header.member_headers.iter().any(|declared| {
+                            declared
+                                .key
+                                .as_known()
+                                .is_some_and(|declared| declared.element_access_collides(&name))
+                        })
+                    });
+                    if !direct {
+                        return MemberOwner::Undecided;
+                    }
+                    return MemberOwner::Class(crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::clone(file),
+                        owner: key.owner,
+                        whole_hash: indexed.whole_hash,
+                        decl_name: Arc::clone(&key.name),
+                    });
+                }
+                _ => MemberOwner::NotAClass,
+            };
+        }
+        owner
     }
 
     pub(super) fn relate_target_index_signature(
@@ -8794,6 +8921,17 @@ fn tuple_position_pairs(
 /// pair: `true` for a template below `string`, `false` for a template
 /// against a primitive or literal of another kind (either direction),
 /// `None` for every other pair.
+/// What declares a property, for the checker's protected-member rule
+/// ([`ProjectSemanticDispatch::property_accessibility_relation`]).
+enum MemberOwner {
+    /// A file-scope class declares it directly.
+    Class(crate::semantic_query::DeclIdentity),
+    /// A file-scope interface or type alias declares it: no class does.
+    NotAClass,
+    /// Its declaration is not read from the graph.
+    Undecided,
+}
+
 fn template_literal_kind_verdict(
     source: &SemanticNodeData,
     target: &SemanticNodeData,

@@ -24,6 +24,7 @@ class Empty {}
 declare class SP3 { static prototype: 'lit'; x: 1 }
 function mk() { return class { ce = 1 as const; static z = 2 }; }
 function mkg() { return class<T> { v!: T; static w = 3 }; }
+class Q0 { p = 1 as const; private q = 2; protected r = 3 }
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? 'y' : 'n') : 'n';
 ";
 
@@ -79,10 +80,10 @@ fn prototype_reads_the_instance_with_any_type_arguments() {
 }
 
 /// An indexed access of `prototype` is the instance type: it relates both
-/// ways with the class it reads, and not with its base. The lane prints the
-/// class body a declared class's read evaluates to, one level expanded, as
-/// it does for any indexed access that reads a declared type; the checker
-/// prints the class name.
+/// ways with the class it reads, and not with its base or a structural
+/// twin. The lane prints the class body a declared class's read evaluates
+/// to, one level expanded, as it does for any indexed access that reads a
+/// declared type; the checker prints the class name.
 ///
 /// Measured on TypeScript 7.0.2, as `Same<A, B>` (`[A] extends [B]` and
 /// `[B] extends [A]`): `(typeof D0)['prototype']` and `D0`, `(typeof
@@ -90,8 +91,9 @@ fn prototype_reads_the_instance_with_any_type_arguments() {
 /// `G<string>`, `(typeof A0)['prototype']` and `A0`, `(typeof
 /// D1)['prototype']` and `D1`, `(typeof SP3)['prototype']` and `SP3`,
 /// `(typeof D0)['prototype' | 's']` and `number | D0` are `"y"`; `(typeof
-/// D1)['prototype']` and `D0`, and `(typeof SP3)['prototype']` and
-/// `'lit'` are `"n"`.
+/// D1)['prototype']` and `D0`, `(typeof D0)['prototype']` and `Q0` (the same
+/// shape declared again, whose private member is its own) and `(typeof
+/// SP3)['prototype']` and `'lit'` are `"n"`.
 #[test]
 fn an_indexed_prototype_read_is_the_instance_type() {
     let failures = mismatches(
@@ -105,6 +107,7 @@ fn an_indexed_prototype_read_is_the_instance_type() {
             ("Same<(typeof SP3)['prototype'], SP3>", "\"y\""),
             ("Same<(typeof D0)['prototype' | 's'], number | D0>", "\"y\""),
             ("Same<(typeof D1)['prototype'], D0>", "\"n\""),
+            ("Same<(typeof D0)['prototype'], Q0>", "\"n\""),
             ("Same<(typeof SP3)['prototype'], 'lit'>", "\"n\""),
         ],
     );

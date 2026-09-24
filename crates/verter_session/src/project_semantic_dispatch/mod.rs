@@ -4183,6 +4183,8 @@ mod indexed_access_relation_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;
 #[cfg(test)]
+mod member_accessibility_relation_tests;
+#[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
 mod namespace_member_value_tests;
