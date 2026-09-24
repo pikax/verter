@@ -1175,6 +1175,9 @@ pub struct SliceClass {
     /// signatures, else its implementation's; `None` when the class
     /// declares no constructor (the base constructor's signatures apply).
     pub constructors: Option<Arc<[Arc<[SliceClassParam]>]>>,
+    /// The accessibility the class's first constructor declares; `None`
+    /// when it declares no constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
     /// The instance and static members in declaration order, including
     /// the constructor's parameter properties. An overloaded method is one
     /// member per visible overload signature, in order.

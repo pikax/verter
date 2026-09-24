@@ -7533,7 +7533,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.relate_property_pair(source_member, t_prop, bindings)
                 }
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                    if let Some(index_result) =
+                    if let Some(prototype_result) =
+                        self.relate_constructor_prototype(source, &target_key, t_prop, bindings)
+                    {
+                        prototype_result
+                    } else if let Some(index_result) =
                         self.relate_property_via_source_index(source, t_prop, bindings)
                     {
                         index_result
@@ -7563,6 +7567,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
+        }
+        if !self.construct_visibilities_compatible(
+            &source.construct_signatures,
+            &target.construct_signatures,
+        ) {
+            return RelationResult::NotAssignable;
         }
         for t_sig in target.construct_signatures.iter() {
             let signature_result =
@@ -7979,6 +7989,123 @@ impl<'a> ProjectSemanticDispatch<'a> {
         acc
     }
 
+    /// A constructor's `prototype` is a projection-time property, never a
+    /// stored member: a target that requires one relates the class instance
+    /// with `any` for its type parameters (`getTypeOfPrototypeProperty`),
+    /// read off the source's last construct signature exactly as the path
+    /// walker reads `C.prototype`. `None` for any other key or a source
+    /// with no construct signature.
+    fn relate_constructor_prototype(
+        &self,
+        source: &SurfaceView,
+        key: &crate::semantic_query::PropertyKey,
+        target: &crate::semantic_query::SurfaceMember,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if key.as_string() != Some("prototype") {
+            return None;
+        }
+        let prototype = source
+            .construct_signatures
+            .last()
+            .and_then(|signature| self.constructor_prototype(*signature))?;
+        Some(self.relate_member(prototype, target.value, bindings, InferPosition::Covariant))
+    }
+
+    /// The checker's `constructorVisibilitiesAreCompatible` over the FIRST
+    /// construct signature of each side: a private target accepts every
+    /// source, a protected target a public or protected one, and a public
+    /// target only a public one. A side with no signature, or whose first
+    /// signature has no declaration, is compatible.
+    fn construct_visibilities_compatible(
+        &self,
+        source: &[SemanticNodeId],
+        target: &[SemanticNodeId],
+    ) -> bool {
+        use verter_type_expr::MemberVisibility::{Private, Protected, Public};
+        let (Some(source), Some(target)) = (source.first(), target.first()) else {
+            return true;
+        };
+        match (
+            self.construct_signature_visibility(*source),
+            self.construct_signature_visibility(*target),
+        ) {
+            (Some(source), Some(target)) => match (source, target) {
+                (_, Private) | (Public | Protected, Protected) | (Public, Public) => true,
+                (Private, Protected) | (Protected | Private, Public) => false,
+            },
+            _ => true,
+        }
+    }
+
+    /// The accessibility of a construct signature's DECLARATION, `None`
+    /// when it has none. A class's own construct signature (no authored
+    /// return annotation, returning the class's instance) is its first
+    /// constructor's; a class that declares no constructor carries its
+    /// base's construct signatures, declaration included
+    /// (`getDefaultConstructSignatures`), and a class with neither has a
+    /// declaration-less default signature. Any other construct signature
+    /// is a public declaration.
+    pub(super) fn construct_signature_visibility(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<verter_type_expr::MemberVisibility> {
+        let graph = self.graph();
+        let instance = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                return_type_span: None,
+                return_type,
+                ..
+            }) => *return_type,
+            _ => return Some(verter_type_expr::MemberVisibility::Public),
+        };
+        let class = match graph.node_data(instance).as_deref() {
+            Some(SemanticNodeData::ClassExpressionInstance { identity, .. }) => {
+                return identity.constructor_visibility;
+            }
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+            _ => return Some(verter_type_expr::MemberVisibility::Public),
+        };
+        let mut current = (
+            Arc::clone(&class.canonical_id),
+            class.owner,
+            Arc::clone(&class.decl_name),
+        );
+        let mut seen = rustc_hash::FxHashSet::default();
+        while seen.insert(current.clone()) {
+            let declared = self
+                .ctx
+                .ensure_indexed_ready_serve(current.0.as_ref())
+                .and_then(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .decl_bodies()
+                        .header_index()
+                        .constructor_visibility
+                        .get(&verter_type_expr::DeclBindingKey::new(
+                            current.1,
+                            current.2.as_ref(),
+                        ))
+                        .copied()
+                });
+            if declared.is_some() {
+                return declared;
+            }
+            match self
+                .class_heritage_bases(current.0.as_ref(), current.1, current.2.as_ref())
+                .into_iter()
+                .next()
+            {
+                Some((canonical, owner, name, _)) => current = (canonical, owner, name),
+                None => break,
+            }
+        }
+        None
+    }
+
     /// An Object source against a DIRECT signature target: some signature
     /// in the source's MATCHING-KIND group must satisfy the target
     /// signature.
@@ -7993,6 +8120,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::SignatureKind::Call => &source.call_signatures,
             crate::semantic_query::SignatureKind::Construct => &source.construct_signatures,
         };
+        if target_kind == crate::semantic_query::SignatureKind::Construct
+            && !self.construct_visibilities_compatible(group, &[target_sig])
+        {
+            return RelationResult::NotAssignable;
+        }
         let alternatives: Vec<_> = group
             .iter()
             .map(|source_signature| (*source_signature, target_sig))

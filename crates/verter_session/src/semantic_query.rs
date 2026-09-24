@@ -1122,6 +1122,11 @@ pub struct ClassExpressionIdentity {
     /// How many type parameters the class declares itself; a reference
     /// prints their arguments after the name (`(Anonymous class)<string>`).
     pub own_arity: u32,
+    /// The accessibility of the declaration behind the class's construct
+    /// signatures — its first constructor's, else its base's — that the
+    /// checker's `constructorVisibilitiesAreCompatible` reads; `None` for
+    /// a declaration-less default constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
 }
 
 /// One type-parameter clause enclosing a class expression.

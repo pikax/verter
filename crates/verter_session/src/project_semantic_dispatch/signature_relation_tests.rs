@@ -183,3 +183,113 @@ fn a_rest_constrained_call_accepts_a_fixed_parameter_argument() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const CONSTRUCTORS: &str = "\
+export class PrivCtor { private constructor() {} x = 1; }
+export class ProtCtor { protected constructor() {} y = 1; }
+export class PubCtor { constructor() {} z = 1; }
+export class DerivedProt extends ProtCtor {}
+export class DerivedPubOfProt extends ProtCtor { constructor() { super(); } }
+export class PrivA { private constructor() {} v = 1; }
+export class ProtA { protected constructor() {} v = 1; }
+export class PubA { v = 1; }
+export function privFactory() { return class { private constructor() {} x = 1; }; }
+export function protFactory() { return class { protected constructor() {} x = 1; }; }
+export function derivedFactory() { return class extends ProtCtor {}; }
+export function plainFactory() { return class { v = 1; }; }
+";
+
+/// The checker's `constructorVisibilitiesAreCompatible` over the first
+/// construct signature of each side: a private target accepts every
+/// source, a protected target a public or protected one, a public target
+/// only a public one — and a declaration-less default constructor (a class
+/// with no constructor and no base) is compatible with every side. A
+/// constructor-less class carries its base's declaration.
+///
+/// Measured on TypeScript 7.0.2 (each row `<pair> ? 1 : 0`): `typeof
+/// PrivCtor` and `typeof ProtCtor` do not extend `new () => any` (`0`),
+/// nor does `typeof PrivCtor` extend `abstract new () => any` or `{ new ():
+/// any; x?: 1 }` (`0`); `ReturnType<typeof privFactory>`,
+/// `ReturnType<typeof protFactory>` and `ReturnType<typeof
+/// derivedFactory>` do not extend `new () => any` (`0`); `typeof
+/// DerivedProt` does not (`0`) but `typeof DerivedPubOfProt` and `typeof
+/// PubCtor` do (`1`); `typeof ProtCtor extends typeof ProtCtor` and `(new
+/// () => ProtCtor) extends typeof ProtCtor` are `1`; over the same-shaped
+/// `PrivA` / `ProtA` / `PubA`, `typeof PubA extends typeof ProtA` is `1`,
+/// `typeof PrivA extends typeof ProtA` is `0`, `typeof ProtA extends typeof
+/// PrivA` is `1`, and `typeof ProtA` / `typeof PrivA` extend `typeof PubA`
+/// (`1`, `PubA` has no constructor declaration) as `typeof PubA extends
+/// typeof PrivA` does (`1`); `typeof ProtA extends ReturnType<typeof
+/// plainFactory>` and `ReturnType<typeof plainFactory> extends new () =>
+/// any` are `1`.
+#[test]
+fn a_non_public_constructor_relates_by_the_checkers_visibility_rule() {
+    let failures = mismatches(
+        CONSTRUCTORS,
+        &[
+            ("typeof PrivCtor extends new () => any ? 1 : 0", "0"),
+            ("typeof ProtCtor extends new () => any ? 1 : 0", "0"),
+            (
+                "typeof PrivCtor extends abstract new () => any ? 1 : 0",
+                "0",
+            ),
+            (
+                "typeof PrivCtor extends { new (): any; x?: 1 } ? 1 : 0",
+                "0",
+            ),
+            (
+                "ReturnType<typeof privFactory> extends new () => any ? 1 : 0",
+                "0",
+            ),
+            (
+                "ReturnType<typeof protFactory> extends new () => any ? 1 : 0",
+                "0",
+            ),
+            (
+                "ReturnType<typeof derivedFactory> extends new () => any ? 1 : 0",
+                "0",
+            ),
+            ("typeof DerivedProt extends new () => any ? 1 : 0", "0"),
+            ("typeof DerivedPubOfProt extends new () => any ? 1 : 0", "1"),
+            ("typeof PubCtor extends new () => any ? 1 : 0", "1"),
+            ("typeof ProtCtor extends typeof ProtCtor ? 1 : 0", "1"),
+            ("(new () => ProtCtor) extends typeof ProtCtor ? 1 : 0", "1"),
+            ("typeof PubA extends typeof ProtA ? 1 : 0", "1"),
+            ("typeof PrivA extends typeof ProtA ? 1 : 0", "0"),
+            ("typeof ProtA extends typeof PrivA ? 1 : 0", "1"),
+            ("typeof ProtA extends typeof PubA ? 1 : 0", "1"),
+            ("typeof PrivA extends typeof PubA ? 1 : 0", "1"),
+            ("typeof PubA extends typeof PrivA ? 1 : 0", "1"),
+            (
+                "typeof ProtA extends ReturnType<typeof plainFactory> ? 1 : 0",
+                "1",
+            ),
+            (
+                "ReturnType<typeof plainFactory> extends new () => any ? 1 : 0",
+                "1",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A constructor's `prototype` is a property of its static side: a target
+/// that requires one relates the class instance with `any` type arguments.
+///
+/// Measured on TypeScript 7.0.2: `typeof PrivCtor extends { prototype:
+/// PrivCtor }` is `1` and `typeof PrivCtor extends { prototype: string }`
+/// is `0`.
+#[test]
+fn a_constructor_relates_its_prototype_property() {
+    let failures = mismatches(
+        CONSTRUCTORS,
+        &[
+            (
+                "typeof PrivCtor extends { prototype: PrivCtor } ? 1 : 0",
+                "1",
+            ),
+            ("typeof PrivCtor extends { prototype: string } ? 1 : 0", "0"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

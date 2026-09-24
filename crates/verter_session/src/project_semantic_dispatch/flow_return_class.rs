@@ -29,6 +29,10 @@ struct ClassBase {
     static_members: Vec<SurfaceMember>,
     /// The base constructor's type variable, when the class extends one.
     type_variable: Option<SemanticNodeId>,
+    /// The accessibility of the declaration behind the base's first
+    /// accepted construct signature — what a constructor-less class's own
+    /// construct signatures carry.
+    constructor_visibility: Option<verter_type_expr::MemberVisibility>,
 }
 
 /// The key kinds a computed member whose key is not a single literal or
@@ -260,6 +264,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     name: Arc::clone(&class.name),
                     outer_clauses: Arc::from(outer_clauses.into_boxed_slice()),
                     own_arity: own_type_parameters.len() as u32,
+                    constructor_visibility: class
+                        .constructor_visibility
+                        .or_else(|| base.as_ref().and_then(|base| base.constructor_visibility)),
                 }),
                 type_arguments: Arc::from(type_arguments.into_boxed_slice()),
                 surface,
@@ -725,11 +732,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             (None, Some(SemanticNodeData::Union(_))) => Vec::new(),
             (None, _) => return None,
         };
+        let constructor_visibility = constructors
+            .first()
+            .and_then(|signature| self.dispatch.construct_signature_visibility(*signature));
         Some(ClassBase {
             constructor_params,
             instance,
             static_members,
             type_variable,
+            constructor_visibility,
         })
     }
 }
