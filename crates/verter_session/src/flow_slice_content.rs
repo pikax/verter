@@ -1033,6 +1033,13 @@ pub enum SliceExpr {
         context: Arc<NestedFlowContext>,
         has_declared_return: bool,
         gap: Option<crate::semantic_query::FlowGap>,
+        /// The captured bindings of THIS frame whose narrowing at the
+        /// function's creation reaches its body: a `const`, or a parameter
+        /// or `let` / `var` past its last assignment (no write after the
+        /// creation, none in any nested callable) — the checker's closure
+        /// extension of the control-flow container. Empty for a callable
+        /// in a class property initializer, whose container stops there.
+        extended_captures: Arc<[SkeletonBindingId]>,
     },
     /// A class EXPRESSION's value — its constructor. The evaluator composes
     /// the constructor type and the instance surface from the lowered
@@ -2217,8 +2224,8 @@ pub(crate) fn build_flow_slice_content(
         narrowing_alias_locals: FxHashSet::default(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
+        class_property_initializers: 0,
         active_guard_bindings: Vec::new(),
-        active_guard_subjects: Vec::new(),
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
         break_target_followed_by_return: Vec::new(),
@@ -4577,8 +4584,11 @@ struct Lowerer<'a> {
     narrowing_alias_locals: FxHashSet<Arc<str>>,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
+    /// How many class property initializers enclose the lowering position:
+    /// a callable there is contained by the property, not this frame, so
+    /// no narrowing of this frame reaches it.
+    class_property_initializers: u32,
     active_guard_bindings: Vec<SkeletonBindingId>,
-    active_guard_subjects: Vec<FlowBindingRef>,
     /// The stack of breakable constructs whose bodies are currently being
     /// lowered (innermost last): `None` for a `switch`, `Some(label)` for
     /// a labeled statement. A `break` resolves against this stack — an
@@ -4937,6 +4947,52 @@ impl Lowerer<'_> {
         })
     }
 
+    fn binding_has_write_before(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let creation = self.rebase(creation_span);
+        self.skeleton.writes.iter().any(|write| {
+            write.span < creation
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
+    fn binding_has_write_within(&self, binding: SkeletonBindingId, range: oxc_span::Span) -> bool {
+        let range = self.rebase(range);
+        self.skeleton.writes.iter().any(|write| {
+            range.contains(write.span)
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
+    /// Whether a capture outside its extended container reads exactly what
+    /// the evaluator supplies: a whole parameter or annotated `var` reads
+    /// its declared authority, and an unannotated `var` no write retypes
+    /// before the creation reads the reaching its declarator binds.
+    fn capture_reads_declared_type(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let fact = self.skeleton.binding(binding);
+        if fact.destructured {
+            return false;
+        }
+        match fact.kind {
+            SkeletonBindingKind::Param => true,
+            SkeletonBindingKind::Var => {
+                fact.annotation_span.is_some()
+                    || (!self.nested_free_writes.contains(&binding)
+                        && !self.binding_has_write_before(binding, creation_span))
+            }
+            _ => false,
+        }
+    }
+
     fn guard_bindings(&self, guard: &SliceGuard, _at: oxc_span::Span) -> Vec<SkeletonBindingId> {
         let mut bindings = Vec::new();
         collect_guard_subjects(guard, &mut |subject| {
@@ -4975,21 +5031,6 @@ impl Lowerer<'_> {
         if !bindings.contains(&local) {
             bindings.push(local);
         }
-    }
-
-    fn predicate_subject_binding(&self, test: &Expression<'_>) -> Option<FlowBindingRef> {
-        let Expression::CallExpression(call) = unwrap_parenthesized(test) else {
-            return None;
-        };
-        let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
-            return None;
-        };
-        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false, call.span)?;
-        let argument = call
-            .arguments
-            .get(ordinal)
-            .and_then(|argument| argument.as_expression())?;
-        chain_root_identifier(argument).and_then(|identifier| self.binding_at(identifier.span))
     }
 
     fn nested_function_transfers_downstream_slot(
@@ -5376,30 +5417,16 @@ impl Lowerer<'_> {
                     // demand through the typed guard-narrowing gap below.
                     let unprovable_control_call = self.record_control_position_calls(&if_stmt.test);
                     let active_guard_base = self.active_guard_bindings.len();
-                    let active_guard_subject_base = self.active_guard_subjects.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
-                    let guard_name = self.predicate_subject_binding(&if_stmt.test);
-                    let nested_predicate_gap = guard_name.as_ref().is_some_and(|name| {
-                        self.active_guard_subjects.contains(name)
-                            && matches!(name, FlowBindingRef::Captured(_))
-                    });
                     self.active_guard_bindings
                         .extend(guard_bindings.iter().copied());
-                    self.active_guard_subjects
-                        .extend(guard_name.iter().cloned());
                     let consequent = self.lower_arm(&if_stmt.consequent);
                     self.active_guard_bindings.truncate(active_guard_base);
-                    self.active_guard_subjects
-                        .truncate(active_guard_subject_base);
                     let alternate = if_stmt.alternate.as_ref().map(|alternate| {
                         self.active_guard_bindings
                             .extend(guard_bindings.iter().copied());
-                        self.active_guard_subjects
-                            .extend(guard_name.iter().cloned());
                         let lowered = self.lower_arm(alternate);
                         self.active_guard_bindings.truncate(active_guard_base);
-                        self.active_guard_subjects
-                            .truncate(active_guard_subject_base);
                         lowered
                     });
                     can_fall_through = consequent
@@ -5426,7 +5453,7 @@ impl Lowerer<'_> {
                     // arm — the test lowers to guard facts only, so the
                     // marker carries the point (ahead of the `if`, where
                     // the test evaluates).
-                    if nested_predicate_gap || unprovable_control_call || unprovable_guard {
+                    if unprovable_control_call || unprovable_guard {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
                         ));
@@ -5786,9 +5813,8 @@ impl Lowerer<'_> {
                         .push(SuffixReturn::NotGuaranteed);
                     // A clause body evaluates under the dispatch narrow
                     // of the discriminant, so a closure created there
-                    // captures a reading the evaluator cannot reproduce
-                    // at the capture's own evaluation — the same rail the
-                    // `if` arms and the ternary's arms take.
+                    // takes the closure-capture rail the `if` arms and
+                    // the ternary's arms take.
                     let active_guard_base = self.active_guard_bindings.len();
                     if let Some(subject) = discriminant.as_ref() {
                         let bindings = self.subject_bindings(subject, switch.discriminant.span());
@@ -7409,14 +7435,11 @@ impl Lowerer<'_> {
                 root: self.narrow_root(name, identifier.span, Some(ordinal))?,
                 path,
             }),
-            NameBinding::Local(_) => Some(SliceNarrowSubject {
+            NameBinding::Local(_) | NameBinding::Captured => Some(SliceNarrowSubject {
                 root: self.narrow_root(name, identifier.span, None)?,
                 path,
             }),
-            NameBinding::Free
-            | NameBinding::Captured
-            | NameBinding::NestedFunction
-            | NameBinding::Unmodeled => None,
+            NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => None,
         }
     }
 
@@ -7777,10 +7800,10 @@ impl Lowerer<'_> {
                 // evaluated return.
                 let function = match unwrap_parenthesized(&call.callee) {
                     Expression::FunctionExpression(func) => {
-                        self.lower_nested_function(&FunctionNode::Function(func))
+                        self.lower_function_value(&FunctionNode::Function(func), Some(call))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
-                        self.lower_nested_function(&FunctionNode::Arrow(arrow))
+                        self.lower_function_value(&FunctionNode::Arrow(arrow), Some(call))
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
@@ -8066,25 +8089,18 @@ impl Lowerer<'_> {
                         }
                         // The ternary's arms are GUARDED exactly as the `if`
                         // statement's are: a closure created inside one
-                        // captures the guarded reading of the guard's
-                        // subject, and a later write to that subject makes
-                        // the capture unsound. The two control spellings must
-                        // reach the closure-capture rail with the same active
-                        // guard set, or the same source degrades under `if`
-                        // and seals clean under `?:`.
+                        // reads a capture's guarded narrowing only when the
+                        // capture is extended into it. The two control
+                        // spellings must reach the closure-capture rail with
+                        // the same active guard set, or the same source
+                        // degrades under `if` and seals clean under `?:`.
                         let active_guard_base = self.active_guard_bindings.len();
-                        let active_guard_subject_base = self.active_guard_subjects.len();
                         let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
-                        let guard_name = self.predicate_subject_binding(&conditional.test);
                         self.active_guard_bindings
                             .extend(guard_bindings.iter().copied());
-                        self.active_guard_subjects
-                            .extend(guard_name.iter().cloned());
                         let consequent = self.lower_expr(&conditional.consequent, mode);
                         let alternate = self.lower_expr(&conditional.alternate, mode);
                         self.active_guard_bindings.truncate(active_guard_base);
-                        self.active_guard_subjects
-                            .truncate(active_guard_subject_base);
                         SliceExpr::Union {
                             arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
                             guard,
@@ -8602,6 +8618,26 @@ impl Lowerer<'_> {
     /// exact captured identities and lexical signature facts. Its body lowers
     /// only when evaluated, through the child's own indexed graph and demand.
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
+        self.lower_function_value(node, None)
+    }
+
+    /// Lower a nested function value, `invocation` naming the call that
+    /// invokes it where it is created (an IIFE).
+    ///
+    /// A capture reads the narrowing reaching the function's creation when
+    /// the checker extends the capture's control-flow container to the
+    /// enclosing one: a `const`, or a parameter / `let` past its last
+    /// assignment (never a `var`, never inside a class property
+    /// initializer). An immediately invoked function — async and generator
+    /// ones included — is no control-flow container of its own, so every
+    /// capture reads the narrowing reaching the call, whatever is assigned
+    /// later or by another nested function, unless the call's own arguments
+    /// write it.
+    fn lower_function_value(
+        &mut self,
+        node: &FunctionNode<'_>,
+        invocation: Option<&oxc_ast::ast::CallExpression<'_>>,
+    ) -> SliceExpr {
         let Some(entry) = self
             .index
             .nested_at(self.bindings.function(), node_span(node).into())
@@ -8610,6 +8646,51 @@ impl Lowerer<'_> {
         };
         let entry = entry.entry();
         let captures = self.capture_scope_for(node_span(node));
+        let invoked_arguments =
+            invocation.map(|call| oxc_span::Span::new(call.callee.span().end, call.span.end));
+        let mut extended_captures: Vec<SkeletonBindingId> = Vec::new();
+        if self.class_property_initializers == 0 {
+            for read in entry.captured_reads.iter() {
+                let Some(binding) = self.bindings.local(&read.binding) else {
+                    continue;
+                };
+                if extended_captures.contains(&binding) {
+                    continue;
+                }
+                // A `var` is never a mutable local the checker extends
+                // (`isMutableLocalVariableDeclaration` is `let`-only), and a
+                // `let` declared after the creation is assigned after it.
+                // An invoked function's captures read the call's flow, so
+                // only a write among the call's arguments (which run before
+                // the body) moves them.
+                let fact = self.skeleton.binding(binding);
+                let past_last_assignment = || {
+                    !self.nested_free_writes.contains(&binding)
+                        && !self.binding_has_write_after(binding, node_span(node))
+                };
+                let declared_before = || fact.span < self.rebase(node_span(node));
+                let eligible = match (fact.kind, invoked_arguments) {
+                    (SkeletonBindingKind::Const, _) => true,
+                    (SkeletonBindingKind::Param, Some(arguments)) => {
+                        !self.binding_has_write_within(binding, arguments)
+                    }
+                    (
+                        SkeletonBindingKind::Let
+                        | SkeletonBindingKind::Var
+                        | SkeletonBindingKind::CatchParam,
+                        Some(arguments),
+                    ) => declared_before() && !self.binding_has_write_within(binding, arguments),
+                    (SkeletonBindingKind::Param, None) => past_last_assignment(),
+                    (SkeletonBindingKind::Let | SkeletonBindingKind::CatchParam, None) => {
+                        declared_before() && past_last_assignment()
+                    }
+                    _ => false,
+                };
+                if eligible {
+                    extended_captures.push(binding);
+                }
+            }
+        }
         let mut gap = None;
         // Mutability constrains captured values. A closure that only
         // forwards a write effect does not observe the entering value.
@@ -8633,9 +8714,24 @@ impl Lowerer<'_> {
                     gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 }
             }
-            if self.active_guard_bindings.contains(&binding)
+            // A guard's narrowing reaches an extended capture's body. Any
+            // other capture reads its declared type there, which the
+            // evaluator reproduces for a parameter or an annotated `var`
+            // (their declared authority) and for an unannotated `var` not
+            // reassigned before the creation (its reaching IS its declared type); every other
+            // capture created under an active guard, a `let` assigned after
+            // the creation and an unannotated `var` reassigned before it
+            // take the typed gap.
+            if extended_captures.contains(&binding) {
+                continue;
+            }
+            if (self.active_guard_bindings.contains(&binding)
+                && !self.capture_reads_declared_type(binding, node_span(node)))
                 || (fact.kind == SkeletonBindingKind::Let
                     && self.binding_has_write_after(binding, node_span(node)))
+                || (fact.kind == SkeletonBindingKind::Var
+                    && fact.annotation_span.is_none()
+                    && self.binding_has_write_before(binding, node_span(node)))
             {
                 gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 break;
@@ -8646,6 +8742,7 @@ impl Lowerer<'_> {
             context: Arc::new(NestedFlowContext { captures }),
             has_declared_return: node.return_type().is_some(),
             gap,
+            extended_captures: Arc::from(extended_captures.into_boxed_slice()),
         }
     }
 

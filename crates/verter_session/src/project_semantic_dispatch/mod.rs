@@ -4153,6 +4153,8 @@ mod class_member_return_tests;
 #[cfg(test)]
 mod class_value_heritage_tests;
 #[cfg(test)]
+mod closure_narrowing_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;

@@ -583,13 +583,16 @@ impl<'s> Lowerer<'s> {
                 &[],
             ));
         }
+        self.class_property_initializers += 1;
+        let value = self.lower_expr(
+            initializer,
+            ExprMode::BindingInit {
+                preserve_literal: readonly,
+            },
+        );
+        self.class_property_initializers -= 1;
         SliceClassMemberValue::Initializer {
-            value: Box::new(self.lower_expr(
-                initializer,
-                ExprMode::BindingInit {
-                    preserve_literal: readonly,
-                },
-            )),
+            value: Box::new(value),
             widen: !readonly,
         }
     }

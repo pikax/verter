@@ -3401,112 +3401,169 @@ fn statement_position_calls_are_proven_or_degrade() {
     );
 }
 
-/// A closure created inside a GUARDED arm captures the guarded reading of
-/// the guard's subject, which the evaluator cannot reproduce at the
-/// capture's own evaluation — so the nested value takes the typed
-/// closure-capture gap. The `if` statement and the ternary are two
-/// spellings of ONE guard, so they must reach that rail identically: an
-/// arm-local active guard set that only the statement spelling populates
-/// makes the same source degrade under `if` and seal clean under `?:`.
+/// Every nested function value a region's returns and declarations lower,
+/// through ternary arms, invocations and nested statement regions.
+fn collect_nested_function_values<'a>(region: &'a SliceRegion, found: &mut Vec<&'a SliceExpr>) {
+    fn scan<'a>(expr: &'a SliceExpr, found: &mut Vec<&'a SliceExpr>) {
+        match expr {
+            SliceExpr::NestedFunctionValue { .. } => found.push(expr),
+            SliceExpr::Union { arms, .. } => {
+                for arm in arms.iter() {
+                    scan(arm, found);
+                }
+            }
+            SliceExpr::Call(SliceCall::Nested(nested), _) => scan(nested, found),
+            _ => {}
+        }
+    }
+    for statement in region.statements.iter() {
+        match statement {
+            SliceStatement::Return {
+                argument: Some(expr),
+                ..
+            }
+            | SliceStatement::Binding {
+                init: Some(expr), ..
+            } => scan(expr, found),
+            SliceStatement::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                collect_nested_function_values(consequent, found);
+                if let Some(alternate) = alternate {
+                    collect_nested_function_values(alternate, found);
+                }
+            }
+            SliceStatement::Block(block) => collect_nested_function_values(block, found),
+            SliceStatement::Switch { cases, .. } => {
+                for case in cases.iter() {
+                    collect_nested_function_values(&case.region, found);
+                }
+            }
+            SliceStatement::Try { block, catch, .. } => {
+                collect_nested_function_values(block, found);
+                if let Some(catch) = catch {
+                    collect_nested_function_values(&catch.region, found);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// An invoked function's captures read the flow reaching its call, so each
+/// capture is extended into the body — except one the call's own arguments
+/// write, since the arguments run before the body. (Measured, TypeScript
+/// 7.0.2: `((y: number) => x)(x = 0)` under `typeof x === "string"` reads
+/// `number`, the argument's assignment, not the guarded `string`.)
+#[test]
+fn an_invoked_function_extends_the_captures_its_arguments_leave_unwritten() {
+    let extended = |body: &str| {
+        let content = content_for(&format!("export {{}};\n{body}"), "f");
+        let mut values = Vec::new();
+        collect_nested_function_values(&content.body, &mut values);
+        let [SliceExpr::NestedFunctionValue {
+            extended_captures, ..
+        }] = values.as_slice()
+        else {
+            panic!("one invoked nested value: {content:?}");
+        };
+        extended_captures.len()
+    };
+    assert_eq!(
+        extended(
+            "function f(x: string | number) { if (typeof x === \"string\") { return ((y: number) => x)(1) } x = 0; return 0 }"
+        ),
+        1,
+        "the capture reads the call's narrowing"
+    );
+    assert_eq!(
+        extended(
+            "function f(x: string | number) { if (typeof x === \"string\") { return ((y: number) => x)(x = 0) } return 0 }"
+        ),
+        0,
+        "an argument's write reaches the body first"
+    );
+}
+
+/// A closure created inside a GUARDED arm reads the guarded narrowing
+/// only when the checker extends the capture's control-flow container to
+/// the enclosing one; any other capture reads its declared type, and a
+/// capture whose declared type the evaluator cannot supply takes the typed
+/// closure-capture gap. The `if` statement, the ternary and the `switch`
+/// clause are spellings of ONE guard, so they must reach that rail
+/// identically: an arm-local active guard set that only the statement
+/// spelling populates makes the same source degrade under `if` and seal
+/// clean under `?:`.
+///
+/// Measured, TypeScript 7.0.2: an immediately invoked arrow over a
+/// parameter reassigned after the call reads the guarded type in every
+/// spelling (`0 | T`, and `"a" | 0` for the `switch` clause), and an arrow
+/// that reassigns the `let` it captures reads the declared `string | number`
+/// on entry in every spelling — a declared type the evaluator does not
+/// supply for a `let`, so the rail is the typed gap.
 #[test]
 fn ternary_arms_reach_the_closure_capture_rail_like_the_if_arms() {
     const PREFIX: &str = "export {};\n\
          type T = { length: number };\n\
-         function isT(x: any): x is T { return true }\n";
-    let statement = content_for(
-        &format!("{PREFIX}function f(x: any) {{ if (isT(x)) {{ return (() => x)() }} return 0 }}"),
-        "f",
-    );
-    let ternary = content_for(
-        &format!("{PREFIX}function f(x: any) {{ return isT(x) ? (() => x)() : 0 }}"),
-        "f",
-    );
-    let capture_gaps = |node: &SliceContent| {
-        let mut found = false;
-        fn walk(region: &SliceRegion, found: &mut bool) {
-            for statement in region.statements.iter() {
-                match statement {
-                    SliceStatement::Return {
-                        argument: Some(argument),
-                        ..
-                    } => scan_expr(argument, found),
-                    SliceStatement::If {
-                        consequent,
-                        alternate,
-                        ..
-                    } => {
-                        walk(consequent, found);
-                        if let Some(alternate) = alternate {
-                            walk(alternate, found);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        fn scan_expr(expr: &SliceExpr, found: &mut bool) {
-            match expr {
-                SliceExpr::NestedFunctionValue { gap, .. } => {
-                    if gap.is_some() {
-                        *found = true;
-                    }
-                }
-                SliceExpr::Union { arms, .. } => {
-                    for arm in arms.iter() {
-                        scan_expr(arm, found);
-                    }
-                }
-                SliceExpr::Call(SliceCall::Nested(nested), _) => scan_expr(nested, found),
-                _ => {}
-            }
-        }
-        walk(&node.body, &mut found);
-        found
+         function isT(x: unknown): x is T { return true }\n";
+    let capture_gaps = |body: &str| {
+        let content = content_for(&format!("{PREFIX}{body}"), "f");
+        let mut values = Vec::new();
+        collect_nested_function_values(&content.body, &mut values);
+        assert!(
+            !values.is_empty(),
+            "the closure lowers as a nested value: {content:?}"
+        );
+        values
+            .into_iter()
+            .map(|value| match value {
+                SliceExpr::NestedFunctionValue { gap, .. } => *gap,
+                _ => unreachable!("only nested function values are collected"),
+            })
+            .collect::<Vec<_>>()
     };
-    assert!(
-        capture_gaps(&statement),
-        "the `if` arm's capture takes the closure-capture gap: {statement:?}"
-    );
-    assert!(
-        capture_gaps(&ternary),
-        "the ternary arm's capture takes the SAME rail: {ternary:?}"
-    );
-
-    // A `switch` clause body evaluates under the dispatch narrow of its
-    // discriminant, so a closure created there takes the same rail.
-    let dispatch = content_for(
-        "export {};\n\
-         function f(x: string | number) { switch (x) { case \"a\": return (() => x)(); } return 0 }",
-        "f",
-    );
-    let mut found = false;
-    fn scan_region(region: &SliceRegion, found: &mut bool) {
-        for statement in region.statements.iter() {
-            match statement {
-                SliceStatement::Switch { cases, .. } => {
-                    for case in cases.iter() {
-                        scan_region(&case.region, found);
-                    }
-                }
-                SliceStatement::Return {
-                    argument: Some(SliceExpr::Call(SliceCall::Nested(nested), _)),
-                    ..
-                } => {
-                    if let SliceExpr::NestedFunctionValue { gap, .. } = nested.as_ref() {
-                        if gap.is_some() {
-                            *found = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+    for (spelling, body) in [
+        (
+            "if",
+            "function f(x: unknown) { if (isT(x)) { return (() => x)() } x = 0; return 0 }",
+        ),
+        (
+            "ternary",
+            "function f(x: unknown) { const r = isT(x) ? (() => x)() : 0; x = 0; return r }",
+        ),
+        (
+            "switch",
+            "function f(x: string | number) { switch (x) { case \"a\": return (() => x)(); } x = 0; return 0 }",
+        ),
+    ] {
+        let gaps = capture_gaps(body);
+        assert!(
+            gaps.iter().all(Option::is_none),
+            "{spelling}: an invoked arrow reads the guarded capture, no gap: {gaps:?}"
+        );
     }
-    scan_region(&dispatch.body, &mut found);
-    assert!(
-        found,
-        "the switch clause's capture takes the SAME rail: {dispatch:?}"
-    );
+    for (spelling, body) in [
+        (
+            "if",
+            "function f(x: string | number) { let y: string | number = x; if (typeof y === \"string\") { const g = () => { const before = y; y = 0; return before }; return g() } return 0 }",
+        ),
+        (
+            "ternary",
+            "function f(x: string | number) { let y: string | number = x; const g = typeof y === \"string\" ? () => { const before = y; y = 0; return before } : () => 1; return g() }",
+        ),
+        (
+            "switch",
+            "function f(x: string | number) { let y: string | number = x; switch (y) { case \"a\": { const g = () => { const before = y; y = 0; return before }; return g() } } return 0 }",
+        ),
+    ] {
+        let gaps = capture_gaps(body);
+        assert!(
+            gaps.contains(&Some(crate::semantic_query::FlowGap::ClosureCapture)),
+            "{spelling}: the guarded capture outside its extended container takes the SAME rail: {gaps:?}"
+        );
+    }
 }
 
 /// A destructured parameter element is a CORRELATED projection of its

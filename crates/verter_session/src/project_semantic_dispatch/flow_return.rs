@@ -6686,6 +6686,10 @@ fn slice_statements_have_non_subject_return<'a>(
 struct PreparedFlowCaptureInput {
     subject: FlowProductSubject,
     value_demanded: bool,
+    /// The capture is past its last assignment where the function is
+    /// created: its reaching (narrowed) type there is what the body reads,
+    /// never replaced by its declared authority.
+    extended: bool,
     assignment: DefiniteAssignmentProduct,
     reaching: Option<ReachingTypeProduct>,
     declared: Option<SemanticNodeId>,
@@ -6706,12 +6710,13 @@ impl PreparedFlowCaptureInput {
         self.declared = Some(node);
         if self.deferred_write.is_none()
             && (self.reaching.is_none()
-                || matches!(
-                    source,
-                    crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                        crate::flow_slice_content::SliceBindingKind::Var
-                    ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
-                ))
+                || !self.extended
+                    && matches!(
+                        source,
+                        crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                            crate::flow_slice_content::SliceBindingKind::Var
+                        ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
+                    ))
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
         }
@@ -14320,6 +14325,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         has_declared_return: bool,
         outer_env: &FlowBinderEnv,
+        extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
     ) -> SemanticNodeId {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -14415,6 +14421,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             anchor,
             &key,
             outer_env,
+            extended_captures,
         )
     }
 
@@ -14510,6 +14517,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         anchor: u32,
         key: &FlowReturnKey,
         outer_env: &FlowBinderEnv,
+        extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
     ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
@@ -14679,11 +14687,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut capture_inputs: Vec<_> = inputs
             .selected_captures(planned.selection())
             .map(|(identity, value_demanded)| {
-                let parent = self
-                    .bindings
-                    .local(identity)
+                let local = self.bindings.local(identity);
+                // A capture past its last assignment enters the body at its
+                // narrowed type where the function is created.
+                let extended = local.is_some_and(|binding| extended_captures.contains(&binding));
+                let parent = local
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
+                let narrowed = extended
+                    .then(|| {
+                        self.products.narrowing(&parent).and_then(|narrowing| {
+                            narrowing
+                                .facts()
+                                .iter()
+                                .find(|fact| fact.path.is_empty())
+                                .map(|fact| fact.narrowed_to)
+                        })
+                    })
+                    .flatten();
                 if value_demanded
                     && self.products.contains_subject(&parent)
                     && self.products.reaching(&parent).is_none()
@@ -14693,6 +14714,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 PreparedFlowCaptureInput {
                     subject: FlowProductSubject::Captured(identity.clone()),
                     value_demanded,
+                    extended,
                     assignment: if value_demanded {
                         self.products.assignment(&parent).with_single_path(false)
                     } else {
@@ -14704,6 +14726,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // REPLACES the statement-entry reaching (the checker's
                     // own deferred-read rule). Direct reads are unaffected
                     // — they consume the live, evaluation-ordered reaching.
+                    //
+                    // An EXTENDED capture reads the reaching where the
+                    // function is created (or invoked, for an IIFE): no
+                    // write of the statement comes between, so the live
+                    // reaching and its narrowing are the answer.
                     deferred_write: value_demanded
                         .then(|| {
                             self.capture_write_lookahead
@@ -14713,10 +14740,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .flatten(),
                     reaching: value_demanded
                         .then(|| {
-                            self.capture_write_lookahead
-                                .get(&self.canonical_runtime_subject(&parent))
-                                .map(|node| ReachingTypeProduct::of(*node))
-                                .or_else(|| self.products.reaching_type(&parent).cloned())
+                            if extended {
+                                narrowed
+                                    .map(ReachingTypeProduct::of)
+                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                            } else {
+                                self.capture_write_lookahead
+                                    .get(&self.canonical_runtime_subject(&parent))
+                                    .map(|node| ReachingTypeProduct::of(*node))
+                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                            }
                         })
                         .flatten(),
                     declared: value_demanded
@@ -15467,7 +15500,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if let Some(node) = self.declared_local_read(binding) {
                         return Positional::Value(node);
                     }
-                } else if !captured {
+                } else {
                     let subject = crate::flow_slice_content::SliceNarrowSubject {
                         root: crate::flow_slice_content::SliceNarrowRoot::Local {
                             name: Arc::clone(name),
@@ -15565,6 +15598,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 context,
                 has_declared_return,
                 gap,
+                extended_captures,
             } => {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
@@ -15575,6 +15609,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     context,
                     *has_declared_return,
                     outer_env,
+                    extended_captures,
                 ))
             }
             crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),

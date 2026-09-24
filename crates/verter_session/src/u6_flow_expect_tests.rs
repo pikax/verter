@@ -2855,15 +2855,11 @@ mod matrix_suite {
             script: "function makeProps(v: string | number) { if (typeof v === \"string\") { return () => v } return () => \"z\" as const }",
             checker: "() => string",
             outcome: CellOutcome::Value {
-                rendered: "() => Union(number | string)",
-                degradation: Degr::FlowGap(FlowGap::ClosureCapture),
-                warm_replay: false,
+                rendered: "() => string",
+                degradation: Degr::None,
+                warm_replay: true,
             },
-            gap: "the typeof guard established BEFORE closure creation does not narrow the \
-                  captured read, so the guarded arm evaluates to `() => string | number` where \
-                  the checker preserves `string`. Return-position subtype reduction then \
-                  absorbs the `() => \"z\"` peer into it, so the collapse the checker performs \
-                  DOES happen — onto an over-broad arm; owner U6.LOOP_CLOSURE",
+            gap: "",
         },
         FixedCell {
             id: "iife_write_in_try_finally",
@@ -5659,22 +5655,18 @@ mod expectation_controls {
 
 /// A control test written INSIDE a nested function value, over a binding
 /// an ENCLOSING frame declares, establishes a narrowing the checker
-/// applies to every read that follows it in that nested body. The
-/// lowering carries no such fact, so the demanded answer is a SUPERSET —
-/// and a superset is only ever admissible behind the typed gap.
+/// applies to every read that follows it in that nested body — and the
+/// nested frame carries it: a captured binding is a narrowing subject like
+/// any other, so the answer is exact, complete and warm (measured, 7.0.2:
+/// `() => string | 0` for the two returned arrows and `string | 0` for the
+/// invoked value).
 ///
-/// A captured binding is a landing slot like any other here: the
-/// evaluator resolves the nested read against the enclosing frame's
-/// binding, so classifying it as "no slot to land on" would be a POSITIVE
-/// claim of inertness that the checker contradicts.
-///
-/// The controls are what make this discriminating rather than a blanket
-/// refusal of closures: a nested value narrowing its OWN parameter still
-/// publishes complete and warm, an outer-frame guard is untouched, and a
-/// closure that never mentions the capture keeps its clean result.
+/// The controls stay as they were: a nested value narrowing its OWN
+/// parameter, the same guard one frame out, and a closure that never
+/// mentions the capture.
 #[test]
-fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
-    let degraded = [
+fn narrowing_over_a_captured_binding_is_carried_and_warms() {
+    let carried = [
         (
             "a `typeof` guard inside a returned arrow",
             "export {};\nfunction makeProps(x: string | number) { return () => { if (typeof x === \"string\") return x; return 0 } }",
@@ -5688,19 +5680,6 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
             "export {};\nfunction makeProps(x: string | number) { return (() => { if (typeof x === \"string\") return x; return 0 })() }",
         ),
     ];
-    for (case, script) in degraded {
-        let measured = drive_expect_boundary("", "cap_deg", script, "makeProps", None);
-        assert_eq!(
-            measured.boundary.degradation,
-            Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
-            "{case}: the uncarried narrowing takes the typed gap"
-        );
-        assert!(
-            !measured.boundary.second_from_cache,
-            "{case}: a degraded result is never served warm"
-        );
-    }
-
     let clean = [
         (
             "a nested value narrowing its OWN parameter",
@@ -5715,7 +5694,7 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
             "export {};\nfunction makeProps(x: string | number) { return () => 1 }",
         ),
     ];
-    for (case, script) in clean {
+    for (case, script) in carried.into_iter().chain(clean) {
         let measured = drive_expect_boundary("", "cap_ok", script, "makeProps", None);
         assert_eq!(
             measured.boundary.degradation,
