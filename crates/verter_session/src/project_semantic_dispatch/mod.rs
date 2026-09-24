@@ -4153,6 +4153,8 @@ mod heritage_signature_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
 #[cfg(test)]
+mod object_literal_key_tests;
+#[cfg(test)]
 mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;

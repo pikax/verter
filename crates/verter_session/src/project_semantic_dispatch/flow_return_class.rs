@@ -1,6 +1,8 @@
 //! Class-expression evaluation: the flow evaluator's composition of
 //! TypeScript's class rules over a lowered class body
-//! ([`crate::flow_slice_content::SliceClass`]), measured on 7.0.2.
+//! ([`crate::flow_slice_content::SliceClass`]), measured on 7.0.2 — and
+//! the late-bound computed-key rule a class side shares with an object
+//! literal (an open-typed key feeds its side's implicit index signature).
 
 use std::sync::Arc;
 
@@ -34,7 +36,7 @@ struct ClassBase {
 /// checker's `getIndexInfosOfIndexSymbol` over a class's late-bound
 /// members.
 #[derive(Default)]
-struct ComputedIndexKinds {
+pub(super) struct ComputedIndexKinds {
     string: Option<bool>,
     number: Option<bool>,
     symbol: Option<bool>,
@@ -44,7 +46,7 @@ struct ComputedIndexKinds {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ComputedKeyKind {
+pub(super) enum ComputedKeyKind {
     String,
     Number,
     Symbol,
@@ -53,7 +55,7 @@ enum ComputedKeyKind {
 impl ComputedIndexKinds {
     /// Record one contribution; the implied signature stays `readonly`
     /// only while every contributor of its kind is.
-    fn record(&mut self, kind: ComputedKeyKind, readonly: bool, value: SemanticNodeId) {
+    pub(super) fn record(&mut self, kind: ComputedKeyKind, readonly: bool, value: SemanticNodeId) {
         let slot = match kind {
             ComputedKeyKind::String => &mut self.string,
             ComputedKeyKind::Number => &mut self.number,
@@ -62,14 +64,20 @@ impl ComputedIndexKinds {
         *slot = Some(slot.unwrap_or(true) && readonly);
         self.values.push((kind, value));
     }
+
+    /// Whether any late-bound member was recorded.
+    pub(super) fn any(&self) -> bool {
+        !self.values.is_empty()
+    }
 }
 
-/// One side (instance or static) of a class under composition.
+/// One member surface under composition — a class's instance or static
+/// side, or an object literal — with its late-bound members.
 #[derive(Default)]
-struct ClassSide {
-    members: Vec<SurfaceMember>,
-    index_signatures: Vec<crate::semantic_query::IndexSignature>,
-    computed: ComputedIndexKinds,
+pub(super) struct MemberSide {
+    pub(super) members: Vec<SurfaceMember>,
+    pub(super) index_signatures: Vec<crate::semantic_query::IndexSignature>,
+    pub(super) computed: ComputedIndexKinds,
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
@@ -144,8 +152,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
         };
-        let mut instance_side = ClassSide::default();
-        let mut static_side = ClassSide::default();
+        let mut instance_side = MemberSide::default();
+        let mut static_side = MemberSide::default();
         for member in class.members.iter() {
             let value = self.eval_class_member_value(&member.value, env);
             let side = if member.is_static {
@@ -157,15 +165,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SliceObjectKey::Static(name) => AuthoredPropertyKey::string(name.as_ref()),
                 SliceObjectKey::Computed { value: key, .. } => {
                     match self.eval_class_member_key(key) {
-                        ClassMemberKey::Named(key) => key,
-                        ClassMemberKey::Index(kind) => {
+                        MemberKey::Named(key) => key,
+                        MemberKey::Index(kind) => {
                             side.computed.record(kind, member.readonly, value);
                             continue;
                         }
                         // A key whose type names no property kind (the
                         // checker's TS2464) declares nothing.
-                        ClassMemberKey::None => continue,
-                        ClassMemberKey::Unmodeled => {
+                        MemberKey::None => continue,
+                        MemberKey::Unmodeled => {
                             self.unmodeled_position();
                             continue;
                         }
@@ -438,49 +446,56 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// What a computed class member key names.
-    fn eval_class_member_key(&mut self, key: &SliceExpr) -> ClassMemberKey {
+    fn eval_class_member_key(&mut self, key: &SliceExpr) -> MemberKey {
         // A hold inside a KEY is not this class's value: drop it and read
         // the outcome.
         let holds_before = self.holds.len();
         let outcome = self.eval_expr(key);
         self.holds.truncate(holds_before);
         let Positional::Value(node) = outcome else {
-            return ClassMemberKey::Unmodeled;
+            return MemberKey::Unmodeled;
         };
         let graph = self.dispatch.graph();
         match graph.node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
-                return ClassMemberKey::Named(AuthoredPropertyKey::string(value.as_str()));
+                return MemberKey::Named(AuthoredPropertyKey::string(value.as_str()));
             }
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(value))) => {
-                return ClassMemberKey::Named(AuthoredPropertyKey::from_known(
+                return MemberKey::Named(AuthoredPropertyKey::from_known(
                     crate::semantic_query::PropertyKey::from_js_number(*value),
                 ));
             }
             Some(SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => {
                 if let Some(identity) = self.dispatch.unique_symbol_identity_for_typeof_node(node) {
-                    return ClassMemberKey::Named(AuthoredPropertyKey::UniqueSymbol(identity));
+                    return MemberKey::Named(AuthoredPropertyKey::UniqueSymbol(identity));
                 }
             }
             _ => {}
         }
-        // Any other key is late-bound to an index signature of the kind its
-        // type is assignable to (`getIndexInfosOfIndexSymbol`: number, then
-        // symbol, then the rest of `string | number | symbol`).
+        self.late_bound_key(node)
+    }
+
+    /// What a computed key whose value names no single property names: a
+    /// late-bound member of the index-signature kind its type is
+    /// assignable to (`getIndexInfosOfIndexSymbol`: number, then symbol,
+    /// then the rest of `string | number | symbol`), or nothing for a type
+    /// that is no property-key type.
+    pub(super) fn late_bound_key(&mut self, node: SemanticNodeId) -> MemberKey {
+        let graph = self.dispatch.graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let symbol = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let property_key = self.union(&[string, number, symbol]);
         match self.assignable(node, property_key) {
             Some(true) => {}
-            Some(false) => return ClassMemberKey::None,
-            None => return ClassMemberKey::Unmodeled,
+            Some(false) => return MemberKey::None,
+            None => return MemberKey::Unmodeled,
         }
         match (self.assignable(node, number), self.assignable(node, symbol)) {
-            (Some(true), _) => ClassMemberKey::Index(ComputedKeyKind::Number),
-            (Some(false), Some(true)) => ClassMemberKey::Index(ComputedKeyKind::Symbol),
-            (Some(false), Some(false)) => ClassMemberKey::Index(ComputedKeyKind::String),
-            _ => ClassMemberKey::Unmodeled,
+            (Some(true), _) => MemberKey::Index(ComputedKeyKind::Number),
+            (Some(false), Some(true)) => MemberKey::Index(ComputedKeyKind::Symbol),
+            (Some(false), Some(false)) => MemberKey::Index(ComputedKeyKind::String),
+            _ => MemberKey::Unmodeled,
         }
     }
 
@@ -491,9 +506,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// string- and number-named member, a number index every numeric-named
     /// one, a symbol index every unique-symbol-named one. `prototype` is
     /// the static side's instance.
-    fn add_computed_index_signatures(
+    pub(super) fn add_computed_index_signatures(
         &mut self,
-        side: &mut ClassSide,
+        side: &mut MemberSide,
         prototype: Option<SemanticNodeId>,
     ) {
         let graph = self.dispatch.graph();
@@ -719,8 +734,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 }
 
-/// What one computed class member key names.
-enum ClassMemberKey {
+/// What one computed member key names.
+pub(super) enum MemberKey {
     /// A literal or unique-symbol key: one named member.
     Named(AuthoredPropertyKey),
     /// A late-bound key: a contribution to the side's implicit index

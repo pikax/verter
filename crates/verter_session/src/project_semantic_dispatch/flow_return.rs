@@ -7661,6 +7661,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut unwidened_differs = false;
         let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
         let mut spread_seen = false;
+        let mut late_bound = class_expression::ComputedIndexKinds::default();
         for entry in entries.iter() {
             let member = match entry {
                 crate::flow_slice_content::SliceObjectEntry::Spread { source } => {
@@ -7722,13 +7723,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // lowering.
             let value = self.widen_value_position_read(member_value, value);
             // A non-static key is its own evaluated position. It names
-            // the member only if it settles to a LITERAL; anything else
-            // leaves the surface's key SET unknown, which an object
-            // surface cannot express — the same fail-closed verdict a
-            // spread source this frame cannot evaluate takes, and for the
-            // same reason.
-            let Some(key) = self.eval_object_member_key(&member.key) else {
-                return Positional::Unmodeled;
+            // the member when it settles to a LITERAL (or a unique
+            // symbol); a key of any other property-key type is
+            // LATE-BOUND: it names no member and contributes to the
+            // literal's implicit index signature of its kind
+            // (`getObjectLiteralIndexInfo`). A key that settles to
+            // nothing leaves the surface's key SET unknown — the same
+            // fail-closed verdict a spread source this frame cannot
+            // evaluate takes. With a spread the literal is a construction
+            // program, which carries no index signature: a late-bound key
+            // there fails closed too.
+            let key = match self.eval_object_member_key(&member.key) {
+                class_expression::MemberKey::Named(key) => key,
+                class_expression::MemberKey::Index(kind) if !spread_seen => {
+                    late_bound.record(kind, member.readonly, value);
+                    continue;
+                }
+                class_expression::MemberKey::None => continue,
+                class_expression::MemberKey::Index(_) | class_expression::MemberKey::Unmodeled => {
+                    return Positional::Unmodeled
+                }
             };
             let unwidened = match &member.unwidened {
                 Some(expr) => match self.eval_expr(expr) {
@@ -7759,6 +7773,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             surface_members.push(surface_member);
         }
         if spread_seen {
+            if late_bound.any() {
+                return Positional::Unmodeled;
+            }
             effects.extend(surface_members.drain(..).map(|member| {
                 super::object_spread_program_lowering::direct_effect_from_member(&member)
             }));
@@ -7769,15 +7786,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.binder_env.scope.clone(),
             ));
         }
+        // A late-bound member contributes to the literal's implicit index
+        // signature of its kind (`getObjectLiteralIndexInfo`), whose value
+        // also unions every named member that kind applies to. The
+        // signatures are the same on both views: only declared union
+        // selection reads the unwidened one.
+        let index_signatures: Arc<[crate::semantic_query::IndexSignature]> = if late_bound.any() {
+            let mut side = class_expression::MemberSide {
+                members: surface_members.clone(),
+                index_signatures: Vec::new(),
+                computed: late_bound,
+            };
+            self.add_computed_index_signatures(&mut side, None);
+            Arc::from(side.index_signatures.into_boxed_slice())
+        } else {
+            Arc::from(Vec::new().into_boxed_slice())
+        };
         let intern = |members: Vec<crate::semantic_query::SurfaceMember>| {
             self.dispatch.graph().intern_node(SemanticNodeData::Object(
                 crate::semantic_query::surface_view! {
                     members: Arc::from(members.into_boxed_slice()),
                     call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                     construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    index_signatures: Arc::clone(&index_signatures),
                     keyspace: None,
-                    has_index_signature: false,
+                    has_index_signature: !index_signatures.is_empty(),
                 },
             ))
         };
@@ -8196,16 +8229,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_object_member_key(
         &mut self,
         key: &crate::flow_slice_content::SliceObjectKey,
-    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
-        let (expression, authored) = match key {
+    ) -> class_expression::MemberKey {
+        let expression = match key {
             crate::flow_slice_content::SliceObjectKey::Static(name) => {
-                return Some(crate::semantic_query::AuthoredPropertyKey::string(
-                    name.as_ref(),
-                ))
+                return class_expression::MemberKey::Named(
+                    crate::semantic_query::AuthoredPropertyKey::string(name.as_ref()),
+                )
             }
-            crate::flow_slice_content::SliceObjectKey::Computed { value, authored } => {
-                (value.as_ref(), authored)
-            }
+            crate::flow_slice_content::SliceObjectKey::Computed { value } => value.as_ref(),
         };
         // A hold inside a KEY is not this object's value any more than a
         // hold inside a spread source is: drop it and read the outcome.
@@ -8213,9 +8244,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let outcome = self.eval_expr(expression);
         self.holds.truncate(holds_before);
         let Positional::Value(node) = outcome else {
-            return None;
+            return class_expression::MemberKey::Unmodeled;
         };
-        match self.dispatch.graph().node_data(node).as_deref() {
+        let named = match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
                 Some(crate::semantic_query::AuthoredPropertyKey::string(
                     value.as_str(),
@@ -8242,42 +8273,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .dispatch
                 .unique_symbol_identity_for_typeof_node(node)
                 .map(crate::semantic_query::AuthoredPropertyKey::UniqueSymbol),
-            // A NON-unique `symbol` key genuinely provisions an index
-            // signature rather than one property, and is over-named here.
-            // That is not a new divergence: it is exactly what the leaf
-            // answer this replaces already did, and telling the two apart
-            // needs the key's own uniqueness, which a bare `symbol` value
-            // does not have.
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => {
-                self.authored_symbol_key(authored)
-            }
-            // Anything else — an OPEN `string` / `number` key, an
-            // unresolved read — leaves the surface's key SET unknown.
-            _ => None,
-        }
-    }
-
-    /// Name a symbol-valued member from its AUTHORED key — the same carrier
-    /// the whole-literal leaf answer produced, resolved by the same
-    /// downstream reader. The fallback when the value channel carries no
-    /// nominal identity of its own.
-    fn authored_symbol_key(
-        &self,
-        authored: &verter_type_expr::AuthoredPropertyKey<
-            verter_type_expr::TypeExpr,
-            verter_type_expr::facts::ValueDeclIdentityPart,
-        >,
-    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
-        match authored.cloned_known() {
-            Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
-                known,
-            )),
-            None => match authored {
-                verter_type_expr::AuthoredPropertyKey::Computed(ty) => Some(
-                    crate::semantic_query::AuthoredPropertyKey::Computed(self.lower_key_type(ty)),
-                ),
-                _ => None,
-            },
+            // Anything else — an OPEN `string` / `number` / `symbol`
+            // key — is late-bound (a `unique symbol` keeps its carrier
+            // above, so a bare `symbol` is never one); an unresolved read
+            // leaves the key SET unknown.
+            _ => return self.late_bound_key(node),
+        };
+        match named {
+            Some(key) => class_expression::MemberKey::Named(key),
+            None => class_expression::MemberKey::Unmodeled,
         }
     }
 
@@ -12569,30 +12573,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// leaf or a declarator's authored annotation) under the function's
     /// OWN binder environment — a body type referencing a root binder
     /// keeps the binder, never an outer same-name resolution.
-    /// Lower an AUTHORED computed-key type CARRIER-PRESERVINGLY.
-    ///
-    /// A computed key's nominal identity lives in the carrier
-    /// (`typeof ob12Key`), and the structural-transit lowering
-    /// [`Self::lower_body_type`] uses reduces it to the bare `symbol`
-    /// primitive — which names no property. `Navigate` keeps the carrier
-    /// for the downstream key reader to resolve, which is exactly what
-    /// the whole-literal leaf answer handed it.
-    fn lower_key_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        self.dispatch.shallow_lower_type_expr_with_context(
-            ty,
-            &self.binder_env.env,
-            &self.binder_env.scope,
-            &self.binder_env.name_resolution,
-            self.binder_env.scope_payload.as_ref(),
-            &self.binder_env.shadowing,
-            &mut substitutions,
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        )
-    }
-
     fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         self.dispatch.shallow_lower_type_expr_with_context(

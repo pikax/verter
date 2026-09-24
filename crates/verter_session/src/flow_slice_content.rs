@@ -1690,19 +1690,9 @@ pub enum SliceObjectKey {
     /// authored text is not its name.
     Computed {
         /// The key expression, lowered as an ordinary value position.
-        /// Its evaluated LITERAL names the property.
+        /// Its evaluated LITERAL (or `unique symbol` carrier) names the
+        /// property; any other property-key type is late-bound.
         value: Box<SliceExpr>,
-        /// The AUTHORED key, through the shared property-key lowering.
-        ///
-        /// The value channel cannot carry every nameable key: a `unique
-        /// symbol` key names exactly one nominal property, and the
-        /// evaluator flattens its value to the bare `symbol` primitive,
-        /// losing the identity the name IS. The authored channel keeps
-        /// it (`typeof ob12Key`), and is the same carrier the
-        /// whole-literal leaf answer used to produce — so a symbol key
-        /// names its property exactly as before, without the literal
-        /// having to abandon its structural lowering to get there.
-        authored: verter_type_expr::TypeAuthoredPropertyKey,
     },
 }
 
@@ -8455,7 +8445,6 @@ impl Lowerer<'_> {
                 // NUMBER's, which only the value knows.
                 ObjectEntryKey::Computed(expression) => SliceObjectKey::Computed {
                     value: Box::new(self.lower_expr(expression, mode)),
-                    authored: verter_type_expr_oxc::lower_property_key(&p.key, self.source),
                 },
                 // A private name is a key form neither half models, and
                 // unlike a computed key it has no value to resolve.

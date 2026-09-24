@@ -557,7 +557,6 @@ impl<'s> Lowerer<'s> {
                             preserve_literal: true,
                         },
                     )),
-                    authored: verter_type_expr_oxc::lower_property_key(key, self.source),
                 })
             }
         }
