@@ -1216,8 +1216,13 @@ fn canonicalize_with(
     //     checker's `getIntersectionType` over what is left.
     if !is_union {
         remove_redundant_supertypes(graph, &mut kept, supertype_reduction);
-        if let Some(distributed) = distribute_over_unions(graph, &kept, nullability, &mut evidence)
-        {
+        if let Some(distributed) = distribute_over_unions(
+            graph,
+            &kept,
+            nullability,
+            DistributionOrigin::KeepWrittenIntersection,
+            &mut evidence,
+        ) {
             return CanonicalComposite {
                 node: distributed,
                 evidence,
@@ -1451,18 +1456,32 @@ pub(super) fn reduced_authored_intersection(
 /// cross product keeps the intersection.
 const MAX_DISTRIBUTED_CONSTITUENTS: usize = 64;
 
+/// Whether a distributed intersection keeps its written form as the
+/// printed origin ([`distribute_over_unions`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DistributionOrigin {
+    /// The canonical construction: the written intersection stays the
+    /// node when the distributed union is wider (the checker's origin).
+    KeepWrittenIntersection,
+    /// A reader of the type the intersection denotes: always the
+    /// distributed union.
+    Distributed,
+}
+
 /// The checker's distribution of an intersection over its union arms
 /// (`getIntersectionType`): `X & (A | B)` is `(X & A) | (X & B)`, each
 /// constituent an intersection reduced on its own, so `1 & (1 | 2)` is
-/// `1` and `string & ("a" | 1)` is `"a"`. `None` when no arm is a union
-/// or the distributed union keeps an intersection constituent and has more
+/// `1` and `string & ("a" | 1)` is `"a"`. `None` when no arm is a union,
+/// or — under [`DistributionOrigin::KeepWrittenIntersection`] — when the
+/// distributed union keeps an intersection constituent and has more
 /// constituents than the intersection has: the checker then keeps the
 /// intersection as the type's printed origin (`(QA | QB) & Z`), and both
 /// forms denote one type.
-fn distribute_over_unions(
+pub(super) fn distribute_over_unions(
     graph: &SemanticGraphStore,
     arms: &[SemanticNodeId],
     nullability: NullabilityPolicy,
+    origin: DistributionOrigin,
     evidence: &mut CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
     let choices: Vec<Vec<SemanticNodeId>> = arms
@@ -1518,7 +1537,8 @@ fn distribute_over_unions(
             Some(SemanticNodeData::Intersection(_))
         )
     });
-    if keeps_intersection
+    if origin == DistributionOrigin::KeepWrittenIntersection
+        && keeps_intersection
         && constituent_count(graph, &constituents, 0) > constituent_count(graph, arms, 0)
     {
         return None;

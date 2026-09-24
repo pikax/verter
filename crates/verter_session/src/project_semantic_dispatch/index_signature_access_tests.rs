@@ -42,6 +42,9 @@ interface Y extends SNS { [index: number]: 'n' }
 interface SS2 { [key: string]: 2 }
 interface NS { [n: number]: 'N'; [k: string]: 'S' }
 type Fn = () => void;
+type U = SS | SN;
+type UU = SS | SS2;
+type I = SS & { a: 1 };
 declare const uniq: unique symbol;
 ";
 
@@ -417,4 +420,92 @@ fn a_composites_arms_read_apparent_members_before_its_index_signatures() {
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The members of the library's `Object`, `String`, `Array` and
+/// `ReadonlyArray` the arms below read, as `lib.es5.d.ts` declares them.
+const ARRAY_LIB: &str = "\
+interface Object { toString(): string; }
+interface String { readonly length: number; readonly [index: number]: string; }
+interface Array<T> { length: number; [n: number]: T; }
+interface ReadonlyArray<T> { readonly length: number; readonly [n: number]: T; }
+";
+
+/// A tuple, an array, a nested union or a nested intersection arm is read
+/// as the checker reads it: a tuple declares its fixed positions and
+/// `length`, an array none of its positions, both reading the rest
+/// through `Array`'s number index; a union arm flattens into its union, an
+/// intersection distributes over a union arm, and an intersection arm of a
+/// union is one object.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): `([1] | SS)[0]`,
+/// `([1] | SS)['length']`, `(string[] & SS)['x']`, `((SS | SN) & { a: 1
+/// })['a']` and `([1] & SS)[0]` and `([1] & SS)[5]` are `1`;
+/// `(string[] | SS)['length']` and `(string[] & SS)['length']` are
+/// `number`; `(string[] & SS)[0]`, `(string[] & SS)[number]` and
+/// `(string[] | { 0: 'z' })[0]` are `string`; `((SS | SS2) & { a: 1
+/// })['b']`, `([1, 2] | SS)[1]`, `((SS & SN) | SS2)['x']`, `((SS & SN) |
+/// SS2)[0]` and `([1] | { 0: 2 })[0]` are `1 | 2`; `([1, 2] | [3])[0]` is
+/// `1 | 3`; `([1] | string[])[0]` is `string | 1`; `(UU | { x: 2 })['x']`
+/// over `type UU = SS | SS2` is `1 | 2`. `([1] | SS)['x']`, `(string[] |
+/// SS)[0]`, `(string[] | SS)['x']`, `((SS | SN) & { a: 1 })['b']`,
+/// `([1] | SS)[5]`, `(U | { x: 2 })['x']` and `(U & { a: 1 })['b']` over
+/// `type U = SS | SN`, `(I | SN)['a']` and `(I | SN)[0]` over `type I = SS
+/// & { a: 1 }`, and `(string | SS)[0]` are TS2339, `(readonly string[] |
+/// SS)[number]` and `([1] | SS)[number]` TS2537 — the error type.
+#[test]
+fn tuple_array_and_nested_composite_arms_read_as_the_checker_reads_them() {
+    let project = ProbeProject {
+        files: &[],
+        compiler_options: None,
+        ambient_lib: Some(ARRAY_LIB),
+    };
+    let failures = mismatches_in(
+        project,
+        FIXTURE,
+        &[
+            ("([1] | SS)[0]", "1"),
+            ("([1] | SS)['length']", "1"),
+            ("(string[] & SS)['x']", "1"),
+            ("((SS | SN) & { a: 1 })['a']", "1"),
+            ("([1] & SS)[0]", "1"),
+            ("([1] & SS)[5]", "1"),
+            ("(string[] | SS)['length']", "number"),
+            ("(string[] & SS)['length']", "number"),
+            ("(string[] & SS)[0]", "string"),
+            ("(string[] & SS)[number]", "string"),
+            ("(string[] | { 0: 'z' })[0]", "string"),
+            ("((SS | SS2) & { a: 1 })['b']", "1 | 2"),
+            ("([1, 2] | SS)[1]", "1 | 2"),
+            ("((SS & SN) | SS2)['x']", "1 | 2"),
+            ("((SS & SN) | SS2)[0]", "1 | 2"),
+            ("([1] | { 0: 2 })[0]", "1 | 2"),
+            ("([1, 2] | [3])[0]", "1 | 3"),
+            ("([1] | string[])[0]", "string | 1"),
+            ("(UU | { x: 2 })['x']", "1 | 2"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for probe in [
+        "([1] | SS)['x']",
+        "(string[] | SS)[0]",
+        "(string[] | SS)['x']",
+        "((SS | SN) & { a: 1 })['b']",
+        "([1] | SS)[5]",
+        "(U | { x: 2 })['x']",
+        "(U & { a: 1 })['b']",
+        "(I | SN)['a']",
+        "(I | SN)[0]",
+        "(string | SS)[0]",
+        "(readonly string[] | SS)[number]",
+        "([1] | SS)[number]",
+    ] {
+        let measured = super::checker_probe_lane_tests::with_probe_in(
+            project,
+            FIXTURE,
+            probe,
+            |dispatch, node| render_node(dispatch, node, 0),
+        );
+        assert_eq!(measured, "Opaque(Miss)", "`{probe}` is the checker's error");
+    }
 }

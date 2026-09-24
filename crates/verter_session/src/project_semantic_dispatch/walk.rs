@@ -846,11 +846,21 @@ struct ArmProbe {
     how: ArmHow,
 }
 
+/// What one arm of a composite split reported.
+enum ArmReport {
+    /// The surface it settled on and how it read the segment.
+    Settled(ArmProbe),
+    /// It is itself a union or an intersection: the composite is rebuilt
+    /// flat over it (the checker's union and intersection construction).
+    Composite(SemanticNodeId),
+}
+
 /// The composite a join decides the segment for once its arms reported
 /// ([`PathWalker::composite_hop`]).
 struct CompositeJoin {
     slot: usize,
     node: SemanticNodeId,
+    arms: Arc<[SemanticNodeId]>,
     path: Arc<[PathSegment]>,
     index: usize,
 }
@@ -1016,7 +1026,7 @@ pub(super) struct PathWalker<'a, 'b> {
     visited_nodes: rustc_hash::FxHashSet<SemanticNodeId>,
     /// The surfaces the arms of each composite split settled on, one slot
     /// per split ([`ArmProbe`]). Owned by this walk and dropped with it.
-    arm_probes: Vec<Vec<Option<ArmProbe>>>,
+    arm_probes: Vec<Vec<Option<ArmReport>>>,
     /// Per-step intermediate nodes for backfill.
     /// `intermediate_nodes[i]` = node reached after consuming path[..i+1].
     /// `Some(node)` only on linear `Object` member-step transitions.
@@ -1955,11 +1965,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             return;
         };
         if entry.is_none() {
-            *entry = Some(ArmProbe {
+            *entry = Some(ArmReport::Settled(ArmProbe {
                 view: view.clone(),
                 node,
                 how,
-            });
+            }));
         }
     }
 
@@ -1976,16 +1986,74 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         frames: &mut Vec<WalkFrame>,
         results: &mut Vec<SemanticNodeId>,
     ) -> bool {
-        let Some(probes) = self.arm_probes.get_mut(join.slot).map(std::mem::take) else {
+        let Some(reports) = self.arm_probes.get_mut(join.slot).map(std::mem::take) else {
             return false;
         };
-        let Some(probes) = probes.into_iter().collect::<Option<Vec<ArmProbe>>>() else {
-            return false;
-        };
+        let replaced_from = results.len().saturating_sub(arm_count);
+        // An arm that is itself a union or an intersection: read the
+        // composite the checker constructs over it — a union flattened, an
+        // intersection distributed over a union arm.
+        if reports
+            .iter()
+            .any(|report| matches!(report, Some(ArmReport::Composite(_))))
+        {
+            let arms: Vec<SemanticNodeId> = join
+                .arms
+                .iter()
+                .zip(reports.iter())
+                .map(|(arm, report)| match report {
+                    Some(ArmReport::Composite(composite)) => *composite,
+                    _ => *arm,
+                })
+                .collect();
+            let rebuilt = if is_union {
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&arms, true)
+            } else {
+                self.dispatch
+                    .distributed_intersection(&arms)
+                    .unwrap_or_else(|| {
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&arms, false)
+                    })
+            };
+            if rebuilt == join.node {
+                return false;
+            }
+            results.truncate(replaced_from);
+            // The rebuilt composite is read afresh, its arms with it: not a
+            // re-entry of the arms the first reading visited.
+            self.visited_nodes.remove(&rebuilt);
+            for arm in join.arms.iter() {
+                self.visited_nodes.remove(arm);
+            }
+            let rebuilt_arms: Vec<SemanticNodeId> = match self.graph().node_data(rebuilt).as_deref()
+            {
+                Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                Some(SemanticNodeData::Intersection(members)) => members.iter().copied().collect(),
+                _ => Vec::new(),
+            };
+            for arm in rebuilt_arms {
+                self.visited_nodes.remove(&arm);
+            }
+            frames.push(WalkFrame::Step {
+                node: rebuilt,
+                path: join.path,
+                index: join.index,
+                arm_read: None,
+            });
+            return true;
+        }
+        let mut probes: Vec<ArmProbe> = Vec::with_capacity(reports.len());
+        for report in reports {
+            match report {
+                Some(ArmReport::Settled(probe)) => probes.push(probe),
+                _ => return false,
+            }
+        }
         let segment = &join.path[join.index];
         let key = self.owned_index_access_key(segment);
         let hop = self.composite_hop(join.node, &probes, is_union, key.borrowed());
-        let replaced_from = results.len().saturating_sub(arm_count);
         match hop {
             CompositeHop::Arms => return false,
             CompositeHop::Value(value) => {
@@ -2027,6 +2095,56 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
         }
         true
+    }
+
+    /// Report, for the arm of a composite split this step reads as, that it
+    /// is itself the union or intersection `composite`.
+    fn note_composite_arm(
+        &mut self,
+        arm_read: Option<ArmRead>,
+        index: usize,
+        composite: SemanticNodeId,
+    ) {
+        let Some(ArmRead {
+            at,
+            probe: Some((slot, arm)),
+            ..
+        }) = arm_read
+        else {
+            return;
+        };
+        if at != index {
+            return;
+        }
+        if let Some(entry) = self
+            .arm_probes
+            .get_mut(slot)
+            .and_then(|reports| reports.get_mut(arm))
+        {
+            if entry.is_none() {
+                *entry = Some(ArmReport::Composite(composite));
+            }
+        }
+    }
+
+    /// Whether the arm of a composite split this step reads as reports to
+    /// its composite at `index`.
+    fn reports_at(arm_read: Option<ArmRead>, index: usize) -> Option<ArmRead> {
+        arm_read.filter(|read| read.at == index && read.probe.is_some())
+    }
+
+    /// The global wrapper surface of an array or a tuple
+    /// ([`Self::apparent_wrapper_read`]) and its view — the object the
+    /// checker reads an array's properties and index signatures off.
+    fn wrapper_view(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
+        let wrapper = self.apparent_wrapper_read(node)?;
+        match self.graph().node_data(wrapper).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some((view.clone(), wrapper)),
+            _ => None,
+        }
     }
 
     /// Open a probe slot for a composite split of `arm_count` arms.
@@ -3047,9 +3165,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // Each arm reads the segment as a union member and
                     // reports the surface it settled on; the join then
                     // decides the segment for the union
-                    // ([`Self::composite_hop`]).
+                    // ([`Self::composite_hop`]). A union that is itself an
+                    // arm of a split reports so, and its composite reads it
+                    // flattened.
                     let arms = arms.clone();
                     drop(data);
+                    if Self::reports_at(arm_read, index).is_some() {
+                        self.note_composite_arm(arm_read, index, current);
+                        results.push(self.opaque_miss());
+                        return;
+                    }
                     let (mode, composite) = match arm_read.filter(|read| read.at == index) {
                         Some(read) => (read.mode, None),
                         None => {
@@ -3059,6 +3184,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 Some(CompositeJoin {
                                     slot,
                                     node: current,
+                                    arms: arms.members_arc(),
                                     path: Arc::clone(path),
                                     index,
                                 }),
@@ -3137,6 +3263,26 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             }
                         }
                     }
+                    // An intersection that is itself an arm of a split is
+                    // one object to its composite: its composed surface.
+                    if !heritage && Self::reports_at(arm_read, index).is_some() {
+                        match self.dispatch.resolve_typeinfo_surface_view_with_node(
+                            current,
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                ProjectionMode::Shallow,
+                            ),
+                        ) {
+                            Some((_, composed)) if composed != current => {
+                                current = composed;
+                                continue;
+                            }
+                            _ => {
+                                self.note_composite_arm(arm_read, index, current);
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     let (mode, composite) = match restricted {
                         Some(read) => (read.mode, None),
                         None => {
@@ -3146,6 +3292,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 Some(CompositeJoin {
                                     slot,
                                     node: current,
+                                    arms: arms.members_arc(),
                                     path: Arc::clone(path),
                                     index,
                                 }),
@@ -4378,6 +4525,68 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             }
                         }
                     }
+                    // An arm of a composite split reports a key that is
+                    // not one of the tuple's properties (a position of its
+                    // fixed elements): a union member reads its number
+                    // index (`getRestTypeOfTupleType`, else `undefined`),
+                    // anything else leaves the key to its composite.
+                    if let Some(read) = Self::reports_at(arm_read, index) {
+                        let demand = self.classify_numeric_index_segment(segment);
+                        let fixed = elements
+                            .iter()
+                            .position(|element| element.rest)
+                            .unwrap_or(elements.len());
+                        let property =
+                            matches!(demand, Some(NumericIndexDemand::Position(at)) if at < fixed);
+                        if !property {
+                            if let Some((view, wrapper)) = self.wrapper_view(current) {
+                                let member_read = match (read.mode, demand) {
+                                    (ArmMode::Member, Some(NumericIndexDemand::Position(_))) => {
+                                        Some(if fixed < elements.len() {
+                                            let declaring_file = self
+                                                .graph()
+                                                .node_scope(current)
+                                                .and_then(|scope| scope.canonical_file());
+                                            match self.project_tuple_index(
+                                                &elements,
+                                                NumericIndexDemand::Position(fixed),
+                                                declaring_file.as_deref(),
+                                            ) {
+                                                Some(rest) => rest,
+                                                None => {
+                                                    results.push(self.opaque_miss());
+                                                    return;
+                                                }
+                                            }
+                                        } else {
+                                            self.graph().intern_node(SemanticNodeData::Primitive(
+                                                PrimitiveKind::Undefined,
+                                            ))
+                                        })
+                                    }
+                                    _ => None,
+                                };
+                                let how = if member_read.is_some() {
+                                    ArmHow::Index
+                                } else {
+                                    ArmHow::Nothing
+                                };
+                                self.note_arm(arm_read, index, &view, wrapper, how);
+                                match member_read {
+                                    Some(value) => {
+                                        current = self
+                                            .step_through_index_signature(current, value, segment);
+                                        index += 1;
+                                        continue;
+                                    }
+                                    None => {
+                                        results.push(self.opaque_miss());
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let projected = self
                         .classify_numeric_index_segment(segment)
                         .and_then(|demand| {
@@ -4427,6 +4636,25 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 continue;
                             }
                             None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
+                    // An arm of a composite split reports its key: an
+                    // array declares no numeric property, so a union member
+                    // reads a position through its number index and
+                    // anything else leaves the key to its composite.
+                    if let Some(read) = Self::reports_at(arm_read, index) {
+                        if let Some((view, wrapper)) = self.wrapper_view(current) {
+                            let position = matches!(
+                                self.classify_numeric_index_segment(segment),
+                                Some(NumericIndexDemand::Position(_))
+                            );
+                            if read.mode == ArmMode::Member && position {
+                                self.note_arm(arm_read, index, &view, wrapper, ArmHow::Index);
+                            } else {
+                                self.note_arm(arm_read, index, &view, wrapper, ArmHow::Nothing);
                                 results.push(self.opaque_miss());
                                 return;
                             }

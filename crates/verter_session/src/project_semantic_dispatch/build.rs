@@ -14260,6 +14260,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// producer that answers under one project's policy — the flow-return
     /// evaluator — constructs through [`Self::intern_normalized_union`]
     /// with that policy instead.
+    /// The union an intersection of `arms` denotes when an arm is a union —
+    /// the checker's distribution (`getIntersectionType`), even where the
+    /// canonical construction keeps the written intersection as its printed
+    /// origin. `None` when no arm is a union or the cross product is wider
+    /// than the canonical distribution builds.
+    pub(super) fn distributed_intersection(
+        &self,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let distributed = super::canonical_algebra::distribute_over_unions(
+            self.graph(),
+            arms,
+            crate::semantic_query::NullabilityPolicy::Strict,
+            super::canonical_algebra::DistributionOrigin::Distributed,
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
+        distributed
+    }
+
     pub(crate) fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
