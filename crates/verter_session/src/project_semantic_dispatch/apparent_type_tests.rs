@@ -89,6 +89,12 @@ fn upsert_ambient(host: &VerterHost, virtual_id: &Arc<str>, source: &str) {
 /// `Function` corpus, plus one plain source file per project so the demand
 /// canonicals resolve to their projects.
 fn two_project_ambient_host() -> Arc<VerterHost> {
+    two_project_host(AMBIENT_LIB_A, AMBIENT_LIB_B)
+}
+
+/// Two configured projects (`/a`, `/b`) with the ambient corpora `lib_a`
+/// and `lib_b`, plus one plain source file per project.
+fn two_project_host(lib_a: &'static str, lib_b: &'static str) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -97,7 +103,7 @@ fn two_project_ambient_host() -> Arc<VerterHost> {
         project_config("/b"),
     ]));
     let mut virtual_ids = Vec::new();
-    for (ordinal, (lib_id, lib)) in [("lib.a.d.ts", AMBIENT_LIB_A), ("lib.b.d.ts", AMBIENT_LIB_B)]
+    for (ordinal, (lib_id, lib)) in [("lib.a.d.ts", lib_a), ("lib.b.d.ts", lib_b)]
         .into_iter()
         .enumerate()
     {
@@ -403,4 +409,90 @@ fn rootless_apparent_without_demand_site_fails_closed() {
         None,
         "a rootless callable with no member-access/call site on the stack has no scope"
     );
+}
+
+/// A `String` corpus carrying a project-A-only marker member.
+const STRING_LIB_A: &str = "interface String { readonly length: number; onlyA: \"a\"; }\n";
+
+/// A `String` corpus carrying a project-B-only marker member.
+const STRING_LIB_B: &str = "interface String { readonly length: number; onlyB: \"b\"; }\n";
+
+/// A primitive's member read reaches its global wrapper through the
+/// requesting project: the SAME interned `string` node read from two
+/// projects with different `String` corpora answers each project's own
+/// member, and the read — which names no project of its own — never enters
+/// the shared memo, so neither project is served the other's answer.
+///
+/// Mutation recipe: drop the path walker's transaction-local taint on the
+/// wrapper read and the B-scoped read of `onlyA` is served A's warm `"a"`.
+#[test]
+fn a_primitive_member_read_is_project_scoped_and_never_cached() {
+    let host = two_project_host(STRING_LIB_A, STRING_LIB_B);
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let string = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path_key = |member: &str| SemanticQueryKey::ProjectPath {
+        base: string,
+        path: Arc::from(
+            vec![crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier(member),
+            )]
+            .into_boxed_slice(),
+        ),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    };
+    let read = |canonical: &str, member: &str| {
+        let _scope = super::super::LexicalDemandScopeGuard::push(
+            &dispatch.lexical_demand_scope,
+            Arc::from(canonical),
+        );
+        dispatch.execute_read(path_key(member))
+    };
+    // The string literal a read answers, if it answers one.
+    let value = |result: &QueryResult<SemanticNodeId>| match result {
+        QueryResult::Value(node) => match dispatch.graph().node_data(*node).as_deref() {
+            Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(text))) => {
+                Some(text.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let a = read("/a/main.ts", "onlyA");
+    assert_eq!(
+        value(&a.value),
+        Some("a".to_string()),
+        "project A reads its own String member"
+    );
+    assert!(a.cache_suppress, "a wrapper read is transaction-local");
+
+    let b = read("/b/main.ts", "onlyA");
+    assert!(
+        matches!(b.value, QueryResult::Value(node) if matches!(
+            dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        )),
+        "project B's String declares no `onlyA`: never A's answer, got {:?}",
+        b.value
+    );
+    assert_eq!(
+        value(&read("/b/main.ts", "onlyB").value),
+        Some("b".to_string()),
+        "project B reads its own String member"
+    );
+
+    let graph = host.project_type_store().semantic_graph();
+    for member in ["onlyA", "onlyB"] {
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&path_key(member)),
+            0,
+            "a wrapper read never enters the shared memo ({member})"
+        );
+    }
 }

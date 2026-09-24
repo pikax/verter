@@ -11522,9 +11522,11 @@ fn project_path_tuple_string_index_requires_canonical_digits() {
 /// Literal positions strictly BEFORE a rest element resolve exactly
 /// (pinned tsgo: `[string, ...number[]][0]` = `string`;
 /// `[string, number?, ...boolean[]][1]` = `number | undefined` — the same
-/// optional widening as a rest-free tuple). Positions AT or AFTER the rest
-/// start have suffix-dependent arithmetic this walker does not guess —
-/// they keep the honest `Opaque` miss.
+/// optional widening as a rest-free tuple). A position AT or AFTER the rest
+/// start reads every element from the rest start on, the rest contributing
+/// its element type: TypeScript 7.0.2 (`tsc --noEmit --strict`) answers
+/// `boolean` for both `T[2]` and `T[5]` over `type T = [x: string, n?:
+/// number, ...rest: boolean[]]`.
 #[test]
 fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
     use crate::semantic_query::TupleElement;
@@ -11597,16 +11599,13 @@ fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
         other => panic!("expected number|undefined union, got {other:?}"),
     }
 
-    // Positions AT (2) and AFTER (5) the rest start: honest Opaque miss —
-    // never a guessed suffix union.
+    // Positions AT (2) and AFTER (5) the rest start read the rest's
+    // element type.
     for position in [2, 5] {
-        let at_or_after_rest = project(position);
-        assert!(
-            matches!(
-                graph.node_data(at_or_after_rest).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            ),
-            "position {position} at/after the rest start must keep the honest miss"
+        assert_eq!(
+            project(position),
+            boolean_node,
+            "position {position} at/after the rest start reads the rest element"
         );
     }
 }

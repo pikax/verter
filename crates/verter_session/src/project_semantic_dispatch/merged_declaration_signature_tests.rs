@@ -108,6 +108,7 @@ fn a_module_augmentation_is_a_later_declaration() {
     let project = ProbeProject {
         files: &files,
         compiler_options: None,
+        ambient_lib: None,
     };
     let failures = mismatches_in(
         project,

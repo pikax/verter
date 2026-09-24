@@ -4157,10 +4157,16 @@ mod homomorphic_mapped_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
 #[cfg(test)]
+mod intersection_distribution_tests;
+#[cfg(test)]
 mod merged_declaration_signature_tests;
 #[cfg(test)]
 mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
+mod relation_operand_tests;
+#[cfg(test)]
 mod truthiness_domain_tests;
+#[cfg(test)]
+mod tuple_length_and_apparent_member_tests;

@@ -33,8 +33,11 @@
 //! enters a shared cache: the build is marked `cache_suppress`, and that
 //! taint folds through every enclosing member/path/call query at the
 //! universal read boundary. The primitive-to-wrapper widening (`string` →
-//! `String`, `number` → `Number`, …) is a separate surface and is not
-//! produced here; those bases also return `Miss`.
+//! `String`, `number` → `Number`, `T[]` → `Array<T>`, …) is not this
+//! family's: those bases return `Miss` here, and signature discovery and the
+//! path walker read the wrapper through
+//! [`ProjectSemanticDispatch::global_wrapper_surface`], scoped by the
+//! request's project.
 
 use std::sync::Arc;
 
@@ -74,7 +77,66 @@ enum CallableAnchor {
     Undecided,
 }
 
+/// A global wrapper interface read for an apparent type
+/// ([`ProjectSemanticDispatch::global_wrapper_surface`]).
+pub(super) enum GlobalWrapper {
+    /// The instantiated interface's surface.
+    Surface(SemanticNodeId),
+    /// The project declares no such global (`noLib`): the checker's empty
+    /// apparent type.
+    Absent,
+    /// The request's project, or the interface's instantiation, did not
+    /// settle.
+    Unsettled,
+}
+
 impl ProjectSemanticDispatch<'_> {
+    /// The global wrapper interface `name` (`String`, `Number`,
+    /// `Array`, …) instantiated with `args` — the apparent type of a
+    /// primitive, a literal, an array or a tuple — read from the resolved
+    /// global population of the request's project, with the consumer's
+    /// dependency on that global recorded.
+    pub(super) fn global_wrapper_surface(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+    ) -> GlobalWrapper {
+        let Some(canonical) = crate::request_context::current_request_canonical()
+            .or_else(|| self.lexical_demand_scope.borrow().last().cloned())
+        else {
+            return GlobalWrapper::Unsettled;
+        };
+        let Some(project) = self.project_stable_key_for_canonical(canonical.as_ref()) else {
+            return GlobalWrapper::Unsettled;
+        };
+        let Some(hit) = self.ctx.lookup_ambient_symbol(project, name) else {
+            return GlobalWrapper::Absent;
+        };
+        self.ctx
+            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
+        let slot = self.type_slot_for(
+            Arc::clone(&hit.virtual_id),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        );
+        match self
+            .execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    Arc::from(args.to_vec().into_boxed_slice()),
+                    self.instantiate_context_for(
+                        hit.virtual_id.as_ref(),
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    ),
+                ),
+            ))
+            .value
+        {
+            QueryResult::Value(surface) => GlobalWrapper::Surface(surface),
+            _ => GlobalWrapper::Unsettled,
+        }
+    }
+
     /// Build the `ApparentType` value for `base`.
     pub(super) fn build_apparent_type(
         &self,

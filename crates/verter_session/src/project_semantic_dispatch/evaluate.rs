@@ -1255,6 +1255,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The keys a `keyof` carrier over a declaration, an application or a
+    /// mapped type settles to under a demand that reduces operators
+    /// ([`Self::key_of_through_carrier`]); `None` when `keys` is no such
+    /// carrier or its keys stay the carrier.
+    fn settled_key_of_carrier(
+        &self,
+        keys: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !crate::semantic_query::may_reduce_operator(context) {
+            return None;
+        }
+        let base = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => *base,
+            _ => return None,
+        };
+        if !matches!(
+            self.graph().node_data(base).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::Mapped { .. }
+                    | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+            )
+        ) {
+            return None;
+        }
+        self.key_of_through_carrier(base, context)
+    }
+
     /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the
     /// resolved node PLUS the typed completeness of THIS evaluation (see
     /// [`EvaluateDeferredOutcome`]).
@@ -1349,10 +1379,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
                     DeferredEvaluationStage::AwaitKeyOfBase => {
-                        let read = self.execute_read(SemanticQueryKey::KeyOf {
+                        let mut read = self.execute_read(SemanticQueryKey::KeyOf {
                             base: child.node,
                             context: frame.context,
                         });
+                        // A `keyof` the builder kept as a carrier over a
+                        // declaration, an application or a mapped type is
+                        // evaluated here, at a demand for its value: its
+                        // keys where they settle, as the checker prints
+                        // them.
+                        if let QueryResult::Value(keys) = read.value {
+                            if let Some(settled) = self.settled_key_of_carrier(keys, frame.context)
+                            {
+                                read.value = QueryResult::Value(settled);
+                            }
+                        }
                         let fallback = self.opaque(QueryError::Miss);
                         self.deferred_read_action(frame, read, fallback)
                     }
