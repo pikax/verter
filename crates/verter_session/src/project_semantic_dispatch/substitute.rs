@@ -104,6 +104,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result
     }
 
+    /// Rebind the ENCLOSING type parameters a body-derived return mentions
+    /// to what the declaration lowering reading it binds them to.
+    ///
+    /// The flow lane interns an enclosing clause's parameter (a class's
+    /// `H` in a method body) as the signature-scoped binder of the
+    /// defining file — `DeclIdentity::from_scope(scope, name)` at ordinal
+    /// 0 — while the lowering that reads the return binds the same name to
+    /// its own binder or to an instantiation argument (`GH<number>` binds
+    /// `H` to `number`). Every such binder of `canonical` whose name
+    /// `bind` answers is replaced by the answer. A signature's OWN
+    /// parameters are the caller's to refuse: the call resolver
+    /// instantiates those through the body-derived carrier itself.
+    pub(super) fn rebind_flow_return_binders(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        bind: impl Fn(&str) -> Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam {
+                decl,
+                param_index: 0,
+                display_name,
+                ..
+            } = data.as_ref()
+            {
+                if decl.canonical_id.as_ref() == canonical && decl.decl_name == *display_name {
+                    binders.push((current, Arc::clone(display_name)));
+                }
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders
+            .into_iter()
+            .fold(node, |result, (binder, name)| match bind(&name) {
+                Some(target) if target != binder => {
+                    self.substitute_semantic_type_param(result, binder, target)
+                }
+                _ => result,
+            })
+    }
+
     /// Apply a stored positional substitution frame to a demanded winner
     /// (or to an open branch that a consumer has already selected). Empty
     /// frames are identity.

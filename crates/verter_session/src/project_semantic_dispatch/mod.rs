@@ -4149,6 +4149,8 @@ mod base_signature_tests;
 #[cfg(test)]
 mod checker_probe_lane_tests;
 #[cfg(test)]
+mod class_member_return_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;

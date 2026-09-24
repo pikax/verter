@@ -1334,7 +1334,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                             _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                         };
-                        (return_type, carrier)
+                        // An enclosing parameter the body reads rebinds to
+                        // this lowering's binder for it, so the receiver's
+                        // instantiation reaches the return (see
+                        // `rebind_flow_return_binders`).
+                        // The signature's own parameters stay the flow
+                        // lane's: the call resolver instantiates them
+                        // through the body-derived carrier.
+                        let own =
+                            |name: &str| func.type_parameters.iter().any(|tp| tp.name == name);
+                        let bind = |name: &str| match inner_ctx.lookup_binder(name) {
+                            Some(BinderSlot::Usable(binder)) if !own(name) => Some(binder),
+                            _ => None,
+                        };
+                        let rebound = self.rebind_flow_return_binders(
+                            return_type,
+                            scope_canonical.as_ref(),
+                            bind,
+                        );
+                        if rebound == return_type {
+                            (return_type, carrier)
+                        } else {
+                            inferred_predicate = inferred_predicate.map(|predicate| {
+                                predicate.map_type(|target| {
+                                    self.rebind_flow_return_binders(
+                                        target,
+                                        scope_canonical.as_ref(),
+                                        bind,
+                                    )
+                                })
+                            });
+                            (
+                                rebound,
+                                crate::semantic_query::SignatureReturnCarrier::Declared(rebound),
+                            )
+                        }
                     }
                     None => (
                         graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
