@@ -47,7 +47,9 @@
 //!   is rendered as a function over the binder and read through an
 //!   instantiation expression, so the selected arguments reach it. A setup
 //!   literal constant a hoisted value references is rendered ahead of it,
-//!   because Vue hoists that declaration to module scope too.
+//!   because Vue hoists that declaration to module scope too; beside a
+//!   normal script it is rendered all the same, so the value never reads as
+//!   an unbound name.
 //! - Exposed members come from the expose provider ([`EXPOSE_PROVIDER`]),
 //!   rendered in the same declaration as the one generic function over the
 //!   setup statements that returns the `defineExpose` argument, instantiated
@@ -759,12 +761,15 @@ pub fn project_public_constructor(
     let locals = LocalTypes {
         programs: [normal_program, Some(program)],
     };
-    // Vue hoists setup literal constants only when setup is the sole script.
-    let literal_consts = if normal_program.is_none() {
-        literal_consts(program, block.content)
-    } else {
-        FxHashMap::default()
-    };
+    // A hoisted value keeps every setup literal constant it references bound,
+    // so its type is read rather than an unbound name. Vue hoists these only
+    // beside no normal script (it rejects the reference otherwise), but the
+    // declaration still renders them so a `required` flag keeps its meaning;
+    // one that shadows a normal-script binding would redeclare it and is
+    // left to that binding.
+    let mut literal_consts = literal_consts(program, block.content);
+    literal_consts
+        .retain(|symbol, _| !module_bound.contains(semantic.scoping().symbol_name(*symbol)));
     let mut collector = PublicCollector {
         macros: MacroContext {
             scoping: semantic.scoping(),

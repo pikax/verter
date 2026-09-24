@@ -536,8 +536,8 @@ fn hoisted_values_carry_the_setup_literal_constants_they_reference() {
     );
     assert!(!rendered.contains("const label"), "{rendered}");
     assert!(!rendered.contains("const open"), "{rendered}");
-    // With a normal script Vue does not hoist setup constants, so nothing
-    // setup-local is rendered at module scope.
+    // Beside a normal script the hoisted value still needs the constant it
+    // references bound, or the required model reads as an unbound name.
     let split = project_public_constructor(
         Some(block("export default {};\n")),
         Some(block(
@@ -546,7 +546,28 @@ fn hoisted_values_carry_the_setup_literal_constants_they_reference() {
         None,
     )
     .expect("projects");
-    assert!(declaration(&split).starts_with("const __VerterModelRequired0 = (strict);\n"));
+    let rendered = declaration(&split);
+    assert!(
+        rendered.starts_with(
+            "const strict = true as const;\nconst __VerterModelRequired0 = (strict);\n"
+        ),
+        "{rendered}"
+    );
+    // A setup constant shadowing a normal-script binding is not rendered at
+    // module scope, where it would redeclare that binding.
+    let shadowed = project_public_constructor(
+        Some(block("const strict = false;\nexport default {};\n")),
+        Some(block(
+            "const strict = true as const;\ndefineModel<string>({ required: strict });\n",
+        )),
+        None,
+    )
+    .expect("projects");
+    let rendered = declaration(&shadowed);
+    assert!(
+        rendered.starts_with("const __VerterModelRequired0 = (strict);\n"),
+        "{rendered}"
+    );
 }
 
 #[test]
