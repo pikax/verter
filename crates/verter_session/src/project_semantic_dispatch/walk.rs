@@ -959,8 +959,10 @@ impl<'a> super::ProjectSemanticDispatch<'a> {
     /// signature: the class instantiated with `any` for every type
     /// parameter it has (the checker's `getTypeOfPrototypeProperty`) — the
     /// signature's own (a generic class's), and a class expression's outer
-    /// ones still at their own parameters (`inside<T>`'s `C.prototype` is
-    /// `inside.C`, measured on 7.0.2).
+    /// ones (`inside<T>`'s `C.prototype` is `inside.C`, measured on
+    /// 7.0.2). A class expression carries its prototype from where it is
+    /// authored, so an instantiated one (`ReturnType<typeof
+    /// make<string>>['prototype']`) still reads every parameter as `any`.
     pub(super) fn constructor_prototype(
         &self,
         signature: SemanticNodeId,
@@ -994,6 +996,9 @@ impl<'a> super::ProjectSemanticDispatch<'a> {
         else {
             return Some(instance);
         };
+        if let Some(prototype) = identity.prototype {
+            return Some(prototype);
+        }
         let parameters = identity
             .outer_clauses
             .iter()

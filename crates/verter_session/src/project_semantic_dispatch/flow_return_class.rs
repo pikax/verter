@@ -255,20 +255,43 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .map(|class_env| class_env.type_param_decls.clone())
             .unwrap_or_default();
         type_arguments.extend(own_type_parameters.iter().map(|decl| decl.param));
+        let type_arguments: Arc<[SemanticNodeId]> = Arc::from(type_arguments.into_boxed_slice());
+        let identity = crate::semantic_query::ClassExpressionIdentity {
+            canonical_id: Arc::from(self.canonical),
+            owner: self.owner,
+            offset: class.offset,
+            name: Arc::clone(&class.name),
+            outer_clauses: Arc::from(outer_clauses.into_boxed_slice()),
+            own_arity: own_type_parameters.len() as u32,
+            constructor_visibility: class
+                .constructor_visibility
+                .or_else(|| base.as_ref().and_then(|base| base.constructor_visibility)),
+            prototype: None,
+        };
+        // The prototype: the class as authored — every argument its own
+        // parameter — with each parameter erased to `any`.
+        let authored = graph.intern_node_with_scope(
+            SemanticNodeData::ClassExpressionInstance {
+                identity: Arc::new(identity.clone()),
+                type_arguments: Arc::clone(&type_arguments),
+                surface,
+            },
+            self.binder_env.scope.clone(),
+        );
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let prototype = type_arguments
+            .iter()
+            .fold(authored, |prototype, parameter| {
+                self.dispatch
+                    .substitute_semantic_type_param(prototype, *parameter, any)
+            });
         let instance = graph.intern_node_with_scope(
             SemanticNodeData::ClassExpressionInstance {
                 identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
-                    canonical_id: Arc::from(self.canonical),
-                    owner: self.owner,
-                    offset: class.offset,
-                    name: Arc::clone(&class.name),
-                    outer_clauses: Arc::from(outer_clauses.into_boxed_slice()),
-                    own_arity: own_type_parameters.len() as u32,
-                    constructor_visibility: class
-                        .constructor_visibility
-                        .or_else(|| base.as_ref().and_then(|base| base.constructor_visibility)),
+                    prototype: Some(prototype),
+                    ..identity
                 }),
-                type_arguments: Arc::from(type_arguments.into_boxed_slice()),
+                type_arguments,
                 surface,
             },
             self.binder_env.scope.clone(),

@@ -1127,6 +1127,13 @@ pub struct ClassExpressionIdentity {
     /// checker's `constructorVisibilitiesAreCompatible` reads; `None` for
     /// a declaration-less default constructor.
     pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
+    /// The class's `prototype`: the class instance with `any` for every
+    /// type parameter it has, outer and own (the checker's
+    /// `getTypeOfPrototypeProperty`), recorded where the class is authored
+    /// — an instantiation of the enclosing clauses substitutes into the
+    /// instance but never re-types the prototype, which has no parameter
+    /// left. `None` for the prototype instance itself.
+    pub prototype: Option<SemanticNodeId>,
 }
 
 /// One type-parameter clause enclosing a class expression.
