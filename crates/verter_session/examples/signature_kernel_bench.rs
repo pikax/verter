@@ -10,8 +10,12 @@
 //!
 //! It records SAMPLES, never verdicts. One JSON document goes to stdout:
 //! per-workload latency samples, per-workload allocation totals,
-//! worker-count throughput, the edit/revert soak's live-heap series, and
-//! the completion census of every witness. Statistics, the ABBA
+//! worker-count throughput, the edit/revert soak's live-heap series, the
+//! completion census of every witness, and — untimed — every witness's
+//! OUTCOME (completion, typed degradation or refusal, and the answered type
+//! rendered structurally) in the original corpus and in each edited state
+//! an edit workload reaches. The runner reports a ratio for a workload only
+//! when both arms' outcomes agree on every witness it queries. Statistics, the ABBA
 //! interleaving, the control benchmark and the regression gate live in the
 //! runner, `scripts/benchmark/signature-kernel-perf.mjs`.
 //!
@@ -48,7 +52,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use verter_scheduler::scheduler::SchedulerConfig;
-use verter_session::semantic_query::ReturnProjectionDemand;
+use verter_session::semantic_query::{ReturnProjectionDemand, SemanticNodeData, SemanticNodeId};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity, TopLevelOwnerId};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
@@ -345,6 +349,187 @@ fn query_all(host: &VerterHost, witnesses: &[(String, String)]) -> Census {
         census.add(query(host, canonical, symbol));
     }
     census
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Outcome fingerprints (untimed)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One witness's OUTCOME as the arms are compared on it: completion,
+/// the typed degradation or refusal, and the answered type rendered
+/// structurally — kinds, names, literals and shape, never node ids, spans
+/// or scopes, so two implementations that answer the same type print the
+/// same text. Union members are sorted (their order is presentation); every
+/// other order is kept. A node kind this renderer does not spell prints as
+/// its variant name, so an arm answering with a different kind still
+/// differs.
+fn outcome(host: &VerterHost, canonical: &str, symbol: &str) -> String {
+    let identity = FlowFunctionReturnIdentity {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(canonical),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Value,
+        },
+        function_part: FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let carrier =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    match carrier.as_result() {
+        Ok(result) => {
+            let graph = host.project_type_store().semantic_graph();
+            let mut rendered = String::new();
+            render_type(
+                &|id| graph.node_data(id),
+                result.return_type(),
+                0,
+                &mut rendered,
+            );
+            match result.degradation() {
+                None => format!("complete {rendered}"),
+                Some(reason) => format!("degraded({reason:?}) {rendered}"),
+            }
+        }
+        Err(error) => format!("refused({error:?})"),
+    }
+}
+
+/// Render depth past which a type prints as `…`: deep enough for every
+/// corpus witness, bounded so a recursive answer terminates.
+const RENDER_DEPTH: usize = 12;
+
+fn render_type(
+    node_data: &dyn Fn(SemanticNodeId) -> Option<Arc<SemanticNodeData>>,
+    node: SemanticNodeId,
+    depth: usize,
+    out: &mut String,
+) {
+    if depth > RENDER_DEPTH {
+        out.push('…');
+        return;
+    }
+    let Some(data) = node_data(node) else {
+        out.push_str("<absent>");
+        return;
+    };
+    let child = |id: SemanticNodeId| {
+        let mut text = String::new();
+        render_type(node_data, id, depth + 1, &mut text);
+        text
+    };
+    match &*data {
+        SemanticNodeData::Primitive(kind) => out.push_str(&format!("{kind:?}")),
+        SemanticNodeData::Literal(value) => out.push_str(&format!("{value:?}")),
+        SemanticNodeData::Alias(target) => out.push_str(&child(*target)),
+        SemanticNodeData::Union(members) => {
+            let mut arms: Vec<String> = members.iter().map(|member| child(*member)).collect();
+            arms.sort_unstable();
+            out.push_str(&format!("({})", arms.join(" | ")));
+        }
+        SemanticNodeData::Intersection(members) => {
+            let parts: Vec<String> = members.iter().map(|member| child(*member)).collect();
+            out.push_str(&format!("({})", parts.join(" & ")));
+        }
+        SemanticNodeData::Array { element, readonly } => {
+            let prefix = if *readonly { "readonly " } else { "" };
+            out.push_str(&format!("{prefix}{}[]", child(*element)));
+        }
+        SemanticNodeData::Tuple { elements, readonly } => {
+            let parts: Vec<String> = elements
+                .iter()
+                .map(|element| {
+                    let rest = if element.rest { "..." } else { "" };
+                    let optional = if element.optional { "?" } else { "" };
+                    format!("{rest}{}{optional}", child(element.value))
+                })
+                .collect();
+            let prefix = if *readonly { "readonly " } else { "" };
+            out.push_str(&format!("{prefix}[{}]", parts.join(", ")));
+        }
+        SemanticNodeData::Object(surface) => {
+            let mut parts: Vec<String> = surface
+                .positive_members()
+                .iter()
+                .map(|member| {
+                    let readonly = if member.readonly { "readonly " } else { "" };
+                    let optional = if member.optional { "?" } else { "" };
+                    format!(
+                        "{readonly}{:?}{optional}: {}",
+                        member.key,
+                        child(member.value)
+                    )
+                })
+                .collect();
+            parts.extend(
+                surface
+                    .call_signatures
+                    .iter()
+                    .map(|signature| format!("call {}", child(*signature))),
+            );
+            parts.extend(
+                surface
+                    .construct_signatures
+                    .iter()
+                    .map(|signature| format!("new {}", child(*signature))),
+            );
+            out.push_str(&format!("{{ {} }}", parts.join("; ")));
+        }
+        SemanticNodeData::Signature {
+            kind,
+            params,
+            return_type,
+            ..
+        } => {
+            let parts: Vec<String> = params
+                .iter()
+                .map(|param| {
+                    let rest = if param.rest { "..." } else { "" };
+                    let optional = if param.optional { "?" } else { "" };
+                    format!("{rest}_{optional}: {}", child(param.ty))
+                })
+                .collect();
+            out.push_str(&format!(
+                "{kind:?}({}) => {}",
+                parts.join(", "),
+                child(*return_type)
+            ));
+        }
+        SemanticNodeData::DeclRef { identity } => out.push_str(&identity.decl_name),
+        SemanticNodeData::InstantiationRef { base, args } => {
+            let parts: Vec<String> = args.iter().map(|arg| child(*arg)).collect();
+            out.push_str(&format!("{}<{}>", base.decl_name, parts.join(", ")));
+        }
+        SemanticNodeData::TypeParam { decl, .. } => {
+            out.push_str(&format!("param({})", decl.decl_name));
+        }
+        other => {
+            // The variant name only: the rest of a `Debug` print carries
+            // node ids and positions, which differ between implementations.
+            let debug = format!("{other:?}");
+            let name: String = debug
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            out.push_str(&format!("<{name}>"));
+        }
+    }
+}
+
+/// One outcome state: its name, the edit (canonical, source) applied to
+/// the loaded corpus, and the witnesses re-queried in it.
+type OutcomeState<'a> = (&'a str, Option<(&'a str, &'a str)>, Vec<(String, String)>);
+
+/// The outcome of every witness in `witnesses`, keyed `canonical#symbol`.
+fn outcomes(host: &VerterHost, witnesses: &[(String, String)]) -> serde_json::Value {
+    let mut by_witness = serde_json::Map::new();
+    for (canonical, symbol) in witnesses {
+        by_witness.insert(
+            format!("{canonical}#{symbol}"),
+            serde_json::json!(outcome(host, canonical, symbol)),
+        );
+    }
+    serde_json::Value::Object(by_witness)
 }
 
 fn nanos(work: impl FnOnce()) -> u64 {
@@ -661,6 +846,48 @@ fn run() {
         (total, by_witness)
     };
 
+    // Outcome fingerprints, untimed, each state on a fresh host: the
+    // original corpus, and every edited state an edit workload reaches,
+    // over exactly the witnesses that workload re-queries. The runner
+    // compares them per witness across the arms before it reports a ratio.
+    let outcomes_by_state = {
+        let module0 = corpus.module(0, true);
+        let shared = Corpus::shared(true);
+        let augmentation = Corpus::augmentation(true);
+        let global_readers: Vec<(String, String)> = (0..corpus.modules)
+            .filter(|_| corpus.kinds.contains(&"Global"))
+            .map(|i| (Corpus::module_path(i), format!("witnessGlobal{i}")))
+            .collect();
+        let states: [OutcomeState<'_>; 4] = [
+            ("original", None, corpus.all_witnesses()),
+            (
+                "local_edit",
+                Some((&Corpus::module_path(0), module0.as_str())),
+                corpus.witnesses_of(0),
+            ),
+            (
+                "declaration_edit",
+                Some((SHARED, shared.as_str())),
+                corpus.all_witnesses(),
+            ),
+            (
+                "augmentation_edit",
+                Some((AUGMENTATION, augmentation.as_str())),
+                global_readers,
+            ),
+        ];
+        let mut by_state = serde_json::Map::new();
+        for (state, edit, witnesses) in states {
+            let host = host_with_workers(None);
+            load(&host, &corpus);
+            if let Some((canonical, source)) = edit {
+                upsert(&host, canonical, source);
+            }
+            by_state.insert(state.to_owned(), outcomes(&host, &witnesses));
+        }
+        by_state
+    };
+
     let mut workloads = vec![cold_load(&corpus, cold_samples)];
     let host = host_with_workers(None);
     load(&host, &corpus);
@@ -716,7 +943,7 @@ fn run() {
     }
     let document = serde_json::json!({
         "harness": "signature_kernel_bench",
-        "harness_version": 1,
+        "harness_version": 2,
         "rev": std::env::var("SK_BENCH_REV").unwrap_or_default(),
         "machine": {
             "os": std::env::consts::OS,
@@ -732,6 +959,7 @@ fn run() {
         },
         "census": census_json(census),
         "census_by_witness": census_by_witness,
+        "outcomes": outcomes_by_state,
         "workloads": by_name,
         "throughput_qps": throughput_qps,
         "soak_live_bytes": live,

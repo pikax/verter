@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use crate::semantic_query::{IncompleteReason, SemanticNodeId};
 
 use super::discovery::{
-    intersection_signatures, publish_signature, signatures_identical, union_signatures,
-    BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput, ResultInput,
-    SignatureInput,
+    heritage_signatures, intersection_signatures, publish_signature, signatures_identical,
+    union_signatures, BinderInput, DiscoveryError, DiscoveryTypes, ForcedResult, MatchOptions,
+    ParamInput, ResultInput, SignatureInput,
 };
 use super::lifetime::SignatureStore;
 use super::positional::SlotTypeFacts;
@@ -69,7 +69,7 @@ impl DiscoveryTypes for DelayedTypes<'_> {
     fn is_any(&self, _: TypeToken) -> bool {
         false
     }
-    fn forced_return(&self, _: &SignatureCandidate) -> Result<TypeToken, IncompleteReason> {
+    fn forced_result(&self, _: &SignatureCandidate) -> Result<ForcedResult, IncompleteReason> {
         Err(IncompleteReason::UnresolvedObligation)
     }
 }
@@ -314,12 +314,18 @@ impl DiscoveryTypes for DeclaredReturns<'_> {
     fn is_any(&self, _: TypeToken) -> bool {
         false
     }
-    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason> {
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<ForcedResult, IncompleteReason> {
         self.returns
             .borrow()
             .iter()
             .find(|(known, _)| known == candidate)
-            .map(|(_, token)| *token)
+            .map(|(_, token)| ForcedResult {
+                return_type: *token,
+                effects: None,
+            })
             .ok_or(IncompleteReason::UnresolvedObligation)
     }
 }
@@ -365,5 +371,131 @@ fn intersection_keeps_signatures_that_differ_only_in_their_result() {
         .unwrap(),
         vec![fa],
         "signatures identical including their result collapse onto the first"
+    );
+}
+
+/// A union whose arms each carry several signatures, none of them common to
+/// every arm, has no signatures: the restricted synthesis runs only when at
+/// most one arm is overloaded, so no product of overload choices is ever
+/// opened. Measured on 7.0.2: calling `{ (x: number): 1; (x: string): 2 } |
+/// { (x: boolean): 3; (x: symbol): 4 }` is TS2349 ("none of those
+/// signatures are compatible with each other"), while `{ (x: number): 1;
+/// (x: string): 2 } | { (x: number | string): 3 }` — one overloaded arm — is
+/// callable.
+#[test]
+fn a_union_of_overloaded_arms_without_a_common_signature_synthesizes_nothing() {
+    let store = SignatureStore::new();
+    let types = DelayedTypes {
+        store: &store,
+        unsettled: RefCell::new(BTreeSet::new()),
+    };
+    let (number, string, boolean, symbol, number_or_string) = (100, 101, 102, 103, 104);
+    let overloaded_arms = vec![
+        vec![sig(&store, 1, number, 201), sig(&store, 2, string, 202)],
+        vec![sig(&store, 3, boolean, 203), sig(&store, 4, symbol, 204)],
+    ];
+    assert_eq!(
+        union_signatures(&store, &types, &overloaded_arms).unwrap(),
+        Vec::new(),
+        "two overloaded arms with no common signature synthesize nothing"
+    );
+
+    // Control: with ONE overloaded arm the restricted synthesis does run.
+    let one_overloaded_arm = vec![
+        vec![sig(&store, 5, number, 201), sig(&store, 6, string, 202)],
+        vec![sig(&store, 7, number_or_string, 203)],
+    ];
+    assert!(
+        !union_signatures(&store, &types, &one_overloaded_arm)
+            .unwrap()
+            .is_empty(),
+        "a single overloaded arm reaches the restricted synthesis"
+    );
+}
+
+/// The restricted union synthesis folds the arms one at a time, but no
+/// prefix of the fold copies provenance: every synthesized candidate interns
+/// ONE constituent sequence and ONE provenance, however many arms it spans.
+/// With K arms folded, the sequences and provenances interned equal the
+/// candidates synthesized — the same for three arms as for six — never a
+/// count that grows with K.
+#[test]
+fn union_synthesis_interns_one_provenance_per_candidate_whatever_the_arm_count() {
+    let interned = |store: &SignatureStore, arms: usize| {
+        let types = DelayedTypes {
+            store,
+            unsettled: RefCell::new(BTreeSet::new()),
+        };
+        // One overloaded arm; every other arm has one signature matching
+        // neither overload, so phase 1 finds nothing and the synthesis runs.
+        let mut lists = vec![vec![sig(store, 1, 100, 200), sig(store, 2, 101, 201)]];
+        for arm in 0..arms as u64 {
+            lists.push(vec![sig(store, 10 + arm, 110 + arm, 210 + arm)]);
+        }
+        let before = store.pin();
+        let (sequences, provenances) = (
+            before.sequences.record_count(),
+            before.provenances.record_count(),
+        );
+        drop(before);
+        let synthesized = union_signatures(store, &types, &lists).unwrap();
+        let after = store.pin();
+        (
+            synthesized.len(),
+            after.sequences.record_count() - sequences,
+            after.provenances.record_count() - provenances,
+        )
+    };
+    for arms in [3, 6] {
+        let store = SignatureStore::new();
+        let (candidates, sequences, provenances) = interned(&store, arms);
+        assert_eq!(candidates, 2, "{arms} arms: one candidate per overload");
+        assert_eq!(
+            (sequences, provenances),
+            (candidates, candidates),
+            "{arms} arms: one sequence and one provenance per synthesized candidate"
+        );
+    }
+}
+
+/// A declaration with heritage is not an intersection type: TypeScript's
+/// `resolveObjectTypeMembers` gives it its OWN signatures first, then each
+/// base's in clause order, and drops nothing. Measured on TypeScript 7.0.2
+/// over `interface A { (a: string): 'A' }`, `interface B1 extends A
+/// { (b1: number): 'B1' }`, `interface B2 extends A { (b2: boolean): 'B2' }`
+/// and `interface DM extends B1, B2 {}`: `ReturnType<DM>` is `"A"` — the
+/// shared base's signature, reached again through `B2`, is the LAST — while
+/// the intersection `B1 & B2` dedups it and `ReturnType<B1 & B2>` is `"B2"`.
+/// Over `interface C extends A { (): number }` a call resolves to the own
+/// `number` signature and `ReturnType<C>` reads the base's.
+#[test]
+fn heritage_lists_own_signatures_first_and_drops_nothing() {
+    let store = SignatureStore::new();
+    let types = DeclaredReturns {
+        store: &store,
+        returns: RefCell::new(Vec::new()),
+    };
+    let root = types.declared(1, 100, 200);
+    let left = types.declared(2, 101, 201);
+    let right = types.declared(3, 102, 202);
+    let own = types.declared(4, 103, 203);
+
+    // `DM`'s body: bases in clause order, the own body LAST. Each base is
+    // itself a declaration listing its own signature before the root's.
+    let members = [vec![left, root], vec![right, root], vec![own]];
+    assert_eq!(
+        heritage_signatures(&members),
+        vec![own, left, root, right, root],
+        "own signatures first, then every base's in clause order, the repeated root kept"
+    );
+    assert_eq!(
+        intersection_signatures(&store, &types, SignatureKind::Call, &members).unwrap(),
+        vec![left, root, right, own],
+        "an intersection over the same members keeps authored arm order and drops the \
+         identical repeat"
+    );
+    assert!(
+        heritage_signatures(&[]).is_empty(),
+        "a body with no member carries no signature"
     );
 }

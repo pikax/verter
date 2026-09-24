@@ -223,7 +223,9 @@ fn realize_callable_member_at(
                 )
             } else {
                 SemanticNodeData::Intersection(
-                    crate::semantic_query::composite::CompositeList::preserving_rebuild(realized),
+                    crate::semantic_query::composite::CompositeList::rebuilt_from(
+                        category, realized,
+                    ),
                 )
             };
             SurfaceResolution::resolved(

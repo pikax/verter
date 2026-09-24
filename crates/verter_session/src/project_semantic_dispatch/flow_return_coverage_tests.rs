@@ -585,10 +585,6 @@ export function tlMissCarrierInArray(x: HasQ) {
   return [x.q];
 }
 
-export function tlMissCarrierInConstArray(x: HasQ) {
-  return [x.q] as const;
-}
-
 export function tlMissCarrierInNestedFunction(x: HasQ) {
   return () => x.q;
 }
@@ -1824,9 +1820,9 @@ fn assignment_expression_return_is_the_assigned_type() {
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 ///
 /// The value is complete and undegraded, and still `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them and the result never warms.
+/// class's constructor and field initializers are callables no indexed
+/// function position serves, so the capture family keeps its typed gap
+/// over them and the result never warms.
 #[test]
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
@@ -2497,52 +2493,26 @@ fn generic_overload_group_callee_resolves_by_arity_and_inference() {
     );
 }
 
-/// CANARY — a `new` expression's return is the constructed instance type.
+/// CANARY (landed) — a `new` expression's return is the constructed
+/// instance type.
 ///
 /// Oracle: `ReturnType<typeof callNew>` is `CtorC`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callNew
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the CONSTRUCT-CALL capability — there is no arm that
-/// resolves a class's construct signature to its instance type. The
-/// ADMISSION half is settled: `NewExpression` is a
-/// `ValueDescent::UnmodeledCall`, so it fails closed rather than
-/// publishing the shallow pass's `any` warm (see
-/// `an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered`).
+/// The construction rides the one call carrier to the class's construct
+/// signatures (`SliceCall::Construct`), so the value is the instance,
+/// clean and warm.
 #[test]
-#[ignore = "NewExpression has no construct-call arm: it fails closed as an unmodeled call position instead of resolving the instance type"]
 fn construct_expression_return_is_the_instance_type() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callNew", type_ref("CtorC"));
 }
 
-/// CANARY — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where `ctorSig`
-/// is a value carrying a `new (…)` signature) returns the signature's
-/// instance type.
+/// CANARY (landed) — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where
+/// `ctorSig` is a value carrying a `new (…)` signature) returns the
+/// signature's instance type.
 ///
 /// Oracle: `ReturnType<typeof callCtorSigNew>` is `{ q: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// expected an object answer, got Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: same as the `new` row above — the construct-signature
-/// group is never consulted. It now FAILS CLOSED rather than publishing
-/// `any` warm, so the canary asserts the value it should produce.
 #[test]
-#[ignore = "construct signatures are never consulted: `new ctorSig(1)` fails closed as an unmodeled call position"]
 fn construct_signature_call_return_is_the_signature_instance_type() {
     let host = ts_host();
     let value = value_of(&host, CALLS, "callCtorSigNew");
@@ -3543,8 +3513,8 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
     // The same read at the nesting depths the evaluation composes as
-    // FLOW expressions: an object-literal member value, an array-literal
-    // element and a nested function's return. Each resolves through the
+    // FLOW expressions: an object-literal member value, an array element
+    // and a nested function's return. Each resolves through the
     // parameter's annotation — clean, warm, the checker's own answer
     // (`{ q: string }`, `string[]`, `() => string`).
     let assert_clean = |name: &str| -> TypeExpr {
@@ -3569,12 +3539,14 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
         projected_member(&object, "q"),
         &TypeExpr::Primitive(PrimitiveName::String)
     );
-    assert_eq!(
-        assert_clean("tlMissCarrierInArray"),
-        TypeExpr::Array {
-            element: Arc::new(string()),
-            readonly: false,
-        }
+    let array = assert_clean("tlMissCarrierInArray");
+    assert!(
+        matches!(
+            &array,
+            TypeExpr::Array { element, readonly: false }
+                if **element == TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "tlMissCarrierInArray: {array:?}"
     );
     let nested = assert_clean("tlMissCarrierInNestedFunction");
     assert_eq!(
@@ -4131,27 +4103,20 @@ fn assert_unresolved_value(
 /// return — clean, warm, the checker's own `string`), so those moved to
 /// the canary
 /// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`.
-/// What remains is the genuinely unresolvable read and the
-/// composite-leaf interior the projection never sees:
+/// What remains is the genuinely unresolvable read:
 ///
 /// ```text
 /// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
 ///                                carrier is involved at all
-/// tlMissCarrierInConstArray      nested inside ONE leaf lowering's own
-///                                answer (an `as const` array keeps the
-///                                whole-carrier leaf: `readonly [typeof
-///                                x.q]`), which no shallow ingress check
-///                                could see
 /// ```
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
-/// to publish for it at all. The const array row's `readonly [string]` is
-/// the answer the composite-leaf ingress still declines to produce.
+/// to publish for it at all.
 ///
 /// Mutation recipe: returning `false` unconditionally from
-/// `flow_return_value_is_unresolved` flips each row to a warm
+/// `flow_return_value_is_unresolved` flips the row to a warm
 /// `candidates: 1`.
 #[test]
 fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
@@ -4160,19 +4125,6 @@ fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
     // Top-level miss, reached through the FREE-leaf arm.
     assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
         assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
-    });
-    // Nested inside ONE leaf lowering's own composite answer: the `as
-    // const` array lowers as ONE leaf (`readonly [typeof x.q]`), so the
-    // frame-rooted member path never reaches the evaluator's projection
-    // — a composite-leaf interior is a distinct, still-declined ingress.
-    assert_unresolved_value(&host, TL, "tlMissCarrierInConstArray", |dispatch, node| {
-        let data = dispatch.graph().node_data(node);
-        let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
-            panic!("the const array row must still produce a Tuple node");
-        };
-        let element = elements[0].value;
-        drop(data);
-        assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
     });
 }
 
@@ -4238,8 +4190,6 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// produce, every one of them different from `any`:
 ///
 /// ```text
-/// callNew         new CtorC(1)                    CtorC
-/// callCtorSigNew  new ctorSig(1)                  { q: string; }
 /// callOptional    maybeFn?.()                     number | undefined
 /// callTagged      tag`a${1}b`                     boolean
 /// ```
@@ -4247,19 +4197,20 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
-/// `awaited_call_return_is_the_awaited_value_wrapped_again`).
+/// `awaited_call_return_is_the_awaited_value_wrapped_again`). Neither is
+/// `new`: a construction rides the call carrier to the construct
+/// signatures (see `construct_expression_return_is_the_instance_type`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
-/// exactly the matching rows — `NewExpression` /
-/// `TaggedTemplateExpression` to `false` flips `callNew` /
-/// `callCtorSigNew` / `callTagged` back to a warm `any`, and
+/// exactly the matching rows — `TaggedTemplateExpression` to `false`
+/// flips `callTagged` back to a warm `any`, and
 /// `ChainElement::CallExpression` to `false` flips `callOptional`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in ["callNew", "callCtorSigNew", "callOptional", "callTagged"] {
+    for name in ["callOptional", "callTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -4270,11 +4221,13 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// The sequence's value is its last operand, so a call there lowers
 /// through the SAME structural call rails its bare spelling takes:
 /// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
-/// exactly like the bare `callRest` twin — the sequence context never
-/// converts a resolved call into a fail-closed marker.
+/// exactly like the bare `callRest` twin, and `(0, new CtorC(1))`
+/// surfaces the constructed `CtorC` exactly like the bare `callNew` —
+/// the sequence context never converts a resolved call into a
+/// fail-closed marker.
 ///
 /// The discriminator runs the other way with the same fixture: every
-/// call form with NO structural arm (`new`, an optional call, a tagged
+/// call form with NO structural arm (an optional call, a tagged
 /// template) keeps the fail-closed verdict when a sequence wraps it —
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
@@ -4284,25 +4237,26 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// the sequence exactly as the resolved bare call's is.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed rows decline to
-/// produce:
+/// --ignoreConfig`):
 ///
 /// ```text
-/// callSeqNew       CtorC
-/// callSeqOptional  number | undefined
-/// callSeqTagged    boolean
+/// callSeqNew       CtorC                (published)
+/// callSeqOptional  number | undefined   (declined — fails closed)
+/// callSeqTagged    boolean              (declined — fails closed)
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest` and `callSeqAwait` to the
-/// fail-closed marker; widening the delegation past the
-/// paren-transparent `CallExpression` form (a `New` / chain / tagged
-/// last operand) flips the three negative rows to a published value.
+/// half's sequence arm flips `callSeqRest`, `callSeqNew` and
+/// `callSeqAwait` to the fail-closed marker; widening the delegation past
+/// the paren-transparent `CallExpression` / `NewExpression` forms (a chain
+/// / tagged last operand) flips the two negative rows to a published
+/// value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
+    assert_clean_warm(&host, CALLS, "callSeqNew", type_ref("CtorC"));
     // An awaited call keeps its own modelled verdict through the
     // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
     assert_clean_warm(
@@ -4315,7 +4269,7 @@ fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
         },
     );
     // Every form with no structural arm keeps failing closed.
-    for name in ["callSeqNew", "callSeqOptional", "callSeqTagged"] {
+    for name in ["callSeqOptional", "callSeqTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -6647,10 +6601,9 @@ export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> 
 /// How a CLASSES probe's answer is admitted.
 ///
 /// An answer read through a class expression's value is `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them — the answer is complete and undegraded, and it
-/// never warms.
+/// class's constructor and field initializers are callables no indexed
+/// function position serves, so the capture family keeps its typed gap
+/// over them — the answer is complete and undegraded, and it never warms.
 #[derive(Clone, Copy, Debug)]
 enum ClassProbeAdmission {
     Warm,
@@ -7071,243 +7024,5 @@ fn an_indexed_access_of_a_self_reference_is_the_declaration() {
         matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
             | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
         "`next` is the self-reference, got {raised:?}"
-    );
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Array literals as flow values
-// ──────────────────────────────────────────────────────────────────────
-
-/// Array literals whose elements are flow values: parameters, locals,
-/// awaits, calls. Every expected answer below is measured on tsc 7.0.2
-/// over this module (`--noEmit --strict --target es2022`, each type read
-/// through the tuple wrapper quoted by TS2322).
-const ARRAY_LITERALS: &str = "/ws/cov/array_literals.ts";
-const ARRAY_LITERALS_SRC: &str = r#"
-export function arrayOfParam(v: string) { return [v]; }
-export function arrayMixed(v: string) { return [v, 1]; }
-export function arrayOfConstLiteral() { const x = 1; return [x]; }
-export function arrayOfLiteralUnion(a: 'x' | 'y') { return [a]; }
-export async function arrayOfAwait(p: Promise<number>) { return [await p]; }
-export function arrayOfNullable(a: string | null) { return [a]; }
-export function arrayOfObject(v: string) { return [{ v }]; }
-export function arrayNested(v: string) { return [[v]]; }
-export function arrayOfCall(f: () => number) { return [f()]; }
-export function arrayOfSubtypes(a: { x: 1 }, b: { x: 1, y: 2 }) { return [b, a]; }
-export function freshBesideDeclared(v: { a: number }) { return [v, { a: 1, b: 2 }]; }
-export function declaredBesideFresh(w: { a: number; b: number }) { return [{ a: 1 }, w]; }
-export function returnOfDeclaredSubtypes(c: boolean, a: { x: 1 }, b: { x: 1, y: 2 }) { if (c) return a; return b; }
-export function emptyArray() { return []; }
-export function emptyLocal() { const a = []; return a; }
-export function holedArray() { return [1, , 2]; }
-export function spreadArray(xs: number[]) { return [0, ...xs]; }
-export function spreadTuple(t: [1, 2?]) { return [...t]; }
-export function spreadRestTuple(t: [1, ...string[]]) { return [...t]; }
-export function spreadUnion(xs: number[] | string[]) { return [...xs]; }
-export function spreadString(s: string) { return [...s]; }
-export function spreadIterable(s: Iterable<number>) { return [...s]; }
-"#;
-
-/// The element type of one CLEAN, warm array answer.
-#[track_caller]
-fn clean_array_element(host: &Arc<VerterHost>, name: &str) -> TypeExpr {
-    match &eval(host, ARRAY_LITERALS, name) {
-        Outcome::Value {
-            ty:
-                TypeExpr::Array {
-                    element,
-                    readonly: false,
-                },
-            degradation: None,
-            candidates: 1,
-        } => element.as_ref().clone(),
-        other => panic!("{name} is a clean, warm array, got {other:?}"),
-    }
-}
-
-/// The union constituents of `ty` (itself when it is not a union).
-fn constituents(ty: &TypeExpr) -> Vec<TypeExpr> {
-    match ty {
-        TypeExpr::Union(arms) => arms.to_vec(),
-        other => vec![other.clone()],
-    }
-}
-
-/// The property names of an object answer, in order.
-#[track_caller]
-fn object_keys(ty: &TypeExpr) -> Vec<String> {
-    let TypeExpr::Object(object) = ty else {
-        panic!("expected an object, got {ty:?}");
-    };
-    object
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            verter_type_expr::ObjectMember::Property(property) => {
-                property.key.as_string().map(str::to_owned)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// An array literal's elements are flow expressions: a parameter, a local,
-/// an await and a call substitute their values, a fresh literal element
-/// widens at the mutable element slot, and a declared literal type stays.
-///
-/// tsc 7.0.2: `arrayOfParam` is `string[]`, `arrayMixed` (`[v, 1]`)
-/// `(string | number)[]`, `arrayOfConstLiteral` (`const x = 1; [x]`)
-/// `number[]`, `arrayOfLiteralUnion` (`a: 'x' | 'y'`) `("x" | "y")[]`,
-/// `arrayOfAwait` (`[await p]` over `Promise<number>`) `Promise<number[]>`,
-/// `arrayOfNullable` `(string | null)[]`, `arrayOfObject` (`[{ v }]`)
-/// `{ v: string; }[]`, `arrayNested` (`[[v]]`) `string[][]`, and
-/// `arrayOfCall` (`[f()]` over `f: () => number`) `number[]`. The literal
-/// used to lower as one leaf answer resolving every name in file scope, so
-/// each of these was a typed gap.
-#[test]
-fn array_literal_elements_are_flow_values() {
-    let host = host_with(&[(ARRAY_LITERALS, ARRAY_LITERALS_SRC)]);
-    assert_eq!(clean_array_element(&host, "arrayOfParam"), string());
-    let mixed = constituents(&clean_array_element(&host, "arrayMixed"));
-    assert_eq!(mixed.len(), 2, "{mixed:?}");
-    assert!(
-        mixed.contains(&string()) && mixed.contains(&number()),
-        "{mixed:?}"
-    );
-    assert_eq!(clean_array_element(&host, "arrayOfConstLiteral"), number());
-    let literals = constituents(&clean_array_element(&host, "arrayOfLiteralUnion"));
-    assert_eq!(literals.len(), 2, "{literals:?}");
-    for value in ["x", "y"] {
-        assert!(
-            literals.contains(&TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-                value.to_owned()
-            ))),
-            "{literals:?}"
-        );
-    }
-    assert_clean_warm(
-        &host,
-        ARRAY_LITERALS,
-        "arrayOfAwait",
-        promise_of(TypeExpr::Array {
-            element: Arc::new(number()),
-            readonly: false,
-        }),
-    );
-    let nullable = constituents(&clean_array_element(&host, "arrayOfNullable"));
-    assert_eq!(nullable.len(), 2, "{nullable:?}");
-    assert!(
-        nullable.contains(&string())
-            && nullable.contains(&TypeExpr::Primitive(PrimitiveName::Null)),
-        "{nullable:?}"
-    );
-    let object = clean_array_element(&host, "arrayOfObject");
-    assert_eq!(object_keys(&object), vec!["v".to_owned()]);
-    assert_eq!(projected_member(&object, "v"), &string());
-    assert_eq!(
-        clean_array_element(&host, "arrayNested"),
-        TypeExpr::Array {
-            element: Arc::new(string()),
-            readonly: false,
-        }
-    );
-    assert_eq!(clean_array_element(&host, "arrayOfCall"), number());
-}
-
-/// The element type is the union of the element values under the
-/// checker's SUBTYPE reduction, which relates declared surfaces and
-/// refuses a pair with a fresh object literal whose keys differ.
-///
-/// tsc 7.0.2: `arrayOfSubtypes` (`[b, a]` over `a: { x: 1 }`, `b: { x: 1;
-/// y: 2 }`) is `{ x: 1; }[]` — `b` is absorbed; `freshBesideDeclared`
-/// (`[v, { a: 1, b: 2 }]` over `v: { a: number }`) is `({ a: number; } |
-/// { a: number; b: number; })[]` and `declaredBesideFresh` (`[{ a: 1 },
-/// w]` over `w: { a: number; b: number }`) `({ a: number; b: number; } |
-/// { a: number; })[]` — neither absorbed. The return join applies the same
-/// reduction: `returnOfDeclaredSubtypes` (`if (c) return a; return b`) is
-/// `{ x: 1; }`.
-#[test]
-fn array_literal_elements_union_under_subtype_reduction() {
-    let host = host_with(&[(ARRAY_LITERALS, ARRAY_LITERALS_SRC)]);
-    let reduced = clean_array_element(&host, "arrayOfSubtypes");
-    assert_eq!(object_keys(&reduced), vec!["x".to_owned()], "{reduced:?}");
-    for name in ["freshBesideDeclared", "declaredBesideFresh"] {
-        let element = clean_array_element(&host, name);
-        let mut key_sets: Vec<Vec<String>> =
-            constituents(&element).iter().map(object_keys).collect();
-        key_sets.sort();
-        assert_eq!(
-            key_sets,
-            vec![vec!["a".to_owned()], vec!["a".to_owned(), "b".to_owned()]],
-            "{name}: both constituents survive, got {element:?}"
-        );
-    }
-    match eval(&host, ARRAY_LITERALS, "returnOfDeclaredSubtypes") {
-        Outcome::Value {
-            ty,
-            degradation: None,
-            candidates: 1,
-        } => assert_eq!(object_keys(&ty), vec!["x".to_owned()], "{ty:?}"),
-        other => panic!("returnOfDeclaredSubtypes is a clean, warm `{{ x: 1 }}`, got {other:?}"),
-    }
-}
-
-/// A spread contributes its source's iterated element type, a hole an
-/// `undefined` element, and a literal with no element is `never[]` — the
-/// shapes that used to fold into one leaf answer and publish `any[]`.
-///
-/// tsc 7.0.2: `emptyArray` (`[]`) is `never[]`, while `emptyLocal`
-/// (`const a = []; return a`) is the evolving array, `any[]` (TS7034 /
-/// TS7005 under `noImplicitAny`); `holedArray` (`[1, , 2]`) is
-/// `(number | undefined)[]`; `spreadArray` (`[0, ...xs]` over `number[]`)
-/// `number[]`; `spreadTuple` (`[...t]` over `[1, 2?]`) `(1 | 2 |
-/// undefined)[]`; `spreadRestTuple` (over `[1, ...string[]]`) `(string |
-/// 1)[]`; `spreadUnion` (over `number[] | string[]`) `(string | number)[]`;
-/// `spreadString` (over `string`) `string[]`; and `spreadIterable` (over
-/// `Iterable<number>`) `number[]` — an iterable this evaluation does not
-/// iterate, so its position is the typed marker and the answer degrades.
-#[test]
-fn array_literal_spreads_holes_and_empty_literals_follow_the_checker() {
-    let host = host_with(&[(ARRAY_LITERALS, ARRAY_LITERALS_SRC)]);
-    let undefined = TypeExpr::Primitive(PrimitiveName::Undefined);
-    let literal = |value: f64| TypeExpr::number_literal(value);
-    assert_eq!(
-        clean_array_element(&host, "emptyArray"),
-        TypeExpr::Primitive(PrimitiveName::Never)
-    );
-    assert_eq!(clean_array_element(&host, "emptyLocal"), any());
-    let holed = constituents(&clean_array_element(&host, "holedArray"));
-    assert_eq!(holed.len(), 2, "{holed:?}");
-    assert!(
-        holed.contains(&number()) && holed.contains(&undefined),
-        "{holed:?}"
-    );
-    assert_eq!(clean_array_element(&host, "spreadArray"), number());
-    let tuple = constituents(&clean_array_element(&host, "spreadTuple"));
-    assert_eq!(tuple.len(), 3, "{tuple:?}");
-    assert!(
-        tuple.contains(&literal(1.0))
-            && tuple.contains(&literal(2.0))
-            && tuple.contains(&undefined),
-        "{tuple:?}"
-    );
-    let rest = constituents(&clean_array_element(&host, "spreadRestTuple"));
-    assert_eq!(rest.len(), 2, "{rest:?}");
-    assert!(
-        rest.contains(&literal(1.0)) && rest.contains(&string()),
-        "{rest:?}"
-    );
-    let union = constituents(&clean_array_element(&host, "spreadUnion"));
-    assert_eq!(union.len(), 2, "{union:?}");
-    assert!(
-        union.contains(&number()) && union.contains(&string()),
-        "{union:?}"
-    );
-    assert_eq!(clean_array_element(&host, "spreadString"), string());
-    assert_degraded(
-        &host,
-        ARRAY_LITERALS,
-        "spreadIterable",
-        FlowReturnDegradation::UnmodeledPosition,
     );
 }

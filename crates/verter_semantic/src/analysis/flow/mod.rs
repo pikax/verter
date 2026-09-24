@@ -55,11 +55,10 @@ pub mod peeker;
 pub mod value_descent;
 
 pub use value_descent::{
-    array_element_descent, chain_is_call_valued, expression_contains_call, object_entry_descent,
-    object_entry_key, sequence_value_takes_await_arm, sequence_value_takes_call_rail,
-    static_property_key_text, value_composes_unmodeled_call, value_descent,
-    value_is_unmodeled_call, ArrayElementDescent, ObjectEntryDescent, ObjectEntryKey,
-    ObjectEntryKind, ValueDescent,
+    chain_is_call_valued, expression_contains_call, object_entry_descent, object_entry_key,
+    sequence_value_takes_await_arm, sequence_value_takes_call_rail, static_property_key_text,
+    value_composes_unmodeled_call, value_descent, value_is_unmodeled_call, ObjectEntryDescent,
+    ObjectEntryKey, ObjectEntryKind, ValueDescent,
 };
 
 #[cfg(test)]
@@ -508,23 +507,15 @@ pub enum SkeletonExprShape {
         /// The arm sites, in authored order (consequent, alternate).
         arms: Arc<[SkeletonExprSiteId]>,
     },
-    /// An array literal: every element (and every spread source) provides
-    /// constituents of the element type, under an unknown index.
+    /// An array literal: every element site (a spread's argument site for
+    /// a spread element) is a whole-value input of this site's value,
+    /// whatever part of the array is demanded.
     ArrayLiteral {
-        /// The element sites in authored order.
-        elements: Arc<[SkeletonArrayElement]>,
+        /// The element sites, in authored order (elisions have none).
+        elements: Arc<[SkeletonExprSiteId]>,
     },
     /// Any other expression shape (footprint-only).
     Other,
-}
-
-/// One tracked array-literal element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
-pub enum SkeletonArrayElement {
-    /// A plain element's child site.
-    Value(SkeletonExprSiteId),
-    /// A spread source's child site (`...src`).
-    Spread(SkeletonExprSiteId),
 }
 
 /// Whether the indexed program correlated one authored nested callable.
@@ -739,6 +730,11 @@ pub struct FunctionBodySkeleton {
     pub expr_sites: Arc<[SkeletonExprSite]>,
     /// The return-site index, in source order.
     pub return_sites: Arc<[SkeletonReturnSite]>,
+    /// The argument site of every statement-position `yield x` (not
+    /// `yield*`), in source order. A generator's yield type is the join of
+    /// these values, so a whole-return demand is a demand for each of them
+    /// as well as for the return sites.
+    pub yield_sites: Arc<[SkeletonExprSiteId]>,
     /// The assignment / kill summary, in source order.
     pub writes: Arc<[SkeletonWrite]>,
 }
@@ -1243,10 +1239,16 @@ struct SkeletonBuilder<'entry> {
     site_stack: Vec<usize>,
     read_kind: FlowReadKind,
     return_sites: Vec<SkeletonReturnSite>,
+    yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
     capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
     capture_names: FxHashSet<(SkeletonExprSiteId, FlowNameId)>,
+    /// How many class expressions' value positions enclose the walk. Their
+    /// reads are the class site's footprint, but no write there is one this
+    /// frame's flow applies: an instance initializer's runs at construction,
+    /// and the class lowering answers every class write with its typed gap.
+    class_values: u32,
 }
 
 impl<'entry> SkeletonBuilder<'entry> {
@@ -1275,9 +1277,11 @@ impl<'entry> SkeletonBuilder<'entry> {
             site_stack: Vec::new(),
             read_kind: FlowReadKind::Input,
             return_sites: Vec::new(),
+            yield_sites: Vec::new(),
             writes: Vec::new(),
             capture_subjects: FxHashSet::default(),
             capture_names: FxHashSet::default(),
+            class_values: 0,
             nested_captures: entry
                 .map(|entry| {
                     entry
@@ -1492,6 +1496,34 @@ impl<'entry> SkeletonBuilder<'entry> {
         id
     }
 
+    /// An ARRAY site: each element (a spread's argument for a spread
+    /// element) opens as its own child site, so the element structure the
+    /// content half lowers is the structure the graph selects.
+    fn open_array_site(
+        &mut self,
+        array: &oxc_ast::ast::ArrayExpression<'_>,
+        parent: Option<SkeletonExprSiteId>,
+        span: verter_span::Span,
+    ) -> SkeletonExprSiteId {
+        let id = self.alloc_site(span, parent);
+        let mut elements = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let value = match element {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => continue,
+                other => match other.as_expression() {
+                    Some(expression) => expression,
+                    None => continue,
+                },
+            };
+            elements.push(self.open_site(value, Some(id)));
+        }
+        self.sites[id.index()].shape = SkeletonExprShape::ArrayLiteral {
+            elements: Arc::from(elements.into_boxed_slice()),
+        };
+        id
+    }
+
     fn open_object_site(
         &mut self,
         object: &ObjectExpression<'_>,
@@ -1542,37 +1574,6 @@ impl<'entry> SkeletonBuilder<'entry> {
         }
         self.sites[id.index()].shape = SkeletonExprShape::ObjectLiteral {
             entries: Arc::from(entries.into_boxed_slice()),
-        };
-        id
-    }
-
-    /// An array literal's site: every element and spread source becomes
-    /// its own child site, taking the disposition the ONE shared element
-    /// classifier gives it, so the graph can name each a value provider
-    /// of the element type.
-    fn open_array_site(
-        &mut self,
-        array: &oxc_ast::ast::ArrayExpression<'_>,
-        parent: Option<SkeletonExprSiteId>,
-        span: verter_span::Span,
-    ) -> SkeletonExprSiteId {
-        let id = self.alloc_site(span, parent);
-        let mut elements = Vec::with_capacity(array.elements.len());
-        for element in &array.elements {
-            match array_element_descent(element) {
-                ArrayElementDescent::Value(value) => {
-                    elements.push(SkeletonArrayElement::Value(self.open_site(value, Some(id))));
-                }
-                ArrayElementDescent::Spread(source) => {
-                    elements.push(SkeletonArrayElement::Spread(
-                        self.open_site(source, Some(id)),
-                    ));
-                }
-                ArrayElementDescent::Hole => {}
-            }
-        }
-        self.sites[id.index()].shape = SkeletonExprShape::ArrayLiteral {
-            elements: Arc::from(elements.into_boxed_slice()),
         };
         id
     }
@@ -1721,6 +1722,9 @@ impl<'entry> SkeletonBuilder<'entry> {
         span: verter_span::Span,
         target_span: Option<verter_span::Span>,
     ) {
+        if self.class_values > 0 {
+            return;
+        }
         let site = self.footprint_site(span);
         let region = self.current_region();
         let span = self.frame_span(span);
@@ -2142,6 +2146,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                     .into_boxed_slice(),
             ),
             return_sites: Arc::from(self.return_sites.into_boxed_slice()),
+            yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
         }
     }
@@ -2175,11 +2180,59 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     // A class expression is itself a callable (its constructor) and
-    // creates more (members, field initializers); no index record serves
-    // any of them. A class DECLARATION binds a name instead and is never
+    // creates more; no index record serves its constructor or its field
+    // initializers. A class DECLARATION binds a name instead and is never
     // walked here.
+    //
+    // The class's VALUE positions read this frame: its decorators, its
+    // `extends` value, its computed keys and its static initializers run
+    // at class evaluation, and its instance initializers read this frame's
+    // lexical scope at construction. The flow lane types every one of them
+    // in this frame, so their reads are this site's footprint — their
+    // writes are not this frame's (see `Self::class_values`). Its methods
+    // and accessors are nested callables the function index serves. A
+    // static block keeps its own lexical scope and stays unwalked.
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
         self.push_unserved_callable(it.span.into());
+        self.class_values += 1;
+        self.visit_decorators(&it.decorators);
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
+        for element in &it.body.body {
+            match element {
+                oxc_ast::ast::ClassElement::MethodDefinition(method) => {
+                    self.visit_decorators(&method.decorators);
+                    if method.computed {
+                        self.visit_property_key(&method.key);
+                    }
+                    if method.value.body.is_some() {
+                        self.push_nested_callable(method.value.span.into());
+                    }
+                }
+                oxc_ast::ast::ClassElement::PropertyDefinition(property) => {
+                    self.visit_decorators(&property.decorators);
+                    if property.computed {
+                        self.visit_property_key(&property.key);
+                    }
+                    if let Some(value) = &property.value {
+                        self.visit_expression(value);
+                    }
+                }
+                oxc_ast::ast::ClassElement::AccessorProperty(property) => {
+                    self.visit_decorators(&property.decorators);
+                    if property.computed {
+                        self.visit_property_key(&property.key);
+                    }
+                    if let Some(value) = &property.value {
+                        self.visit_expression(value);
+                    }
+                }
+                oxc_ast::ast::ClassElement::StaticBlock(_)
+                | oxc_ast::ast::ClassElement::TSIndexSignature(_) => {}
+            }
+        }
+        self.class_values -= 1;
     }
 
     fn visit_statement(&mut self, it: &Statement<'a>) {
@@ -2423,6 +2476,22 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        // A statement-position `yield x` provides the generator's yield
+        // type exactly as a return argument provides its return type: the
+        // ARGUMENT is the tracked root, so its structure opens the way a
+        // return argument's does and a whole-return demand selects it. A
+        // `yield*` delegation keeps the whole expression as one site.
+        let mut expression = &it.expression;
+        while let Expression::ParenthesizedExpression(paren) = expression {
+            expression = &paren.expression;
+        }
+        if let Expression::YieldExpression(yield_expr) = expression {
+            if let (false, Some(argument)) = (yield_expr.delegate, yield_expr.argument.as_ref()) {
+                let site = self.open_root_site(argument);
+                self.yield_sites.push(site);
+                return;
+            }
+        }
         self.open_root_site(&it.expression);
     }
 
@@ -2447,11 +2516,8 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 
     fn visit_expression(&mut self, it: &Expression<'a>) {
         let previous = self.read_kind;
-        // An array literal the walk reaches OUTSIDE a structural descent
-        // (under a member read, a logical operand, a call argument) folds
-        // into the enclosing answer, and an element is never the result
-        // itself: its reads are inputs, as they were while the literal was
-        // a leaf form.
+        // An array walked inside another site's footprint reads its
+        // elements whole, exactly as its own site's element edges do.
         if matches!(
             value_descent(it),
             ValueDescent::Leaf | ValueDescent::UnmodeledCall | ValueDescent::Array(_)

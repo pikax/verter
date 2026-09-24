@@ -167,7 +167,6 @@ pub fn compute_flow_slice_hash(
                         buf.push(match source {
                             super::flow_graph::PathWriteSource::ObjectLiteralEntry => 1,
                             super::flow_graph::PathWriteSource::Assignment => 2,
-                            super::flow_graph::PathWriteSource::ArrayLiteralElement => 3,
                         });
                         buf.push(match certainty {
                             SkeletonWriteCertainty::Definite => 1,

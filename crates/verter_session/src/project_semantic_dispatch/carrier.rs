@@ -761,6 +761,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload,
                 name.as_ref(),
             )
+            // A bare name nothing in scope declares or imports is a GLOBAL
+            // name: it names the program's merged global declaration, whose
+            // identity is its first declaration in declaration precedence
+            // order (the declaration's `Instantiate` folds in the rest).
+            .or_else(|| {
+                (!name.contains('.')
+                    && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
+                .then(|| self.first_global_declaration(name.as_ref()))
+                .flatten()
+            })
         } else {
             None
         };

@@ -362,6 +362,17 @@ impl SignatureSetRef {
     pub const fn many(id: SignatureSetId) -> Self {
         Self::Many(id)
     }
+
+    /// The epoch the set's handles belong to; `None` for Empty, which
+    /// carries no handle and is live in every epoch.
+    #[must_use]
+    pub const fn epoch(self) -> Option<GraphEpoch> {
+        match self {
+            Self::Empty => None,
+            Self::One(candidate) => Some(candidate.signature.epoch()),
+            Self::Many(id) => Some(id.epoch()),
+        }
+    }
 }
 
 /// Interned many-set payload.

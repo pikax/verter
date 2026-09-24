@@ -1263,9 +1263,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(index)
                 .map(|argument| (*argument, context.into_structural_provenance())),
             SemanticNodeData::Alias(target) => (index == 0).then_some((*target, context)),
-            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                (index == 0).then_some((*surface, context))
-            }
+            // The reference's type arguments, then the instance surface.
+            SemanticNodeData::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => match type_arguments.get(index) {
+                Some(argument) => Some((*argument, context)),
+                None => (index == type_arguments.len()).then_some((*surface, context)),
+            },
             SemanticNodeData::TypeParam {
                 constraint,
                 default,

@@ -746,6 +746,9 @@ impl ProjectSemanticDispatch<'_> {
                 span: None,
             })
             .collect();
+        // A body-derived return carries the predicate the checker infers
+        // from the body beside it.
+        let mut inferred_predicate = None;
         let (return_type, return_carrier) = match &signature.return_source {
             verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
                 let return_type = self.raise_required_interior(
@@ -780,7 +783,10 @@ impl ProjectSemanticDispatch<'_> {
                         )
                     },
                 ) {
-                    super::flow_return::FunctionReturnNode::Flow(result) => result.return_type(),
+                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                        inferred_predicate = result.inferred_predicate();
+                        result.return_type()
+                    }
                     super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
                     super::flow_return::FunctionReturnNode::DeclaredMiss
                     | super::flow_return::FunctionReturnNode::NoValue(_) => {
@@ -890,10 +896,12 @@ impl ProjectSemanticDispatch<'_> {
                 return_carrier,
                 signature_span: None,
                 return_type_span: None,
-                // The signature fact records no predicate slot: a predicate
-                // signature composes to its checker return (`boolean` /
-                // `void`) alone.
-                predicate: None,
+                // The signature fact records no slot for an AUTHORED
+                // predicate: a declared predicate composes to its checker
+                // return (`boolean` / `void`) alone. The one production
+                // producer of a composed function fact (a payload-less
+                // slot's synthesized callable) authors no return at all.
+                predicate: inferred_predicate,
             },
             scope,
         ))

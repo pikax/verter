@@ -43,19 +43,19 @@
 //! content half fails closed only when the shared shallow pass minted an
 //! unreduced `ReturnType<callee>` carrier it could recognise. For
 //! `new f()`, `` tag`…` ``, `f?.()` and a sequence whose
-//! value operand is one of those (`(k, new f())`) that pass answers a
+//! value operand is one of those (`` (k, tag`…`) ``) that pass answers a
 //! bare `any` with no carrier in it, so nothing fired and a
 //! fabricated `any` published warm and clean under a promise that a call
 //! with no structural arm fails closed. (A sequence whose value operand
-//! is a BARE call is not in that class: the content half's sequence arm
+//! is a BARE call or `new` is not in that class: the content half's sequence arm
 //! routes it to the structural call rails —
 //! [`sequence_value_takes_call_rail`].) Whether an expression is a call
 //! position is a property of the FORM, so it is decided here, where the
 //! form is.
 
 use oxc_ast::ast::{
-    ArrayExpression, ArrayExpressionElement, AwaitExpression, ChainElement, ConditionalExpression,
-    Expression, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey, PropertyKind,
+    ArrayExpression, AwaitExpression, ChainElement, ConditionalExpression, Expression,
+    ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey, PropertyKind,
 };
 
 /// The value-structural disposition of one expression.
@@ -94,9 +94,12 @@ pub enum ValueDescent<'a, 'ast> {
     /// An object literal: its member VALUES are the descent, each one a
     /// value provider of exactly the key it provisions.
     Object(&'a ObjectExpression<'ast>),
-    /// An array literal: its ELEMENTS are the descent ([`array_element_descent`]),
-    /// each one a value provider of the element type, under an unknown
-    /// index.
+    /// An array literal: every element (a spread's argument included) is a
+    /// WHOLE-value input of the array's value — the element type is the
+    /// union of every element's type, so no element can be demanded at
+    /// only part of its value. A literal nesting array literals deeper
+    /// than the shallow inference's budget is a [`Self::Leaf`] instead
+    /// ([`array_nest_exceeds_inference_budget`]).
     Array(&'a ArrayExpression<'ast>),
     /// A branch JOIN: EVERY arm provides the whole value, so a demand
     /// for the join's value (or for a projection under it) is a demand
@@ -107,7 +110,7 @@ pub enum ValueDescent<'a, 'ast> {
     /// produced by a call the substrate does not model —
     /// `new f()`, `` tag`…` ``, an optional call chain (`f?.()`), or a
     /// sequence whose last operand is one of those (a sequence whose last
-    /// operand is a bare call routes to the call rails instead —
+    /// operand is a bare call or `new` routes to the call rails instead —
     /// [`sequence_value_takes_call_rail`]; an awaited call is a modeled
     /// [`Self::Awaited`] form, not this one).
     ///
@@ -172,6 +175,42 @@ pub enum ValueDescent<'a, 'ast> {
     Leaf,
 }
 
+/// Whether `array` nests array literals (as elements or spread
+/// arguments, through parentheses) more levels deep than the shallow
+/// per-expression inference's nesting budget. Such a nest answers as a
+/// whole through that inference, which charges the budget and reports
+/// its typed exhaustion, so the flow substrate never descends it level by
+/// level. The walk stops at the budget: it visits no level past it.
+#[must_use]
+pub fn array_nest_exceeds_inference_budget(array: &ArrayExpression<'_>) -> bool {
+    let mut level: Vec<&ArrayExpression<'_>> = vec![array];
+    for _ in 0..crate::analysis::type_eval_build::MAX_SEMANTIC_INFERENCE_DEPTH {
+        let mut next = Vec::new();
+        for array in level {
+            for element in &array.elements {
+                let mut value = match element {
+                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
+                    other => match other.as_expression() {
+                        Some(expression) => expression,
+                        None => continue,
+                    },
+                };
+                while let Expression::ParenthesizedExpression(paren) = value {
+                    value = &paren.expression;
+                }
+                if let Expression::ArrayExpression(inner) = value {
+                    next.push(&**inner);
+                }
+            }
+        }
+        if next.is_empty() {
+            return false;
+        }
+        level = next;
+    }
+    true
+}
+
 /// The value-structural disposition of `expression` — ONE step. A caller
 /// that must reach a non-transparent form re-enters on the inner
 /// expression of [`ValueDescent::Transparent`] /
@@ -191,6 +230,9 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
             ValueDescent::TypeCarrier(&inner.expression)
         }
         Expression::ObjectExpression(object) => ValueDescent::Object(object),
+        Expression::ArrayExpression(array) if array_nest_exceeds_inference_budget(array) => {
+            ValueDescent::Leaf
+        }
         Expression::ArrayExpression(array) => ValueDescent::Array(array),
         Expression::ConditionalExpression(conditional) => ValueDescent::Branches(conditional),
         // Matched BEFORE the call-position guard: an await is a modeled
@@ -218,11 +260,11 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         // shapes are listed here for exhaustiveness but are consumed by
         // the guarded arm above; what reaches `Leaf` through these names
         // is the NON-call shape of each (`a?.b`, `(a, b)`). A bare
-        // `CallExpression` never reaches the CONTENT half's classifier
-        // dispatch at all — that half owns six structural call arms and
-        // takes them first — and for the PLANNER half `UnmodeledCall`
-        // and `Leaf` are the same disposition, so the guard is safe for
-        // it either way. `AwaitExpression` has its own early arm and
+        // `CallExpression` or `NewExpression` never reaches the CONTENT
+        // half's classifier dispatch at all — that half owns structural
+        // arms for both and takes them first — and for the PLANNER half
+        // `UnmodeledCall` and `Leaf` are the same disposition, so the
+        // guard is safe for it either way. `AwaitExpression` has its own early arm and
         // never reaches this list.
         Expression::Identifier(_) | Expression::StaticMemberExpression(_) => {
             ValueDescent::Reference
@@ -258,42 +300,6 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::V8IntrinsicExpression(_)
         | Expression::ComputedMemberExpression(_)
         | Expression::PrivateFieldExpression(_) => ValueDescent::Leaf,
-    }
-}
-
-/// The value-structural disposition of ONE array-literal element — the
-/// second half of [`ValueDescent::Array`], and the single authority both
-/// halves iterate, exactly as [`object_entry_descent`] is for an object
-/// literal's entries.
-#[derive(Debug)]
-pub enum ArrayElementDescent<'a, 'ast> {
-    /// A plain element: its value is one constituent of the element type.
-    Value(&'a Expression<'ast>),
-    /// A SPREAD (`...source`): `source`'s iterated elements provide
-    /// constituents. Both halves descend into `source`, an ordinary value
-    /// position.
-    Spread(&'a Expression<'ast>),
-    /// A hole (`[1, , 2]`): no expression; it contributes an `undefined`
-    /// element.
-    Hole,
-}
-
-/// The value-structural disposition of `element` — see
-/// [`ArrayElementDescent`]. The match is exhaustive over the element's
-/// three shapes.
-#[must_use]
-pub fn array_element_descent<'a, 'ast>(
-    element: &'a ArrayExpressionElement<'ast>,
-) -> ArrayElementDescent<'a, 'ast> {
-    match element {
-        ArrayExpressionElement::SpreadElement(spread) => {
-            ArrayElementDescent::Spread(&spread.argument)
-        }
-        ArrayExpressionElement::Elision(_) => ArrayElementDescent::Hole,
-        other => match other.as_expression() {
-            Some(expression) => ArrayElementDescent::Value(expression),
-            None => ArrayElementDescent::Hole,
-        },
     }
 }
 
@@ -447,9 +453,9 @@ pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str>
 /// Whether `operand` — a sequence's LAST operand, the one that provides
 /// the sequence's value — is a call form the content half's sequence arm
 /// routes to its structural call rails: a paren-transparent
-/// [`Expression::CallExpression`], or a nested sequence (recursively the
-/// same question, because a nested sequence's value is its own last
-/// operand).
+/// [`Expression::CallExpression`] or [`Expression::NewExpression`], or a
+/// nested sequence (recursively the same question, because a nested
+/// sequence's value is its own last operand).
 ///
 /// The routed call then answers its OWN question through the call rails
 /// — a callee they cannot represent keeps the positional fail-closed
@@ -458,7 +464,7 @@ pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str>
 /// plain [`ValueDescent::Sequence`] (last operand provides the value,
 /// the discarded ones ride the effect obligations). Every OTHER last
 /// operand keeps the verdict [`value_is_unmodeled_call`]'s recursion
-/// already gave it (`(0, new f())` still fails closed).
+/// already gave it (`` (0, tag`x`) `` still fails closed).
 ///
 /// ONE home, consumed by BOTH halves: the classifier's sequence arm
 /// decides its verdict through this predicate, and the content half's
@@ -470,7 +476,7 @@ pub fn sequence_value_takes_call_rail(expression: &Expression<'_>) -> bool {
         Expression::ParenthesizedExpression(paren) => {
             sequence_value_takes_call_rail(&paren.expression)
         }
-        Expression::CallExpression(_) => true,
+        Expression::CallExpression(_) | Expression::NewExpression(_) => true,
         Expression::SequenceExpression(sequence) => sequence
             .expressions
             .last()
@@ -591,7 +597,7 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
 ///
 /// The two predicates exist because the leaf lowering has two failure
 /// shapes. `value_is_unmodeled_call` catches the case where the WHOLE
-/// answer is the fabricated `any` (`return new Box()`). This one catches
+/// answer is the fabricated `any` (`` return tag`x` ``). This one catches
 /// the case where the fabricated `any` is NESTED inside an answer that
 /// otherwise looks modelled: `["s", new Box()]` answers
 /// `Array<string | any>`, which embeds no call-return carrier and is not
@@ -671,7 +677,7 @@ pub fn value_composes_unmodeled_call(expression: &Expression<'_>) -> bool {
                 || value_composes_unmodeled_call(&logical.right)
         }
         Expression::UnaryExpression(unary) => value_composes_unmodeled_call(&unary.argument),
-        // An `await x` FOLDED INTO a leaf answer (inside an `as const` array, a
+        // An `await x` FOLDED INTO a leaf answer (inside an array, a
         // non-structural object, a template) is answered by the shallow
         // pass's fallback: the value-position await is modeled through
         // [`ValueDescent::Awaited`], but a leaf-composed one never reaches

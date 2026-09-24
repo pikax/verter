@@ -323,8 +323,10 @@ fn non_unit_member_conflict_narrows_to_the_checker_kept_intersection() {
 /// A predicate narrow over an operand nobody can read publishes NO fact in
 /// either direction — the subject keeps its own type, with no degradation.
 ///
-/// The deciding member value is an indexed access (`Boxed["k"]`) that no
-/// relation stage reduces: assignability defers, so the narrow never
+/// The deciding member value is an indexed access that reads an OPTIONAL
+/// property (`Boxed["k"]` over `k?: "a"`), which no relation stage decides
+/// — the type-level read omits the `undefined` the checker adds, so a
+/// relation over it stays undecided: assignability defers, so the narrow never
 /// reaches a decided judgement at all, and the recompute (not a warm
 /// serve — an unread operand publishes nothing cacheable either) answers
 /// the same way. The temperature pins below carry that cold half: BOTH
@@ -337,7 +339,7 @@ fn non_unit_member_conflict_narrows_to_the_checker_kept_intersection() {
 /// checker does not have.
 #[test]
 fn predicate_narrow_over_an_unreduced_operand_publishes_no_fact() {
-    const SOURCE: &str = "type Boxed = { k: \"a\" };\n\
+    const SOURCE: &str = "type Boxed = { k?: \"a\" };\n\
          type Subject = { v: Boxed[\"k\"] };\n\
          function isOther(x: Subject): x is { v: \"b\" } { return true as boolean as never }\n\
          function makeProps(x: Subject) { return { v: isOther(x) ? x : \"no\" } }";

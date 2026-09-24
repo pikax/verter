@@ -127,6 +127,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,
+                    no_implicit_any: true,
                 },
             },
             demand: ReturnProjectionDemand::whole_return(),

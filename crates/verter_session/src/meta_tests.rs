@@ -2144,8 +2144,8 @@ import { obj } from './obj'
 /// unmodelled one, reports partial, and warms NOTHING.
 ///
 /// `defineProps<ReturnType<typeof makeProps>>()` over
-/// `{ label: "x", made: new Box() }`. The substrate cannot type
-/// `new Box()` — that is `U6.CALL_RESOLVE` — but `label` is fully known,
+/// `` { label: "x", made: box`b` } ``. The substrate has no arm for the
+/// tagged template `` box`b` ``, but `label` is fully known,
 /// and a props surface is a COMPOSITE: routing one unmodelled member to a
 /// whole-frame failure published `[]`, complete and warm, where the
 /// checker publishes `{ label: string; made: Box }`. A wrong value at a
@@ -2317,12 +2317,12 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
         ),
         (
             "/src/U1HelperBare.vue",
-            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
             "{ label: string; made: Box }",
         ),
         (
             "/src/U1HelperArray.vue",
-            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
+            "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => [\"s\", box`b`]; return { label: \"x\", made: f() } }",
             "{ label: string; made: (string | Box)[] }",
         ),
         // A `switch` whose DISCRIMINANT is not a reference this half
@@ -3087,8 +3087,9 @@ fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
             "/src/C1.vue",
             r#"<script setup lang="ts">
 class Box { readonly tag = "box" }
+declare function box(strings: TemplateStringsArray): Box
 function makeProps() {
-  return { label: "x", made: new Box() }
+  return { label: "x", made: box`b` }
 }
 defineProps<ReturnType<typeof makeProps>>()
 </script>
@@ -3323,7 +3324,7 @@ fn render_runtime_macro(
 fn runtime_props_derive_each_member_from_that_members_own_evidence() {
     let RenderedRuntime::Props(props) = render_runtime_props(
         "/src/R1Helper.vue",
-        "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+        "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
     ) else {
         panic!(
             "a FAITHFUL degraded surface (marker at one position, every sibling exact) has a \
@@ -3361,14 +3362,14 @@ fn runtime_props_derive_each_member_from_that_members_own_evidence() {
 /// Two families reach the root: a NO-VALUE outcome (`R2Loop`: a
 /// return-bearing loop the substrate does not model) and an object literal
 /// whose SPREAD SOURCE the substrate cannot type — directly
-/// (`S5NewSpread`) or one call away (`S6MarkerSpread`, whose callee's own
+/// (`S5TaggedSpread`) or one call away (`S6MarkerSpread`, whose callee's own
 /// frame is what cannot type its return). An unknown source makes the
 /// literal's KEY SET unknown, and an object surface has no way to say
 /// "and an unknown number of further keys". tsgo types both as
 /// `{ label: …; n: number }`, so publishing `{ n }` alone would be a
 /// surface missing a declared prop — not a conservative answer.
 ///
-/// `S5NewSpread` is the row that discriminates the evaluator's spread
+/// `S5TaggedSpread` is the row that discriminates the evaluator's spread
 /// fail-closed rail: dropping an unevaluable spread source instead of
 /// failing the literal closed publishes `props: { n: { type: Number } }`
 /// for it. `S6MarkerSpread` reaches the same verdict one rail earlier
@@ -3382,8 +3383,9 @@ fn runtime_props_derive_each_member_from_that_members_own_evidence() {
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// every spread row's `ReturnType<typeof makeProps>` is an ordinary object
-/// type — `{ label: string; n: number }` for S1/S3/S4/C1, `{ label: string }`
-/// for S2 — which is exactly why publishing `props: {}` for them is wrong
+/// type — `{ label: string; n: number }` for S1/S3/S4/C1, `{ label: "x"; n:
+/// number }` for S7, `{ label: string }` for S2 — which is exactly why
+/// publishing `props: {}` for them is wrong
 /// rather than merely conservative.
 ///
 /// The controls are the discrimination: a blanket "never publish an empty
@@ -3399,8 +3401,8 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
             "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
         ),
         (
-            "/src/S5NewSpread.vue",
-            "class Box { readonly label = \"x\" }\nfunction makeProps() { return { ...new Box(), n: 1 } }",
+            "/src/S5TaggedSpread.vue",
+            "class Box { readonly label = \"x\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { return { ...box`b`, n: 1 } }",
         ),
         // The same fact one CALL away — the spread source is a modelled
         // direct call whose own frame is the one that cannot type its
@@ -3410,7 +3412,7 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
         // missing `label`.
         (
             "/src/S6MarkerSpread.vue",
-            "class Box { readonly label = \"x\" }\nfunction base() { return new Box() }\nfunction makeProps() { return { ...base(), n: 1 } }",
+            "class Box { readonly label = \"x\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction base() { return box`b` }\nfunction makeProps() { return { ...base(), n: 1 } }",
         ),
     ];
 
@@ -3455,6 +3457,13 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
         (
             "/src/C2Plain.vue",
             "function makeProps() { return { label: \"x\", n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        // A `new` spread source is modelled: the construction resolves to
+        // the class instance, whose `label` spreads in.
+        (
+            "/src/S7NewSpread.vue",
+            "class Box { readonly label = \"x\" }\nfunction makeProps() { return { ...new Box(), n: 1 } }",
             &["label: { type: String", "n: { type: Number"],
         ),
     ];
@@ -3615,7 +3624,7 @@ fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
         // A FAITHFUL degraded surface — a marker at one interior position.
         (
             "/src/R1Helper.vue",
-            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
         ),
         // A NO-VALUE outcome.
         (
@@ -34555,7 +34564,8 @@ fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
         (
             "/src/X5FaithfulInter.vue",
             "class Box { readonly tag = \"box\" }\n\
-             function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+             declare function box(strings: TemplateStringsArray): Box\n\
+             function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
             "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
             "props: ",
             &[
@@ -34701,13 +34711,14 @@ fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
 #[test]
 fn an_unevaluable_emits_spread_source_refuses_rather_than_dropping_the_event() {
     match render_runtime_emits(
-        "/src/E3NewSpread.vue",
+        "/src/E3TaggedSpread.vue",
         "class Box { readonly evA = (p: string) => true }\n\
-         function makeEmits() { return { ...new Box(), evB: (n: number) => true } }",
+         declare function box(strings: TemplateStringsArray): Box\n\
+         function makeEmits() { return { ...box`b`, evB: (n: number) => true } }",
     ) {
         RenderedRuntime::Refused => {}
         RenderedRuntime::Props(emitted) => panic!(
-            "/src/E3NewSpread.vue: the spread source has no evaluable surface, so the event \
+            "/src/E3TaggedSpread.vue: the spread source has no evaluable surface, so the event \
              set is incomplete — publishing `{emitted}` drops `evA` and routes its listeners \
              to `$attrs`"
         ),

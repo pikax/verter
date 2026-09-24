@@ -184,13 +184,13 @@ pub fn lower_slice_plan(
                         elided_entries: elided,
                     }
                 }
-                // A branch JOIN (and an array literal) carries no lowered
-                // shape of its own: its arms (elements) ride as their OWN
-                // selected expression records
-                // (the graph made them value providers), and the content
-                // half re-reads the authored branch structure from the
-                // retained snapshot through this site's span locator —
-                // exactly as it does for any other non-object site.
+                // A branch JOIN or an array literal carries no lowered
+                // shape of its own: its arms / elements ride as their OWN
+                // selected expression records (the graph made them value
+                // providers), and the content half re-reads the authored
+                // structure from the retained snapshot through this site's
+                // span locator — exactly as it does for any other
+                // non-object site.
                 SkeletonExprShape::BranchJoin { .. }
                 | SkeletonExprShape::ArrayLiteral { .. }
                 | SkeletonExprShape::Other => FlowExprShape::Opaque {

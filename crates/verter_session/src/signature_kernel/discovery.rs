@@ -1,7 +1,7 @@
 //! Record-level signature discovery: publishing candidates from neutral
 //! input, signature-equivalence comparison, union common-match then
-//! restricted synthesis, and intersection dedup with constructor/mixin
-//! composition.
+//! restricted synthesis, intersection dedup with constructor/mixin
+//! composition, and a declaration's heritage concatenation.
 //!
 //! Everything here works over V2 records and is independent of the
 //! semantic graph; the graph-facing subject walk lives with the dispatcher
@@ -91,10 +91,21 @@ pub trait DiscoveryTypes: SlotTypeFacts {
     fn unknown(&self) -> Option<TypeToken>;
     fn any(&self) -> Option<TypeToken>;
     fn is_any(&self, ty: TypeToken) -> bool;
-    /// The return type a candidate's recipe denotes. This FORCES a body
-    /// recipe; discovery calls it only when comparison semantics need a
-    /// return (exact matching that includes returns).
-    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason>;
+    /// The result a candidate's recipe denotes: its return type and its
+    /// predicate effect. This FORCES a body recipe; discovery calls it
+    /// only when comparison semantics need a result (exact matching that
+    /// includes results).
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<ForcedResult, IncompleteReason>;
+}
+
+/// A candidate's forced result — see [`DiscoveryTypes::forced_result`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedResult {
+    pub return_type: TypeToken,
+    pub effects: Option<super::records::PredicateEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,12 +575,30 @@ pub fn signatures_identical(
         );
         if !same_body {
             let a = types
-                .forced_return(&source)
+                .forced_result(&source)
                 .map_err(DiscoveryError::Incomplete)?;
             let b = types
-                .forced_return(&target)
+                .forced_result(&target)
                 .map_err(DiscoveryError::Incomplete)?;
-            if !ident(types, a, b, &corr)? {
+            // A predicate replaces the return in the comparison, as the
+            // checker's `compareTypePredicatesIdentical` does: two
+            // predicates of the same kind about the same subject with
+            // identical targets, or none on either side and identical
+            // returns.
+            let identical = match (a.effects, b.effects) {
+                (None, None) => ident(types, a.return_type, b.return_type, &corr)?,
+                (Some(a), Some(b)) => {
+                    a.subject == b.subject
+                        && a.asserts == b.asserts
+                        && match (a.ty, b.ty) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => ident(types, a, b, &corr)?,
+                            _ => false,
+                        }
+                }
+                _ => false,
+            };
+            if !identical {
                 return Ok(false);
             }
         }
@@ -1137,6 +1166,28 @@ fn is_mixin_constructor(
         && loaded.layout.rest.as_ref().is_some_and(|r| {
             r.kind == RestKind::Array && r.tail.is_empty() && types.is_any(r.slot.ty)
         }))
+}
+
+/// The signatures of one kind an interface or class declaration with
+/// `extends` heritage carries (TypeScript's `resolveObjectTypeMembers`).
+/// `members` are the per-member candidate lists of the declaration's body
+/// in body order — its bases in clause order, its own body LAST — and the
+/// answer is the own body's signatures first, then each base's, in clause
+/// order.
+///
+/// A declaration is not an intersection type, so nothing is dropped and
+/// nothing is composed ([`intersection_signatures`] does both): a
+/// signature identical to one already present stays, a base reached twice
+/// through a diamond contributes twice, and a mixin constructor base keeps
+/// its own construct signature. Call resolution therefore tries the own
+/// signatures first, and conditional inference (`ReturnType`,
+/// `InstanceType`), which reads the LAST signature, reads the last base's.
+#[must_use]
+pub fn heritage_signatures(members: &[Vec<SignatureCandidate>]) -> Vec<SignatureCandidate> {
+    let Some((own, bases)) = members.split_last() else {
+        return Vec::new();
+    };
+    own.iter().chain(bases.iter().flatten()).copied().collect()
 }
 
 /// Intersection signatures for one kind. `members` are the per-member

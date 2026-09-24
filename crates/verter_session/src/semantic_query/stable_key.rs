@@ -270,6 +270,7 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
         CompositeOriginCategory::QuerySubject => 6,
         #[cfg(any(test, feature = "test-support"))]
         CompositeOriginCategory::TestFixture => 7,
+        CompositeOriginCategory::Heritage => 9,
     }
 }
 
@@ -620,21 +621,32 @@ fn encode_data(
             }
         }
         // The class identity is the authored position (file, owner, offset);
-        // the printed name and qualifier ride along, and the instance
-        // surface descends as a child, so two instantiations of one class
-        // expression stay distinct.
-        SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+        // the printed name and the enclosing clauses ride along, and the
+        // reference's type arguments and the instance surface descend as
+        // children, so two instantiations of one class expression stay
+        // distinct.
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            surface,
+        } => {
             enc.header(category::AUTHORED, subtag::CLASS_EXPRESSION_INSTANCE);
             enc.str(&identity.canonical_id);
             encode_owner(&mut enc, identity.owner);
             enc.u32(identity.offset);
             enc.str(&identity.name);
-            match &identity.qualifier {
-                None => enc.u8(0),
-                Some(qualifier) => {
-                    enc.u8(1);
-                    enc.str(qualifier);
+            enc.u16(identity.outer_clauses.len() as u16);
+            for clause in identity.outer_clauses.iter() {
+                enc.str(&clause.container);
+                enc.u16(clause.parameters.len() as u16);
+                for parameter in clause.parameters.iter() {
+                    enc.str(parameter);
                 }
+            }
+            enc.u32(identity.own_arity);
+            enc.u16(type_arguments.len() as u16);
+            for argument in type_arguments.iter() {
+                encode_child(graph, *argument, seen, &mut enc, depth);
             }
             encode_child(graph, *surface, seen, &mut enc, depth);
         }

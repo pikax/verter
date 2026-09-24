@@ -1880,15 +1880,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Specialize THIS class's own type parameters with the key's
                 // `type_args` (produced by a derived class's heritage hop
                 // above, or any caller instantiating the static surface).
-                if !type_args.is_empty() {
-                    composed_node = self.apply_class_surface_type_args(
+                // With no key arguments, the class's type parameters are its
+                // construct signatures' OWN clause instead (`new <T>(v: T) =>
+                // C<T>`), so a `new C(…)` infers them from its arguments.
+                composed_node = if type_args.is_empty() {
+                    self.generic_class_construct_signatures(
+                        own_canonical.as_ref(),
+                        own_owner,
+                        own_symbol.as_ref(),
+                        composed_node,
+                    )
+                } else {
+                    self.apply_class_surface_type_args(
                         own_canonical.as_ref(),
                         own_owner,
                         own_symbol.as_ref(),
                         composed_node,
                         type_args,
-                    );
-                }
+                    )
+                };
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
                     QueryResult::Value(composed_node),
                     self.project_generation_signature(),
@@ -2414,6 +2424,168 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         result
+    }
+
+    /// The construct signatures of an UNAPPLIED generic class's static
+    /// surface, generic over the class's own type parameters — the
+    /// checker's class construct signature carries the class's
+    /// `localTypeParameters` as its own clause and returns the class
+    /// instance applied to them (`new <T>(v: T) => C<T>` for `class C<T>
+    /// { constructor(v: T) }`), which is what lets a `new C(1)` infer `T`
+    /// from its arguments. A derived class's inherited parameters already
+    /// carry the derived class's binder shells (the heritage arguments are
+    /// lowered in its scope), so they generalize over the derived clause.
+    ///
+    /// The class-level shells the constructor shape was lowered over are
+    /// rewritten to the declaration-header binders, whose constraints and
+    /// defaults the call executor reads, and the class-instance return
+    /// becomes the class applied to those binders. A non-generic class, a
+    /// class whose type-side declaration is unavailable, and a signature
+    /// that already declares a clause are returned unchanged.
+    fn generic_class_construct_signatures(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        surface: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let Some(type_decl) = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, symbol)
+        else {
+            return surface;
+        };
+        if type_decl.type_parameters.is_empty() {
+            return surface;
+        }
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return surface;
+        };
+        let view = match self.graph().node_data(surface).as_deref() {
+            Some(SemanticNodeData::Object(view)) if !view.construct_signatures.is_empty() => {
+                view.clone()
+            }
+            _ => return surface,
+        };
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let shells =
+            self.class_type_param_shell_env(canonical, owner, symbol, indexed.whole_hash, &scope);
+        let binders = self.locator_binder_frame_from_narrow_params(
+            &scope,
+            &Arc::from(symbol),
+            &type_decl.type_parameters,
+        );
+        let clause: Vec<crate::semantic_query::TypeParamDecl> = binders
+            .iter()
+            .zip(type_decl.type_parameters.iter())
+            .map(|((name, binder), param)| {
+                let (constraint, default) = match self.graph().node_data(*binder).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        constraint,
+                        default,
+                        ..
+                    }) => (*constraint, *default),
+                    _ => (None, None),
+                };
+                crate::semantic_query::TypeParamDecl {
+                    name: Arc::clone(name),
+                    param: *binder,
+                    constraint,
+                    default,
+                    is_const: param.is_const,
+                }
+            })
+            .collect();
+        let clause: Arc<[crate::semantic_query::TypeParamDecl]> =
+            Arc::from(clause.into_boxed_slice());
+        let instance_args: Arc<[SemanticNodeId]> = binders
+            .iter()
+            .map(|(_, binder)| *binder)
+            .collect::<Vec<_>>()
+            .into();
+        let generalize = |signature: SemanticNodeId| -> SemanticNodeId {
+            let mut rebound = signature;
+            for (name, binder) in binders.iter() {
+                if let Some(shell) = shells.get(name.as_ref()) {
+                    rebound = self.substitute_semantic_type_param(rebound, *shell, *binder);
+                }
+            }
+            let Some(SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier: _,
+                signature_span,
+                return_type_span,
+                predicate,
+            }) = self.graph().node_data(rebound).as_deref().cloned()
+            else {
+                return signature;
+            };
+            if !type_parameters.is_empty() {
+                return signature;
+            }
+            let return_type = match self.graph().node_data(return_type).as_deref() {
+                Some(SemanticNodeData::DeclRef { identity })
+                    if identity.canonical_id.as_ref() == canonical
+                        && identity.owner == owner
+                        && identity.decl_name.as_ref() == symbol =>
+                {
+                    let scope = self
+                        .graph()
+                        .node_scope(return_type)
+                        .unwrap_or_else(|| scope.clone());
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::InstantiationRef {
+                            base: identity.clone(),
+                            args: Arc::clone(&instance_args),
+                        },
+                        scope,
+                    )
+                }
+                _ => return_type,
+            };
+            self.graph().intern_node(SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters: Arc::clone(&clause),
+                occurrence,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                    return_type,
+                ),
+                signature_span,
+                return_type_span,
+                predicate,
+            })
+        };
+        let entries: Vec<SurfaceEntry> = view
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::ConstructSignature(signature) => {
+                    SurfaceEntry::ConstructSignature(generalize(*signature))
+                }
+                other => other.clone(),
+            })
+            .collect();
+        self.graph()
+            .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                view.keyspace,
+                view.has_known_index_signature(),
+            )))
     }
 
     /// The class's heritage bases, base-first, read from the PRODUCER-MINTED
@@ -3408,6 +3580,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 augmenter_contributor_roots = stitch.contributor_roots;
                 augmentation_source_env_unobservable = stitch.source_env_unobservable;
             }
+            // A GLOBAL interface's other declarations — every other
+            // module's `declare global` and script's file-scope interface —
+            // merge in through the same peer-merge carrier, whichever of
+            // them the reference named.
+            if self.declares_global_interface(
+                decl_canonical.as_ref(),
+                decl_owner,
+                decl_name.as_ref(),
+                prepared.kind,
+            ) {
+                if let Some(stitch) = self.stitch_global_declarations(
+                    decl_canonical,
+                    decl_name,
+                    args,
+                    result,
+                    &scope,
+                    context,
+                ) {
+                    result = stitch.merged;
+                    augmenter_contributor_roots.extend(stitch.contributor_roots);
+                    augmentation_source_env_unobservable |= stitch.source_env_unobservable;
+                }
+            }
         }
         self.pop_instantiate_active();
 
@@ -3581,18 +3776,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
-        let AugmentationContributions {
-            contributor_nodes,
-            contributor_roots,
-            source_env_unobservable,
-        } = self.collect_augmentation_contributions(
+        let contributions = self.collect_augmentation_contributions(
             target,
             decl_name.as_ref(),
             &[],
             context,
             decl_canonical.as_ref(),
+            None,
         )?;
+        Some(self.merge_into_base(base_result, base_scope, contributions))
+    }
 
+    /// Fold a GLOBAL interface's other declarations into the base body
+    /// `Instantiate` lowered from one of them (`decl_canonical`'s): every
+    /// other module's `declare global` contribution and every other
+    /// script's file-scope interface of the name, in declaration precedence
+    /// order, through the same peer-merge carrier a relative augmentation
+    /// takes. `type_arguments` bind each contributor's own clause.
+    ///
+    /// The folder observes the contributor population and every folded
+    /// contributor's content version, so an edit to ANY declaration of the
+    /// global misses the warm read. `None` when no other declaration
+    /// exists.
+    fn stitch_global_declarations(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_name: &Arc<str>,
+        type_arguments: &[SemanticNodeId],
+        base_result: SemanticNodeId,
+        base_scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationStitch> {
+        let contributions = self.collect_augmentation_contributions(
+            crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+            decl_name.as_ref(),
+            type_arguments,
+            context,
+            decl_canonical.as_ref(),
+            Some(decl_canonical.as_ref()),
+        )?;
+        Some(self.merge_into_base(base_result, base_scope, contributions))
+    }
+
+    /// Merge collected augmenter `contributions` into `base_result` as ONE
+    /// peer-merge carrier.
+    fn merge_into_base(
+        &self,
+        base_result: SemanticNodeId,
+        base_scope: &NodeScopeId,
+        contributions: AugmentationContributions,
+    ) -> AugmentationStitch {
+        let AugmentationContributions {
+            contributor_nodes,
+            contributor_roots,
+            source_env_unobservable,
+        } = contributions;
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
         // single-contributor `MergedDecl` wrapper) but propagate the no-warm
@@ -3600,11 +3838,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `output.cache_suppress`. `source_env_unobservable` is `true` here (the
         // collector returns `None` for a genuine no-augmentation empty).
         if contributor_nodes.is_empty() {
-            return Some(AugmentationStitch {
+            return AugmentationStitch {
                 merged: base_result,
                 contributor_roots: Vec::new(),
                 source_env_unobservable,
-            });
+            };
         }
 
         // Build the single peer-merge carrier: base contributors ∪ augmenter
@@ -3627,11 +3865,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             base_scope.clone(),
         );
-        Some(AugmentationStitch {
+        AugmentationStitch {
             merged,
             contributor_roots,
             source_env_unobservable,
-        })
+        }
     }
 
     /// Shared augmenter-contribution folder — the ONE cross-file
@@ -3663,6 +3901,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Promise<number>` lowers its `T` as `number`. An unbound parameter
     /// stays unbound, as in `Instantiate`'s published modes.
     ///
+    /// `excluded_contributor` names a file whose contribution the caller
+    /// already holds as the base body (a global declaration's own file):
+    /// it is skipped, never folded twice.
+    ///
     /// Returns `None` when no augmenter contributes.
     pub(super) fn collect_augmentation_contributions(
         &self,
@@ -3671,6 +3913,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
         request_canonical: &str,
+        excluded_contributor: Option<&str>,
     ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
@@ -3859,6 +4102,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
         });
         for candidate in ordered {
+            if excluded_contributor == Some(candidate.canonical.as_ref()) {
+                continue;
+            }
             match candidate.origin {
                 OrderedOrigin::Augmenter(augmenter_idx) => {
                     let augmenter = &augmenter_set.entries[augmenter_idx];
@@ -3877,6 +4123,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         source_env_unobservable = true;
                         continue;
                     };
+                    // `declare global` augments the global scope only from a
+                    // MODULE: in a script it is an error and binds nothing
+                    // (the augmenter set still fingerprints the file, so the
+                    // script gaining module syntax misses the warm read).
+                    if matches!(target, AugmentationTargetKind::GlobalAugmentation)
+                        && crate::global_contributors::classify_module_kind(&indexed)
+                            == crate::global_contributors::FileModuleKind::Script
+                    {
+                        continue;
+                    }
                     // The addressable contribution pointers: each augmenter
                     // `ModuleAugmentationFact` that targets THIS decl gives the raw
                     // `declare module "<spec>"` specifier under which the typed inner
@@ -4373,7 +4629,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, name, &[], context, scope_canonical)?;
+        } = self.collect_augmentation_contributions(
+            target,
+            name,
+            &[],
+            context,
+            scope_canonical,
+            None,
+        )?;
         // A torn contributor (unobservable source-env identity — a
         // torn/unhealable/unservable augmenter) is SERVED but must NEVER be
         // warm-admitted. This carrier is interned mid-reference-resolution and
@@ -4424,6 +4687,118 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope.clone(),
         );
         Some(merged)
+    }
+
+    /// The identity of the program's merged GLOBAL declaration named
+    /// `name`: its FIRST declaration in declaration precedence order (the
+    /// configured file sequence, then the canonical path) among every
+    /// module's `declare global` contribution and every script's file-scope
+    /// interface. `None` when the program declares no such global type.
+    ///
+    /// A `declare global` block in a SCRIPT is an error that binds nothing,
+    /// and an automatic lib's declarations are the lib's own (reached
+    /// through the lib environment, never through this lookup). The global
+    /// contributor population is observed onto the active fact tracer, so
+    /// a contributor added, removed or reordered misses every warm read
+    /// that named the global through this identity — including a read that
+    /// found none.
+    pub(super) fn first_global_declaration(&self, name: &str) -> Option<ResolvedRootIdentity> {
+        use crate::file_artifact_store::AugmentationTargetKind;
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        let host = self.ctx.host_for_fact_tracer_install();
+        host.ingest_program_ambient_roots();
+        let (_, overlay_discriminator) =
+            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
+        let target = AugmentationTargetKind::GlobalAugmentation;
+        let population = self
+            .ctx
+            .project_type_store()
+            .indexed()
+            .global_contributor_index()
+            .snapshot()
+            .lookup_in_space(
+                &target,
+                name,
+                overlay_discriminator,
+                true,
+                verter_semantic::facts::SymbolSpace::Type,
+            );
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: String::new(),
+                    key: crate::global_contributors::population_contributor_fact_key(&target, name),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: population.fingerprint,
+                },
+            ),
+        );
+        let first = population
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.is_automatic_lib
+                    && match entry.origin {
+                        ContributorOrigin::DeclareGlobal => {
+                            entry.module_kind == FileModuleKind::Module
+                        }
+                        ContributorOrigin::FileScopeInterface => true,
+                        ContributorOrigin::FileScopeNamespace
+                        | ContributorOrigin::ModuleAugmentation => false,
+                    }
+            })
+            .min_by(|left, right| {
+                host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                    .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                    .then_with(|| {
+                        left.artifact_key
+                            .canonical
+                            .as_ref()
+                            .cmp(right.artifact_key.canonical.as_ref())
+                    })
+                    .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
+            })?;
+        Some(ResolvedRootIdentity::new_in_owner(
+            Arc::clone(&first.artifact_key.canonical),
+            first.owner,
+            name,
+        ))
+    }
+
+    /// Whether the TYPE declaration `name` in `canonical` is (one
+    /// declaration of) a GLOBAL declaration: a `declare global` interface
+    /// of a module that has no file-scope symbol of the name, or a
+    /// file-scope interface of a script. Every other declaration of the
+    /// same global lives in another file, and its `Instantiate` folds them
+    /// in.
+    fn declares_global_interface(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+    ) -> bool {
+        if kind != verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+            || owner != verter_type_expr::TopLevelOwnerId::ordinary_file()
+        {
+            return false;
+        }
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return false;
+        };
+        let shallow = &indexed.shallow_state;
+        match crate::global_contributors::classify_module_kind(&indexed) {
+            crate::global_contributors::FileModuleKind::Module => {
+                !shallow.has_type_symbol_in(owner, name) && shallow.has_global_augmentation(name)
+            }
+            crate::global_contributors::FileModuleKind::Script => {
+                shallow.has_type_symbol_in(owner, name)
+            }
+        }
     }
 
     /// Bind a prepared declaration's type parameters for one application,
@@ -4576,6 +4951,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+        self.prepared_type_decl(identity)
+            .map(|prepared| prepared.kind)
+    }
+
+    /// Whether the prepared declaration rooted at `identity` declares type
+    /// parameters.
+    pub(super) fn prepared_decl_is_generic(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<bool> {
+        self.prepared_type_decl(identity)
+            .map(|prepared| !prepared.type_parameters.is_empty())
+    }
+
+    fn prepared_type_decl(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<Arc<PreparedTypeDecl>> {
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&identity.canonical_id),
             owner: identity.owner,
@@ -4592,11 +4985,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.decl_name.as_ref(),
         );
         match adapter.resolve_prepared_type_decl(base, &ri) {
-            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared.kind),
+            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared),
             PreparedTypeDeclResolution::AuthoredPartial {
                 declaration: prepared,
                 ..
-            } => Some(prepared.kind),
+            } => Some(prepared),
             PreparedTypeDeclResolution::Missing => None,
             PreparedTypeDeclResolution::Failed { .. } => {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
@@ -7037,7 +7430,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(target) => stack.push(*target),
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
@@ -12494,7 +12894,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// list is the budgeted derived value, and re-deciding gives the
     /// authority another complete attempt), so it routes canonical. Every
     /// other category preserves verbatim: `OrderedCarrier` order IS
-    /// overload precedence; `PreservingRebuild` lost its original's
+    /// overload precedence; a `Heritage` body is a declaration, not an
+    /// intersection type; `PreservingRebuild` lost its original's
     /// category, so re-deciding is unproven; `QuerySubject` shape is
     /// caller contract; `TestFixture` is a deliberately raw fixture.
     ///
@@ -12519,7 +12920,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use crate::semantic_query::composite::CompositeOriginCategory as C;
         let derived = match category {
             C::Canonical(_) | C::CanonicalUnproven | C::AuthoredShell => true,
-            C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
+            C::OrderedCarrier | C::Heritage | C::PreservingRebuild | C::QuerySubject => false,
             #[cfg(any(test, feature = "test-support"))]
             C::TestFixture => false,
         };

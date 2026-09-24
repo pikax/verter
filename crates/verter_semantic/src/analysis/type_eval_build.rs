@@ -4820,10 +4820,85 @@ fn infer_expression_type_ctx_with_read_root(
                 Ok(call_return_carrier(callee_type))
             }
         }
+        // An equality, relational, `instanceof` or `in` comparison is
+        // `boolean` whatever its operands are: neither operand provides the
+        // comparison's value.
+        Expression::BinaryExpression(binary) if binary_operator_is_comparison(binary.operator) => {
+            Ok(TypeExpr::Primitive(PrimitiveName::Boolean))
+        }
+        // `!operand`, and `a && b` / `a || b`, over `boolean` operands are
+        // `boolean`. Any other operand keeps the unmodeled fallback: the
+        // result then depends on the operand's truthiness facts (`!` over an
+        // always-truthy operand is `false`) or is the operand's own value.
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            let operand = infer_expression_type_ctx(
+                &unary.argument,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(boolean_or_unmodeled(&[operand], budget))
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(
+                logical.operator,
+                oxc_ast::ast::LogicalOperator::And | oxc_ast::ast::LogicalOperator::Or
+            ) =>
+        {
+            let left = infer_expression_type_ctx(
+                &logical.left,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            let right = infer_expression_type_ctx(
+                &logical.right,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(boolean_or_unmodeled(&[left, right], budget))
+        }
         _ => {
             budget.used_unmodeled_fallback = true;
             Ok(TypeExpr::Primitive(PrimitiveName::Any))
         }
+    }
+}
+
+/// Whether a binary operator is a comparison — the operators whose result
+/// the checker types `boolean` whatever the operands: equality (strict and
+/// loose), relational, `instanceof` and `in`.
+fn binary_operator_is_comparison(operator: BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Equality
+            | BinaryOperator::Inequality
+            | BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality
+            | BinaryOperator::LessThan
+            | BinaryOperator::LessEqualThan
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterEqualThan
+            | BinaryOperator::Instanceof
+            | BinaryOperator::In
+    )
+}
+
+/// `boolean` when every operand is exactly `boolean`; otherwise the
+/// unmodeled fallback.
+fn boolean_or_unmodeled(operands: &[TypeExpr], budget: &mut InferenceBudget) -> TypeExpr {
+    if operands
+        .iter()
+        .all(|operand| matches!(operand, TypeExpr::Primitive(PrimitiveName::Boolean)))
+    {
+        TypeExpr::Primitive(PrimitiveName::Boolean)
+    } else {
+        budget.used_unmodeled_fallback = true;
+        TypeExpr::Primitive(PrimitiveName::Any)
     }
 }
 
@@ -6175,16 +6250,6 @@ pub fn lower_indexed_value_expression(
     lower_indexed_value_expression_with_policy(expr, source, MemberLiteralPolicy::Widen)
 }
 
-/// Lower one indexed CALL-ARGUMENT expression: the same indexed lowering in
-/// the call-argument position, so the authored literal form reaches
-/// applicability exactly as the flow IR's own call arguments do.
-fn lower_indexed_call_argument_expression(
-    expr: &Expression<'_>,
-    source: &str,
-) -> IndexedValueExpression {
-    lower_indexed_value_expression_with_policy(expr, source, MemberLiteralPolicy::Argument)
-}
-
 fn lower_indexed_value_expression_with_policy(
     expr: &Expression<'_>,
     source: &str,
@@ -6362,8 +6427,63 @@ fn lower_indexed_call_expression_observed(
     mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> IndexedValueCall {
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
-    let args = call
-        .arguments
+    IndexedValueCall {
+        point: call.span.start,
+        kind: IndexedValueCallKind::Call,
+        callee: Box::new(callee),
+        receiver,
+        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        explicit_type_args: lower_indexed_explicit_type_arguments(
+            call.type_arguments.as_deref(),
+            source,
+        ),
+    }
+}
+
+fn lower_indexed_new_expression(
+    call: &oxc_ast::ast::NewExpression<'_>,
+    source: &str,
+) -> IndexedValueCall {
+    lower_indexed_new_expression_observed(call, source, None)
+}
+
+/// The construct twin of [`lower_indexed_call_expression_with_read_roots`]:
+/// a `new` expression reports its argument ordinals the same way. It has no
+/// receiver, so only arguments are reported.
+pub fn lower_indexed_new_expression_with_read_roots(
+    call: &oxc_ast::ast::NewExpression<'_>,
+    source: &str,
+    observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+) -> IndexedValueCall {
+    lower_indexed_new_expression_observed(call, source, Some(observe))
+}
+
+fn lower_indexed_new_expression_observed(
+    call: &oxc_ast::ast::NewExpression<'_>,
+    source: &str,
+    observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCall {
+    IndexedValueCall {
+        point: call.span.start,
+        kind: IndexedValueCallKind::Construct,
+        callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
+        receiver: None,
+        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        explicit_type_args: lower_indexed_explicit_type_arguments(
+            call.type_arguments.as_deref(),
+            source,
+        ),
+    }
+}
+
+/// The argument list of one call or `new` expression, each ordinal
+/// (including a spread) reported to `observe` exactly once.
+fn lower_indexed_call_arguments(
+    arguments: &[oxc_ast::ast::Argument<'_>],
+    source: &str,
+    mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> Arc<[IndexedValueCallArg]> {
+    let args = arguments
         .iter()
         .enumerate()
         .map(|(ordinal, argument)| {
@@ -6410,67 +6530,14 @@ fn lower_indexed_call_expression_observed(
             }
         })
         .collect::<Vec<_>>();
-    let explicit_type_args = call
-        .type_arguments
-        .as_ref()
-        .map(|arguments| {
-            arguments
-                .params
-                .iter()
-                .map(|argument| lower_ts_type(argument, source))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    IndexedValueCall {
-        point: call.span.start,
-        kind: IndexedValueCallKind::Call,
-        callee: Box::new(callee),
-        receiver,
-        args: Arc::from(args.into_boxed_slice()),
-        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-    }
+    Arc::from(args.into_boxed_slice())
 }
 
-fn lower_indexed_new_expression(
-    call: &oxc_ast::ast::NewExpression<'_>,
+fn lower_indexed_explicit_type_arguments(
+    type_arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>,
     source: &str,
-) -> IndexedValueCall {
-    let args = call
-        .arguments
-        .iter()
-        .map(|argument| {
-            let (expression, point, spread, literal_mode, context_sensitive) = match argument {
-                oxc_ast::ast::Argument::SpreadElement(spread) => (
-                    lower_indexed_call_argument_expression(&spread.argument, source),
-                    spread.argument.span().start,
-                    true,
-                    indexed_literal_mode(Some(&spread.argument)),
-                    indexed_context_sensitive(Some(&spread.argument)),
-                ),
-                argument => {
-                    let expression = argument.to_expression();
-                    (
-                        lower_indexed_call_argument_expression(expression, source),
-                        expression.span().start,
-                        false,
-                        indexed_literal_mode(Some(expression)),
-                        indexed_context_sensitive(Some(expression)),
-                    )
-                }
-            };
-            IndexedValueCallArg {
-                expression,
-                point,
-                spread,
-                literal_mode,
-                context_sensitive,
-                function_return_source: None,
-            }
-        })
-        .collect::<Vec<_>>();
-    let explicit_type_args = call
-        .type_arguments
-        .as_ref()
+) -> Arc<[TypeExpr]> {
+    let explicit_type_args = type_arguments
         .map(|arguments| {
             arguments
                 .params
@@ -6479,14 +6546,7 @@ fn lower_indexed_new_expression(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    IndexedValueCall {
-        point: call.span.start,
-        kind: IndexedValueCallKind::Construct,
-        callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
-        receiver: None,
-        args: Arc::from(args.into_boxed_slice()),
-        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-    }
+    Arc::from(explicit_type_args.into_boxed_slice())
 }
 
 /// Whether lowering `expr` as a VALUE would fabricate a type for a call it

@@ -22,24 +22,26 @@ const SEAL_CANONICAL: &str = "/ws/flow-frame-seal.ts";
 
 const SEAL_FIXTURE: &str = r#"
 export class Box { readonly tag = "box"; }
+// A tagged template is a call form the substrate has no arm for.
+export declare function box(strings: TemplateStringsArray): Box;
 
 // ── the callee rail: a marker in a callee's RETURN position ──────────
 //
 // tsgo: `{ label: string; made: Box }`
 export function q1LocalHelperBare() {
-  const f = () => new Box();
+  const f = () => box`b`;
   return { label: "x", made: f() };
 }
 
 // tsgo: `{ label: string; made: (string | Box)[] }`
 export function q1LocalHelperArray() {
-  const f = () => ["s", new Box()];
+  const f = () => ["s", box`b`];
   return { label: "x", made: f() };
 }
 
 // tsgo: `{ label: string; made: (string | Box)[] }`
 export function q1IifeArray() {
-  return { label: "x", made: (() => ["s", new Box()])() };
+  return { label: "x", made: (() => ["s", box`b`])() };
 }
 
 // ── a nested body whose CONTROL surface is unmodelled ────────────────
@@ -71,7 +73,7 @@ export function localFunctionShadowCall() {
 //
 // tsgo: `{ label: string; made: (string | Box)[] }`
 export function arrayWithUnmodeledElement() {
-  return { label: "x", made: ["s", new Box()] };
+  return { label: "x", made: ["s", box`b`] };
 }
 
 // ── the CLEAN control: nothing degraded, warm ────────────────────────
@@ -182,40 +184,42 @@ fn assert_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, w
     );
 }
 
-/// `(string | MARKER)[]`: the modelled `"s"` element widened beside the
-/// typed marker of the one element the substrate does not model.
+/// `node` is `(string | MARKER)[]`: the array survives, its modelled
+/// `string` element with it, and only the unmodelled element carries the
+/// positional marker.
 #[track_caller]
 fn assert_string_or_marker_array(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     what: &str,
 ) {
-    let element = match dispatch.graph().node_data(node).as_deref() {
+    let graph = dispatch.graph();
+    let element = match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Array { element, .. }) => *element,
-        other => panic!("{what}: an Array keeps its modelled element, got {other:?}"),
+        other => panic!("{what}: the array survives, got {other:?}"),
     };
-    let arms = match dispatch.graph().node_data(element).as_deref() {
-        Some(SemanticNodeData::Union(arms)) => arms.to_vec(),
-        other => panic!("{what}: the element type is `string | MARKER`, got {other:?}"),
+    let members = match graph.node_data(element).as_deref() {
+        Some(SemanticNodeData::Union(members)) => members.to_vec(),
+        other => panic!("{what}: the element is the union of both elements, got {other:?}"),
     };
-    assert_eq!(arms.len(), 2, "{what}: two element constituents");
+    assert_eq!(members.len(), 2, "{what}: {members:?}");
     assert!(
-        arms.iter().any(|arm| matches!(
-            dispatch.graph().node_data(*arm).as_deref(),
+        members.iter().any(|member| matches!(
+            graph.node_data(*member).as_deref(),
             Some(SemanticNodeData::Primitive(PrimitiveKind::String))
         )),
         "{what}: the modelled `string` element survives"
     );
-    let marker = arms
+    let marker = members
         .iter()
-        .find(|arm| {
+        .copied()
+        .find(|member| {
             !matches!(
-                dispatch.graph().node_data(**arm).as_deref(),
+                graph.node_data(*member).as_deref(),
                 Some(SemanticNodeData::Primitive(PrimitiveKind::String))
             )
         })
-        .copied()
-        .expect("a second constituent");
+        .expect("a second element");
     assert_marker(dispatch, marker, what);
 }
 
@@ -245,16 +249,16 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 ///
 /// | program | TypeScript 7.0.2 `tsc` |
 /// |---|---|
-/// | `const f = () => new Box(); return { label: "x", made: f() }` | `{ label: string; made: Box }` |
-/// | `const f = () => ["s", new Box()]; return { label: "x", made: f() }` | `{ label: string; made: (string \| Box)[] }` |
-/// | `return { label: "x", made: (() => ["s", new Box()])() }` | same |
+/// | `` const f = () => box`b`; return { label: "x", made: f() } `` | `{ label: string; made: Box }` |
+/// | `const f = () => ["s", box`b`]; return { label: "x", made: f() }` | `{ label: string; made: (string \| Box)[] }` |
+/// | `return { label: "x", made: (() => ["s", box`b`])() }` | same |
 ///
 /// The parent's answer was not right either: the first two published
 /// `Array<string \| any>` with NO degradation and WARM — a fabricated
 /// `any` inside a clean result. The target is neither: the composite
-/// survives, the unmodelled slot carries the typed marker, and nothing
-/// admits. An array literal's elements lower structurally, so in the
-/// array rows the marker is ONE element's: `made` is `(string | MARKER)[]`.
+/// survives, the unmodelled slot carries the typed marker (an array's
+/// unmodelled ELEMENT beside its modelled `string` one), and nothing
+/// admits.
 ///
 /// Mutation recipe: minting the marker as `QueryError::Miss` again makes
 /// `of_signature_node` classify it `ReturnMiss`, and all three rows lose
@@ -389,22 +393,19 @@ fn the_clean_control_is_undegraded_and_warms() {
     });
 }
 
-/// An unmodelled ELEMENT marks only its own position inside the ARRAY.
+/// An unmodelled array ELEMENT marks its own position: the array survives
+/// with its modelled elements.
 ///
-/// `return { label: "x", made: ["s", new Box()] }` — TypeScript 7.0.2
-/// `tsc` types `made` as `(string | Box)[]`. The array literal lowers
-/// structurally: the SHARED value-descent classifier gives it the `Array`
-/// disposition, the demand planner opens one site per element (so every
-/// element value is selected), the content half lowers each element as a
-/// flow expression, and the evaluator unions them. The modelled `"s"`
-/// element survives as `string` beside the typed marker of the
-/// `new Box()` position — `(string | MARKER)[]` — where it once collapsed
-/// the whole array to one marker.
-///
-/// The no-wrong-and-warm half stays pinned: the result is DEGRADED and
-/// admits nothing.
+/// `return { label: "x", made: ["s", box`b`] }` — TypeScript 7.0.2
+/// `tsc` types `made` as `(string | Box)[]`. The array literal is a
+/// structural carrier in both halves (the shared value-descent classifier
+/// opens each element as a child site of the array, and the content half
+/// lowers each one as its own position), so the positional rule holds
+/// inside the array exactly as it does at the object level: `made` is
+/// `(string | MARKER)[]`, the `` box`b` `` element alone carrying the
+/// typed marker. The result is DEGRADED and admits nothing.
 #[test]
-fn an_unmodeled_array_element_marks_only_its_element() {
+fn an_unmodeled_array_element_marks_only_its_own_position() {
     let host = make_seal_host();
     let outcome = evaluate(&host, "arrayWithUnmodeledElement")
         .expect("arrayWithUnmodeledElement produces a value");

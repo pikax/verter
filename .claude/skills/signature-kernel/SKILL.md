@@ -24,14 +24,14 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 
 | Module | Owns |
 |---|---|
-| `records.rs` | The record vocabulary and its handles: `SignatureDescriptor`, `SignatureCandidate`, `SignatureTemplate`, `SignatureInputShape`, `ParameterLayout`/`ParameterSlot`/`RestSlot`, `BinderSpace`/`BinderDeclaration`, `SignatureResultRecipe`, `PredicateEffect` (a declared result's type predicate / assertion — the effect half of a result read), `AppliedResult`, `TypeToken`, `GraphEpoch`. Every id is epoch-qualified. |
+| `records.rs` | The record vocabulary and its handles: `SignatureDescriptor`, `SignatureCandidate`, `SignatureTemplate`, `SignatureInputShape`, `ParameterLayout`/`ParameterSlot`/`RestSlot`, `BinderSpace`/`BinderDeclaration`, `SignatureResultRecipe`, `PredicateEffect` (the effect half of a result read: a declared result's type predicate / assertion, the predicate the checker infers from a body, or a union signature's composite predicate), `AppliedResult`, `TypeToken`, `GraphEpoch`. Every id is epoch-qualified. |
 | `storage.rs` | `AppendInterner<T>` — the private append-only interner over `boxcar::Vec` with `DEDUP_SHARDS` (16) hash shards. Hash is computed outside the shard lock; equality decides collisions. A record is fully initialised before its handle is published, so `boxcar`'s `count()` is never a published-handle range. |
 | `lifetime.rs` | `SignatureStore`: interning entry points, `replace_epoch()`, `retain_result`/`drain_retained`/`retained_len`, `live_reader_count()`, `StoreError`. |
 | `read_view.rs` | `SemanticReadView::pin(&SignatureStore)` — the request-pinned borrowed read. `BorrowedSet::{Empty, One, Many}`, `ReadError`, plus the `descriptor_chain_walks` / `shard_lock_acquires` probes the performance gates assert on. |
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `signatures_identical`, `DiscoveryError`. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `signatures_identical`, `DiscoveryError`. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -93,6 +93,10 @@ node identity:
    merging itself belongs to `SignaturesOfType` →
    `signature_kernel::discovery::intersection_signatures`, never to a local
    concatenation of signature nodes (§15).
+
+An interface/class declaration body with heritage is a third construction
+outside the funnel, the `CompositeList::heritage` mint (§6, rule 8): it is a
+declaration, not a commutative intersection, and is never re-decided.
 
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,
@@ -211,12 +215,22 @@ change; never weaken the test.
    the intersection (`with_discovered_signatures`), never from its own
    identity-deduplicated concatenation. A new merge that interns an object
    carrying signatures must do the same, or it creates a second signature
-   authority. The one exception is an interface/class body's heritage
-   overlay: it is an intersection NODE but inherits by concatenation
-   (TypeScript's `resolveObjectTypeMembers` keeps identical base signatures an
-   intersection would collapse), so its flush keeps the merge's lists. The
-   kernel itself still answers such a body with intersection rules — an open
-   divergence for identical inherited signatures, not a licence to copy.
+   authority.
+8. **A declaration body with heritage is not an intersection type.** An
+   interface/class body with `extends` is an intersection NODE (bases in
+   clause order, own body LAST) minted `CompositeList::heritage`
+   (`CompositeOriginCategory::Heritage`; the single-declaration projection
+   and the merged-declaration reducer mint it, and every order-preserving
+   rebuild keeps it through `CompositeList::rebuilt_from`). `SignaturesOfType`
+   reads the category and answers it with
+   `signature_kernel::discovery::heritage_signatures` — own signatures first,
+   then each base's in clause order, no identical-signature dedup, no mixin
+   composition (TypeScript's `resolveObjectTypeMembers`) — so call
+   resolution, the signature utilities, the relation engine and the shallow
+   walker's heritage flush all agree, through an alias of the declaration and
+   after instantiation too. Because the category is part of node identity,
+   the body never shares a node with the authored `Base & { … }` over the
+   same arms.
 
 ## Related skills
 

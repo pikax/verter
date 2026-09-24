@@ -31522,7 +31522,8 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         &host,
         "/ws.ts",
         "class Box { readonly tag = \"box\" }\n\
-         function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\n\
+         declare function box(strings: TemplateStringsArray): Box\n\
+         function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }\n\
          interface Props extends ReturnType<typeof makeProps> { extra: string }",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -32187,6 +32188,7 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
         (C::CanonicalUnproven, true),
         (C::AuthoredShell, true),
         (C::OrderedCarrier, false),
+        (C::Heritage, false),
         (C::PreservingRebuild, false),
         (C::QuerySubject, false),
         (C::TestFixture, false),
@@ -32202,6 +32204,10 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
     assert!(
         dispatch.composite_rebuild_re_decides(C::AuthoredShell, &plain, false),
         "signature-free derived intersection re-decides"
+    );
+    assert!(
+        !dispatch.composite_rebuild_re_decides(C::Heritage, &plain, false),
+        "a declaration body with heritage is never re-decided as an intersection, even          signature-free"
     );
     assert!(
         !dispatch.composite_rebuild_re_decides(C::AuthoredShell, &with_callable, false),

@@ -41,17 +41,20 @@ const POS_CANONICAL: &str = "/ws/flow-positional.ts";
 /// making the position local, deletes it.
 const POS_FIXTURE: &str = r#"
 export class Box { readonly tag = "box"; }
+// A tagged template is a call form the substrate has no arm for — the
+// unmodelled position every row below places.
+export declare function box(strings: TemplateStringsArray): Box;
 
 // ── B-F1: one unmodelled member inside an object literal ─────────────
 export function objectWithUnmodeledCall() {
-  return { label: "x", made: new Box() };
+  return { label: "x", made: box`b` };
 }
 
 // The byte-equivalent local-binding spelling — already survived at HEAD
 // through `FailedBindingInitializer`, and is the control that proves the
 // disposition must not depend on where the evaluator was standing.
 export function objectWithUnmodeledLocal() {
-  const b = new Box();
+  const b = box`b`;
   return { label: "x", made: b };
 }
 
@@ -63,12 +66,11 @@ export function objectWithUnmodeledBinding() {
 
 // ── B-F2: an array element at a call position ────────────────────────
 //
-// The array's elements lower structurally, so the unmodelled position is
-// ONE ELEMENT: `made` is `(string | MARKER)[]`, the modelled `"s"` kept
-// (tsgo: `{ label: string; made: (string | Box)[] }`) — see
-// `flow_return_frame_seal_tests::an_unmodeled_array_element_marks_only_its_element`.
+// Both composites survive: the OBJECT and the array inside it, whose
+// `` box`b` `` element alone carries the marker beside the modelled
+// `"s"` one (tsgo: `{ label: string; made: (string | Box)[] }`).
 export function arrayWithUnmodeledCall() {
-  return { label: "x", made: ["s", new Box()] };
+  return { label: "x", made: ["s", box`b`] };
 }
 
 // ── A-F2 / A-F3: the residual warm-fabricated-`any` call forms ───────
@@ -262,7 +264,7 @@ fn is_unresolved_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNo
 ///
 /// This is B-F1 at the evaluator boundary. The checker's answer for
 /// `objectWithUnmodeledCall` is `{ label: string; made: Box }`; the
-/// substrate cannot type `new Box()` (that is `U6.CALL_RESOLVE`), so
+/// substrate has no arm for the tagged template `` box`b` ``, so
 /// `made` is the typed unresolved marker — never a fabricated `any`,
 /// which is indistinguishable from an authored one at every downstream
 /// gate, and never a discarded composite.
@@ -280,10 +282,6 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
         ),
         (
             "objectWithUnmodeledBinding",
-            FlowReturnDegradation::UnmodeledPosition,
-        ),
-        (
-            "arrayWithUnmodeledCall",
             FlowReturnDegradation::UnmodeledPosition,
         ),
         (
@@ -313,32 +311,8 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
                 dispatch.graph().node_data(label)
             );
             let made = member(dispatch, outcome.node, "made");
-            // The array row's unmodelled position is ONE ELEMENT: `made`
-            // is `(string | MARKER)[]`, the modelled `"s"` kept.
-            let marked = match dispatch.graph().node_data(made).as_deref() {
-                Some(SemanticNodeData::Array { element, .. })
-                    if name == "arrayWithUnmodeledCall" =>
-                {
-                    match dispatch.graph().node_data(*element).as_deref() {
-                        Some(SemanticNodeData::Union(arms)) => {
-                            assert!(
-                                arms.iter().any(|arm| matches!(
-                                    dispatch.graph().node_data(*arm).as_deref(),
-                                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
-                                )),
-                                "{name}: the modelled `string` element survives"
-                            );
-                            arms.iter()
-                                .copied()
-                                .find(|arm| is_unresolved_marker(dispatch, *arm))
-                        }
-                        _ => None,
-                    }
-                }
-                _ => Some(made),
-            };
             assert!(
-                marked.is_some_and(|node| is_unresolved_marker(dispatch, node)),
+                is_unresolved_marker(dispatch, made),
                 "{name}: the unmodelled position must carry the typed marker, got {:?}",
                 dispatch.graph().node_data(made)
             );
@@ -353,6 +327,36 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "{name} degraded success is ReturnOnly — nothing warms"
         );
     }
+
+    // `arrayWithUnmodeledCall` — the ARRAY survives too: its element is
+    // `string | MARKER`, the modelled `"s"` element kept beside the marked
+    // `` box`b` `` one.
+    let outcome = evaluate(&host, POS_CANONICAL, "arrayWithUnmodeledCall")
+        .expect("arrayWithUnmodeledCall must produce a value");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        let element = match dispatch.graph().node_data(made).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => *element,
+            other => panic!("arrayWithUnmodeledCall: the array survives, got {other:?}"),
+        };
+        let members = match dispatch.graph().node_data(element).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.to_vec(),
+            other => panic!("arrayWithUnmodeledCall: a two-element union, got {other:?}"),
+        };
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert!(members
+            .iter()
+            .any(|member| is_unresolved_marker(dispatch, *member)));
+        assert!(members.iter().any(|member| matches!(
+            dispatch.graph().node_data(*member).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        )));
+    });
+    assert_eq!(
+        outcome.degradation,
+        Some(FlowReturnDegradation::UnmodeledPosition)
+    );
+    assert_eq!(outcome.candidates, 0);
 
     // `assignmentCallPosition` — `(z = fs())` is a whole-binding write in
     // expression position whose right-hand side is a resolved call: the

@@ -739,13 +739,22 @@ pub(crate) fn emits_from_typeinfo_surface(
     let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.clone());
 
     let mut emits: Vec<ResolvedEmitOccurrence> = Vec::new();
+    // An exact callable occurrence publishes once. A declaration inherits a
+    // shared base's signatures once per heritage path (a diamond reaches its
+    // root twice), and the one authored signature under one instantiation is
+    // one occurrence, not two overloads.
+    let mut published_occurrences: rustc_hash::FxHashSet<SemanticNodeId> =
+        rustc_hash::FxHashSet::default();
 
     // Walk the canonical resolver stream exactly once. Each producer becomes
     // a complete occurrence here; kind indexes never define membership,
     // association, or order.
     for entry in macro_surface.surface.entries.iter() {
         let sig = match entry {
-            TypeInfoSurfaceEntry::CallSignature(sig) => sig,
+            TypeInfoSurfaceEntry::CallSignature(sig) if published_occurrences.insert(sig.node) => {
+                sig
+            }
+            TypeInfoSurfaceEntry::CallSignature(_) => continue,
             TypeInfoSurfaceEntry::Member(member) => {
                 if let Some(occurrence) = property_style_emit_field(ctx, resolved, member) {
                     emits.push(occurrence);

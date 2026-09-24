@@ -25,7 +25,7 @@ use crate::semantic_query::{
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 const R5_OTHER: &str = "/ws/flow-r5-other.ts";
 const R5_OTHER_SOURCE: &str = r#"
@@ -5125,7 +5125,8 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// Two halves close it. A CONDITIONAL is a `Branches` disposition of the
 /// shared value-structural classifier, so both branches lower as flow
 /// expressions and their calls ride the one call sink, joining through
-/// the same normalizing interner the contributor join uses. And a leaf
+/// the same normalizing interner the contributor join uses; an ARRAY
+/// literal is an `Array` disposition whose elements do the same. And a leaf
 /// answer that would EMBED the carrier goes through `lower_leaf`'s
 /// call-carrier gate and FAILS CLOSED rather than publishing it.
 ///
@@ -5157,17 +5158,15 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// applicable signature at a bare call, in an `if` arm, and in a ternary
 /// arm alike (one callee, one answer). The generic rows resolve exactly
 /// too: explicit type arguments instantiate the clause, and the ternary
-/// joins both arms. The array rows resolve the same way: an array
-/// literal's elements are flow expressions (the `Array` disposition), so
-/// each element's call rides the one call sink. `tnLitTernary` /
-/// `tnLitIf` keep their un-widened literals — the checker's own `1 | 2`.
+/// joins both arms. `tnLitTernary` / `tnLitIf` keep their un-widened
+/// literals — the checker's own `1 | 2`.
 ///
 /// Mutation recipe: dispositioning `ConditionalExpression` as
 /// `ValueDescent::Leaf` in the shared classifier flips `tnAmbTernary`
 /// back to `deg=None cands=1` and puts a `ReturnType` `InstantiationRef`
-/// inside every generic row; dispositioning `ArrayExpression` as `Leaf`
-/// sends the two array rows back through `lower_leaf`, whose gate fails
-/// them closed.
+/// inside every generic row; dispositioning `ArrayExpression` as
+/// `ValueDescent::Leaf` again sends both array rows back through the leaf
+/// gate, which fails them closed.
 #[test]
 fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_return() {
     let host = make_r5_host();
@@ -5230,16 +5229,12 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
         },
     );
 
-    // An ARRAY literal's element is a flow expression too: the call rides
-    // the one call sink, so the element is the resolved overload / the
-    // instantiated clause, never the raw callee return — the checker's own
-    // `"TA"[]` and `string[]`.
+    // An ARRAY literal is structural too: its element call rides the one
+    // call sink, so the element is the resolved call return — never the
+    // carrier.
     for (name, element) in [
-        (
-            "tnAmbArray",
-            TypeExpr::Literal(LiteralValue::String("TA".to_owned())),
-        ),
-        ("tnGenericArray", TypeExpr::Primitive(PrimitiveName::String)),
+        ("tnAmbArray", string_lit("TA")),
+        ("tnGenericArray", string()),
     ] {
         assert_clean_warm(
             &host,
