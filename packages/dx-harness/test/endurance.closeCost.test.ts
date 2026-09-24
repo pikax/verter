@@ -21,6 +21,7 @@
  * Opt in with `VERTER_ENDURANCE_CLOSE_COST=1`. `VERTER_ENDURANCE_CLOSE_COST_CORPUS_DIR`
  * points at an existing workspace root instead of generating the slice;
  * `VERTER_ENDURANCE_CLOSE_COST_FILES` bounds the documents driven (default 40);
+ * `VERTER_ENDURANCE_CLOSE_COST_COUNT` sets the slice size (default 2615 SFCs);
  * `VERTER_ENDURANCE_CLOSE_COST_OUT` names a JSON receipt to write.
  */
 import { execFileSync } from "node:child_process";
@@ -55,8 +56,17 @@ const REPO_ROOT = path.resolve(HERE, "..", "..", "..");
 const config = loadEnduranceConfig();
 const ENABLED = process.env.VERTER_ENDURANCE_CLOSE_COST === "1";
 const FILE_BUDGET = Number(process.env.VERTER_ENDURANCE_CLOSE_COST_FILES ?? "40");
-/** WSP1B: the PrimeVue-equivalent slice of the synthetic-15k corpus. */
-const SLICE = { count: 2615, modules: 80, composite: 8 } as const;
+/**
+ * WSP1B: the PrimeVue-equivalent slice of the synthetic-15k corpus (2615 SFCs,
+ * 80 modules, 8 composite). `VERTER_ENDURANCE_CLOSE_COST_COUNT` scales the
+ * slice down for a machine or build that cannot sync the full one in time;
+ * the receipt records the size actually driven.
+ */
+const SLICE = (() => {
+  const count = Number(process.env.VERTER_ENDURANCE_CLOSE_COST_COUNT ?? "2615");
+  const modules = Math.max(2, Math.round((count / 2615) * 80));
+  return { count, modules, composite: Math.max(1, Math.round(modules / 10)) } as const;
+})();
 
 interface CloseCostSample {
   readonly relativePath: string;
