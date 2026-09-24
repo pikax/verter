@@ -3832,7 +3832,11 @@ mod corpus_suite {
     /// * a [`Verdict::MatchesChecker`] row's live surface must EQUAL
     ///   its parsed checker — editing the checker column (or regressing
     ///   the surface) fails here;
-    /// * every OTHER verdict (KnownOwed / Degraded) must NOT match —
+    /// * a Degraded row listed in [`DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE`]
+    ///   must EQUAL it too: its flow type is the checker's and only its
+    ///   runtime is erased, and the list's own check requires that
+    ///   erasure;
+    /// * every OTHER verdict (KnownOwed / unlisted Degraded) must NOT match —
     ///   the recorded divergence must be REAL in the tree, so silently
     ///   repairing the debt, or editing the checker column to the live
     ///   value, fails here and forces the deliberate re-pin.
@@ -3875,39 +3879,161 @@ mod corpus_suite {
                     None => (false, "<no value>".to_owned()),
                 },
             );
-            match row.verdict {
-                Verdict::MatchesChecker => {
-                    if !matches {
-                        failures.push(format!(
-                            "{}: labelled MatchesChecker but the LIVE semantic surface does \
-                             not equal the parsed checker `{}` — measured `{rendered}`. \
-                             Either the surface regressed or the checker column was edited; \
-                             re-measure against the pinned oracle before re-pinning.",
-                            row.id, row.checker
-                        ));
-                    }
+            failures.extend(deep_pin_verdict_failure(row, matches, &rendered));
+        }
+        failures.extend(flow_type_matching_degraded_list_failures(CORPUS));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The flip law for ONE deep-pinned row, given whether its LIVE
+    /// semantic surface equals its parsed checker: a `MatchesChecker` row
+    /// must match; a Degraded row listed in
+    /// [`DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE`] pins BOTH halves — the
+    /// flow type equals the checker's while the runtime is erased — so it
+    /// must match too; every other verdict (KnownOwed, an unlisted
+    /// Degraded) records a divergence that must be REAL, so it must not
+    /// match. Each direction fails, so every move is a deliberate re-pin.
+    pub(super) fn deep_pin_verdict_failure(
+        row: &Row,
+        matches: bool,
+        rendered: &str,
+    ) -> Option<String> {
+        let flow_type_pinned = DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE
+            .iter()
+            .any(|(id, _)| *id == row.id);
+        match row.verdict {
+            Verdict::MatchesChecker if !matches => Some(format!(
+                "{}: labelled MatchesChecker but the LIVE semantic surface does not equal \
+                 the parsed checker `{}` — measured `{rendered}`. Either the surface \
+                 regressed or the checker column was edited; re-measure against the pinned \
+                 oracle before re-pinning.",
+                row.id, row.checker
+            )),
+            Verdict::MatchesChecker => None,
+            Verdict::Degraded(_) if flow_type_pinned && !matches => Some(format!(
+                "{}: listed in DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE (its flow type equals \
+                 the checker's, its runtime is erased) but the LIVE semantic surface does not \
+                 equal the parsed checker `{}` — measured `{rendered}`. The flow half of the \
+                 pin regressed; re-measure before re-pinning.",
+                row.id, row.checker
+            )),
+            Verdict::Degraded(_) if flow_type_pinned => None,
+            _ if matches => Some(format!(
+                "{}: labelled {:?} but the LIVE semantic surface EQUALS the parsed checker \
+                 `{}` — the recorded divergence is GONE. This failure is the INTENDED \
+                 signal: the debt looks repaired (or the checker column was edited to the \
+                 live value); re-pin the row and close its ledger entries in the same \
+                 change. A Degraded row whose flow type now matches while its runtime stays \
+                 erased is listed in DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE.",
+                row.id, row.verdict, row.checker
+            )),
+            _ => None,
+        }
+    }
+
+    /// CONTROL — the flip law fires in BOTH directions for both Degraded
+    /// pin shapes: a Degraded row at the checker's flow type fails when its
+    /// flow type stops matching and passes while it matches; an unlisted
+    /// Degraded row fails when its flow type starts matching and passes
+    /// while it diverges; and the list check refuses an entry whose row
+    /// lost its Degraded label or its runtime erasure.
+    #[test]
+    fn degraded_flow_type_pins_flip_in_both_directions() {
+        let row = |id: &str| {
+            *CORPUS
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("corpus row `{id}`"))
+        };
+        let listed = row("X10_destructured_default_conditional");
+        assert!(deep_pin_verdict_failure(&listed, true, "").is_none());
+        assert!(
+            deep_pin_verdict_failure(&listed, false, "").is_some(),
+            "a listed Degraded row whose flow type stops matching must fail"
+        );
+        let unlisted = row("D16_helper_undeclared_callee");
+        assert!(matches!(unlisted.verdict, Verdict::Degraded(_)));
+        assert!(deep_pin_verdict_failure(&unlisted, false, "").is_none());
+        assert!(
+            deep_pin_verdict_failure(&unlisted, true, "").is_some(),
+            "an unlisted Degraded row whose flow type starts matching must fail"
+        );
+        assert!(flow_type_matching_degraded_list_failures(CORPUS).is_empty());
+        let relabelled: Vec<Row> = CORPUS
+            .iter()
+            .map(|candidate| {
+                let mut candidate = *candidate;
+                if candidate.id == listed.id {
+                    candidate.verdict = Verdict::MatchesChecker;
                 }
-                // A Degraded row's claim is its runtime erasure (`type:
-                // null`), which the verdict column test corroborates; the
-                // flow type under it may equal the checker's (a `T |
-                // undefined` member of the checker's own type has no single
-                // runtime constructor) or not.
-                Verdict::Degraded(_) => {}
-                _ => {
-                    if matches {
-                        failures.push(format!(
-                            "{}: labelled {:?} but the LIVE semantic surface EQUALS the \
-                             parsed checker `{}` — the recorded divergence is GONE. This \
-                             failure is the INTENDED signal: the debt looks repaired (or \
-                             the checker column was edited to the live value); re-pin the \
-                             row and close its ledger entries in the same change.",
-                            row.id, row.verdict, row.checker
-                        ));
-                    }
+                candidate
+            })
+            .collect();
+        assert!(
+            !flow_type_matching_degraded_list_failures(&relabelled).is_empty(),
+            "a listed row no longer labelled Degraded must fail the list check"
+        );
+        let unerased: Vec<Row> = CORPUS
+            .iter()
+            .map(|candidate| {
+                let mut candidate = *candidate;
+                if candidate.id == listed.id {
+                    candidate.runtime = Runtime::Emitted {
+                        has: &["label: { type: String"],
+                        hasnt: &[],
+                    };
                 }
+                candidate
+            })
+            .collect();
+        assert!(
+            !flow_type_matching_degraded_list_failures(&unerased).is_empty(),
+            "a listed row whose runtime pins no erased member must fail the list check"
+        );
+    }
+
+    /// Every [`DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE`] entry names a
+    /// corpus row that is deep-pinned, labelled `Degraded`, and whose
+    /// runtime lane pins the erased `type: null` member — the second half
+    /// of the two-sided pin; each entry appears once.
+    pub(super) fn flow_type_matching_degraded_list_failures(corpus: &[Row]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for (index, (id, reason)) in DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE.iter().enumerate() {
+            if reason.is_empty() {
+                failures.push(format!("{id}: listed with no reason"));
+            }
+            if DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE[..index]
+                .iter()
+                .any(|(earlier, _)| earlier == id)
+            {
+                failures.push(format!("{id}: listed twice"));
+            }
+            let Some(row) = corpus.iter().find(|row| row.id == *id) else {
+                failures.push(format!("{id}: listed but no corpus row has this id"));
+                continue;
+            };
+            if !matches!(row.verdict, Verdict::Degraded(_)) {
+                failures.push(format!(
+                    "{id}: listed as a Degraded row at the checker's flow type but labelled \
+                     {:?}",
+                    row.verdict
+                ));
+            }
+            if !matches!(row.expect, Expect::Node(_)) {
+                failures.push(format!(
+                    "{id}: listed but not deep-pinned — its flow half is never compared"
+                ));
+            }
+            let erased = matches!(row.runtime, Runtime::Emitted { has, .. }
+                if has.iter().any(|needle| needle.contains("type: null")));
+            if !erased {
+                failures.push(format!(
+                    "{id}: listed but its runtime lane pins no erased `type: null` member — \
+                     the runtime half of the pin is missing"
+                ));
             }
         }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        failures
     }
 
     /// CONTROL — the checker columns of the deep rows the byte lists
@@ -5265,6 +5391,32 @@ const OPEN_DEBTS: &[&str] = &[
     "X105_closure_captures_narrowed_binding_in_guarded_arm",
     "X108_record_index_read_has_no_undefined",
     "X109_optional_index_read_through_optional_chain",
+];
+
+/// Degraded rows whose FLOW type equals the checker's, `(row id, why)`: the
+/// row pins both halves — the deep semantic surface MATCHES the parsed
+/// checker, and the runtime lane erases a member to `type: null` because
+/// that member's type (`T | undefined`, from the checker's union
+/// normal-form cross member) has no single runtime constructor. The flip
+/// law holds in both directions for these rows too
+/// (`corpus_suite::deep_pin_verdict_failure`): a listed row whose flow type
+/// stops matching fails, and every UNLISTED Degraded row still fails the
+/// moment its flow type starts matching.
+#[cfg(test)]
+const DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE: &[(&str, &str)] = &[
+    (
+        "H02_union_spread_source",
+        "the composed spread alternatives carry the cross members `label?: undefined` / `n?: \
+         undefined`, which publish `type: null`",
+    ),
+    (
+        "X10_destructured_default_conditional",
+        "the no-`n` arm carries the cross member `n?: undefined`, so `n` publishes `type: null`",
+    ),
+    (
+        "X27_finally_fallthrough_break_override",
+        "each arm carries the other's member as `?: undefined`, so both publish `type: null`",
+    ),
 ];
 
 // Per-owner conformance — the merge go/no-go
