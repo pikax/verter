@@ -247,11 +247,9 @@ export async function negAsync() {
   return 1;
 }
 
-// A SELF-REFERENTIAL (directly-circular, not valid authored TS) alias:
-// `negAsyncSelfRef`'s operand recurses back through the SAME alias every
-// `Awaited` unwrap step, so the dispatch exhausts its unwrap budget and
-// must publish the TYPED GAP rather than loop forever or fabricate a
-// resolved-looking answer.
+// A SELF-REFERENTIAL promise alias: `negAsyncSelfRef`'s payload recurses
+// back into the SAME alias, which the checker reports as TS1062 and
+// recovers from with `Promise<any>`.
 type NegSelfProm = Promise<NegSelfProm>;
 export declare function negAsyncSrc(): NegSelfProm;
 export async function negAsyncSelfRef() {
@@ -1822,9 +1820,9 @@ fn assignment_expression_return_is_the_assigned_type() {
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 ///
 /// The value is complete and undegraded, and still `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them and the result never warms.
+/// class's constructor and field initializers are callables no indexed
+/// function position serves, so the capture family keeps its typed gap
+/// over them and the result never warms.
 #[test]
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
@@ -2495,52 +2493,26 @@ fn generic_overload_group_callee_resolves_by_arity_and_inference() {
     );
 }
 
-/// CANARY — a `new` expression's return is the constructed instance type.
+/// CANARY (landed) — a `new` expression's return is the constructed
+/// instance type.
 ///
 /// Oracle: `ReturnType<typeof callNew>` is `CtorC`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callNew
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the CONSTRUCT-CALL capability — there is no arm that
-/// resolves a class's construct signature to its instance type. The
-/// ADMISSION half is settled: `NewExpression` is a
-/// `ValueDescent::UnmodeledCall`, so it fails closed rather than
-/// publishing the shallow pass's `any` warm (see
-/// `an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered`).
+/// The construction rides the one call carrier to the class's construct
+/// signatures (`SliceCall::Construct`), so the value is the instance,
+/// clean and warm.
 #[test]
-#[ignore = "NewExpression has no construct-call arm: it fails closed as an unmodeled call position instead of resolving the instance type"]
 fn construct_expression_return_is_the_instance_type() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callNew", type_ref("CtorC"));
 }
 
-/// CANARY — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where `ctorSig`
-/// is a value carrying a `new (…)` signature) returns the signature's
-/// instance type.
+/// CANARY (landed) — a CONSTRUCT-SIGNATURE call (`new ctorSig(1)` where
+/// `ctorSig` is a value carrying a `new (…)` signature) returns the
+/// signature's instance type.
 ///
 /// Oracle: `ReturnType<typeof callCtorSigNew>` is `{ q: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// expected an object answer, got Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: same as the `new` row above — the construct-signature
-/// group is never consulted. It now FAILS CLOSED rather than publishing
-/// `any` warm, so the canary asserts the value it should produce.
 #[test]
-#[ignore = "construct signatures are never consulted: `new ctorSig(1)` fails closed as an unmodeled call position"]
 fn construct_signature_call_return_is_the_signature_instance_type() {
     let host = ts_host();
     let value = value_of(&host, CALLS, "callCtorSigNew");
@@ -3541,12 +3513,10 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
     // The same read at the nesting depths the evaluation composes as
-    // FLOW expressions: an object-literal member value and a nested
-    // function's return. Each resolves through the parameter's
-    // annotation — clean, warm, the checker's own answer (`{ q: string }`,
-    // `() => string`). (An ARRAY element rides inside the array literal's
-    // single composite leaf — a different ingress, still declined; see
-    // `a_value_reaching_a_miss_carrier_is_never_admitted_warm`.)
+    // FLOW expressions: an object-literal member value, an array element
+    // and a nested function's return. Each resolves through the
+    // parameter's annotation — clean, warm, the checker's own answer
+    // (`{ q: string }`, `string[]`, `() => string`).
     let assert_clean = |name: &str| -> TypeExpr {
         match eval(&host, TL, name) {
             Outcome::Value {
@@ -3568,6 +3538,15 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     assert_eq!(
         projected_member(&object, "q"),
         &TypeExpr::Primitive(PrimitiveName::String)
+    );
+    let array = assert_clean("tlMissCarrierInArray");
+    assert!(
+        matches!(
+            &array,
+            TypeExpr::Array { element, readonly: false }
+                if **element == TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "tlMissCarrierInArray: {array:?}"
     );
     let nested = assert_clean("tlMissCarrierInNestedFunction");
     assert_eq!(
@@ -4120,28 +4099,24 @@ fn assert_unresolved_value(
 /// function's return): each declined a frame-rooted `x.q` read as a
 /// miss-carrier value. The frame-rooted member-path projection now
 /// resolves the reads the evaluation composes as FLOW expressions (the
-/// plain read, the object member, the nested-function return — clean,
-/// warm, the checker's own `string`), so those moved to the canary
+/// plain read, the object member, the array element, the nested-function
+/// return — clean, warm, the checker's own `string`), so those moved to
+/// the canary
 /// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`.
-/// What remains is the genuinely unresolvable read and the
-/// composite-leaf interior the projection never sees:
+/// What remains is the genuinely unresolvable read:
 ///
 /// ```text
 /// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
 ///                                carrier is involved at all
-/// tlMissCarrierInArray           nested inside ONE leaf lowering's own
-///                                answer (`Array{element}`), which no
-///                                shallow ingress check could see
 /// ```
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
-/// to publish for it at all. The array row's `string[]` is the answer
-/// the composite-leaf ingress still declines to produce.
+/// to publish for it at all.
 ///
 /// Mutation recipe: returning `false` unconditionally from
-/// `flow_return_value_is_unresolved` flips each row to a warm
+/// `flow_return_value_is_unresolved` flips the row to a warm
 /// `candidates: 1`.
 #[test]
 fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
@@ -4150,19 +4125,6 @@ fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
     // Top-level miss, reached through the FREE-leaf arm.
     assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
         assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
-    });
-    // Nested inside ONE leaf lowering's own composite answer: the array
-    // literal lowers as ONE leaf (`Array{element: typeof x.q}`), so the
-    // frame-rooted member path never reaches the evaluator's projection
-    // — a composite-leaf interior is a distinct, still-declined ingress.
-    assert_unresolved_value(&host, TL, "tlMissCarrierInArray", |dispatch, node| {
-        let data = dispatch.graph().node_data(node);
-        let Some(SemanticNodeData::Array { element, .. }) = data.as_deref() else {
-            panic!("the array row must still produce an Array node");
-        };
-        let element = *element;
-        drop(data);
-        assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
     });
 }
 
@@ -4228,8 +4190,6 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// produce, every one of them different from `any`:
 ///
 /// ```text
-/// callNew         new CtorC(1)                    CtorC
-/// callCtorSigNew  new ctorSig(1)                  { q: string; }
 /// callOptional    maybeFn?.()                     number | undefined
 /// callTagged      tag`a${1}b`                     boolean
 /// ```
@@ -4237,19 +4197,20 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
-/// `awaited_call_return_is_the_awaited_value_wrapped_again`).
+/// `awaited_call_return_is_the_awaited_value_wrapped_again`). Neither is
+/// `new`: a construction rides the call carrier to the construct
+/// signatures (see `construct_expression_return_is_the_instance_type`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
-/// exactly the matching rows — `NewExpression` /
-/// `TaggedTemplateExpression` to `false` flips `callNew` /
-/// `callCtorSigNew` / `callTagged` back to a warm `any`, and
+/// exactly the matching rows — `TaggedTemplateExpression` to `false`
+/// flips `callTagged` back to a warm `any`, and
 /// `ChainElement::CallExpression` to `false` flips `callOptional`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in ["callNew", "callCtorSigNew", "callOptional", "callTagged"] {
+    for name in ["callOptional", "callTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -4260,11 +4221,13 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// The sequence's value is its last operand, so a call there lowers
 /// through the SAME structural call rails its bare spelling takes:
 /// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
-/// exactly like the bare `callRest` twin — the sequence context never
-/// converts a resolved call into a fail-closed marker.
+/// exactly like the bare `callRest` twin, and `(0, new CtorC(1))`
+/// surfaces the constructed `CtorC` exactly like the bare `callNew` —
+/// the sequence context never converts a resolved call into a
+/// fail-closed marker.
 ///
 /// The discriminator runs the other way with the same fixture: every
-/// call form with NO structural arm (`new`, an optional call, a tagged
+/// call form with NO structural arm (an optional call, a tagged
 /// template) keeps the fail-closed verdict when a sequence wraps it —
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
@@ -4274,25 +4237,26 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// the sequence exactly as the resolved bare call's is.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed rows decline to
-/// produce:
+/// --ignoreConfig`):
 ///
 /// ```text
-/// callSeqNew       CtorC
-/// callSeqOptional  number | undefined
-/// callSeqTagged    boolean
+/// callSeqNew       CtorC                (published)
+/// callSeqOptional  number | undefined   (declined — fails closed)
+/// callSeqTagged    boolean              (declined — fails closed)
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest` and `callSeqAwait` to the
-/// fail-closed marker; widening the delegation past the
-/// paren-transparent `CallExpression` form (a `New` / chain / tagged
-/// last operand) flips the three negative rows to a published value.
+/// half's sequence arm flips `callSeqRest`, `callSeqNew` and
+/// `callSeqAwait` to the fail-closed marker; widening the delegation past
+/// the paren-transparent `CallExpression` / `NewExpression` forms (a chain
+/// / tagged last operand) flips the two negative rows to a published
+/// value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
+    assert_clean_warm(&host, CALLS, "callSeqNew", type_ref("CtorC"));
     // An awaited call keeps its own modelled verdict through the
     // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
     assert_clean_warm(
@@ -4305,7 +4269,7 @@ fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
         },
     );
     // Every form with no structural arm keeps failing closed.
-    for name in ["callSeqNew", "callSeqOptional", "callSeqTagged"] {
+    for name in ["callSeqOptional", "callSeqTagged"] {
         assert_fails_closed(&host, CALLS, name);
     }
 }
@@ -4405,41 +4369,36 @@ fn plain_async_wrap_is_unaffected_by_a_missing_generator_lib_surface() {
     );
 }
 
-/// The `Awaited` dispatch over a SELF-REFERENTIAL operand:
-/// `negAsyncSrc`'s declared return is the directly-circular alias
-/// `NegSelfProm = Promise<NegSelfProm>` (not valid authored TS — real
-/// `tsc` rejects this alias with TS2456 — but a fixture-only shape this
-/// substrate must still fail closed over rather than hang or fabricate
-/// an answer). The async wrap's unconditional `Awaited` dispatch resolves
-/// the alias to `Promise<NegSelfProm>` and RE-ENTERS the family over the
-/// SAME identical alias every step (the `Promise<V>` payload arm of
-/// `AwaitedNormalize`), so it never settles. The refusal is now the
-/// FAMILY's own cycle handling, not a private unwrap counter: re-entry
-/// produces the identical query key, which the same-path guard stops —
-/// the retired `AWAITED_UNWRAP_BUDGET` constant is gone with the private
-/// recursion it bounded. The dispatch refuses rather than looping
-/// forever or answering a resolved-looking but meaningless carrier, and
-/// the wrap publishes the TYPED GAP, never warming.
+/// The async wrap over a SELF-REFERENTIAL promise: `negAsyncSrc`'s
+/// declared return is the alias `NegSelfProm = Promise<NegSelfProm>`,
+/// whose payload is the alias itself.
+///
+/// tsc 7.0.2 (`--noEmit --strict`) accepts the alias and types
+/// `negAsyncSelfRef` `Promise<any>`, reporting TS1062 ("Type is referenced
+/// directly or indirectly in the fulfillment callback of its own 'then'
+/// method.") at its name — the checker's promised-type recursion rule,
+/// whose own case is a promise whose promised type is the promise itself.
+/// The payload relation resolves the alias to `Promise<NegSelfProm>`,
+/// re-enters on the payload, finds the SAME alias already being unwrapped
+/// and fails with that diagnostic: the wrap publishes the checker's
+/// recovery, complete and never warm (the failure is a fact about the
+/// path), instead of looping or answering a meaningless carrier.
 #[test]
-fn async_wrap_awaited_dispatch_over_a_self_referential_operand_keeps_typed_gap_never_warms() {
+fn async_wrap_over_a_self_referential_promise_recovers_under_ts1062() {
     let host = ts_host();
-    match eval(&host, NEG, "negAsyncSelfRef") {
+    assert_eq!(
+        eval(&host, NEG, "negAsyncSelfRef"),
         Outcome::Value {
-            degradation,
-            candidates,
-            ..
-        } => {
-            assert!(
-                degradation.is_some(),
-                "a directly-circular Awaited operand must degrade, never resolve to a fabricated answer"
-            );
-            assert_eq!(
-                candidates, 0,
-                "a gapped async wrap is ReturnOnly — it must never warm"
-            );
+            ty: TypeExpr::Ref {
+                name: Arc::from("Promise"),
+                type_arguments: Arc::from(
+                    vec![TypeExpr::Primitive(PrimitiveName::Any)].into_boxed_slice()
+                ),
+            },
+            degradation: None,
+            candidates: 0,
         }
-        other => panic!("negAsyncSelfRef must produce a degraded value, got {other:?}"),
-    }
+    );
 }
 
 /// Structural matcher for [`awaited_relation_oracle_matrix`]. Spans are part
@@ -5697,51 +5656,494 @@ fn async_return_payload_demand_is_bounded_cold_and_zero_warm() {
     );
 }
 
-/// A self-referential thenable for [`recursive_thenable_terminates_without_fabricating_a_type`].
+// ──────────────────────────────────────────────────────────────────────
+// Recursive thenables: the checker's TS1062 / TS2589 diagnostics and the
+// error type it continues with
+// ──────────────────────────────────────────────────────────────────────
+
+/// Recursive thenables in every Awaited position, beside a non-recursive
+/// thenable and a non-thenable cycle that must keep their ordinary answers.
+/// Every expected answer below is measured on tsc 7.0.2 over this exact
+/// module (`--noEmit --strict --target es2022`, each type read through the
+/// tuple wrapper `null as any as [ReturnType<typeof f>]` quoted by TS2322).
 const RECURSIVE_THENABLE: &str = "/ws/cov/recursive_thenable.ts";
 const RECURSIVE_THENABLE_SRC: &str = r#"
 interface Rec { then(onfulfilled: (v: Rec) => void): void }
-export async function recAwait(v: Rec) { return v; }
-declare const l1: Awaited<Rec>; export function f1() { return l1; }
+interface PingThen { then(onfulfilled: (v: PongThen) => void): void }
+interface PongThen { then(onfulfilled: (v: PingThen) => void): void }
+interface SelfOrText { then(onfulfilled: (v: SelfOrText | string) => void): void }
+interface NumberThen { then(onfulfilled: (v: number) => void): void }
+interface Chain { next: Chain; v: number }
+interface Linked { then(onfulfilled: (v: { next: Linked }) => void): void }
+interface Holder { self: Holder; box: { then(onfulfilled: (v: Holder) => void): void } }
+type AwaitedOf<T> = Awaited<T>;
+export async function awaitRec(r: Rec) { const value = await r; return value; }
+export async function returnRec(r: Rec) { return r; }
+export async function awaitPromiseRec(p: Promise<Rec>) { const value = await p; return value; }
+export async function returnPromiseRec(p: Promise<Rec>) { return p; }
+export async function awaitRecOrNumber(a: Rec | number) { const value = await a; return value; }
+export async function awaitPing(a: PingThen) { const value = await a; return value; }
+export async function returnPing(a: PingThen) { return a; }
+export async function awaitSelfOrText(a: SelfOrText) { const value = await a; return value; }
+export async function returnSelfOrText(a: SelfOrText) { return a; }
+export async function awaitNumberThen(a: NumberThen) { const value = await a; return value; }
+export async function returnNumberThen(a: NumberThen) { return a; }
+export async function awaitChain(a: Chain) { const value = await a; return value; }
+export async function returnChain(a: Chain) { return a; }
+export async function awaitLinked(a: Linked) { const value = await a; return value; }
+export async function returnLinked(a: Linked) { return a; }
+export async function awaitHolderBox(h: Holder) { const value = await h.box; return value; }
+export async function returnHolderBox(h: Holder) { return h.box; }
+export async function declaredRec(): Promise<Rec> { return null as any; }
+export function declaredRecReturn() { const x: ReturnType<typeof declaredRec> = null as any; return x; }
+export function libRec() { const x: Awaited<Rec> = null as any; return x; }
+export function libRecThroughAlias() { const x: AwaitedOf<Rec> = null as any; return x; }
+export function libPromiseRec() { const x: Awaited<Promise<Rec>> = null as any; return x; }
+export function libPing() { const x: Awaited<PingThen> = null as any; return x; }
+export function libSelfOrText() { const x: Awaited<SelfOrText> = null as any; return x; }
+export function libNumberThen() { const x: Awaited<NumberThen> = null as any; return x; }
+export function libChain() { const x: Awaited<Chain> = null as any; return x; }
+export function libHolderBox() { const x: Awaited<Holder['box']> = null as any; return x; }
+export function libLinked() { const x: Awaited<Linked> = null as any; return x; }
+// The lib async-generator surface this standalone host has no `lib*.d.ts` for
+// (measured against the real lib).
+interface AsyncGenerator<T, TReturn, TNext> {}
+export async function* yieldRec(r: Rec) { yield r; }
+export async function* yieldNumberThen(a: NumberThen) { yield a; }
+interface GenericRec<T> { then(onfulfilled: (v: GenericRec<T>) => void): void }
+export async function awaitGenericRec(a: GenericRec<string>) { const value = await a; return value; }
+export async function returnGenericRec(a: GenericRec<string>) { return a; }
 "#;
 
-/// A thenable whose fulfillment callback takes the thenable itself
-/// TERMINATES, and never publishes a fabricated type.
+/// The checker diagnostic a recovery carrier names, if `node` is one.
+fn checker_recovery_of(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<crate::semantic_query::CheckerDiagnostic> {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))) => {
+            Some(*diagnostic)
+        }
+        _ => None,
+    }
+}
+
+/// The TS1062 diagnostic `operation` raises on a recursive thenable.
+fn recursive_fulfillment(
+    operation: crate::semantic_query::CheckerDiagnosticOperation,
+) -> crate::semantic_query::CheckerDiagnostic {
+    crate::semantic_query::CheckerDiagnostic {
+        code: crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+        operation,
+    }
+}
+
+/// `Promise<payload>`, and the payload node, of one async function's
+/// COMPLETE flow return: never degraded, and ReturnOnly exactly when
+/// `warm` is false.
+#[track_caller]
+fn async_payload<R>(
+    host: &Arc<VerterHost>,
+    name: &str,
+    warm: bool,
+    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    with_dispatch(host, |dispatch| {
+        let key = key_of(dispatch, RECURSIVE_THENABLE, name);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            panic!("{name} must produce a value");
+        };
+        assert_eq!(result.degradation(), None, "{name} is a complete answer");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            usize::from(warm),
+            "{name}: warm-admitted exactly when no recursive-thenable failure is on its path"
+        );
+        let payload = match dispatch.graph().node_data(result.return_type()).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args })
+                if base.decl_name.as_ref() == "Promise" && args.len() == 1 =>
+            {
+                args[0]
+            }
+            other => panic!("{name} must publish `Promise<…>`, got {other:?}"),
+        };
+        pick(dispatch, payload)
+    })
+}
+
+/// `Promise<inner>` with no spans.
+fn promise_of(inner: TypeExpr) -> TypeExpr {
+    TypeExpr::Ref {
+        name: Arc::from("Promise"),
+        type_arguments: Arc::from(vec![inner].into_boxed_slice()),
+    }
+}
+
+fn any() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Any)
+}
+
+/// The node an authored lib `Awaited<…>` annotation reduces to when a
+/// consumer demands it (publication keeps the application; the corpus
+/// lane's structural-fact demand reduces it), and that node raised.
+#[track_caller]
+fn reduced_annotation(host: &Arc<VerterHost>, name: &str) -> (SemanticNodeData, TypeExpr) {
+    with_dispatch(host, |dispatch| {
+        let key = key_of(dispatch, RECURSIVE_THENABLE, name);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("{name} must produce a value");
+        };
+        let node = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .unwrap_or_else(|| panic!("{name}: the demand must complete"));
+        let data = dispatch
+            .graph()
+            .node_data(node)
+            .unwrap_or_else(|| panic!("{name}: the reduced node exists"))
+            .as_ref()
+            .clone();
+        let raised = host
+            .project_node_to_type_expr_for_test(node)
+            .unwrap_or_else(|| panic!("{name}: the reduced node raises"));
+        (data, raised)
+    })
+}
+
+/// `await` of a recursive thenable is the checker's error type under TS1062,
+/// raised by the await operand.
 ///
-/// tsc 7.0.2 rejects both readings and recovers with `any`: the async
-/// position is `Promise<any>` under TS1062 ("Type is referenced directly or
-/// indirectly in the fulfillment callback of its own 'then' method") and the
-/// authored `Awaited<Rec>` is `any` under TS2589. An error recovery is not a
-/// type this substrate may fabricate clean and warm, so the requirement here
-/// is the pair that IS decidable without the diagnostic channel: the read
-/// terminates, and whatever it publishes is not a confidently-wrong concrete
-/// answer.
-///
-/// The runtime relation refuses through the shared family cycle guard and
-/// the async wrap publishes the typed gap with ZERO candidates — never a
-/// clean, warm `Promise<any>` copied from the checker's error recovery. The
-/// lib conditional keeps the AUTHORED `Awaited<Rec>` application unreduced,
-/// which is the honest deferral, not a branch selection.
+/// tsc 7.0.2, each function's type and its one diagnostic ("Type is
+/// referenced directly or indirectly in the fulfillment callback of its own
+/// 'then' method."), reported at the `await` expression:
+/// `awaitRec` is `Promise<any>`; `awaitPromiseRec` (the payload of
+/// `Promise<Rec>` is the recursive thenable) is `Promise<any>`; `awaitPing`
+/// (`PingThen` promises `PongThen`, which promises `PingThen`) is
+/// `Promise<any>`. The `await` answers the recovery carrier naming that
+/// diagnostic, which reads as `any`; the answer is complete, but which
+/// types the relation is already unwrapping is a fact about the path, so it
+/// never warms.
 #[test]
-fn recursive_thenable_terminates_without_fabricating_a_type() {
+fn awaiting_a_recursive_thenable_recovers_with_any_under_ts1062() {
+    use crate::semantic_query::CheckerDiagnosticOperation;
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
-    assert_degraded(
+    for name in ["awaitRec", "awaitPromiseRec", "awaitPing"] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: promise_of(any()),
+                degradation: None,
+                candidates: 0,
+            },
+            "{name}"
+        );
+        let recovery = async_payload(&host, name, false, checker_recovery_of);
+        assert_eq!(
+            recovery,
+            Some(recursive_fulfillment(
+                CheckerDiagnosticOperation::AwaitOperand
+            )),
+            "{name}"
+        );
+    }
+}
+
+/// An async function returning a recursive thenable publishes `Promise<any>`
+/// under TS1062, raised by the async return.
+///
+/// tsc 7.0.2: `returnRec`, `returnPromiseRec` and `returnPing` are each
+/// `Promise<any>`, with the one TS1062 reported at the function's name (the
+/// async return's awaited type).
+#[test]
+fn returning_a_recursive_thenable_recovers_with_promise_any_under_ts1062() {
+    use crate::semantic_query::CheckerDiagnosticOperation;
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for name in ["returnRec", "returnPromiseRec", "returnPing"] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: promise_of(any()),
+                degradation: None,
+                candidates: 0,
+            },
+            "{name}"
+        );
+        let recovery = async_payload(&host, name, false, checker_recovery_of);
+        assert_eq!(
+            recovery,
+            Some(recursive_fulfillment(
+                CheckerDiagnosticOperation::AsyncReturnPayload
+            )),
+            "{name}"
+        );
+    }
+}
+
+/// A recursive arm of an awaited union is DROPPED, not recovered: the
+/// checker maps its awaited type over the union and leaves out the arm it
+/// failed on, so the answer is the other arms and carries no `any`.
+///
+/// tsc 7.0.2: `awaitSelfOrText` is `Promise<string>` (TS1062 at the
+/// `await`), `returnSelfOrText` is `Promise<string>` (TS1062 at the name,
+/// measured alone: sharing a file, the checker caches the union's awaited
+/// type from the first position and reports only there), and
+/// `awaitRecOrNumber` is `Promise<number>` (TS1062 at the `await`).
+#[test]
+fn a_recursive_arm_is_dropped_from_an_awaited_union() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for (name, expected) in [
+        ("awaitSelfOrText", string()),
+        ("returnSelfOrText", string()),
+        ("awaitRecOrNumber", number()),
+    ] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: promise_of(expected),
+                degradation: None,
+                candidates: 0,
+            },
+            "{name}"
+        );
+    }
+}
+
+/// The authored lib `Awaited<X>` over a recursive thenable is the checker's
+/// error type under TS2589, raised by the lib conditional: `Awaited<V>`
+/// recurses into the application it is still evaluating.
+///
+/// tsc 7.0.2, each read through the tuple wrapper, each reporting
+/// "Type instantiation is excessively deep and possibly infinite." at the
+/// `Awaited` reference: `Awaited<Rec>`, `AwaitedOf<Rec>` (a generic alias
+/// over `Awaited<T>`, measured alone — the checker caches the shared
+/// instantiation and reports it once per file), `Awaited<Promise<Rec>>`,
+/// `Awaited<PingThen>` and `Awaited<SelfOrText>` are all `[any]` — the
+/// error type absorbs the union arm the runtime relation would drop.
+#[test]
+fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    };
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let ts2589 = CheckerDiagnostic {
+        code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        operation: CheckerDiagnosticOperation::LibAwaited,
+    };
+    for name in [
+        "libRec",
+        "libRecThroughAlias",
+        "libPromiseRec",
+        "libPing",
+        "libSelfOrText",
+    ] {
+        let (data, raised) = reduced_annotation(&host, name);
+        assert_eq!(
+            data,
+            SemanticNodeData::Opaque(QueryError::CheckerRecovery(ts2589)),
+            "{name}"
+        );
+        assert_eq!(raised, any(), "{name}: the recovery raises as `any`");
+    }
+}
+
+/// A declared `Promise<Rec>` return keeps its declared type: the checker
+/// reports TS1062 against the annotation, but no type operation recovers
+/// there.
+///
+/// tsc 7.0.2: `ReturnType<typeof declaredRec>` is `Promise<Rec>`, with
+/// TS1062 at `declaredRec`'s name.
+#[test]
+fn a_declared_promise_of_a_recursive_thenable_keeps_its_declared_type() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let (data, _) = reduced_annotation(&host, "declaredRecReturn");
+    with_dispatch(&host, |dispatch| match &data {
+        SemanticNodeData::InstantiationRef { base, args }
+            if base.decl_name.as_ref() == "Promise" && args.len() == 1 =>
+        {
+            assert_eq!(
+                node_shape(dispatch, args[0]),
+                NodeShape::DeclRef("Rec".to_string()),
+                "the declared payload stays `Rec`"
+            );
+        }
+        other => panic!("`ReturnType<typeof declaredRec>` is `Promise<Rec>`, got {other:?}"),
+    });
+}
+
+/// The controls: a thenable that promises a plain value keeps reducing, and
+/// a type that refers to itself WITHOUT being a recursive thenable is never
+/// the recovery — whether it is not a thenable at all (`Chain`), is what a
+/// thenable inside its own body promises (`Holder['box']`, whose callback
+/// names `Holder` through the body's self-reference), or is a thenable that
+/// holds itself inside the value it promises (`Linked`). All of them stay
+/// warm.
+///
+/// tsc 7.0.2, no diagnostics: `awaitNumberThen` / `returnNumberThen` are
+/// `Promise<number>` and `Awaited<NumberThen>` is `number`; `awaitChain` /
+/// `returnChain` are `Promise<Chain>` and `Awaited<Chain>` is `Chain`;
+/// `awaitHolderBox` / `returnHolderBox` are `Promise<Holder>` and
+/// `Awaited<Holder['box']>` is `Holder`; `awaitLinked` / `returnLinked`
+/// are `Promise<{ next: Linked; }>` and `Awaited<Linked>` is
+/// `{ next: Linked; }`.
+#[test]
+fn non_recursive_thenables_and_non_thenable_cycles_keep_their_answers() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for name in ["awaitNumberThen", "returnNumberThen"] {
+        assert_clean_warm(&host, RECURSIVE_THENABLE, name, promise_of(number()));
+    }
+    for name in ["awaitChain", "returnChain"] {
+        assert_clean_warm(
+            &host,
+            RECURSIVE_THENABLE,
+            name,
+            promise_of(type_ref("Chain")),
+        );
+    }
+    for name in ["awaitHolderBox", "returnHolderBox"] {
+        assert_clean_warm(
+            &host,
+            RECURSIVE_THENABLE,
+            name,
+            promise_of(type_ref("Holder")),
+        );
+    }
+    for name in ["awaitLinked", "returnLinked"] {
+        let next = async_payload(&host, name, true, |dispatch, payload| {
+            match dispatch.graph().node_data(payload).as_deref() {
+                Some(SemanticNodeData::Object(surface)) => surface
+                    .positive_members()
+                    .iter()
+                    .find(|member| member.string_name() == Some("next"))
+                    .map(|member| member.value),
+                other => panic!("{name} promises `{{ next: Linked }}`, got {other:?}"),
+            }
+        });
+        let next = next.unwrap_or_else(|| panic!("{name}: the promised value carries `next`"));
+        let raised = host.project_node_to_type_expr_for_test(next);
+        assert!(
+            matches!(&raised, Some(TypeExpr::RecursiveRef { name: referent, .. })
+                | Some(TypeExpr::Ref { name: referent, .. }) if referent.as_ref() == "Linked"),
+            "{name}: `next` is `Linked`, got {raised:?}"
+        );
+    }
+    let (number_then, raised) = reduced_annotation(&host, "libNumberThen");
+    assert_eq!(
+        number_then,
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    );
+    assert_eq!(raised, number());
+    for (name, declaration) in [("libChain", "Chain"), ("libHolderBox", "Holder")] {
+        let (data, raised) = reduced_annotation(&host, name);
+        assert!(
+            matches!(&data, SemanticNodeData::DeclRef { identity } if identity.decl_name.as_ref() == declaration),
+            "{name} is `{declaration}`, got {data:?}"
+        );
+        assert_eq!(raised, type_ref(declaration), "{name}");
+    }
+    let (linked, _) = reduced_annotation(&host, "libLinked");
+    assert!(
+        matches!(&linked, SemanticNodeData::Object(surface)
+            if surface.positive_members().iter().any(|member| member.string_name() == Some("next"))),
+        "`Awaited<Linked>` is `{{ next: Linked; }}`, got {linked:?}"
+    );
+}
+
+/// A recursive-thenable answer is the same whichever position is demanded
+/// first and however often: the relation's in-path failures never warm, so
+/// no position can serve another a failure computed on a different path.
+/// (tsc 7.0.2 itself is order-dependent here only in which position REPORTS
+/// the diagnostic, never in the types measured above.)
+#[test]
+fn recursive_thenable_answers_do_not_depend_on_demand_order() {
+    let names = [
+        "awaitSelfOrText",
+        "returnSelfOrText",
+        "libSelfOrText",
+        "awaitRecOrNumber",
+        "returnRec",
+        "awaitRec",
+    ];
+    let forward = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let reverse = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let first: Vec<Outcome> = names
+        .iter()
+        .map(|name| eval(&forward, RECURSIVE_THENABLE, name))
+        .collect();
+    let mut second: Vec<Outcome> = names
+        .iter()
+        .rev()
+        .map(|name| eval(&reverse, RECURSIVE_THENABLE, name))
+        .collect();
+    second.reverse();
+    assert_eq!(first, second, "reversed demand order");
+    let again: Vec<Outcome> = names
+        .iter()
+        .map(|name| eval(&forward, RECURSIVE_THENABLE, name))
+        .collect();
+    assert_eq!(first, again, "repeated demand");
+}
+
+/// Where no recovery is modelled, a recursive thenable stays a TYPED GAP —
+/// never an `any` taken from the recursion itself.
+///
+/// tsc 7.0.2: `yieldRec` (an async generator yielding the recursive
+/// thenable) is `AsyncGenerator<never, void, unknown>` under TS1062 at the
+/// `yield`, and a second such yield crashes the checker, so the async
+/// iteration has no recovery to carry; the control `yieldNumberThen` is
+/// `AsyncGenerator<number, void, unknown>`. `awaitGenericRec` /
+/// `returnGenericRec` are `Promise<any>` under TS1062, but the generic
+/// declaration's self-reference inside its own body does not record which
+/// instantiation it stands for, so the relation cannot follow it.
+#[test]
+fn recursive_thenable_positions_without_a_modelled_recovery_stay_typed_gaps() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    assert_clean_warm(
         &host,
         RECURSIVE_THENABLE,
-        "recAwait",
-        FlowReturnDegradation::UnresolvedValue,
+        "yieldNumberThen",
+        TypeExpr::Ref {
+            name: Arc::from("AsyncGenerator"),
+            type_arguments: Arc::from(
+                vec![
+                    number(),
+                    TypeExpr::Primitive(PrimitiveName::Void),
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                ]
+                .into_boxed_slice(),
+            ),
+        },
     );
-    let lib = eval(&host, RECURSIVE_THENABLE, "f1");
-    assert!(
-        matches!(
-            &lib,
-            Outcome::Value { ty, .. }
-                if matches!(ty, TypeExpr::Ref { name, type_arguments }
-                    if name.as_ref() == "Awaited" && type_arguments.len() == 1)
-        ),
-        "the lib conditional over a recursive thenable keeps its authored \
-         application rather than selecting a branch, got {lib:?}"
-    );
+    for name in ["yieldRec", "awaitGenericRec", "returnGenericRec"] {
+        match eval(&host, RECURSIVE_THENABLE, name) {
+            Outcome::Value {
+                ty,
+                degradation,
+                candidates,
+            } => {
+                assert!(
+                    degradation.is_some(),
+                    "{name} must stay a typed gap, got {ty:?}"
+                );
+                assert_eq!(candidates, 0, "{name}: a gap never warms");
+            }
+            other => panic!("{name} must produce a degraded value, got {other:?}"),
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -5800,10 +6202,9 @@ export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> 
 /// How a CLASSES probe's answer is admitted.
 ///
 /// An answer read through a class expression's value is `ReturnOnly`: the
-/// class body's constructor, members and field initializers are callables
-/// no indexed function position serves, so the capture family keeps its
-/// typed gap over them — the answer is complete and undegraded, and it
-/// never warms.
+/// class's constructor and field initializers are callables no indexed
+/// function position serves, so the capture family keeps its typed gap
+/// over them — the answer is complete and undegraded, and it never warms.
 #[derive(Clone, Copy, Debug)]
 enum ClassProbeAdmission {
     Warm,

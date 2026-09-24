@@ -716,9 +716,12 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         | QueryError::RecursiveRef { .. }
         | QueryError::RaiseAliasCycle
         | QueryError::TypeParamCycle => PropCallableRoleUnresolvedReason::Cycle,
+        // The checker's recovered error type reads as `any`, which names no
+        // callable role.
         QueryError::UnsupportedIntrinsic { .. }
         | QueryError::UnrepresentableSurface
-        | QueryError::UnrepresentableSurfaceMember => PropCallableRoleUnresolvedReason::Unsupported,
+        | QueryError::UnrepresentableSurfaceMember
+        | QueryError::CheckerRecovery(_) => PropCallableRoleUnresolvedReason::Unsupported,
         QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::ForeignSemanticOperand

@@ -28,7 +28,9 @@
 //!    a live basis itself) or a recorded refusal
 //!    (compared ORDER-SENSITIVELY — the declaration bytes carry union
 //!    arm order as a structured field), and for diagnostic rows the
-//!    recorded refusal pinned by a live NON-ANSWER (the probe held
+//!    recorded DIAGNOSTIC and the recovery type the checker continues
+//!    with, matched against the live typed recovery carrier (an owed
+//!    diagnostic row instead pins a live NON-ANSWER: the probe held
 //!    deferred, or a typed gap). A
 //!    `MatchesChecker` row fails when the live answer stops matching,
 //!    and an owed/degraded row fails when the live answer STARTS
@@ -46,7 +48,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::signature_corpus_rows_tests::{Row, Verdict, CORPUS};
+use crate::signature_corpus_rows_tests::{RecordedDiagnostic, Row, Verdict, CORPUS};
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 
 /// The corpus identity this driver locks. Mirrored verbatim in
@@ -68,22 +70,37 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// The digest input for the corpus lock: for every row in table order,
-/// the length-prefixed id, checker and decl-emit bytes (the same
-/// length-prefix scheme the u6 cohort fingerprint uses, over the row's
-/// RECORDED observation only — never live answers).
+/// the length-prefixed id, checker, decl-emit and recorded-diagnostic
+/// bytes (the same length-prefix scheme the u6 cohort fingerprint uses,
+/// over the row's RECORDED observation only — never live answers). A row
+/// with no diagnostic contributes an empty diagnostic field.
 fn corpus_digest_input() -> Vec<u8> {
     let mut buf = Vec::new();
     for row in CORPUS {
+        let diagnostic = row
+            .diagnostic
+            .map(|diagnostic| spell_recorded_diagnostic(&diagnostic))
+            .unwrap_or_default();
         for field in [
             row.id.as_bytes(),
             row.checker.as_bytes(),
             row.decl_emit.as_bytes(),
+            diagnostic.as_bytes(),
         ] {
             buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
             buf.extend_from_slice(field);
         }
     }
     buf
+}
+
+/// The digest spelling of a recorded diagnostic:
+/// `TS<code>: <message> => <recovery>`.
+fn spell_recorded_diagnostic(diagnostic: &RecordedDiagnostic) -> String {
+    format!(
+        "TS{}: {} => {}",
+        diagnostic.code, diagnostic.message, diagnostic.recovery
+    )
 }
 
 /// Observation well-formedness: every recorded observation is non-empty, carries
@@ -152,10 +169,19 @@ fn signature_corpus_observations_parse_and_families_are_covered() {
             }
         }
         if let Some(diagnostic) = row.diagnostic {
-            if diagnostic.is_empty() || !row.checker.is_empty() {
+            if diagnostic.code == 0 || diagnostic.message.is_empty() || !row.checker.is_empty() {
                 failures.push(format!(
-                    "{}: a recorded diagnostic is non-empty and replaces the checker text",
+                    "{}: a recorded diagnostic carries its code and message, and replaces the \
+                     checker text",
                     row.id
+                ));
+            }
+            // The recovery is a recorded checker print, so it parses through
+            // the same typed checker syntax as every checker column.
+            if let Err(error) = checker_syntax::parse(diagnostic.recovery) {
+                failures.push(format!(
+                    "{}: the recorded diagnostic's recovery `{}` does not parse: {error}",
+                    row.id, diagnostic.recovery
                 ));
             }
         }
@@ -344,6 +370,11 @@ struct LiveProbeOutcome {
     /// refusal. The declaration bytes carry union arm order as a
     /// structured field, so this basis compares ORDER-SENSITIVELY.
     matched_declared_return: bool,
+    /// The live answer is the checker's error type after the row's RECORDED
+    /// diagnostic — the typed recovery carrier naming that code, whose
+    /// recovery matches the recorded recovery print. Only a row that records
+    /// a diagnostic has this basis.
+    matched_diagnostic: bool,
     /// The base declaration name when the live answer is the DEFERRED
     /// instantiation carrier (`InstantiationRef(<operator>)` — the
     /// substrate has not reduced the probe's outer operator), else
@@ -413,6 +444,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
             matched_checker: false,
             matched_checker_in_order: false,
             matched_declared_return: false,
+            matched_diagnostic: false,
             deferred_operator: None,
             refused: false,
             boundary_failed: true,
@@ -467,6 +499,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
             matched_checker: false,
             matched_checker_in_order: false,
             matched_declared_return: false,
+            matched_diagnostic: false,
             deferred_operator: None,
             refused: true,
             boundary_failed: false,
@@ -537,10 +570,39 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
         })
         .flatten()
         .unwrap_or(false);
+    // A recorded diagnostic is matched by the checker's error type after
+    // that diagnostic: the typed recovery carrier naming the recorded code
+    // and message, whose recovery reads as the recorded recovery print.
+    let live_diagnostic = match dispatch.graph().node_data(node).as_deref() {
+        Some(crate::semantic_query::SemanticNodeData::Opaque(
+            crate::semantic_query::QueryError::CheckerRecovery(diagnostic),
+        )) => Some(*diagnostic),
+        _ => None,
+    };
+    let matched_diagnostic =
+        match (row.diagnostic, live_diagnostic) {
+            (Some(recorded), Some(live)) => {
+                let recovery = dispatch.graph().intern_node(
+                    crate::semantic_query::SemanticNodeData::Primitive(live.recovery()),
+                );
+                let recorded_recovery =
+                    checker_syntax::parse(recorded.recovery).unwrap_or_else(|err| {
+                        panic!(
+                            "{}: recorded recovery `{}` does not parse ({err})",
+                            row.id, recorded.recovery
+                        )
+                    });
+                live.code.code() == recorded.code
+                    && live.code.message() == recorded.message
+                    && checker_syntax::matches_node(&dispatch, recovery, &recorded_recovery, 0)
+            }
+            _ => false,
+        };
     LiveProbeOutcome {
         matched_checker,
         matched_checker_in_order,
         matched_declared_return,
+        matched_diagnostic,
         deferred_operator,
         refused,
         boundary_failed: false,
@@ -574,14 +636,15 @@ fn recorded_signature_return<'a>(decl_emit: &'a str, fn_name: &str) -> Option<&'
 /// checker-syntax projection of the recorded `checker` text, the
 /// recorded `decl_emit` signature return where the checker column is a
 /// display-only instantiation, and (for diagnostic rows) the recorded
-/// REFUSAL: the checker refused to print a type, so the row pins that
-/// the live rail still holds the probe DEFERRED (an unreduced carrier
-/// is the honest non-answer; any reduction flips the row). A later
-/// block that changes the answer to any recorded probe FLIPS its row
-/// here instead of a prose report — in BOTH directions.
+/// DIAGNOSTIC with the recovery the checker continues with: a matching
+/// row's live answer is the typed recovery carrier naming that code, and
+/// an owed row pins that the live rail still refuses (an unreduced carrier
+/// or a typed gap; any other reduction flips the row). A later block that
+/// changes the answer to any recorded probe FLIPS its row here instead of
+/// a prose report — in BOTH directions.
 /// One row's verdict evaluation: `Some(failure)` when the live answer to
 /// the recorded probe contradicts the row's recorded verdict (either
-/// direction), when a diagnostic row's recorded refusal is no longer
+/// direction), when an owed diagnostic row's recorded refusal is no longer
 /// pinned by a live non-answer, or when the observation lane itself
 /// failed to produce a result.
 fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
@@ -599,6 +662,24 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
     {
         let rendered = live.rendered.as_deref().unwrap_or("<no value>");
         let note = match row.verdict {
+            // A diagnostic row's basis is the recorded diagnostic and the
+            // recovery the checker continues with.
+            Verdict::MatchesChecker if row.diagnostic.is_some() => {
+                (!live.matched_diagnostic).then(|| {
+                    format!(
+                        "labelled MatchesChecker but the live answer to the probe `{}` is not \
+                         the checker's recovery after the recorded diagnostic `{}` — measured \
+                         `{}` (degraded: {}). Either the answer regressed or the observation \
+                         was edited; re-measure against the pinned oracle before re-pinning",
+                        row.probe,
+                        row.diagnostic
+                            .map(|recorded| spell_recorded_diagnostic(&recorded))
+                            .unwrap_or_default(),
+                        rendered,
+                        live.degraded
+                    )
+                })
+            }
             Verdict::MatchesChecker => {
                 if !(live.matched_checker || live.matched_declared_return) {
                     let bases = if row.checker_display_only {
@@ -643,7 +724,19 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                 }
             }
             Verdict::KnownOwed { .. } | Verdict::Degraded { .. } => {
-                if live.matched_checker {
+                if live.matched_diagnostic {
+                    Some(format!(
+                        "labelled {:?} but the live answer to the probe `{}` IS the checker's \
+                         recovery after the recorded diagnostic `{}` — the recorded divergence \
+                         is GONE. Re-pin the row and update the semantic-difference ledger in \
+                         the same change",
+                        row.verdict,
+                        row.probe,
+                        row.diagnostic
+                            .map(|recorded| spell_recorded_diagnostic(&recorded))
+                            .unwrap_or_default(),
+                    ))
+                } else if live.matched_checker {
                     Some(format!(
                         "labelled {:?} but the live answer to the probe `{}` STRUCTURALLY \
                          EQUALS the recorded observation `{}` — the recorded divergence is \
@@ -669,31 +762,32 @@ fn verdict_failure(row: &Row, live: &LiveProbeOutcome) -> Option<String> {
                 }
             }
         };
-        let note = note.map(|note| format!("{}: {note}", row.id));
-        // The diagnostic row pins the recorded REFUSAL: 7.0.2 printed no
-        // type (TS2589), so an honest live answer is a NON-ANSWER — the
-        // probe held DEFERRED by its outer operator, or the typed gap the
-        // rail publishes when its cycle guard terminates the recursive
-        // thenable (`docs/evidence/signature-kernel/semantic-difference-ledger.md`
-        // SDL-4: "an error recovery is not a type this substrate fabricates
-        // clean and warm"). Both are refusals; neither fabricates a type
-        // where the checker printed none. A reduction to an actual VALUE
-        // flips the row for a re-pin and a ledger review.
-        if let Some(diagnostic) = row.diagnostic {
+        // An OWED diagnostic row pins the recorded REFUSAL with a live
+        // NON-ANSWER: the probe held DEFERRED by its outer operator, or a
+        // typed gap. Neither fabricates a type where the checker printed
+        // none; a reduction to an actual VALUE flips the row for a re-pin
+        // and a ledger review. (A matching diagnostic row answers the
+        // checker's own recovery instead, checked above.)
+        if let (Some(diagnostic), Verdict::KnownOwed { .. } | Verdict::Degraded { .. }) =
+            (row.diagnostic, &row.verdict)
+        {
             let outer_operator = row.probe.split('<').next().unwrap_or("");
             let held_deferred = live.deferred_operator.as_deref() == Some(outer_operator);
             if !held_deferred && !live.refused {
                 return Some(format!(
-                    "{}: the recorded observation is the checker's REFUSAL (`{diagnostic}`) \
-                     but the live answer to the probe `{}` is neither the deferred \
-                     `{outer_operator}` carrier nor a typed gap — measured `{}`. The \
-                     substrate now publishes a TYPE where the checker refused; re-pin the \
-                     row and review the semantic-difference ledger",
-                    row.id, row.probe, rendered
+                    "{}: the recorded observation is the checker's REFUSAL (`{}`) but the \
+                     live answer to the probe `{}` is neither the deferred `{outer_operator}` \
+                     carrier nor a typed gap — measured `{}`. The substrate now publishes a \
+                     TYPE where the checker refused; re-pin the row and review the \
+                     semantic-difference ledger",
+                    row.id,
+                    spell_recorded_diagnostic(&diagnostic),
+                    row.probe,
+                    rendered
                 ));
             }
         }
-        note
+        note.map(|note| format!("{}: {note}", row.id))
     }
 }
 
@@ -742,7 +836,11 @@ fn a_boundary_failure_never_satisfies_a_diagnostic_row() {
         checker_is_any: false,
         checker_is_never: false,
         checker_display_only: false,
-        diagnostic: Some("Type instantiation is excessively deep and possibly infinite."),
+        diagnostic: Some(RecordedDiagnostic {
+            code: 2589,
+            message: "Type instantiation is excessively deep and possibly infinite.",
+            recovery: "any",
+        }),
         decl_emit: "export declare function witness(): number;\n",
         verdict: Verdict::KnownOwed {
             note: "control: the lane is broken",
@@ -752,6 +850,7 @@ fn a_boundary_failure_never_satisfies_a_diagnostic_row() {
         matched_checker: false,
         matched_checker_in_order: false,
         matched_declared_return: false,
+        matched_diagnostic: false,
         deferred_operator: None,
         refused: false,
         boundary_failed: true,
@@ -819,7 +918,11 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
     // A diagnostic row whose probe REDUCES loses its refusal pin.
     let diagnostic = reduced_row(
         Verdict::KnownOwed { note: "control" },
-        Some("TS9999 control"),
+        Some(RecordedDiagnostic {
+            code: 9999,
+            message: "control",
+            recovery: "any",
+        }),
     );
     let live = live_probe_outcome(&diagnostic);
     assert!(
@@ -879,6 +982,91 @@ fn signature_corpus_flip_law_fires_in_both_directions() {
         verdict_failure(&display_text, &live),
         None,
         "a KnownOwed display-only row must NOT flip when only the display text matches"
+    );
+}
+
+/// The flip law for a DIAGNOSTIC row, in both directions over the real
+/// probe lane: the checker's recovery after the recorded diagnostic
+/// satisfies a `MatchesChecker` row and contradicts an owed one, while a
+/// different recorded code, a different recorded recovery, or a probe the
+/// substrate answers without a diagnostic never matches.
+///
+/// The probe is the corpus's recursive thenable (`Awaited<Rec>`), measured on
+/// tsc 7.0.2: TS2589 at the `Awaited` reference, `[any]` through the tuple
+/// wrapper. `Awaited<NumberThen>` is `number` with no diagnostic.
+#[test]
+fn diagnostic_rows_flip_on_the_checker_recovery_in_both_directions() {
+    use crate::signature_corpus_rows_tests::Family;
+    const TS2589: RecordedDiagnostic = RecordedDiagnostic {
+        code: 2589,
+        message: "Type instantiation is excessively deep and possibly infinite.",
+        recovery: "any",
+    };
+    let row = |probe, diagnostic, verdict| Row {
+        id: "SV_CONTROL_recursive_thenable",
+        family: Family::AwaitedResidual,
+        source: "interface Rec { then(onfulfilled: (v: Rec) => void): void }\n\
+                 interface NumberThen { then(onfulfilled: (v: number) => void): void }\n\
+                 export function witness() { const t: Rec = null as any; return t; }",
+        probe,
+        checker: "",
+        checker_is_any: false,
+        checker_is_never: false,
+        checker_display_only: false,
+        diagnostic: Some(diagnostic),
+        decl_emit: "export declare function witness(): Rec;\n",
+        verdict,
+    };
+    let matching = row("Awaited<Rec>", TS2589, Verdict::MatchesChecker);
+    let live = live_probe_outcome(&matching);
+    assert!(
+        live.matched_diagnostic,
+        "the recursive thenable answers the TS2589 recovery, measured `{}`",
+        live.rendered.as_deref().unwrap_or("<no value>")
+    );
+    assert_eq!(verdict_failure(&matching, &live), None);
+    let owed = row(
+        "Awaited<Rec>",
+        TS2589,
+        Verdict::KnownOwed {
+            note: "control: the recovery is implemented",
+        },
+    );
+    assert!(
+        verdict_failure(&owed, &live_probe_outcome(&owed)).is_some(),
+        "an implemented recovery must flip an owed diagnostic row"
+    );
+    for (why, diagnostic) in [
+        (
+            "a different code",
+            RecordedDiagnostic {
+                code: 1062,
+                message: "Type is referenced directly or indirectly in the fulfillment callback \
+                          of its own 'then' method.",
+                recovery: "any",
+            },
+        ),
+        (
+            "a different recovery",
+            RecordedDiagnostic {
+                recovery: "never",
+                ..TS2589
+            },
+        ),
+    ] {
+        let other = row("Awaited<Rec>", diagnostic, Verdict::MatchesChecker);
+        let live = live_probe_outcome(&other);
+        assert!(!live.matched_diagnostic, "{why} must not match");
+        assert!(
+            verdict_failure(&other, &live).is_some(),
+            "{why} must fail a MatchesChecker diagnostic row"
+        );
+    }
+    let no_diagnostic = row("Awaited<NumberThen>", TS2589, Verdict::MatchesChecker);
+    let live = live_probe_outcome(&no_diagnostic);
+    assert!(
+        !live.matched_diagnostic && verdict_failure(&no_diagnostic, &live).is_some(),
+        "a probe answered without a diagnostic never satisfies a diagnostic row"
     );
 }
 
@@ -990,9 +1178,19 @@ fn union_order_is_the_only_difference_from_the_checker() {
 /// application by its alias when the alias constructs the type it settles
 /// on — each with its omitted defaulted arguments filled — and every other
 /// alias (a conditional, a bare parameter, a primitive, a union that
-/// collapsed to one member) as what it resolves to. Every checker print is
-/// TypeScript 7.0.2's, measured on this exact module through the corpus's
-/// two-step wrapper.
+/// collapsed to one member) as what it resolves to. An alias of a
+/// non-generic declaration is that declaration (`ToFace` prints `Face`,
+/// `ToToObj` prints `ObjNoGen`), while one of a generic interface
+/// application keeps its own name (`ToGFace`, `PromAlias<number>`). A
+/// mapped utility application is printed by the utility's name
+/// (`Partial<{ a: 1; }>`, `Pick<…, "a">`); an alias of a homomorphic one
+/// (`Partial` / `Readonly`, or an alias declaring one) takes the mapped
+/// name unless its declared source is a union (`P<{ a: 1 }>` and
+/// `PP<{ a: 1 }>` print `Partial<{ a: 1; }>`, `MpA<{ a: 1 }>` prints
+/// `Mp<{ a: 1; }>`, `PU` prints `PU`), and an alias of a keyed one keeps
+/// its own (`PickA<…>`, `Rec<"x">`). Every checker print is TypeScript
+/// 7.0.2's, measured on this exact module through the corpus's two-step
+/// wrapper.
 #[test]
 fn the_print_altitude_names_declaration_applications_as_the_checker_does() {
     use crate::signature_corpus_rows_tests::Family;
@@ -1016,6 +1214,27 @@ type OuterCond<T = string> = Cond<T>;
 type ObjNoGen = { a: 1 };
 type Fn<T> = (x: T) => void;
 type Lit<T> = T;
+interface Face { a: 1 }
+class Klass { k = 1 }
+type ToFace = Face;
+type ToToFace = ToFace;
+type ToKlass = Klass;
+type ToObj = ObjNoGen;
+type ToToObj = ToObj;
+type ToGFace = GI<string>;
+type ToGFaceDefault = GI;
+type GenToFace<T> = GI<T>;
+type PromAlias<T> = Promise<T>;
+type P<T> = Partial<T>;
+type PP<T> = P<T>;
+type PFace = Partial<Face>;
+type NonGenP = Partial<{ z: 1 }>;
+type RO<T> = Readonly<T>;
+type PU = Partial<Face | ObjNoGen>;
+type PickA<T extends { a: unknown }> = Pick<T, 'a'>;
+type Rec<K extends string> = Record<K, number>;
+type OmitA<T> = Omit<T, 'a'>;
+type MpA<T> = Mp<T>;
 export function witness() { return 1; }";
     let mut failures = Vec::new();
     for (probe, checker) in [
@@ -1037,6 +1256,30 @@ export function witness() { return 1; }";
         ("ObjNoGen", "ObjNoGen"),
         ("Fn<number>", "Fn<number>"),
         ("Lit<{ z: 1 }>", "{ z: 1; }"),
+        ("ToFace", "Face"),
+        ("ToToFace", "Face"),
+        ("ToKlass", "Klass"),
+        ("ToObj", "ObjNoGen"),
+        ("ToToObj", "ObjNoGen"),
+        ("ToGFace", "ToGFace"),
+        ("ToGFaceDefault", "ToGFaceDefault"),
+        ("GenToFace<boolean>", "GenToFace<boolean>"),
+        ("PromAlias<number>", "PromAlias<number>"),
+        ("P<{ a: 1 }>", "Partial<{ a: 1; }>"),
+        ("PP<{ a: 1 }>", "Partial<{ a: 1; }>"),
+        ("PFace", "Partial<Face>"),
+        ("NonGenP", "Partial<{ z: 1; }>"),
+        ("RO<Face>", "Readonly<Face>"),
+        ("PU", "PU"),
+        ("PickA<{ a: 1; b: 2 }>", "PickA<{ a: 1; b: 2; }>"),
+        ("Rec<'x'>", "Rec<\"x\">"),
+        ("OmitA<{ a: 1; b: 2 }>", "OmitA<{ a: 1; b: 2; }>"),
+        ("MpA<{ a: 1 }>", "Mp<{ a: 1; }>"),
+        ("Partial<{ a: 1 }>", "Partial<{ a: 1; }>"),
+        ("Pick<{ a: 1; b: 2 }, 'a'>", "Pick<{ a: 1; b: 2; }, \"a\">"),
+        ("Record<'x', number>", "Record<\"x\", number>"),
+        ("Omit<{ a: 1; b: 2 }, 'a'>", "Omit<{ a: 1; b: 2; }, \"a\">"),
+        ("Partial<Face | ObjNoGen>", "Partial<Face | ObjNoGen>"),
     ] {
         let row = Row {
             id: "SV_CONTROL_print_altitude",

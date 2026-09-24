@@ -150,6 +150,19 @@ type HeritageBase = (
     Arc<[verter_type_expr::locators::TypeArgLocator]>,
 );
 
+/// What a class declaration's `extends` VALUE gives it
+/// ([`ProjectSemanticDispatch::class_value_base`]).
+pub(super) struct ClassValueBase {
+    /// The base constructor type — the value's type.
+    pub(super) constructor_type: SemanticNodeId,
+    /// Its construct signatures, instantiated with the heritage clause's
+    /// type arguments, in declaration order.
+    pub(super) construct_signatures: Vec<SemanticNodeId>,
+    /// The base instance type, when the first signature returns a valid
+    /// base type.
+    pub(super) instance: Option<SemanticNodeId>,
+}
+
 /// One class declaration's heritage answer plus the PROOF status of that
 /// answer ([`ProjectSemanticDispatch::class_heritage_reading`]): `decidable`
 /// is `true` only when the declaration IS a readable class whose every
@@ -1858,6 +1871,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             None => continue,
                         }
                     };
+                    // A base that names a value the type space does not
+                    // declare contributes its constructor type's members
+                    // and construct signatures.
+                    if self.heritage_names_value_only(&base_canonical, base_owner, &base_name) {
+                        if let Some(base) = self.class_value_base(
+                            &base_canonical,
+                            base_owner,
+                            &base_name,
+                            &lowered_args,
+                            ProjectionReductionContext::published(context.mode),
+                        ) {
+                            let base_node = self.class_value_base_static_surface(
+                                &base,
+                                ProjectionReductionContext::published(context.mode),
+                            );
+                            composed_node = self.merge_static_surfaces(composed_node, base_node);
+                        }
+                        continue;
+                    }
                     let base_slot = self.type_slot_for(
                         Arc::clone(&base_canonical),
                         base_owner,
@@ -1879,15 +1911,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Specialize THIS class's own type parameters with the key's
                 // `type_args` (produced by a derived class's heritage hop
                 // above, or any caller instantiating the static surface).
-                if !type_args.is_empty() {
-                    composed_node = self.apply_class_surface_type_args(
+                // With no key arguments, the class's type parameters are its
+                // construct signatures' OWN clause instead (`new <T>(v: T) =>
+                // C<T>`), so a `new C(…)` infers them from its arguments.
+                composed_node = if type_args.is_empty() {
+                    self.generic_class_construct_signatures(
+                        own_canonical.as_ref(),
+                        own_owner,
+                        own_symbol.as_ref(),
+                        composed_node,
+                    )
+                } else {
+                    self.apply_class_surface_type_args(
                         own_canonical.as_ref(),
                         own_owner,
                         own_symbol.as_ref(),
                         composed_node,
                         type_args,
-                    );
-                }
+                    )
+                };
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
                     QueryResult::Value(composed_node),
                     self.project_generation_signature(),
@@ -1997,10 +2039,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             (QueryResult::Error(QueryError::Miss), empty_signature()).into()
         };
         // The candidates ARE the shared signature list of the callee's
-        // requested bucket. The list owns carrier settlement, alias and
-        // constraint hops, apparent globals, and the union and intersection
-        // procedures; this reducer chooses nothing.
-        let sigs = match self.shared_signature_nodes(callee, kind) {
+        // requested bucket, in the order call resolution tries them. The
+        // list owns carrier settlement, alias and constraint hops, apparent
+        // globals, and the union and intersection procedures, and the kernel
+        // owns the resolution order; this reducer chooses nothing.
+        let sigs = match self.shared_signature_nodes_in_resolution_order(callee, kind) {
             super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => nodes,
             super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
                 // An unsettled list is never a proven-empty one: the miss
@@ -2415,6 +2458,168 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result
     }
 
+    /// The construct signatures of an UNAPPLIED generic class's static
+    /// surface, generic over the class's own type parameters — the
+    /// checker's class construct signature carries the class's
+    /// `localTypeParameters` as its own clause and returns the class
+    /// instance applied to them (`new <T>(v: T) => C<T>` for `class C<T>
+    /// { constructor(v: T) }`), which is what lets a `new C(1)` infer `T`
+    /// from its arguments. A derived class's inherited parameters already
+    /// carry the derived class's binder shells (the heritage arguments are
+    /// lowered in its scope), so they generalize over the derived clause.
+    ///
+    /// The class-level shells the constructor shape was lowered over are
+    /// rewritten to the declaration-header binders, whose constraints and
+    /// defaults the call executor reads, and the class-instance return
+    /// becomes the class applied to those binders. A non-generic class, a
+    /// class whose type-side declaration is unavailable, and a signature
+    /// that already declares a clause are returned unchanged.
+    fn generic_class_construct_signatures(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        surface: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let Some(type_decl) = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, symbol)
+        else {
+            return surface;
+        };
+        if type_decl.type_parameters.is_empty() {
+            return surface;
+        }
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return surface;
+        };
+        let view = match self.graph().node_data(surface).as_deref() {
+            Some(SemanticNodeData::Object(view)) if !view.construct_signatures.is_empty() => {
+                view.clone()
+            }
+            _ => return surface,
+        };
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let shells =
+            self.class_type_param_shell_env(canonical, owner, symbol, indexed.whole_hash, &scope);
+        let binders = self.locator_binder_frame_from_narrow_params(
+            &scope,
+            &Arc::from(symbol),
+            &type_decl.type_parameters,
+        );
+        let clause: Vec<crate::semantic_query::TypeParamDecl> = binders
+            .iter()
+            .zip(type_decl.type_parameters.iter())
+            .map(|((name, binder), param)| {
+                let (constraint, default) = match self.graph().node_data(*binder).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        constraint,
+                        default,
+                        ..
+                    }) => (*constraint, *default),
+                    _ => (None, None),
+                };
+                crate::semantic_query::TypeParamDecl {
+                    name: Arc::clone(name),
+                    param: *binder,
+                    constraint,
+                    default,
+                    is_const: param.is_const,
+                }
+            })
+            .collect();
+        let clause: Arc<[crate::semantic_query::TypeParamDecl]> =
+            Arc::from(clause.into_boxed_slice());
+        let instance_args: Arc<[SemanticNodeId]> = binders
+            .iter()
+            .map(|(_, binder)| *binder)
+            .collect::<Vec<_>>()
+            .into();
+        let generalize = |signature: SemanticNodeId| -> SemanticNodeId {
+            let mut rebound = signature;
+            for (name, binder) in binders.iter() {
+                if let Some(shell) = shells.get(name.as_ref()) {
+                    rebound = self.substitute_semantic_type_param(rebound, *shell, *binder);
+                }
+            }
+            let Some(SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier: _,
+                signature_span,
+                return_type_span,
+                predicate,
+            }) = self.graph().node_data(rebound).as_deref().cloned()
+            else {
+                return signature;
+            };
+            if !type_parameters.is_empty() {
+                return signature;
+            }
+            let return_type = match self.graph().node_data(return_type).as_deref() {
+                Some(SemanticNodeData::DeclRef { identity })
+                    if identity.canonical_id.as_ref() == canonical
+                        && identity.owner == owner
+                        && identity.decl_name.as_ref() == symbol =>
+                {
+                    let scope = self
+                        .graph()
+                        .node_scope(return_type)
+                        .unwrap_or_else(|| scope.clone());
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::InstantiationRef {
+                            base: identity.clone(),
+                            args: Arc::clone(&instance_args),
+                        },
+                        scope,
+                    )
+                }
+                _ => return_type,
+            };
+            self.graph().intern_node(SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters: Arc::clone(&clause),
+                occurrence,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                    return_type,
+                ),
+                signature_span,
+                return_type_span,
+                predicate,
+            })
+        };
+        let entries: Vec<SurfaceEntry> = view
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::ConstructSignature(signature) => {
+                    SurfaceEntry::ConstructSignature(generalize(*signature))
+                }
+                other => other.clone(),
+            })
+            .collect();
+        self.graph()
+            .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                view.keyspace,
+                view.has_known_index_signature(),
+            )))
+    }
+
     /// The class's heritage bases, base-first, read from the PRODUCER-MINTED
     /// content-free heritage-base FACTS on the type-side sibling slot's
     /// prepared decl (`PreparedTypeDecl.heritage_bases`, extracted once at
@@ -2498,6 +2703,183 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bases,
             decidable: !prepared.heritage_undecidable,
         }
+    }
+
+    /// Whether a class `extends` reference names a VALUE the type space
+    /// does not declare — `class K extends Ctor` over `declare const Ctor:
+    /// new () => …`. TypeScript resolves every class heritage through the
+    /// value; a class base names a type as well, and its constructor's
+    /// instance IS that type, so only a value-only name needs the value
+    /// route ([`Self::class_value_base`]).
+    pub(super) fn heritage_names_value_only(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        self.ctx
+            .prepared_type_decl_return_only(canonical, owner, name)
+            .is_none()
+            && self
+                .ctx
+                .prepared_value_decl_return_only(canonical, owner, name)
+                .is_some()
+    }
+
+    /// The base a class declaration's `extends` VALUE gives it — TypeScript's
+    /// `getBaseConstructorTypeOfClass` and `resolveBaseTypesOfClass` over
+    /// the value `name` declared at `(canonical, owner)`, with the heritage
+    /// clause's type arguments `type_args`.
+    ///
+    /// The base constructor type is the value's type. Its construct
+    /// signatures, instantiated with the type arguments (a signature that
+    /// cannot take them drops), make the base constructor: the derived
+    /// class's static side inherits its members, and a derived class
+    /// without a constructor of its own inherits its construct signatures.
+    /// The base INSTANCE type is the FIRST signature's return, and only an
+    /// object type, `object`, `any` or an intersection of those is a base
+    /// type (`isValidBaseType`). Measured on the pinned checker: over
+    /// `declare const CtorO: { new (a: string): { o: 'str' }; new (a:
+    /// number): { o: 'num' } }`, `KO['o']` is `"str"` (TS2510) while
+    /// `ConstructorParameters<typeof KO>` is `[a: number]`; a union of
+    /// constructors whose union signature returns a union gives no base
+    /// type, and a value with no construct signature gives none (TS2507).
+    pub(super) fn class_value_base(
+        &self,
+        canonical: &Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &Arc<str>,
+        type_args: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<ClassValueBase> {
+        let root = crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId::file(Arc::clone(canonical), owner),
+            name: Arc::clone(name),
+        };
+        let constructor_type = match self
+            .execute_read(self.typeof_key_with_path(root, Arc::from([]), context))
+            .value
+        {
+            QueryResult::Value(node) => node,
+            _ => return None,
+        };
+        let signatures = match self.shared_signature_nodes(
+            constructor_type,
+            crate::semantic_query::SignatureKind::Construct,
+        ) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => nodes,
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+        };
+        let signatures: Vec<SemanticNodeId> = if type_args.is_empty() {
+            signatures
+        } else {
+            signatures
+                .into_iter()
+                .filter_map(|signature| self.instantiate_call_candidate(signature, type_args))
+                .collect()
+        };
+        // Only an object or intersection constructor type (or `any`) gives
+        // base types; a union of constructors gives none, though its union
+        // signature still constructs (measured on the pinned checker: over
+        // `(new (x: string) => { a: 1 }) | (new (x: number) => { a: 1 })`
+        // the derived class has no `a` and its constructor takes `x: never`).
+        let settled_constructor = self.resolve_signature_source_carrier(constructor_type, context);
+        let constructor_gives_bases = matches!(
+            self.graph().node_data(settled_constructor).as_deref(),
+            Some(
+                SemanticNodeData::Object(_)
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Intersection(_)
+                    | SemanticNodeData::Primitive(PrimitiveKind::Any)
+            )
+        );
+        let instance = signatures
+            .first()
+            .filter(|_| constructor_gives_bases)
+            .and_then(|first| {
+                let instance = match self.graph().node_data(*first).as_deref() {
+                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                    _ => return None,
+                };
+                let settled = self.resolve_signature_source_carrier(instance, context);
+                self.is_valid_base_type(settled, 0).then_some(instance)
+            });
+        Some(ClassValueBase {
+            constructor_type,
+            construct_signatures: signatures,
+            instance,
+        })
+    }
+
+    /// TypeScript's `isValidBaseType` over a settled node: an object type
+    /// (an object surface, array, tuple, signature, class or interface
+    /// instance), `object`, `any`, or an intersection of those. A union or
+    /// a primitive is not a base type.
+    fn is_valid_base_type(&self, node: SemanticNodeId, depth: usize) -> bool {
+        const MAX_NESTING: usize = 8;
+        if depth > MAX_NESTING {
+            return false;
+        }
+        let Some(data) = self.graph().node_data(node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Signature { .. }
+            | SemanticNodeData::ClassExpressionInstance { .. }
+            | SemanticNodeData::MergedDecl { .. }
+            | SemanticNodeData::Primitive(PrimitiveKind::Object | PrimitiveKind::Any) => true,
+            SemanticNodeData::DeclRef { identity }
+            | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
+                self.prepared_decl_kind(identity),
+                Some(
+                    verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+                        | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                )
+            ),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.members_arc();
+                drop(data);
+                arms.iter().all(|arm| {
+                    let settled = self.resolve_signature_source_carrier(
+                        *arm,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    );
+                    self.is_valid_base_type(settled, depth + 1)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// The static-side contribution of a class value base: the base
+    /// constructor type's members with its construct signatures (already
+    /// instantiated with the heritage type arguments), as one constructor
+    /// surface [`Self::merge_static_surfaces`] composes under the derived
+    /// class's own.
+    pub(super) fn class_value_base_static_surface(
+        &self,
+        base: &ClassValueBase,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let settled = self.resolve_signature_source_carrier(base.constructor_type, context);
+        let static_members: Arc<[SurfaceMember]> = match self.graph().node_data(settled).as_deref()
+        {
+            Some(SemanticNodeData::Object(view)) => Arc::from(view.positive_members()),
+            _ => Arc::from(Vec::new().into_boxed_slice()),
+        };
+        self.graph().intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: static_members,
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(base.construct_signatures.clone().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
     }
 
     /// The TRANSITIVE class ancestry of one declaration — ONE heritage
@@ -3406,6 +3788,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 augmenter_contributor_roots = stitch.contributor_roots;
                 augmentation_source_env_unobservable = stitch.source_env_unobservable;
             }
+            // A GLOBAL interface's other declarations — every other
+            // module's `declare global` and script's file-scope interface —
+            // merge in through the same peer-merge carrier, whichever of
+            // them the reference named.
+            if self.declares_global_interface(
+                decl_canonical.as_ref(),
+                decl_owner,
+                decl_name.as_ref(),
+                prepared.kind,
+            ) {
+                if let Some(stitch) = self.stitch_global_declarations(
+                    decl_canonical,
+                    decl_name,
+                    args,
+                    result,
+                    &scope,
+                    context,
+                ) {
+                    result = stitch.merged;
+                    augmenter_contributor_roots.extend(stitch.contributor_roots);
+                    augmentation_source_env_unobservable |= stitch.source_env_unobservable;
+                }
+            }
         }
         self.pop_instantiate_active();
 
@@ -3579,18 +3984,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
-        let AugmentationContributions {
-            contributor_nodes,
-            contributor_roots,
-            source_env_unobservable,
-        } = self.collect_augmentation_contributions(
+        let contributions = self.collect_augmentation_contributions(
             target,
             decl_name.as_ref(),
             &[],
             context,
             decl_canonical.as_ref(),
+            None,
         )?;
+        Some(self.merge_into_base(base_result, base_scope, contributions))
+    }
 
+    /// Fold a GLOBAL interface's other declarations into the base body
+    /// `Instantiate` lowered from one of them (`decl_canonical`'s): every
+    /// other module's `declare global` contribution and every other
+    /// script's file-scope interface of the name, in declaration precedence
+    /// order, through the same peer-merge carrier a relative augmentation
+    /// takes. `type_arguments` bind each contributor's own clause.
+    ///
+    /// The folder observes the contributor population and every folded
+    /// contributor's content version, so an edit to ANY declaration of the
+    /// global misses the warm read. `None` when no other declaration
+    /// exists.
+    fn stitch_global_declarations(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_name: &Arc<str>,
+        type_arguments: &[SemanticNodeId],
+        base_result: SemanticNodeId,
+        base_scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationStitch> {
+        let contributions = self.collect_augmentation_contributions(
+            crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+            decl_name.as_ref(),
+            type_arguments,
+            context,
+            decl_canonical.as_ref(),
+            Some(decl_canonical.as_ref()),
+        )?;
+        Some(self.merge_into_base(base_result, base_scope, contributions))
+    }
+
+    /// Merge collected augmenter `contributions` into `base_result` as ONE
+    /// peer-merge carrier.
+    fn merge_into_base(
+        &self,
+        base_result: SemanticNodeId,
+        base_scope: &NodeScopeId,
+        contributions: AugmentationContributions,
+    ) -> AugmentationStitch {
+        let AugmentationContributions {
+            contributor_nodes,
+            contributor_roots,
+            source_env_unobservable,
+        } = contributions;
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
         // single-contributor `MergedDecl` wrapper) but propagate the no-warm
@@ -3598,11 +4046,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `output.cache_suppress`. `source_env_unobservable` is `true` here (the
         // collector returns `None` for a genuine no-augmentation empty).
         if contributor_nodes.is_empty() {
-            return Some(AugmentationStitch {
+            return AugmentationStitch {
                 merged: base_result,
                 contributor_roots: Vec::new(),
                 source_env_unobservable,
-            });
+            };
         }
 
         // Build the single peer-merge carrier: base contributors ∪ augmenter
@@ -3625,11 +4073,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             base_scope.clone(),
         );
-        Some(AugmentationStitch {
+        AugmentationStitch {
             merged,
             contributor_roots,
             source_env_unobservable,
-        })
+        }
     }
 
     /// Shared augmenter-contribution folder — the ONE cross-file
@@ -3661,6 +4109,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Promise<number>` lowers its `T` as `number`. An unbound parameter
     /// stays unbound, as in `Instantiate`'s published modes.
     ///
+    /// `excluded_contributor` names a file whose contribution the caller
+    /// already holds as the base body (a global declaration's own file):
+    /// it is skipped, never folded twice.
+    ///
     /// Returns `None` when no augmenter contributes.
     pub(super) fn collect_augmentation_contributions(
         &self,
@@ -3669,6 +4121,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
         request_canonical: &str,
+        excluded_contributor: Option<&str>,
     ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
@@ -3857,6 +4310,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
         });
         for candidate in ordered {
+            if excluded_contributor == Some(candidate.canonical.as_ref()) {
+                continue;
+            }
             match candidate.origin {
                 OrderedOrigin::Augmenter(augmenter_idx) => {
                     let augmenter = &augmenter_set.entries[augmenter_idx];
@@ -3875,6 +4331,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         source_env_unobservable = true;
                         continue;
                     };
+                    // `declare global` augments the global scope only from a
+                    // MODULE: in a script it is an error and binds nothing
+                    // (the augmenter set still fingerprints the file, so the
+                    // script gaining module syntax misses the warm read).
+                    if matches!(target, AugmentationTargetKind::GlobalAugmentation)
+                        && crate::global_contributors::classify_module_kind(&indexed)
+                            == crate::global_contributors::FileModuleKind::Script
+                    {
+                        continue;
+                    }
                     // The addressable contribution pointers: each augmenter
                     // `ModuleAugmentationFact` that targets THIS decl gives the raw
                     // `declare module "<spec>"` specifier under which the typed inner
@@ -4371,7 +4837,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
             contributor_roots: _,
             source_env_unobservable,
-        } = self.collect_augmentation_contributions(target, name, &[], context, scope_canonical)?;
+        } = self.collect_augmentation_contributions(
+            target,
+            name,
+            &[],
+            context,
+            scope_canonical,
+            None,
+        )?;
         // A torn contributor (unobservable source-env identity — a
         // torn/unhealable/unservable augmenter) is SERVED but must NEVER be
         // warm-admitted. This carrier is interned mid-reference-resolution and
@@ -4422,6 +4895,118 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope.clone(),
         );
         Some(merged)
+    }
+
+    /// The identity of the program's merged GLOBAL declaration named
+    /// `name`: its FIRST declaration in declaration precedence order (the
+    /// configured file sequence, then the canonical path) among every
+    /// module's `declare global` contribution and every script's file-scope
+    /// interface. `None` when the program declares no such global type.
+    ///
+    /// A `declare global` block in a SCRIPT is an error that binds nothing,
+    /// and an automatic lib's declarations are the lib's own (reached
+    /// through the lib environment, never through this lookup). The global
+    /// contributor population is observed onto the active fact tracer, so
+    /// a contributor added, removed or reordered misses every warm read
+    /// that named the global through this identity — including a read that
+    /// found none.
+    pub(super) fn first_global_declaration(&self, name: &str) -> Option<ResolvedRootIdentity> {
+        use crate::file_artifact_store::AugmentationTargetKind;
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        let host = self.ctx.host_for_fact_tracer_install();
+        host.ingest_program_ambient_roots();
+        let (_, overlay_discriminator) =
+            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
+        let target = AugmentationTargetKind::GlobalAugmentation;
+        let population = self
+            .ctx
+            .project_type_store()
+            .indexed()
+            .global_contributor_index()
+            .snapshot()
+            .lookup_in_space(
+                &target,
+                name,
+                overlay_discriminator,
+                true,
+                verter_semantic::facts::SymbolSpace::Type,
+            );
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: String::new(),
+                    key: crate::global_contributors::population_contributor_fact_key(&target, name),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: population.fingerprint,
+                },
+            ),
+        );
+        let first = population
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.is_automatic_lib
+                    && match entry.origin {
+                        ContributorOrigin::DeclareGlobal => {
+                            entry.module_kind == FileModuleKind::Module
+                        }
+                        ContributorOrigin::FileScopeInterface => true,
+                        ContributorOrigin::FileScopeNamespace
+                        | ContributorOrigin::ModuleAugmentation => false,
+                    }
+            })
+            .min_by(|left, right| {
+                host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                    .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                    .then_with(|| {
+                        left.artifact_key
+                            .canonical
+                            .as_ref()
+                            .cmp(right.artifact_key.canonical.as_ref())
+                    })
+                    .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
+            })?;
+        Some(ResolvedRootIdentity::new_in_owner(
+            Arc::clone(&first.artifact_key.canonical),
+            first.owner,
+            name,
+        ))
+    }
+
+    /// Whether the TYPE declaration `name` in `canonical` is (one
+    /// declaration of) a GLOBAL declaration: a `declare global` interface
+    /// of a module that has no file-scope symbol of the name, or a
+    /// file-scope interface of a script. Every other declaration of the
+    /// same global lives in another file, and its `Instantiate` folds them
+    /// in.
+    fn declares_global_interface(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+    ) -> bool {
+        if kind != verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+            || owner != verter_type_expr::TopLevelOwnerId::ordinary_file()
+        {
+            return false;
+        }
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return false;
+        };
+        let shallow = &indexed.shallow_state;
+        match crate::global_contributors::classify_module_kind(&indexed) {
+            crate::global_contributors::FileModuleKind::Module => {
+                !shallow.has_type_symbol_in(owner, name) && shallow.has_global_augmentation(name)
+            }
+            crate::global_contributors::FileModuleKind::Script => {
+                shallow.has_type_symbol_in(owner, name)
+            }
+        }
     }
 
     /// Bind a prepared declaration's type parameters for one application,
@@ -4574,6 +5159,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+        self.prepared_type_decl(identity)
+            .map(|prepared| prepared.kind)
+    }
+
+    /// Whether the prepared declaration rooted at `identity` declares type
+    /// parameters.
+    pub(super) fn prepared_decl_is_generic(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<bool> {
+        self.prepared_type_decl(identity)
+            .map(|prepared| !prepared.type_parameters.is_empty())
+    }
+
+    fn prepared_type_decl(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<Arc<PreparedTypeDecl>> {
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&identity.canonical_id),
             owner: identity.owner,
@@ -4590,11 +5193,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.decl_name.as_ref(),
         );
         match adapter.resolve_prepared_type_decl(base, &ri) {
-            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared.kind),
+            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared),
             PreparedTypeDeclResolution::AuthoredPartial {
                 declaration: prepared,
                 ..
-            } => Some(prepared.kind),
+            } => Some(prepared),
             PreparedTypeDeclResolution::Missing => None,
             PreparedTypeDeclResolution::Failed { .. } => {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
@@ -5608,6 +6211,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // source member values directly), not a
                 // runtime-discoverable `T[K]` shape.
                 kind: crate::semantic_query::MapperKind::Identity,
+                // `{ [K in keyof T]…: T[K] }` over the utility's own `T`.
+                over_type_variable: true,
             }
         };
 
@@ -5739,6 +6344,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // `build_mapped_type` takes the substitute +
                     // evaluate path.
                     kind: crate::semantic_query::MapperKind::Computed,
+                    over_type_variable: false,
                 };
                 // Source is K; `build_mapped_type` reads names from K's
                 // keyspace branch when the source isn't an Object.
@@ -7035,7 +7641,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Alias(target) => stack.push(*target),
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
@@ -7495,12 +8108,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // `ResolvedDeclSlotIdentity` slot), so there is no arena node to unwrap.
 
     /// Single-hop union-index distribution — the `IndexedAccessUnionDistribution`
-    /// reduction for `Obj[A | B]`. Resolves the index node; when it is a FINITE
-    /// union whose every arm normalises to a literal key (`string` / `number`),
-    /// projects `Obj[arm]` per arm through the shared `IndexedAccess` query and
-    /// renormalises the results through `ReduceUnion`. Returns `None` (fall
-    /// through to the path walker) for a non-`TypeNode` index, a non-union
-    /// resolved index, an open/generic union arm, or any per-arm projection
+    /// reduction for `Obj[A | B]`. Resolves the index node; when it denotes a
+    /// FINITE set of literal keys ([`Self::finite_index_keys`]: a union of
+    /// literal keys, `keyof T` over an enumerable `T`, or an intersection of
+    /// those), projects `Obj[key]` per key through the shared `IndexedAccess`
+    /// query and renormalises the results through `ReduceUnion`. Returns
+    /// `None` (fall through to the path walker) for a non-`TypeNode` index, a
+    /// single literal key, an open/generic key, or any per-key projection
     /// miss — so symbolic / partial cases keep their carrier.
     fn distribute_union_index(
         &self,
@@ -7515,36 +8129,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let resolved = self
             .evaluate_deferred_semantic_node_with_context(*index_node, context)
             .into_active_query_build_node(self);
-        let members = match self.graph().node_data(resolved).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.members_arc(),
-            _ => return None,
-        };
-        if members.is_empty() {
+        if matches!(
+            self.graph().node_data(resolved).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        ) {
             return None;
         }
-        let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+        let keys = self.finite_index_keys(resolved, 0)?;
+        if keys.is_empty() {
+            return None;
+        }
+        let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(keys.len());
         let mut any_partial = false;
-        for &member in members.iter() {
-            // Each arm MUST be a concrete literal key; a non-literal arm
-            // aborts the distribution (the union is not a finite key set).
-            // A NUMERIC-literal arm outside the bounded integer
-            // convention (`Obj[1.5 | 1e21]`, big integers with divergent
-            // shortest-round-trip spellings) stays `TypeNode` by the
-            // producer predicate yet IS a concrete key — keep it as the
-            // `TypeNode` index so the per-arm `IndexedAccess` dispatch
-            // recovers its canonical `js_number_to_string` needle
-            // through the same G4.5 path as a single-key access.
-            let member_index = match self.normalized_index_key_node(member) {
-                key @ (IndexKey::String(_) | IndexKey::Number(_) | IndexKey::UniqueSymbol(_)) => {
-                    key
-                }
-                IndexKey::Computed(resolved) => match self.graph().node_data(resolved).as_deref() {
-                    Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
-                        IndexKey::Computed(resolved)
-                    }
-                    _ => return None,
-                },
-            };
+        for member_index in keys {
             let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                 base,
                 index: member_index,
@@ -7614,6 +8211,132 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(out)
             }
             _ => None,
+        }
+    }
+
+    /// The finite literal keys the resolved index node `index` denotes, in
+    /// order, or `None` when it is not a finite set of literal keys:
+    ///
+    /// - a literal key is itself (a NUMERIC literal outside the bounded
+    ///   integer convention — `Obj[1.5 | 1e21]` — stays a `TypeNode` key,
+    ///   so the per-key `IndexedAccess` recovers its canonical
+    ///   `js_number_to_string` needle through the same path as a single-key
+    ///   access);
+    /// - a union is every arm's keys;
+    /// - `keyof T` over a `T` whose keys enumerate (a declaration carrier
+    ///   resolves first) is those keys — `Box[keyof Box]` reads every
+    ///   property;
+    /// - an intersection is the keys common to every arm, in the first
+    ///   arm's order — `'opt' & keyof Box` is `'opt'`.
+    fn finite_index_keys(
+        &self,
+        index: SemanticNodeId,
+        depth: usize,
+    ) -> Option<Vec<crate::semantic_query::IndexKey>> {
+        use crate::semantic_query::IndexKey;
+        const MAX_INDEX_NESTING: usize = 8;
+        if depth > MAX_INDEX_NESTING {
+            return None;
+        }
+        let data = self.graph().node_data(index)?;
+        match data.as_ref() {
+            SemanticNodeData::Union(members) => {
+                let members = members.members_arc();
+                drop(data);
+                let mut keys = Vec::with_capacity(members.len());
+                for member in members.iter() {
+                    for key in self.finite_index_keys(*member, depth + 1)? {
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+                Some(keys)
+            }
+            SemanticNodeData::Intersection(members) => {
+                let members = members.members_arc();
+                drop(data);
+                let mut common: Option<Vec<IndexKey>> = None;
+                for member in members.iter() {
+                    let keys = self.finite_index_keys(*member, depth + 1)?;
+                    common = Some(match common {
+                        None => keys,
+                        Some(common) => common
+                            .into_iter()
+                            .filter(|key| keys.contains(key))
+                            .collect(),
+                    });
+                }
+                common
+            }
+            SemanticNodeData::KeyOf { base } => {
+                let base = *base;
+                drop(data);
+                let settled = self.resolve_signature_source_carrier(
+                    base,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                );
+                let names = self.key_names_from_base_node(settled)?;
+                Some(
+                    names
+                        .into_iter()
+                        .map(|name| match name {
+                            crate::semantic_query::PropertyKey::String(text) => {
+                                IndexKey::String(text)
+                            }
+                            crate::semantic_query::PropertyKey::Number(number) => {
+                                IndexKey::Number(number)
+                            }
+                            crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
+                                IndexKey::UniqueSymbol(identity)
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            SemanticNodeData::Literal(_) => {
+                drop(data);
+                Some(vec![match self.normalized_index_key_node(index) {
+                    key @ (IndexKey::String(_)
+                    | IndexKey::Number(_)
+                    | IndexKey::UniqueSymbol(_)) => key,
+                    IndexKey::Computed(resolved) => {
+                        match self.graph().node_data(resolved).as_deref() {
+                            Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => {
+                                IndexKey::Computed(resolved)
+                            }
+                            _ => return None,
+                        }
+                    }
+                }])
+            }
+            // A named key type (`type K = keyof Box`) is the keys its
+            // declaration resolves to.
+            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
+                drop(data);
+                let context = crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                );
+                let settled = self.resolve_signature_source_carrier(index, context);
+                if settled == index {
+                    return None;
+                }
+                let settled = self
+                    .evaluate_deferred_semantic_node_with_context(settled, context)
+                    .into_active_query_build_node(self);
+                self.finite_index_keys(settled, depth + 1)
+            }
+            _ => {
+                drop(data);
+                match self.normalized_index_key_node(index) {
+                    key @ (IndexKey::String(_)
+                    | IndexKey::Number(_)
+                    | IndexKey::UniqueSymbol(_)) => Some(vec![key]),
+                    IndexKey::Computed(_) => None,
+                }
+            }
         }
     }
 
@@ -8181,6 +8904,313 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
+    /// TypeScript's instantiation of a mapped type declared over `keyof T`
+    /// for a type parameter `T` ([`MapperKey::over_type_variable`]) at the
+    /// type `source` stands for — `instantiateMappedType`. Returns `None`
+    /// when `source` is an object type (or still open), which the ordinary
+    /// mapping answers:
+    ///
+    /// - a union maps each constituent and unites the results
+    ///   (`Partial<A | B>` is `Partial<A> | Partial<B>`), so its keys are no
+    ///   longer the constituents' COMMON keys;
+    /// - a primitive, a literal, `object`, `null` and `undefined` pass
+    ///   through unchanged (`Partial<string>` is `string`), with or without
+    ///   an `as` clause; `never` is `never`, and `unknown` maps to `{}`;
+    /// - without an `as` clause, an array maps its element (`Partial<number[]>`
+    ///   is `(number | undefined)[]`) and a tuple each element, the
+    ///   modifiers applying to the element flags (`Partial<[1, 2?]>` is
+    ///   `[(1 | undefined)?, (2 | undefined)?]`, `Readonly<[1]>` is
+    ///   `readonly [1]`).
+    ///
+    /// [`MapperKey::over_type_variable`]: crate::semantic_query::MapperKey::over_type_variable
+    fn instantiate_homomorphic_mapped(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        // A declaration carrier settles to what it declares, so an alias
+        // of a union, tuple or primitive maps as that type.
+        let resolved = self.resolve_signature_source_carrier(source, context);
+        let data = self.graph().node_data(resolved)?;
+        let fence = self.project_generation_signature();
+        let finish = |node: SemanticNodeId, partial: bool| {
+            let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                fence.clone(),
+            ))
+            .with_observed_self_roots(self.observed_self_roots_from_nodes([source, resolved]));
+            out.result_is_partial = partial;
+            out
+        };
+        match data.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::Any) => None,
+            SemanticNodeData::Primitive(PrimitiveKind::Unknown) => {
+                drop(data);
+                Some(finish(self.empty_object(), false))
+            }
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::TypeOfNominal(_) => {
+                drop(data);
+                Some(finish(resolved, false))
+            }
+            SemanticNodeData::Union(members) => {
+                let members = members.members_arc();
+                drop(data);
+                let mut mapped: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+                let mut partial = false;
+                for &arm in members.iter() {
+                    let read = self.execute_read(SemanticQueryKey::MappedType {
+                        source: arm,
+                        mapper: self.homomorphic_mapper_at(mapper, source, arm, context),
+                        context,
+                    });
+                    partial |= read.result_is_partial;
+                    match read.value {
+                        QueryResult::Value(node) | QueryResult::Recursive(node) => {
+                            mapped.push(node)
+                        }
+                        QueryResult::Error(_) => return None,
+                    }
+                }
+                let united = self.execute_read(SemanticQueryKey::ReduceUnion {
+                    members: Arc::from(mapped.into_boxed_slice()),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                });
+                match united.value {
+                    QueryResult::Value(node) => {
+                        Some(finish(node, partial || united.result_is_partial))
+                    }
+                    _ => None,
+                }
+            }
+            SemanticNodeData::Array { readonly, .. } if mapper.name_remap.is_none() => {
+                let readonly = *readonly;
+                drop(data);
+                let key = self.primitive_node(PrimitiveKind::Number);
+                let value =
+                    self.homomorphic_template(mapper, source, resolved, key, None, context)?;
+                // The mapped array keeps its source's scope, so a read of it
+                // follows the declaring project's options.
+                Some(finish(
+                    self.graph().intern_preserving_scope(
+                        resolved,
+                        SemanticNodeData::Array {
+                            element: value,
+                            readonly: modified_readonly(readonly, mapper.readonly),
+                        },
+                    ),
+                    false,
+                ))
+            }
+            SemanticNodeData::Tuple { elements, readonly } if mapper.name_remap.is_none() => {
+                let (elements, readonly) = (Arc::clone(elements), *readonly);
+                drop(data);
+                let mut mapped: Vec<crate::semantic_query::TupleElement> =
+                    Vec::with_capacity(elements.len());
+                for (position, element) in elements.iter().enumerate() {
+                    let value = if element.rest {
+                        // A rest element holds its array type: it maps as
+                        // that array does.
+                        let rest = self
+                            .evaluate_deferred_semantic_node_with_context(element.value, context)
+                            .into_active_query_build_node(self);
+                        if !matches!(
+                            self.graph().node_data(rest).as_deref(),
+                            Some(SemanticNodeData::Array { .. })
+                        ) {
+                            return None;
+                        }
+                        let read = self.execute_read(SemanticQueryKey::MappedType {
+                            source: rest,
+                            mapper: self.homomorphic_mapper_at(mapper, source, rest, context),
+                            context,
+                        });
+                        match read.value {
+                            QueryResult::Value(node) => node,
+                            _ => return None,
+                        }
+                    } else {
+                        let key = self.graph().intern_node(SemanticNodeData::Literal(
+                            LiteralValue::String(position.to_string()),
+                        ));
+                        self.homomorphic_template(
+                            mapper,
+                            source,
+                            resolved,
+                            key,
+                            Some(element.optional),
+                            context,
+                        )?
+                    };
+                    let optional = !element.rest
+                        && match mapper.optionality {
+                            crate::semantic_query::OptionalityMod::Add => true,
+                            crate::semantic_query::OptionalityMod::Remove => false,
+                            crate::semantic_query::OptionalityMod::Keep => element.optional,
+                        };
+                    mapped.push(crate::semantic_query::TupleElement {
+                        label: element.label.clone(),
+                        value,
+                        optional,
+                        rest: element.rest,
+                    });
+                }
+                Some(finish(
+                    self.graph().intern_preserving_scope(
+                        resolved,
+                        SemanticNodeData::Tuple {
+                            elements: Arc::from(mapped.into_boxed_slice()),
+                            readonly: modified_readonly(readonly, mapper.readonly),
+                        },
+                    ),
+                    false,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The mapper that maps `arm` — one constituent of the homomorphic
+    /// mapping's `source`, or the array a tuple's rest element holds — as
+    /// the mapping maps `source`: its keys are `arm`'s, and the template
+    /// and `as` clause read `arm` where they read `source`.
+    fn homomorphic_mapper_at(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        source: SemanticNodeId,
+        arm: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> crate::semantic_query::MapperKey {
+        let key_space = match self
+            .execute_read(SemanticQueryKey::KeyOf { base: arm, context })
+            .value
+        {
+            QueryResult::Value(node) => node,
+            _ => self
+                .graph()
+                .intern_node(SemanticNodeData::KeyOf { base: arm }),
+        };
+        crate::semantic_query::MapperKey {
+            key_space,
+            value_expr: self.substitute_semantic_type_param(mapper.value_expr, source, arm),
+            name_remap: mapper
+                .name_remap
+                .map(|remap| self.substitute_semantic_type_param(remap, source, arm)),
+            ..mapper.clone()
+        }
+    }
+
+    /// The mapping's template at the key `key` over the array or tuple
+    /// `container` (TypeScript's `instantiateMappedTypeTemplate`): the
+    /// container's element read at `key` for an identity mapping, else the
+    /// template with the binder bound to `key` and `source` read as
+    /// `container`, then the optional modifier under `strictNullChecks`
+    /// — `+?` adds `undefined` unless the type already admits it (for a
+    /// tuple element under `exactOptionalPropertyTypes` the element's
+    /// optional flag carries it instead), `-?` removes it from an array
+    /// element or an optional tuple element. `tuple_element` is the
+    /// element's own optionality, `None` for an array's element.
+    fn homomorphic_template(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        source: SemanticNodeId,
+        container: SemanticNodeId,
+        key: SemanticNodeId,
+        tuple_element: Option<bool>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let template = match mapper.kind {
+            crate::semantic_query::MapperKind::Identity => {
+                self.graph().intern_node(SemanticNodeData::IndexedAccess {
+                    object: container,
+                    index: self.normalized_index_key_node(key),
+                })
+            }
+            crate::semantic_query::MapperKind::Computed => {
+                let over_container =
+                    self.substitute_semantic_type_param(mapper.value_expr, source, container);
+                self.substitute_semantic_type_param(over_container, mapper.parameter_node, key)
+            }
+        };
+        let value = self
+            .evaluate_deferred_semantic_node_with_context(template, context)
+            .into_active_query_build_node(self);
+        if matches!(
+            self.graph().node_data(value).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ) {
+            return None;
+        }
+        let (strict_null_checks, exact_optional) = self
+            .graph()
+            .node_scope(container)
+            .and_then(|scope| scope.canonical_file())
+            .map_or((true, false), |canonical| {
+                let options = self
+                    .ctx
+                    .host_for_fact_tracer_install()
+                    .semantic_compiler_options_for(&canonical);
+                (
+                    options.strict_null_checks,
+                    options.exact_optional_property_types,
+                )
+            });
+        let mut arms: Vec<SemanticNodeId> = Vec::new();
+        match self.graph().node_data(value).as_deref() {
+            Some(SemanticNodeData::Union(members)) => arms.extend(members.members_arc().iter()),
+            _ => arms.push(value),
+        }
+        if !strict_null_checks {
+            // With `strictNullChecks` off `null` and `undefined` are no
+            // types of their own: the element erases them.
+            return Some(if arms.len() < 2 {
+                value
+            } else {
+                self.intern_normalized_union(
+                    &arms,
+                    crate::semantic_query::NullabilityPolicy::Erased,
+                )
+            });
+        }
+        let admits_undefined = |arm: &SemanticNodeId| {
+            matches!(
+                self.graph().node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Undefined | PrimitiveKind::Void
+                ))
+            )
+        };
+        match mapper.optionality {
+            crate::semantic_query::OptionalityMod::Add
+                if !(exact_optional && tuple_element.is_some())
+                    && !arms.iter().any(admits_undefined) =>
+            {
+                arms.push(self.primitive_node(PrimitiveKind::Undefined));
+                Some(self.intern_normalized_union_or_intersection(&arms, true))
+            }
+            crate::semantic_query::OptionalityMod::Remove if tuple_element.unwrap_or(true) => {
+                let kept: Vec<SemanticNodeId> = arms
+                    .into_iter()
+                    .filter(|arm| {
+                        !matches!(
+                            self.graph().node_data(*arm).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                        )
+                    })
+                    .collect();
+                Some(match kept.as_slice() {
+                    [] => self.primitive_node(PrimitiveKind::Never),
+                    [only] => *only,
+                    _ => self.intern_normalized_union_or_intersection(&kept, true),
+                })
+            }
+            _ => Some(value),
+        }
+    }
+
     /// Mapped-type rewrite.
     ///
     /// For a mapped type `{ [K in key_space]: value_expr }` with
@@ -8257,6 +9287,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // warm a whole-surface candidate.
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
+        }
+        // A mapping over a type parameter instantiates the checker's way:
+        // unions distribute, primitives pass through, arrays and tuples map
+        // element-wise.
+        if mapper.over_type_variable {
+            if let Some(instantiated) = self.instantiate_homomorphic_mapped(source, mapper, context)
+            {
+                return instantiated;
+            }
         }
         // §22 fast-reject on the mapped SOURCE: over `any` ⇒ `any`; over
         // `never` ⇒ `{}`; over `error` ⇒ `error`; a direct mapping over
@@ -10678,40 +11717,151 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Re-enter [`SemanticQueryKey::AwaitedNormalize`] on a composite arm.
-    /// Going back through the query — rather than recursing privately — is
-    /// what puts nested unwraps under the family memo, the singleflight, the
-    /// same-path cycle guard and the connected-work budget.
-    fn awaited_normalize_read(
+    /// The checker's error type after `diagnostic`, as the typed recovery
+    /// carrier.
+    fn checker_recovery(
+        &self,
+        diagnostic: crate::semantic_query::CheckerDiagnostic,
+    ) -> SemanticNodeId {
+        self.graph()
+            .intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery(
+                diagnostic,
+            )))
+    }
+
+    /// Whether `reduced` is `relation`'s TS1062 failure for `operand` — the
+    /// relation's own recovery carrier, reached from an operand that was not
+    /// already an error type (an error-type operand is its own answer, so it
+    /// passes through as a value).
+    fn awaited_relation_failed_on(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        reduced: SemanticNodeId,
+    ) -> bool {
+        use crate::project_semantic_dispatch::absorb::SpecialKind;
+        matches!(
+            self.graph().node_data(reduced).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic)))
+                if *diagnostic == relation.recursion_diagnostic()
+        ) && !matches!(self.peek_special(operand), Some((SpecialKind::Error, _)))
+    }
+
+    /// Whether the runtime awaited relation FAILED on `operand` with TS1062,
+    /// given the node `awaited_normalize_for_flow` answered for it.
+    pub(super) fn awaited_normalize_failed_on(
         &self,
         operand: SemanticNodeId,
+        reduced: SemanticNodeId,
+    ) -> bool {
+        self.awaited_relation_failed_on(AwaitedRelation::Normalize, operand, reduced)
+    }
+
+    /// Re-enter `relation`'s own family on `operand`. Going back through the
+    /// query — rather than recursing privately — is what puts nested unwraps
+    /// under the family memo, the singleflight and the connected-work
+    /// budget; each relation re-enters ONLY itself, so an async return
+    /// payload never comes back as `Awaited<T>` for a nested naked `T`.
+    ///
+    /// The re-entry first applies the checker's own recursion rule
+    /// (`getAwaitedTypeNoAlias` and its `awaitedTypeStack`): when `operand`
+    /// is a type this relation is ALREADY unwrapping on the current path, the
+    /// thenable that promised it references itself, directly or indirectly,
+    /// in its fulfillment callback. The checker reports TS1062 there and
+    /// fails the step ([`AwaitedStep::Failed`]). Which operands are in flight
+    /// is a fact about this path, not about `operand`, so every answer built
+    /// over such a failure stays out of the warm memo.
+    fn awaited_relation_step(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AwaitedNormalize { operand, context })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
+    ) -> AwaitedStep {
+        let key = relation.key(operand, context);
+        if self.graph().is_same_path_inflight_on_current_thread(&key) {
+            self.fold_into_top_build_local_taint(false, true);
+            return AwaitedStep::Failed;
+        }
+        match self.execute_read(key).value {
+            QueryResult::Value(node)
+                if self.awaited_relation_failed_on(relation, operand, node) =>
+            {
+                AwaitedStep::Failed
+            }
+            QueryResult::Value(node) => AwaitedStep::Value(node),
+            _ => AwaitedStep::Refused,
         }
     }
 
-    /// Re-enter [`SemanticQueryKey::AsyncReturnPayload`] on a composite arm.
-    /// Deliberately its OWN relation: an async return payload never
-    /// re-enters `AwaitedNormalize`, or a nested naked type parameter would
-    /// come back as `Awaited<T>` instead of `T`.
-    fn async_return_payload_read(
+    /// Distribute `relation` over union arms the way the checker maps
+    /// `getAwaitedTypeNoAlias` over a union: an arm that FAILS (TS1062) is
+    /// dropped, and the union fails only when every arm does. An arm that
+    /// refuses defers the whole reduction — a partial distribution would
+    /// silently drop information.
+    fn awaited_union_step(
         &self,
-        operand: SemanticNodeId,
+        relation: AwaitedRelation,
+        arms: &[SemanticNodeId],
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AsyncReturnPayload { operand, context })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
+    ) -> AwaitedStep {
+        let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match self.awaited_relation_step(relation, *arm, context) {
+                AwaitedStep::Value(node) => reduced.push(node),
+                AwaitedStep::Failed => {}
+                AwaitedStep::Refused => return AwaitedStep::Refused,
+            }
         }
+        match reduced.as_slice() {
+            [] => AwaitedStep::Failed,
+            [single] => AwaitedStep::Value(*single),
+            _ => AwaitedStep::Value(self.intern_normalized_union_or_intersection(&reduced, true)),
+        }
+    }
+
+    /// The declaration a lowering-time self-reference sentinel names.
+    ///
+    /// A declaration's body lowers a reference to the declaration itself as
+    /// `RecursiveRef { name }` (`interface Rec { then(f: (v: Rec) => void):
+    /// void }` — the `Rec` in the callback), scoped to the declaring file.
+    /// For a declaration with no type parameters that sentinel denotes
+    /// exactly the declaration, so it answers as its `DeclRef` carrier.
+    /// A generic declaration's sentinel does not record which instantiation
+    /// it stands for, and a function-local declaration is not addressable by
+    /// its file slot, so both stay the sentinel.
+    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let name = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name })) => Arc::clone(name),
+            _ => return None,
+        };
+        let scope = self.graph().node_scope(node)?;
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            whole_hash,
+            local_scope: None,
+        } = &scope
+        else {
+            return None;
+        };
+        let prepared = self.ctx.prepared_type_decl_return_only(
+            canonical_id.as_ref(),
+            *owner,
+            name.as_ref(),
+        )?;
+        if !prepared.type_parameters.is_empty() {
+            return None;
+        }
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(canonical_id),
+            owner: *owner,
+            whole_hash: *whole_hash,
+            decl_name: name,
+        };
+        Some(
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope.clone()),
+        )
     }
 
     /// Settle the operand once, through the shared deferred evaluator, and
@@ -10729,6 +11879,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
             .into_active_query_build_node(self);
+        // A declaration's lowering-time reference to itself is the
+        // declaration it names.
+        let resolved = self
+            .self_reference_declaration(resolved)
+            .unwrap_or(resolved);
         // `any` / `never` / `unknown` and the dominating error carrier all
         // answer with the resolved operand verbatim.
         if let Some((kind, special)) = self.peek_special(resolved) {
@@ -10748,21 +11903,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (resolved, None)
     }
 
-    /// Re-enter the family `relation` names — each relation's composite arms
-    /// go back through its OWN query so nested unwraps share its memo, cycle
-    /// guard and budget.
-    fn awaited_relation_read(
-        &self,
-        relation: AwaitedRelation,
-        operand: SemanticNodeId,
-        context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        match relation {
-            AwaitedRelation::Normalize => self.awaited_normalize_read(operand, context),
-            AwaitedRelation::Payload => self.async_return_payload_read(operand, context),
-        }
-    }
-
     /// The structural arms BOTH compiler awaited relations share, reached
     /// after each family's own arms declined. They follow the checker's
     /// runtime awaited-type protocol (`getAwaitedType` /
@@ -10774,7 +11914,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   ([`Self::surface_thenability`]): not thenable ⇒ itself; a valid
     ///   thenable ⇒ the relation over the promised value; a callable `then`
     ///   with no callable `onfulfilled` ⇒ `any` (the checker reports the
-    ///   operand and types it `any`);
+    ///   operand and types it `any`); the promised values are one union to
+    ///   the checker, so a value the relation FAILS on is dropped, and the
+    ///   step fails only when every value does;
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands ONE
     ///   level through the shared `Instantiate` family and re-enters the
     ///   relation on its body. When the body comes back unchanged the
@@ -10787,44 +11929,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         relation: AwaitedRelation,
         resolved: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
-        let data = self.graph().node_data(resolved)?;
+    ) -> AwaitedStep {
+        let Some(data) = self.graph().node_data(resolved) else {
+            return AwaitedStep::Refused;
+        };
         match data.as_ref() {
             SemanticNodeData::Object(surface) => {
                 self.note_awaited_evidence(surface.positive_members().iter().map(|m| m.value));
                 let thenability = self.surface_thenability(resolved, surface);
                 drop(data);
                 match thenability {
-                    Thenability::NotThenable => Some(resolved),
+                    Thenability::NotThenable => AwaitedStep::Value(resolved),
                     Thenability::Promised(values) => {
-                        let mut reduced = Vec::with_capacity(values.len());
-                        for value in values {
-                            reduced.push(self.awaited_relation_read(relation, value, context)?);
-                        }
-                        Some(if reduced.len() == 1 {
-                            reduced[0]
-                        } else {
-                            self.intern_normalized_union_or_intersection(&reduced, true)
-                        })
+                        self.awaited_union_step(relation, &values, context)
                     }
-                    Thenability::Malformed => Some(
+                    Thenability::Malformed => AwaitedStep::Value(
                         self.graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
                     ),
-                    Thenability::Undecided => None,
+                    Thenability::Undecided => AwaitedStep::Refused,
                 }
             }
             SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
                 drop(data);
-                let body = self.declaration_carrier_body(resolved)?;
+                let Some(body) = self.declaration_carrier_body(resolved) else {
+                    return AwaitedStep::Refused;
+                };
                 self.note_awaited_evidence([body]);
                 if self.same_node_payload(body, resolved) {
-                    return None;
+                    return AwaitedStep::Refused;
                 }
-                let reduced = self.awaited_relation_read(relation, body, context)?;
-                Some(if reduced == body { resolved } else { reduced })
+                match self.awaited_relation_step(relation, body, context) {
+                    AwaitedStep::Value(reduced) if reduced == body => AwaitedStep::Value(resolved),
+                    step => step,
+                }
             }
-            _ => None,
+            _ => AwaitedStep::Refused,
         }
     }
 
@@ -10847,6 +11987,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         carrier: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
+        match self
+            .execute_read(self.declaration_carrier_key(carrier)?)
+            .value
+        {
+            QueryResult::Value(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// The `Instantiate` key [`Self::declaration_carrier_body`] reads for a
+    /// declaration carrier, or `None` for any other node.
+    fn declaration_carrier_key(&self, carrier: SemanticNodeId) -> Option<SemanticQueryKey> {
         let (identity, args) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => (
                 identity.clone(),
@@ -10868,15 +12020,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
         );
-        match self
-            .execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(slot, args, context),
-            ))
-            .value
-        {
-            QueryResult::Value(body) => Some(body),
-            _ => None,
-        }
+        Some(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(slot, args, context),
+        ))
     }
 
     /// Bind the lexical demand scope to `node`'s declaring file for one
@@ -11096,8 +12242,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// family (its memo, singleflight and cycle guard), classified:
     /// `Some(None)` when the application stays deferred, `Some(Some(node))`
     /// when it reduced, `None` on refusal.
+    ///
+    /// When `Awaited<argument>` is an application whose evaluation is
+    /// ALREADY in progress on this path, the conditional has recursed back
+    /// into itself with the same argument: `Awaited<V>` for a `then` whose
+    /// fulfillment value leads back to the operand. The checker's
+    /// instantiation never terminates there; it stops at its depth limit,
+    /// reports TS2589 and continues with its error type. That recovery is
+    /// the answer, and it holds whatever else is in flight — every
+    /// application on the path leads back to this one, and the error type
+    /// dominates each union and branch the conditional builds on the way.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
-        let body = self.declaration_carrier_body(self.lib_awaited_carrier(argument))?;
+        let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
+        if self
+            .graph()
+            .is_same_path_inflight_on_current_thread(&application)
+        {
+            return Some(Some(self.checker_recovery(
+                crate::semantic_query::CheckerDiagnostic {
+                    code:
+                        crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                    operation: crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+                },
+            )));
+        }
+        let body = match self.execute_read(application).value {
+            QueryResult::Value(body) => body,
+            _ => return None,
+        };
         if self.lib_awaited_carrier_argument(body) == Some(argument) {
             return Some(None);
         }
@@ -11138,6 +12310,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
             .into_active_query_build_node(self);
+        let resolved = self
+            .self_reference_declaration(resolved)
+            .unwrap_or(resolved);
         if let Some((kind, special)) = self.peek_special(resolved) {
             return match kind {
                 SpecialKind::Any
@@ -11446,8 +12621,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             _ => vec![bound],
         };
-        arms.into_iter()
-            .any(|arm| self.awaited_normalize_read(arm, context) != Some(arm))
+        arms.into_iter().any(|arm| {
+            !matches!(
+                self.awaited_relation_step(AwaitedRelation::Normalize, arm, context),
+                AwaitedStep::Value(node) if node == arm
+            )
+        })
     }
 
     /// The awaited-type normalization — the LIVE producer for
@@ -11465,19 +12644,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_awaited_normalize();
         let reduced = self.awaited_normalize_node(operand, context);
-        self.awaited_relation_output(operand, reduced)
+        self.awaited_relation_output(AwaitedRelation::Normalize, operand, reduced)
     }
 
     fn awaited_normalize_node(
         &self,
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> AwaitedStep {
         let (resolved, decided) = self.awaited_operand_prelude(operand);
         if let Some(node) = decided {
-            return Some(node);
+            return AwaitedStep::Value(node);
         }
-        let data = self.graph().node_data(resolved)?;
+        let Some(data) = self.graph().node_data(resolved) else {
+            return AwaitedStep::Refused;
+        };
         match data.as_ref() {
             // `Promise<V>` — recognised by RESOLVED declaration identity
             // through the registry, never by spelling — unwraps its payload
@@ -11487,20 +12668,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let payload = args[0];
                 drop(data);
-                self.awaited_normalize_read(payload, context)
+                self.awaited_relation_step(AwaitedRelation::Normalize, payload, context)
             }
             // Union distribution: every arm re-enters the family and the
-            // results renormalise canonically. An arm that refuses defers the
-            // WHOLE reduction — a partial distribution would silently drop
-            // information.
+            // results renormalise canonically.
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
                 drop(data);
-                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    reduced.push(self.awaited_normalize_read(*member, context)?);
-                }
-                Some(self.intern_normalized_union_or_intersection(&reduced, true))
+                self.awaited_union_step(AwaitedRelation::Normalize, &members, context)
             }
             // A type parameter whose constraint is provably its own awaited
             // type is its own awaited type; every other open parameter is the
@@ -11510,9 +12685,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let constraint = *constraint;
                 drop(data);
                 if self.awaited_type_parameter_needs_deferral(constraint, context) {
-                    Some(self.deferred_awaited(resolved))
+                    AwaitedStep::Value(self.deferred_awaited(resolved))
                 } else {
-                    Some(resolved)
+                    AwaitedStep::Value(resolved)
                 }
             }
             // The awaited operation is idempotent: awaiting a deferred
@@ -11520,7 +12695,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::IntrinsicApplication {
                 op: crate::semantic_query::CompilerIntrinsicTypeOp::Awaited,
                 ..
-            } => Some(resolved),
+            } => AwaitedStep::Value(resolved),
             // An authored lib `Awaited<X>` (by declaration identity): the lib
             // conditional decides it first; a deferred application is
             // already an awaited type (the checker's
@@ -11532,9 +12707,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .lib_awaited_carrier_argument(resolved)
                     .expect("guarded by the arm");
                 drop(data);
-                match self.lib_awaited_read(argument)? {
-                    None => Some(resolved),
-                    Some(reduced) => self.awaited_normalize_read(reduced, context),
+                match self.lib_awaited_read(argument) {
+                    None => AwaitedStep::Refused,
+                    Some(None) => AwaitedStep::Value(resolved),
+                    Some(Some(reduced)) => {
+                        self.awaited_relation_step(AwaitedRelation::Normalize, reduced, context)
+                    }
                 }
             }
             // Object surfaces and declaration carriers follow the shared
@@ -11562,25 +12740,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_async_return_payload();
         let reduced = self.async_return_payload_node(operand, context);
-        self.awaited_relation_output(operand, reduced)
+        self.awaited_relation_output(AwaitedRelation::Payload, operand, reduced)
     }
 
     fn async_return_payload_node(
         &self,
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> AwaitedStep {
         let (resolved, decided) = self.awaited_operand_prelude(operand);
         if let Some(node) = decided {
-            return Some(node);
+            return AwaitedStep::Value(node);
         }
-        let data = self.graph().node_data(resolved)?;
+        let Some(data) = self.graph().node_data(resolved) else {
+            return AwaitedStep::Refused;
+        };
         match data.as_ref() {
             // THE DISCRIMINATOR. A naked type parameter is its own payload
             // REGARDLESS of constraint — no constraint test here, deliberately.
             SemanticNodeData::TypeParam { .. } => {
                 drop(data);
-                Some(resolved)
+                AwaitedStep::Value(resolved)
             }
             // An awaited operand contributes NOTHING to the published
             // payload: measured on tsc 7.0.2, `async f<T>(v: T) { return await
@@ -11601,7 +12781,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let inner = args[0];
                 drop(data);
-                self.async_return_payload_read(inner, context)
+                self.awaited_relation_step(AwaitedRelation::Payload, inner, context)
             }
             // An authored lib `Awaited<X>` at the TOP of the payload arrives as
             // the syntax-preserving `__builtin__` carrier, recognised by
@@ -11620,9 +12800,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .lib_awaited_carrier_argument(resolved)
                     .expect("guarded by the arm");
                 drop(data);
-                match self.lib_awaited_read(argument)? {
-                    None => self.async_return_payload_read(argument, context),
-                    Some(reduced) => self.async_return_payload_read(reduced, context),
+                match self.lib_awaited_read(argument) {
+                    None => AwaitedStep::Refused,
+                    Some(None) => {
+                        self.awaited_relation_step(AwaitedRelation::Payload, argument, context)
+                    }
+                    Some(Some(reduced)) => {
+                        self.awaited_relation_step(AwaitedRelation::Payload, reduced, context)
+                    }
                 }
             }
             SemanticNodeData::InstantiationRef { base, args }
@@ -11630,16 +12815,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let payload = args[0];
                 drop(data);
-                self.async_return_payload_read(payload, context)
+                self.awaited_relation_step(AwaitedRelation::Payload, payload, context)
             }
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
                 drop(data);
-                let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    reduced.push(self.async_return_payload_read(*member, context)?);
-                }
-                Some(self.intern_normalized_union_or_intersection(&reduced, true))
+                self.awaited_union_step(AwaitedRelation::Payload, &members, context)
             }
             _ => {
                 drop(data);
@@ -11649,16 +12830,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Shared output shape for both relations: the reduced node rooted on the
-    /// operand's file-derived version, or a non-admitting honest refusal.
+    /// operand's file-derived version; for a TS1062 failure, the checker's
+    /// error type the operation continues with, carrying that diagnostic;
+    /// otherwise a non-admitting honest refusal.
     fn awaited_relation_output(
         &self,
+        relation: AwaitedRelation,
         operand: SemanticNodeId,
-        reduced: Option<SemanticNodeId>,
+        reduced: AwaitedStep,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let observed_self_roots = self.observed_self_roots_from_nodes([operand]);
         let result = match reduced {
-            Some(node) => QueryResult::Value(node),
-            None => QueryResult::Error(QueryError::Miss),
+            AwaitedStep::Value(node) => QueryResult::Value(node),
+            AwaitedStep::Failed => {
+                QueryResult::Value(self.checker_recovery(relation.recursion_diagnostic()))
+            }
+            AwaitedStep::Refused => QueryResult::Error(QueryError::Miss),
         };
         let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
@@ -12230,7 +13417,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// list is the budgeted derived value, and re-deciding gives the
     /// authority another complete attempt), so it routes canonical. Every
     /// other category preserves verbatim: `OrderedCarrier` order IS
-    /// overload precedence; `PreservingRebuild` lost its original's
+    /// overload precedence; a `Heritage` body is a declaration, not an
+    /// intersection type; `PreservingRebuild` lost its original's
     /// category, so re-deciding is unproven; `QuerySubject` shape is
     /// caller contract; `TestFixture` is a deliberately raw fixture.
     ///
@@ -12255,7 +13443,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use crate::semantic_query::composite::CompositeOriginCategory as C;
         let derived = match category {
             C::Canonical(_) | C::CanonicalUnproven | C::AuthoredShell => true,
-            C::OrderedCarrier | C::PreservingRebuild | C::QuerySubject => false,
+            C::OrderedCarrier
+            | C::OverloadGroup
+            | C::MergedOverloadGroup
+            | C::Heritage
+            | C::PreservingRebuild
+            | C::QuerySubject => false,
             #[cfg(any(test, feature = "test-support"))]
             C::TestFixture => false,
         };
@@ -12645,6 +13838,48 @@ enum AwaitedRelation {
     Payload,
 }
 
+impl AwaitedRelation {
+    /// This relation's family key over `operand`.
+    fn key(
+        self,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> SemanticQueryKey {
+        match self {
+            Self::Normalize => SemanticQueryKey::AwaitedNormalize { operand, context },
+            Self::Payload => SemanticQueryKey::AsyncReturnPayload { operand, context },
+        }
+    }
+
+    /// The diagnostic this relation raises on a thenable whose promised
+    /// value it is already unwrapping: TS1062, from the operation the
+    /// relation serves.
+    fn recursion_diagnostic(self) -> crate::semantic_query::CheckerDiagnostic {
+        use crate::semantic_query::CheckerDiagnosticOperation;
+        crate::semantic_query::CheckerDiagnostic {
+            code: crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+            operation: match self {
+                Self::Normalize => CheckerDiagnosticOperation::AwaitOperand,
+                Self::Payload => CheckerDiagnosticOperation::AsyncReturnPayload,
+            },
+        }
+    }
+}
+
+/// One step of an awaited relation.
+#[derive(Debug, Clone, Copy)]
+enum AwaitedStep {
+    /// The relation reduced the operand to this node.
+    Value(SemanticNodeId),
+    /// The relation reached a thenable whose promised value it is already
+    /// unwrapping, and the checker reports TS1062. Its `getAwaitedType`
+    /// answers `undefined` here: a union drops the arm, anything else fails
+    /// whole, and the operation continues with its error type.
+    Failed,
+    /// The protocol cannot decide the operand.
+    Refused,
+}
+
 /// The lib `Awaited<T>` conditional's outcome over one operand.
 #[derive(Debug)]
 enum LibAwaited {
@@ -12707,4 +13942,14 @@ struct DeclarationBindingScope<'s> {
     shadowing: &'s crate::resolver_core::scope_shadowing::ScopeShadowing,
     authored_resolution_debt:
         Option<&'s crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame>,
+}
+
+/// The readonly state a mapped type's `readonly` modifier gives an array or
+/// tuple that was `readonly` (TypeScript's `getModifiedReadonlyState`).
+fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMod) -> bool {
+    match modifier {
+        crate::semantic_query::ReadonlyMod::Add => true,
+        crate::semantic_query::ReadonlyMod::Remove => false,
+        crate::semantic_query::ReadonlyMod::Keep => readonly,
+    }
 }

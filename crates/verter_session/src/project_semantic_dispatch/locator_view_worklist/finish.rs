@@ -127,16 +127,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Alias(target) => projected(memo, *target, context),
-            // The same class expression over its projected instance surface.
-            SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+            // The same class expression over its projected type arguments
+            // and instance surface.
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let projected_arguments: Vec<SemanticNodeId> = type_arguments
+                    .iter()
+                    .map(|argument| projected(memo, *argument, context))
+                    .collect();
                 let projected_surface = projected(memo, *surface, context);
-                if projected_surface == *surface {
+                if projected_surface == *surface && projected_arguments[..] == type_arguments[..] {
                     node
                 } else {
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::ClassExpressionInstance {
                             identity: Arc::clone(identity),
+                            type_arguments: Arc::from(projected_arguments.into_boxed_slice()),
                             surface: projected_surface,
                         },
                     )
@@ -221,13 +231,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // canonical authority, Global intern.
                     self.intern_normalized_union_or_intersection(&ids, false)
                 } else {
-                    // Order- and scope-preserving projection rebuild: an
-                    // ordered heritage/overload carrier (or a possibly-
-                    // callable rebuilt arm set) keeps its verbatim order.
+                    // Order- and scope-preserving projection rebuild: a
+                    // heritage body or an ordered overload carrier (or a
+                    // possibly-callable rebuilt arm set) keeps its verbatim
+                    // order, and a heritage body stays one.
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
                                 Arc::from(ids.into_boxed_slice()),
                             ),
                         ),
@@ -440,6 +452,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: parameter.optional,
                         rest: parameter.rest,
                         span: parameter.span,
+                        declared_literal: parameter.declared_literal,
                     })
                     .collect();
                 let type_parameters: Vec<_> = type_parameters

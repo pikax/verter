@@ -187,7 +187,14 @@ impl SemanticNodeData {
                 args.iter().copied().for_each(visit);
             }
             Self::Alias(inner) | Self::KeyOf { base: inner } => visit(*inner),
-            Self::ClassExpressionInstance { surface, .. } => visit(*surface),
+            Self::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => {
+                type_arguments.iter().copied().for_each(&mut visit);
+                visit(*surface);
+            }
             Self::Object(view) => {
                 for entry in view.entries.iter() {
                     match entry {

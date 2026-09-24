@@ -66,6 +66,19 @@ pub use crate::ide::vue_projection::binding_views::{
     BindingKind, BindingUsageSet, TemplateReadBinding, TemplateReadView, TemplateWriteTarget,
     UsageRegions, UsedBinding, ViewSnapshotKind, WritableBinding, WriteDomain, WriteRejection,
 };
+use crate::ide::vue_projection::public_constructor::project_public_constructor;
+/// Public constructor products: the acceptance surface of
+/// [`VueProjectionBackend::public_constructor`] and the backend's
+/// [`ProjectionBackend::PublicApi`]. Re-exported here (rather than through
+/// `ide`, which is crate-internal) so qualification harnesses and the
+/// declaration and use-inference consumers name the same types as this
+/// backend.
+pub use crate::ide::vue_projection::public_constructor::{
+    ConstructorCompatibilityReceipt, ConstructorSource, DeclaredSurface, ExposeSurface,
+    ExposedMember, InstanceMemberOrigin, PropsDefaults, PropsRequirement, PublicBinderParam,
+    PublicInstanceMember, PublicInstanceProjection, PublicModel, PublicSurface, StaticOptions,
+    VuePublicConstructorContract, EXPOSE_PROVIDER, PUBLIC_COMPONENT, PUBLIC_INSTANCE, PUBLIC_PROPS,
+};
 use crate::ide::vue_projection::script_setup::{
     project_script_pair, ScriptBlockInput, ScriptProjectionFacts, SetupProjectionRefusal,
 };
@@ -298,6 +311,21 @@ impl VueProjectionBackend {
         capture_binder_plan(normal, setup, generic)
     }
 
+    /// The source-backed public constructor and instance contract for the
+    /// admitted parse: one generic construct signature over the authored
+    /// binder, the props/events/models/slots/exposed/static surface, the
+    /// public instance, and its compatibility receipt. Dormant relative to
+    /// [`Self::project_ide`], whose public carrier still answers until Vue
+    /// atomic activation switches the live route.
+    pub fn public_constructor(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Result<VuePublicConstructorContract, SetupProjectionRefusal> {
+        let (normal, setup, generic) = self.script_blocks(source, artifact)?;
+        project_public_constructor(normal, setup, generic)
+    }
+
     /// The two authored script blocks and the `generic` attribute value of
     /// an admitted parse of exactly `source`. Both script-facing projections
     /// read the blocks here, so neither can drift onto a different notion of
@@ -349,7 +377,7 @@ impl VueProjectionBackend {
 
 impl ProjectionBackend for VueProjectionBackend {
     type IdeCompanion = VueIdeCompanion;
-    type PublicApi = ();
+    type PublicApi = VuePublicConstructorContract;
     type Declarations = ();
     type ParseArtifact = FrameworkParseArtifact;
     type Request = CompileRequest;

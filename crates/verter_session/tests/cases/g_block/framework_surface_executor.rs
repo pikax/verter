@@ -156,8 +156,8 @@ fn member_keys(
 /// could not work out its props".
 ///
 /// Each row's props come from `ReturnType<typeof makeProps>` where
-/// `makeProps` returns an object with ONE member this substrate cannot type
-/// (TypeScript 7.0.2 `tsc`: `{ label: string; made: Box }`).
+/// `makeProps` returns an object with ONE member this substrate cannot type,
+/// a tagged template (TypeScript 7.0.2 `tsc`: `{ label: string; made: Box }`).
 ///
 /// The CLEAN controls are the discrimination: an ordinary component must
 /// still encode SUPPORTED + EXACT_RESOLVED, so a blanket downgrade fails
@@ -171,7 +171,8 @@ fn a_degraded_framework_surface_never_encodes_exact_resolved() {
     use verter_session::{FileLanguage, HostConfig, UpsertRequest};
 
     const DEGRADED_BODY: &str = "class Box { readonly tag = \"box\" }\n\
-         function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\n";
+         declare function box(strings: TemplateStringsArray): Box\n\
+         function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }\n";
 
     let vue_degraded = format!(
         "<script setup lang=\"ts\">\n{DEGRADED_BODY}\

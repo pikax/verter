@@ -5125,7 +5125,8 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// Two halves close it. A CONDITIONAL is a `Branches` disposition of the
 /// shared value-structural classifier, so both branches lower as flow
 /// expressions and their calls ride the one call sink, joining through
-/// the same normalizing interner the contributor join uses. And a leaf
+/// the same normalizing interner the contributor join uses; an ARRAY
+/// literal is an `Array` disposition whose elements do the same. And a leaf
 /// answer that would EMBED the carrier goes through `lower_leaf`'s
 /// call-carrier gate and FAILS CLOSED rather than publishing it.
 ///
@@ -5163,8 +5164,9 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// Mutation recipe: dispositioning `ConditionalExpression` as
 /// `ValueDescent::Leaf` in the shared classifier flips `tnAmbTernary`
 /// back to `deg=None cands=1` and puts a `ReturnType` `InstantiationRef`
-/// inside every generic row; deleting only the `lower_leaf` gate flips
-/// the two array rows back to a published carrier.
+/// inside every generic row; dispositioning `ArrayExpression` as
+/// `ValueDescent::Leaf` again sends both array rows back through the leaf
+/// gate, which fails them closed.
 #[test]
 fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_return() {
     let host = make_r5_host();
@@ -5227,10 +5229,21 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
         },
     );
 
-    // A form with NO structural arm fails CLOSED rather than publishing
-    // the carrier.
-    for name in ["tnAmbArray", "tnGenericArray"] {
-        assert_fails_closed(&host, name);
+    // An ARRAY literal is structural too: its element call rides the one
+    // call sink, so the element is the resolved call return — never the
+    // carrier.
+    for (name, element) in [
+        ("tnAmbArray", string_lit("TA")),
+        ("tnGenericArray", string()),
+    ] {
+        assert_clean_warm(
+            &host,
+            name,
+            TypeExpr::Array {
+                element: Arc::new(element),
+                readonly: false,
+            },
+        );
     }
 
     // CONTROL — a call-free ternary is untouched: same answer as its

@@ -133,6 +133,7 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
+                no_implicit_any: true,
             },
         },
         demand: ReturnProjectionDemand::whole_return(),

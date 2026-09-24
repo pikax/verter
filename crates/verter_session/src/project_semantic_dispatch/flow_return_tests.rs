@@ -7483,8 +7483,8 @@ fn lower_lib_global_mints_only_a_global_the_environment_provides() {
 /// The D10 heritage controls for `instanceof` derivation: the
 /// declaration-identity chain decides both edges, a STRUCTURAL TWIN with
 /// no heritage relation takes the checker's OWN subtype fallback (clean,
-/// warm), a twin whose carrier the relation authority cannot decide
-/// stays behind the typed guard gap, the cold walk reads one heritage
+/// warm), a twin of a class WITH heritage takes it through the composed
+/// heritage surface, the cold walk reads one heritage
 /// bundle per visited ancestor, and an identical warm demand adds zero
 /// dispatches of any class.
 #[test]
@@ -7631,15 +7631,12 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
         // (5) The same fallback over a tested class that HAS heritage:
         // `Twin` is shape-identical to `KSub`'s composed instance
-        // surface and heritage proves the two unrelated, but `KSub`'s
-        // carrier unwraps to the heritage INTERSECTION (`K & { s }`) and
-        // the shared relation authority answers that pair undecided in
-        // one direction. An undecided relation is no fact: the fallback
-        // is never entered on a guess, so the subject stays possible
-        // behind the typed guard gap and never warms. The missing
-        // capability is the relation authority's, not this evaluator's —
-        // deciding a class-vs-class structural pair through a composed
-        // heritage carrier is outside D10's mutation boundary.
+        // surface and heritage proves the two unrelated, while `KSub`'s
+        // carrier unwraps to the heritage INTERSECTION (`K & { s }`). The
+        // relation authority relates that intersection as the object its
+        // constituents compose, so `KSub` is a subtype of `Twin` and the
+        // fallback narrows to the instance type: `carrierTwin` returns
+        // `0 | KSub` on 7.0.2, complete.
         let key = whole_return_key(dispatch, CANONICAL, "carrierTwin");
         let result = flow_result_value(dispatch, key.clone());
         let expr = host
@@ -7649,23 +7646,17 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
             matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
             if arms.iter().any(|arm| matches!(
                 arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
                 verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Twin"
             ))),
-            "an undecided structural relation never narrows the arm away, got {expr:?}"
+            "the composed heritage surface narrows the twin to the instance type, got {expr:?}"
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "the undecided structural relation stays behind the typed guard gap"
-        );
-        assert_eq!(
-            dispatch
-                .graph()
-                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "a structurally-undecided arm never warms"
+            None,
+            "the decided structural relation is complete"
         );
 
         // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
@@ -8901,18 +8892,16 @@ function f(x: string | number) {
     });
 }
 
-/// A CONTROL position nested inside a leaf-lowered expression is still a
-/// control position: the checker binds the predicate call in the ternary
-/// test into the branch narrowing even though the WHOLE array folds into
-/// one shallow-pass leaf answer — `[isString(x) ? x : false]` is
-/// `(string | boolean)[]` in the checker. Blanket-certifying the nested
-/// test call decided-above dropped that narrowing and the unnarrowed
-/// superset sealed complete and warm. The nested control call takes the
-/// per-callee certification instead: a predicate callee is unprovable
-/// here, so the element keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// An array element that is a CONDITIONAL narrows its branches through a
+/// predicate test exactly as a returned conditional does: the array
+/// literal lowers structurally, so the element is the branch join and the
+/// predicate call is the guard's own evidence — `[isString(x) ? x :
+/// false]` is the checker's `(string | boolean)[]` (TypeScript 7.0.2),
+/// clean and warm. (The same conditional folded into a LEAF answer keeps
+/// the per-callee certification and its typed gap:
+/// `flow_slice_content_tests::leaf_nested_control_position_calls_are_never_blanket_certified`.)
 #[test]
-fn leaf_nested_conditional_predicate_never_certifies_decided_above() {
+fn array_element_conditional_narrows_through_its_predicate() {
     const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8936,37 +8925,26 @@ function f(x: string | number) {
         let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
             panic!("f: the return is an array, got {expr:?}");
         };
-        // The dropped branch narrowing never collapses the element to the
-        // narrowed branch read: the `false` arm survives and no arm is the
-        // narrowed `string`. (The consequent's bare `typeof x` root rides
-        // its own typed miss carrier — bare frame-rooted `typeof` roots
-        // are not path-projected, before and after this change.)
         let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
-            panic!("f: the element keeps the unnarrowed join, got {expr:?}");
+            panic!("f: the element is the branch join, got {expr:?}");
         };
-        assert!(
-            arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)),
-            "f: the `false` arm survives, got {expr:?}"
-        );
-        assert!(
-            !arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
-            "f: the narrowed branch read never publishes, got {expr:?}"
-        );
+        let mut arms: Vec<_> = arms.iter().cloned().collect();
+        arms.sort_by_key(|arm| format!("{arm:?}"));
         assert_eq!(
-            result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "f: the nested control call degrades to the typed guard-narrowing gap"
+            arms,
+            vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ],
+            "f: the consequent reads the narrowed `string`, got {expr:?}"
         );
+        assert_eq!(result.degradation(), None, "f: {expr:?}");
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "f: an unprovable nested control call never warms"
+            1,
+            "f: a clean complete result admits warm"
         );
     });
 }

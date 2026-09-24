@@ -513,12 +513,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The checker's criteria (`tsc` `getNarrowedType` /
     /// `isTypeDisjointTo`): disjoint primitive/literal tags and distinct
     /// `unique symbol` identities are unit-discriminant conflicts, as is a
-    /// shared REQUIRED member whose two types are BOTH unit types (a
-    /// literal or a `unique symbol`) and conflict. A conflict reachable
-    /// only through member values that are not both unit types — at ANY
-    /// depth — is a real disjointness proof whose intersection the checker
-    /// KEEPS. Unions distribute the decision: every alternative pair must
-    /// satisfy a collapse criterion, else the intersection is kept.
+    /// shared member that is not optional on both sides and whose types
+    /// make a discriminant with an empty intersection
+    /// ([`Self::discriminant_members_conflict`]). A conflict reachable only
+    /// through member values that are not literal types — at ANY depth — is
+    /// a real disjointness proof whose intersection the checker KEEPS.
+    /// Unions distribute the decision: every alternative pair must satisfy
+    /// a collapse criterion, else the intersection is kept.
     ///
     /// Runs OUTSIDE the relation budget, including for warm `Comparable`
     /// hits: the class is a pure function of the pair's top-level shapes —
@@ -575,9 +576,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return IntersectionCollapse::ReducesToNever;
         }
         // Two structural surfaces: the checker collapses only on a shared
-        // REQUIRED member whose two types are both UNIT types and conflict.
-        // Any other member conflict — nested descent, non-unit values —
-        // leaves `A & B` standing.
+        // member that makes an empty discriminant. Any other member conflict
+        // — nested descent, non-literal values — leaves `A & B` standing.
         let (ComparableSurface::Object(source_view), ComparableSurface::Object(target_view)) = (
             self.comparable_surface(source),
             self.comparable_surface(target),
@@ -585,9 +585,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return IntersectionCollapse::Kept;
         };
         for source_member in source_view.positive_members() {
-            if source_member.optional {
-                continue;
-            }
             let Some(member_key) = source_member.key.cloned_known() else {
                 continue;
             };
@@ -596,10 +593,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             else {
                 continue;
             };
-            if target_member.optional {
+            // The intersection's member is optional only when both are, and
+            // an optional member never reduces the intersection.
+            if source_member.optional && target_member.optional {
                 continue;
             }
-            if self.unit_types_conflict(source_member.value, target_member.value) {
+            if self.discriminant_members_conflict(
+                (source_member.value, source_member.optional),
+                (target_member.value, target_member.optional),
+            ) {
                 return IntersectionCollapse::ReducesToNever;
             }
         }
@@ -629,25 +631,78 @@ impl<'a> ProjectSemanticDispatch<'a> {
         IntersectionCollapse::ReducesToNever
     }
 
-    /// Whether two member values are BOTH unit types (a literal or a
-    /// `unique symbol` identity) that provably conflict — the checker's
-    /// unit-discriminant criterion. Bounded to one hop: a unit type is
-    /// never an object, so the recursion bottoms out in the tag / nominal
-    /// arms immediately.
-    fn unit_types_conflict(&self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
-        let unit = |node: SemanticNodeId| {
+    /// Whether a shared member of two surfaces is an EMPTY DISCRIMINANT —
+    /// the checker's `isDiscriminantWithNeverType`: at least one side's
+    /// type is a literal type (a unit type — a literal, a `unique symbol`,
+    /// `null`, `undefined` — `boolean`, or a union of those) and the two
+    /// types share no value, every pair of their arms being disjoint. An
+    /// optional side contributes its type plus `undefined` under
+    /// `strictNullChecks`. Measured on the pinned checker: `{ v: number }
+    /// & { v: "b" }`, `{ v: "a" | undefined } & { v: "b" }`, `{ v?: "a" }
+    /// & { v: "b" }` and `{ v: boolean } & { v: 1 }` are `never`, while
+    /// `{ v: string } & { v: number }` (no literal side) and `{ v: "a" |
+    /// "b" } & { v: "b" | "d" }` (a shared `"b"`) are kept. Bounded to one
+    /// hop: an arm pair is decided by the tag / nominal arms, and an object
+    /// arm is never disjoint from a literal (the pair is kept).
+    fn discriminant_members_conflict(
+        &self,
+        (left, left_optional): (SemanticNodeId, bool),
+        (right, right_optional): (SemanticNodeId, bool),
+    ) -> bool {
+        // A member value is the type the relation read for it: an indexed
+        // access or a reference that reads a literal IS that literal
+        // (`v: Boxed['k']` over `k: 'a'` is the unit `'a'`).
+        let read = |node: SemanticNodeId| match self.unwrap_identity_carrier_for_relation(node) {
+            IdentityCarrierUnwrap::Concrete(read) => read,
+            IdentityCarrierUnwrap::Unresolvable => node,
+        };
+        let strict_null_checks = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .strict
+            .unwrap_or(StrictFamilyConfig::TS_STRICT)
+            .strict_null_checks;
+        let arms_of = |node: SemanticNodeId, optional: bool| {
+            let node = read(node);
+            let mut arms: Vec<SemanticNodeId> = match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Union(members)) => {
+                    members.members_arc().iter().map(|arm| read(*arm)).collect()
+                }
+                _ => vec![node],
+            };
+            if optional && strict_null_checks {
+                arms.push(
+                    self.graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                );
+            }
+            arms
+        };
+        let (left, right) = (arms_of(left, left_optional), arms_of(right, right_optional));
+        let unit = |node: &SemanticNodeId| {
             matches!(
-                self.graph().node_data(node).as_deref(),
-                Some(SemanticNodeData::Literal(_)) | Some(SemanticNodeData::TypeOfNominal(_))
+                self.graph().node_data(*node).as_deref(),
+                Some(
+                    SemanticNodeData::Literal(_)
+                        | SemanticNodeData::TypeOfNominal(_)
+                        | SemanticNodeData::Primitive(
+                            PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Boolean
+                        )
+                )
             )
         };
-        if !unit(left) || !unit(right) {
+        if !left.iter().all(unit) && !right.iter().all(unit) {
             return false;
         }
-        match self.checker_intersection_collapse(left, right) {
-            IntersectionCollapse::ReducesToNever => true,
-            IntersectionCollapse::Kept => false,
-        }
+        left.iter().all(|a| {
+            right.iter().all(|b| {
+                matches!(
+                    self.checker_intersection_collapse(*a, *b),
+                    IntersectionCollapse::ReducesToNever
+                )
+            })
+        })
     }
 
     /// Test-support adapter mapping the authority's step onto the
@@ -3410,7 +3465,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(args.iter().copied());
                 }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
@@ -3633,6 +3695,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             RelationResult::NotAssignable
         }
+    }
+
+    /// Relate an intersection `source` none of whose constituents is
+    /// assignable to the object `target` on its own, as the one object the
+    /// constituents compose — TypeScript's structural fallback for an
+    /// intersection source (measured on the pinned checker: over `interface
+    /// QA { qa: 1 }` and `interface QB { qb: 2 }`, `QA & QB extends { qa:
+    /// 1; qb: 2 }` is true though neither arm is). The composition is the
+    /// shared surface reader's; one it cannot produce leaves the pair
+    /// undecided, since no constituent's failure proves the whole fails.
+    fn relate_composed_intersection(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let Some((_, composed)) = self.resolve_typeinfo_surface_view_with_node(
+            source,
+            ProjectionReductionContext::structural_transit(),
+        ) else {
+            return RelationResult::Unknown;
+        };
+        if composed == source
+            || !matches!(
+                self.graph().node_data(composed).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            )
+        {
+            return RelationResult::Unknown;
+        }
+        self.relate_member(composed, target, bindings, InferPosition::Covariant)
     }
 
     fn relate_signature_alternatives(
@@ -5085,15 +5178,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // linear budget; charging the scan keeps the budget an
                     // honest bound on comparisons performed.
                     let target_width = target_view.positive_members().len() as u64;
+                    // A member both sides declare is compared as the
+                    // checker's comparable relation reads it: each side's
+                    // type plus `undefined` where that side is optional
+                    // under `strictNullChecks` (measured on the pinned
+                    // checker: `{ v?: 'a' }` narrowed by `x is { v: 'b' }`
+                    // is `never` with the option on and off, while `{ v?:
+                    // 'a' }` against `{ v?: 'b' }` overlaps on `undefined`).
+                    let strict_null_checks = self
+                        .dispatch_txn
+                        .borrow()
+                        .relation
+                        .strict
+                        .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                        .strict_null_checks;
+                    let read = |value: SemanticNodeId, optional: bool| {
+                        if !(optional && strict_null_checks) {
+                            return value;
+                        }
+                        let undefined = graph
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                        self.intern_normalized_union_or_intersection(&[value, undefined], true)
+                    };
                     work.push(Work::CombineAllFrom(results.len()));
                     for source_member in source_view.positive_members() {
                         budget_used = budget_used.saturating_add(1);
                         if budget_used > budget_limit {
                             self.note_relation_budget_exceeded(budget_limit);
                             return RelationResult::Unknown;
-                        }
-                        if source_member.optional {
-                            continue;
                         }
                         let Some(member_key) = source_member.key.cloned_known() else {
                             continue;
@@ -5108,9 +5220,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         else {
                             continue;
                         };
-                        if !target_member.optional {
-                            work.push(Work::Eval(source_member.value, target_member.value));
-                        }
+                        work.push(Work::Eval(
+                            read(source_member.value, source_member.optional),
+                            read(target_member.value, target_member.optional),
+                        ));
                     }
                 }
             }
@@ -6098,56 +6211,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             || (target_data.typeof_nominal_identity().is_some() && is_decl_carrier(&source_data))
     }
 
-    /// Whether a REQUIRED string-keyed property of the object `target` is
-    /// proven absent from every member of an intersection source — the
-    /// one refutation of the intersection's combined structure a
-    /// member-wise read can give (`{ a } & { b }` has no `c`).
-    fn intersection_lacks_a_required_property(
-        &self,
-        members: &[SemanticNodeId],
-        target: SemanticNodeId,
-    ) -> bool {
-        let graph = self.graph();
-        let Some(target_data) = graph.node_data(target) else {
-            return false;
-        };
-        let SemanticNodeData::Object(target_surface) = &*target_data else {
-            return false;
-        };
-        let member_surfaces: Option<Vec<SurfaceView>> = members
-            .iter()
-            .map(|member| {
-                let concrete = match self.unwrap_identity_carrier_for_relation(*member) {
-                    IdentityCarrierUnwrap::Concrete(concrete) => concrete,
-                    IdentityCarrierUnwrap::Unresolvable => return None,
-                };
-                match graph.node_data(concrete).as_deref() {
-                    Some(SemanticNodeData::Object(surface))
-                        if !surface.has_known_index_signature()
-                            && surface.index_signatures.is_empty() =>
-                    {
-                        Some(surface.clone())
-                    }
-                    _ => None,
-                }
-            })
-            .collect();
-        let Some(member_surfaces) = member_surfaces else {
-            return false;
-        };
-        target_surface.positive_members().iter().any(|property| {
-            !property.optional
-                && matches!(
-                    &property.key,
-                    crate::semantic_query::AuthoredPropertyKey::String(name)
-                        if member_surfaces.iter().all(|surface| matches!(
-                            surface.project_string_key(name),
-                            crate::semantic_query::SurfaceKeyProjection::AbsentProven
-                        ))
-                )
-        })
-    }
-
     /// Whether either side of a composite arm pair is a declaration
     /// carrier (a `DeclRef` / `InstantiationRef` / an unexpanded
     /// declaration placeholder) the inline deferred gate would answer
@@ -6629,14 +6692,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
             let members = members.members_arc();
-            // No single member relating is not a refutation against a
-            // structured object target: the checker then relates the
-            // intersection's COMBINED properties (`K & { s }` has every
-            // property of `{ k; s }`), which no member-wise read decides.
-            let structured_target = matches!(
-                &*target_data,
-                SemanticNodeData::Object(surface) if !surface.positive_members().is_empty()
-            );
+            let object_target = matches!(&*target_data, SemanticNodeData::Object(_));
             drop(source_data);
             drop(target_data);
             let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
@@ -6650,14 +6706,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
             };
             results.push(match result {
-                RelationResult::NotAssignable
-                    if structured_target
-                        && members.len() > 1
-                        && !self.intersection_lacks_a_required_property(&members, target) =>
-                {
-                    RelationResult::Unknown
+                RelationResult::NotAssignable if object_target => {
+                    self.relate_composed_intersection(source, target, bindings)
                 }
-                result => result,
+                other => other,
             });
             return;
         }
@@ -6890,12 +6942,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                     }
                 } else {
-                    pairs.extend(
-                        s_els
-                            .iter()
-                            .zip(t_els.iter())
-                            .map(|(source, target)| (source.value, target.value)),
-                    );
+                    // An OPTIONAL element's type is its written type plus
+                    // `undefined` under `strictNullChecks` (the checker's
+                    // tuple type argument for `1?` is `1 | undefined`), so
+                    // `[(1 | undefined)?]` relates to `[1?]`; under
+                    // `exactOptionalPropertyTypes` the implied `undefined`
+                    // is the distinct missing type, removed when both
+                    // elements are optional (measured on the pinned
+                    // checker, with each option).
+                    let strict = self
+                        .dispatch_txn
+                        .borrow()
+                        .relation
+                        .strict
+                        .unwrap_or(StrictFamilyConfig::TS_STRICT);
+                    // The target element's missing type is removed whenever
+                    // it is optional, the source's only when both are.
+                    let read = |element: &crate::semantic_query::TupleElement, removed: bool| {
+                        let implied_undefined = element.optional
+                            && strict.strict_null_checks
+                            && !(strict.exact_optional_property_types && removed);
+                        if !implied_undefined {
+                            return element.value;
+                        }
+                        let undefined = graph
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                        self.intern_normalized_union_or_intersection(
+                            &[element.value, undefined],
+                            true,
+                        )
+                    };
+                    pairs.extend(s_els.iter().zip(t_els.iter()).map(|(source, target)| {
+                        (read(source, target.optional), read(target, true))
+                    }));
                 }
                 if pairs.is_empty() {
                     results.push(assignable(bindings));
@@ -7272,6 +7351,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
                 SemanticNodeData::InstantiationRef { base, args } => {
                     (base.clone(), Arc::clone(args))
+                }
+                // An indexed access over a type that is not generic is the
+                // property type it reads (`Box['lit']` IS `2`, and an
+                // optional `opt?: 3` reads `3 | undefined`): the checker
+                // resolves it where it is written, so a relation compares
+                // that type. One the deferred evaluator cannot read further
+                // (`T['k']` over an open `T`) stays the operand it is.
+                SemanticNodeData::IndexedAccess { .. } => {
+                    drop(data);
+                    let read = self
+                        .evaluate_deferred_semantic_node_with_context(current, transit)
+                        .into_active_query_build_node(self);
+                    if read == current {
+                        return IdentityCarrierUnwrap::Concrete(current);
+                    }
+                    current = read;
+                    continue;
                 }
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };

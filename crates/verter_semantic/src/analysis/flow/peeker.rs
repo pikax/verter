@@ -176,10 +176,11 @@ pub struct SliceDemand {
 
 impl SliceDemand {
     /// The whole-return-surface demand for `path` under every return
-    /// site of `skeleton`: origins = every return site, and each
-    /// demanded key resolved against the skeleton's interned name table
-    /// (a table lookup — not a body walk; a key the body never mentions
-    /// stays [`DemandSegment::Foreign`]).
+    /// site of `skeleton`: origins = every return site, then every
+    /// statement-position yield argument (a generator's yield type is part
+    /// of its return type), and each demanded key resolved against the
+    /// skeleton's interned name table (a table lookup — not a body walk; a
+    /// key the body never mentions stays [`DemandSegment::Foreign`]).
     ///
     /// The WHOLE return of a plain function whose one `return` carries a
     /// value that is not an object literal may be a type predicate over
@@ -192,6 +193,7 @@ impl SliceDemand {
         let mut origins: Vec<SliceOrigin> = (0..skeleton.return_sites.len())
             .filter_map(|index| u32::try_from(index).ok())
             .map(|index| SliceOrigin::Return(SkeletonReturnSiteId::from_index(index)))
+            .chain(skeleton.yield_sites.iter().copied().map(SliceOrigin::Expr))
             .collect();
         let may_infer_predicate = path.is_empty()
             && skeleton.kind == super::FunctionBodyKind::Plain

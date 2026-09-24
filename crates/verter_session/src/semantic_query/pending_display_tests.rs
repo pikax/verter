@@ -202,6 +202,7 @@ fn pending_display_preserves_a_mapped_binder_and_its_value_scope() {
     let mapped = store.intern_node(SemanticNodeData::Mapped {
         source: key,
         mapper: super::super::MapperKey {
+            over_type_variable: false,
             parameter_node: key,
             key_space: key,
             value_expr: key,

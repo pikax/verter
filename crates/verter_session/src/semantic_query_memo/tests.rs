@@ -8992,6 +8992,7 @@ mod env_scoped_key_identity_guards {
 
     fn mapper_key(id: SemanticNodeId) -> MapperKey {
         MapperKey {
+            over_type_variable: false,
             parameter_node: id,
             key_space: id,
             value_expr: id,
@@ -10548,6 +10549,7 @@ mod prepared_identity_bijection {
 
     fn mapper(id: u64) -> MapperKey {
         MapperKey {
+            over_type_variable: false,
             parameter_node: node(id),
             key_space: node(id),
             value_expr: node(id),
@@ -11115,6 +11117,7 @@ mod prepared_identity_bijection {
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
                 policy: crate::semantic_query::FlowReturnPolicy {
                     nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    no_implicit_any: true,
                 },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),

@@ -1140,6 +1140,7 @@ fn parity_deferred_operator_shells() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: tp,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: tp,
             key_space: keyspace,
             value_expr: value_tp,
@@ -2389,6 +2390,7 @@ fn mapped_fixture(
     graph.intern_node(SemanticNodeData::Mapped {
         source,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: source,
             key_space,
             value_expr,
@@ -2790,8 +2792,13 @@ fn publication_score_corpus(
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     offset: 42,
                     name: Arc::from("(Anonymous class)"),
-                    qualifier: Some(Arc::from("Mixin")),
+                    outer_clauses: Arc::from([crate::semantic_query::ClassExpressionClause {
+                        container: Arc::from("Mixin"),
+                        parameters: Arc::from([Arc::from("S")]),
+                    }]),
+                    own_arity: 0,
                 }),
+                type_arguments: Arc::from([foo]),
                 surface: obj_a,
             }),
         ),

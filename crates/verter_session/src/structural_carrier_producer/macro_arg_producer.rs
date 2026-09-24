@@ -792,6 +792,12 @@ fn lower_node(
                 readonly,
                 name_remap,
                 kind,
+                over_type_variable: match source.as_ref() {
+                    TypeExpr::KeyOf(_) => {
+                        crate::semantic_query::keyof_operand_is_type_variable(graph, source_node)
+                    }
+                    _ => false,
+                },
             };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Mapped {
@@ -975,6 +981,7 @@ fn lower_function_signature(
             optional: p.optional,
             rest: p.rest,
             span: p.span,
+            declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
         });
     }
     let return_type = match func.return_type.as_deref() {

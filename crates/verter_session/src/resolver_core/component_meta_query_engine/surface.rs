@@ -565,5 +565,12 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
                 spell::spell_partial_reasons(*reasons)
             )
         }
+        QueryError::CheckerRecovery(diagnostic) => {
+            format!(
+                "{}TS{})",
+                spell::CHECKER_RECOVERY_PREFIX,
+                diagnostic.code.code()
+            )
+        }
     }
 }

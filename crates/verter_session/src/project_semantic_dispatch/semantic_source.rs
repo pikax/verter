@@ -48,10 +48,10 @@ use crate::semantic_query::{
 /// and only at a boundary that explicitly owns optional absence.
 #[derive(Debug, Clone)]
 pub(crate) enum SourceRaiseOutcome {
-    /// The source raised to a live graph handle. This includes the two
-    /// legitimately publishable control carriers (a recursive reference and a
-    /// declaration placeholder), which raise AS carriers rather than
-    /// vanishing.
+    /// The source raised to a live graph handle. This includes the
+    /// legitimately publishable carriers (a recursive reference, a
+    /// declaration placeholder and a checker recovery), which raise AS
+    /// carriers rather than vanishing.
     Raised(HotTypeRef),
     /// The source has no live graph representation under the current view —
     /// an unknown file, a memo deref miss, an unrouted payload position, or a
@@ -69,8 +69,8 @@ impl SourceRaiseOutcome {
     /// authority.
     ///
     /// A produced node raises. An error routes by disposition: an
-    /// optional-absence read is [`Absent`](Self::Absent); the two publishable
-    /// control carriers are interned and raised through `carrier`; everything
+    /// optional-absence read is [`Absent`](Self::Absent); the publishable
+    /// carriers are interned and raised through `carrier`; everything
     /// else is [`Failed`](Self::Failed) with its payload intact.
     pub(in crate::project_semantic_dispatch) fn from_read(
         read: QueryResult<SemanticNodeId>,
@@ -92,7 +92,9 @@ impl SourceRaiseOutcome {
     ) -> Self {
         match query_error_disposition(&err) {
             QueryErrorDisposition::OptionalAbsence => Self::Absent,
-            QueryErrorDisposition::RecursionCarrier | QueryErrorDisposition::ExpandableDecl => {
+            QueryErrorDisposition::RecursionCarrier
+            | QueryErrorDisposition::ExpandableDecl
+            | QueryErrorDisposition::CheckerRecovery => {
                 match carrier(&err) {
                     Some(node) => Self::Raised(HotTypeRef::new(node)),
                     // The carrier could not be interned (no scope to intern
@@ -558,8 +560,8 @@ impl ProjectSemanticDispatch<'_> {
         })
     }
 
-    /// Intern one of the two legitimately publishable `Opaque` control
-    /// carriers — a recursive reference or a declaration placeholder — under
+    /// Intern one of the legitimately publishable `Opaque` carriers — a
+    /// recursive reference, a declaration placeholder or a checker recovery — under
     /// the raising file's scope, so the raise hands back a real carrier node
     /// instead of erasing the read into absence. Every other `QueryError`
     /// disposition travels as a typed failure and never reaches here.
@@ -791,8 +793,8 @@ impl ProjectSemanticDispatch<'_> {
     /// The typed error of an interned `Opaque` FAILURE carrier at `node`.
     ///
     /// `None` when `node` is not an `Opaque` carrier at all, or when it is one
-    /// of the two legitimately publishable carriers (a recursive reference,
-    /// a declaration placeholder) — those are real published shapes, not
+    /// of the legitimately publishable carriers (a recursive reference, a
+    /// declaration placeholder, a checker recovery) — those are real published shapes, not
     /// failures. This is the node-domain reader that lets a raise boundary
     /// answer with the carrier's OWN disposition instead of a blanket `None`.
     fn opaque_failure_carrier_error(&self, node: SemanticNodeId) -> Option<QueryError> {

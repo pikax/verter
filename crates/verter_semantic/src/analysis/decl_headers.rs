@@ -234,6 +234,12 @@ pub struct DeclHeaderIndex {
     /// in source order, EMPTY blocks included. Empty in the
     /// `from_eval_env` mirror (same block-level-view limitation).
     pub augmentation_blocks: Vec<AugmentationBlockRecord>,
+    /// The file-scope class declarations authored `abstract` — the
+    /// declaration fact behind the checker's "cannot create an instance of
+    /// an abstract class" refusal of a `new` over the class's own
+    /// construct signatures. Empty in the `from_eval_env` mirror (the
+    /// lowered env carries no class modifiers).
+    pub abstract_classes: FxHashSet<DeclBindingKey>,
 }
 
 impl DeclHeaderIndex {
@@ -1016,6 +1022,9 @@ fn index_named_class(
     let Some(id) = &decl.id else {
         return;
     };
+    if decl.r#abstract {
+        index.abstract_classes.insert(ctx.key(name));
+    }
 
     let params = type_param_headers(decl.type_parameters.as_deref());
     let mut instance_members = Vec::new();

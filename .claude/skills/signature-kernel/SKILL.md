@@ -31,7 +31,7 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `signatures_identical`, `DiscoveryError`. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -93,6 +93,10 @@ node identity:
    merging itself belongs to `SignaturesOfType` →
    `signature_kernel::discovery::intersection_signatures`, never to a local
    concatenation of signature nodes (§15).
+
+An interface/class declaration body with heritage is a third construction
+outside the funnel, the `CompositeList::heritage` mint (§6, rule 8): it is a
+declaration, not a commutative intersection, and is never re-decided.
 
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,
@@ -211,12 +215,38 @@ change; never weaken the test.
    the intersection (`with_discovered_signatures`), never from its own
    identity-deduplicated concatenation. A new merge that interns an object
    carrying signatures must do the same, or it creates a second signature
-   authority. The one exception is an interface/class body's heritage
-   overlay: it is an intersection NODE but inherits by concatenation
-   (TypeScript's `resolveObjectTypeMembers` keeps identical base signatures an
-   intersection would collapse), so its flush keeps the merge's lists. The
-   kernel itself still answers such a body with intersection rules — an open
-   divergence for identical inherited signatures, not a licence to copy.
+   authority.
+8. **A declaration body with heritage is not an intersection type.** An
+   interface/class body with `extends` is an intersection NODE (bases in
+   clause order, own body LAST) minted `CompositeList::heritage`
+   (`CompositeOriginCategory::Heritage`; the single-declaration projection
+   and the merged-declaration reducer mint it, and every order-preserving
+   rebuild keeps it through `CompositeList::rebuilt_from`). `SignaturesOfType`
+   reads the category and answers it with
+   `signature_kernel::discovery::heritage_signatures` — own signatures first,
+   then each base's in clause order, no identical-signature dedup, no mixin
+   composition (TypeScript's `resolveObjectTypeMembers`) — so call
+   resolution, the signature utilities, the relation engine and the shallow
+   walker's heritage flush all agree, through an alias of the declaration and
+   after instantiation too. Because the category is part of node identity,
+   the body never shares a node with the authored `Base & { … }` over the
+   same arms.
+9. **Merged declarations list in order and resolve later-first.** One
+   declaration's own overloads are minted `CompositeList::overload_group`
+   and a merged declaration's groups `CompositeList::merged_overload_group`
+   (one arm per declaration; `CompositeOriginCategory::{OverloadGroup,
+   MergedOverloadGroup}`, kept by every order-preserving rebuild).
+   `SignaturesOfType` answers them with
+   `signature_kernel::discovery::merged_declaration_signatures` — every
+   declaration's signatures in declaration order, identical ones included —
+   which the signature utilities and conditional inference read (the LAST
+   signature). Call resolution alone reads
+   `shared_signature_nodes_in_resolution_order`, the kernel's
+   `resolution_order` (TypeScript's `reorderCandidates`): a later
+   declaration's group before an earlier one's, and a signature whose
+   parameter is WRITTEN as a literal type (`FunctionParam::declared_literal`,
+   carried through instantiation) before the rest. No call site orders
+   candidates itself.
 
 ## Related skills
 

@@ -85,6 +85,14 @@ impl<T> AppendInterner<T> {
         self.shard_lock_acquires.load(Ordering::Relaxed)
     }
 
+    /// Records this table holds, including a duplicate a racing publisher
+    /// stored before equality chose the other id. It is the table's
+    /// retained size, not a published-handle range.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.slots.count()
+    }
+
     fn shard_index(hash: u64) -> usize {
         (hash as usize) % DEDUP_SHARDS
     }

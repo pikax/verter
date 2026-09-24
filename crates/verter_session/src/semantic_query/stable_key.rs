@@ -270,6 +270,9 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
         CompositeOriginCategory::QuerySubject => 6,
         #[cfg(any(test, feature = "test-support"))]
         CompositeOriginCategory::TestFixture => 7,
+        CompositeOriginCategory::Heritage => 9,
+        CompositeOriginCategory::OverloadGroup => 10,
+        CompositeOriginCategory::MergedOverloadGroup => 11,
     }
 }
 
@@ -517,6 +520,7 @@ fn encode_data(
                 MapperKind::Identity => 1,
                 MapperKind::Computed => 2,
             });
+            enc.bool(mapper.over_type_variable);
             match mapper.name_remap {
                 None => enc.u8(0),
                 Some(remap) => {
@@ -613,21 +617,32 @@ fn encode_data(
             }
         }
         // The class identity is the authored position (file, owner, offset);
-        // the printed name and qualifier ride along, and the instance
-        // surface descends as a child, so two instantiations of one class
-        // expression stay distinct.
-        SemanticNodeData::ClassExpressionInstance { identity, surface } => {
+        // the printed name and the enclosing clauses ride along, and the
+        // reference's type arguments and the instance surface descend as
+        // children, so two instantiations of one class expression stay
+        // distinct.
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            surface,
+        } => {
             enc.header(category::AUTHORED, subtag::CLASS_EXPRESSION_INSTANCE);
             enc.str(&identity.canonical_id);
             encode_owner(&mut enc, identity.owner);
             enc.u32(identity.offset);
             enc.str(&identity.name);
-            match &identity.qualifier {
-                None => enc.u8(0),
-                Some(qualifier) => {
-                    enc.u8(1);
-                    enc.str(qualifier);
+            enc.u16(identity.outer_clauses.len() as u16);
+            for clause in identity.outer_clauses.iter() {
+                enc.str(&clause.container);
+                enc.u16(clause.parameters.len() as u16);
+                for parameter in clause.parameters.iter() {
+                    enc.str(parameter);
                 }
+            }
+            enc.u32(identity.own_arity);
+            enc.u16(type_arguments.len() as u16);
+            for argument in type_arguments.iter() {
+                encode_child(graph, *argument, seen, &mut enc, depth);
             }
             encode_child(graph, *surface, seen, &mut enc, depth);
         }
@@ -663,7 +678,10 @@ fn encode_data(
                         enc.str(n);
                     }
                 }
-                enc.bool(p.optional);
+                // One byte for optionality and the literal-declared fact:
+                // a parameter that is not literal-declared encodes exactly
+                // as its optionality alone.
+                enc.u8(u8::from(p.optional) | (u8::from(p.declared_literal) << 1));
                 enc.bool(p.rest);
                 encode_child(graph, p.ty, seen, &mut enc, depth);
             }
@@ -939,9 +957,18 @@ fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
         QueryError::UnrepresentableSurfaceMember => 19,
         QueryError::OpenSurface => 20,
         QueryError::UnmodeledPosition => 21,
+        QueryError::CheckerRecovery(_) => 22,
     };
     enc.u8(tag);
     match err {
+        QueryError::CheckerRecovery(diagnostic) => {
+            enc.u16(u16::try_from(diagnostic.code.code()).unwrap_or(u16::MAX));
+            enc.u8(match diagnostic.operation {
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
+                crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand => 2,
+                crate::semantic_query::CheckerDiagnosticOperation::AsyncReturnPayload => 3,
+            });
+        }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
         QueryError::RecursiveRef { name } => enc.str(name),
         QueryError::Other(s) => enc.str(s),
