@@ -378,3 +378,202 @@ export function tickRoot(n: number) { return tick(n); }\n";
         }
     );
 }
+
+/// A chain across `levels` modules: module `k` imports `c(k-1)` from
+/// module `k-1` and exports `c(k)`, calling it; the last module exports the
+/// witness. `generic` gives every level a `<T>` clause.
+fn module_chain(levels: usize, generic: bool) -> Vec<(String, String)> {
+    (0..levels)
+        .map(|level| {
+            let mut source = String::new();
+            let (clause, param) = if generic { ("<T>", "T") } else { ("", "number") };
+            if level == 0 {
+                source.push_str(&format!(
+                    "export function c0{clause}(x: {param}) {{ return {{ v: x, tag: \"c\" as const }}; }}\n"
+                ));
+            } else {
+                let previous = level - 1;
+                source.push_str(&format!(
+                    "import {{ c{previous} }} from \"./m{previous}\";\n\
+                     export function c{level}{clause}(x: {param}) {{ return c{previous}(x); }}\n"
+                ));
+            }
+            if level == levels - 1 {
+                let witness = if generic { "number | string" } else { "number" };
+                source.push_str(&format!(
+                    "export function witness(v: {witness}) {{ return c{level}(v); }}\n"
+                ));
+            }
+            (format!("/ws/cov/schedule/m{level}.ts"), source)
+        })
+        .collect()
+}
+
+/// The witness of a module chain, under the given query-depth cap.
+fn module_witness_under_depth(files: &[(String, String)], depth: u16) -> Outcome {
+    let sources: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let host = host_with(&sources);
+    let entry = files.last().expect("a chain has a last module").0.as_str();
+    with_dispatch(&host, |dispatch| {
+        dispatch.set_connected_limits_for_tests(MAX_CONNECTED_PROJECTION_WORK, depth);
+        let key = key_of(dispatch, entry, "witness");
+        eval_key_on(&host, dispatch, key)
+    })
+}
+
+/// A chain across modules — every level a callee imported from the module
+/// before — needs no more query depth, and no more native stack, than a
+/// short one: the schedule resolves an imported callee through the
+/// module's imports exactly as the call rail's `typeof callee` lowering
+/// does, and evaluates it bottom-up.
+///
+/// Oracle: `witness` is `{ v: string | number; tag: "c"; }` for the
+/// generic chain (measured across 31 modules) and `{ v: number; tag: "c"; }`
+/// for the non-generic one (measured across 32).
+///
+/// Without the schedule, each level nested the imported callee's
+/// evaluation inside its `typeof` lowering, two connected queries deep, and
+/// the depth guard refused a chain past eleven modules.
+#[test]
+fn a_chain_across_modules_needs_no_more_query_depth_than_a_short_one() {
+    for (generic, arms) in [(true, vec![number(), string()]), (false, vec![number()])] {
+        let (long, short, depth) = on_stack(8 << 20, move || {
+            let short = module_chain(4, generic);
+            let depth = (1..=MAX_CONNECTED_QUERY_DEPTH)
+                .find(|&depth| {
+                    matches!(
+                        module_witness_under_depth(&short, depth),
+                        Outcome::Value { .. }
+                    )
+                })
+                .expect("the short chain answers under the production depth cap");
+            (
+                module_witness_under_depth(&module_chain(32, generic), depth),
+                module_witness_under_depth(&short, MAX_CONNECTED_QUERY_DEPTH),
+                depth,
+            )
+        });
+        assert_tagged_value(&short, &arms);
+        assert!(
+            depth < MAX_CONNECTED_QUERY_DEPTH / 4,
+            "the short chain needs a query depth of {depth}"
+        );
+        assert_eq!(
+            long, short,
+            "the 32-module chain answers like the 4-module one under its depth cap ({depth})"
+        );
+        let on_small_stack = on_stack(512 << 10, move || {
+            module_witness_under_depth(&module_chain(32, generic), MAX_CONNECTED_QUERY_DEPTH)
+        });
+        assert_eq!(
+            on_small_stack, short,
+            "the 32-module chain runs on the short chain's stack"
+        );
+    }
+}
+
+/// A new instantiation of a chain whose uninstantiated answers are already
+/// warm — a second call site after the first request warmed the chain —
+/// runs on the short chain's stack too.
+///
+/// The uninstantiated frames never evaluate on the second request, so no
+/// record of what their call resolution demanded exists there: the
+/// schedule reads the instantiation each level demands from the two
+/// signatures the call executor reads, because every level FORWARDS its
+/// own binder. Without that, each level's instantiation nested one native
+/// evaluation per level with no query boundary between them.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`, over the same 128-level
+/// chain): `second(v: boolean)` is `{ v: boolean; tag: "c"; }`.
+#[test]
+fn a_new_instantiation_of_a_warm_chain_runs_on_the_short_chains_native_stack() {
+    let mut source = witness_chain(128);
+    source.push_str("export function second(v: boolean) { return c127(v); }\n");
+    let host = host_with(&[(PATH, source.as_str())]);
+    let warm = {
+        let host = Arc::clone(&host);
+        on_stack(8 << 20, move || {
+            with_dispatch(&host, |dispatch| {
+                eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+            })
+        })
+    };
+    assert_tagged_value(&warm, &[number(), string()]);
+    let second = on_stack(512 << 10, move || {
+        with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "second"))
+        })
+    });
+    assert_tagged_value(&second, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
+}
+
+/// The second request's answer for `second` over a warm chain of `levels`
+/// local-arrow levels: whether it answered, its partial rails, and how many
+/// warm candidates it admitted — with the first request's `witness`.
+fn warm_local_chain_second(levels: usize) -> (Outcome, bool, bool, PartialReasonSet, usize) {
+    on_stack(8 << 20, move || {
+        let mut source = local_arrow_chain(levels);
+        source.push_str(&format!(
+            "export function second(v: boolean) {{ return l{}(v); }}\n",
+            levels - 1
+        ));
+        let host = host_with(&[(PATH, source.as_str())]);
+        let warm = with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+        });
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, PATH, "second");
+            let read = dispatch
+                .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+            let candidates = dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+            (
+                warm,
+                matches!(read.value, QueryResult::Value(_)),
+                read.result_is_partial && read.cache_suppress,
+                read.partial_reasons,
+                candidates,
+            )
+        })
+    })
+}
+
+/// Native recursion the schedule does not predict ends in the typed depth
+/// refusal, never in a stack overflow: an inline flow evaluation that would
+/// nest past the connected demand's depth bound is refused with
+/// `CONNECTED_QUERY_DEPTH_LIMIT`, partial and never admitted.
+///
+/// The witness is a new instantiation of a warm chain whose every level
+/// calls the next through a local arrow function: the schedule reads a
+/// forwarded instantiation only through a direct call, so each level nests
+/// one evaluation natively. Below the bound (16 levels) it answers; past
+/// it (256 levels, which without the bound overflows the 8 MiB production
+/// worker stack in an unoptimized build) it is refused, typed.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `second(v: boolean)`
+/// is `{ v: boolean; tag: "c"; }` at both lengths (measured at 64), so the
+/// refusal is a typed gap, not an answer.
+#[test]
+fn an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal() {
+    let (warm, answered, partial, reasons, candidates) = warm_local_chain_second(16);
+    assert_tagged_value(&warm, &[number(), string()]);
+    assert!(
+        answered && !partial && candidates == 1,
+        "a 16-level chain stays within the bound and answers: {reasons:?}"
+    );
+    let (warm, answered, partial, reasons, candidates) = warm_local_chain_second(256);
+    assert_tagged_value(&warm, &[number(), string()]);
+    assert!(
+        !answered && partial && candidates == 0,
+        "a 256-level unpredicted chain ends typed, partial and never admitted \
+         (answered: {answered}, partial: {partial}, candidates: {candidates})"
+    );
+    assert!(
+        reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
+        "the refusal is the depth rail's: {reasons:?}"
+    );
+}

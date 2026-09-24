@@ -1819,15 +1819,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
     }
 
-    /// A nested flow evaluation's INLINE cold compute: charge the
-    /// connected-demand ledger for the frame open (the machinery root's
-    /// charge covers only the root frame — a long DirectCall chain charges
-    /// one unit per inline frame), then push a frame, run the evaluation,
-    /// and close the frame through the SCC close. The publish is NEVER
-    /// direct — it is batched at this frame's SCC close and drained by the
-    /// machinery root onto the root's carrier.
+    /// A nested flow evaluation's INLINE cold compute: refuse it past the
+    /// native nesting bound, charge the connected-demand ledger for the
+    /// frame open (the machinery root's charge covers only the root frame —
+    /// a long DirectCall chain charges one unit per inline frame), then push
+    /// a frame, run the evaluation, and close the frame through the SCC
+    /// close. The publish is NEVER direct — it is batched at this frame's
+    /// SCC close and drained by the machinery root onto the root's
+    /// carrier.
     fn execute_flow_return_inline(&self, key: FlowReturnKey) -> FlowReturnStep {
-        if self.charge_connected_work().is_err() {
+        if self.refuse_nested_flow_evaluation() || self.charge_connected_work().is_err() {
             return FlowReturnStep::NoValue(FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
             ));

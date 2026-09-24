@@ -3,12 +3,12 @@
 //!
 //! A frame's body demands a callee's return where the call sits, and the
 //! callee's body is evaluated there, inside the caller's evaluation — for
-//! a generic call, beneath the `TypeOf` and `LowerLocator` queries that
-//! lower `typeof callee`, and again under the call's instantiation. Left to
-//! that alone, a linear call chain nests one native evaluation (and, for a
-//! generic call, two connected queries) per level, so its length is bounded
-//! by the native stack and the connected-query depth guard rather than by
-//! the work it does.
+//! a generic or imported call, beneath the `TypeOf` and `LowerLocator`
+//! queries that lower `typeof callee`, and again under the call's
+//! instantiation. Left to that alone, a linear call chain nests one native
+//! evaluation (and, through a `typeof` lowering, two connected queries) per
+//! level, so its length is bounded by the native stack and the
+//! connected-query depth guard rather than by the work it does.
 //!
 //! Before a frame evaluates its body, the schedule discovers the callee
 //! returns that body will demand and evaluates them bottom-up from an
@@ -26,20 +26,23 @@
 //! meaning:
 //!
 //! - **Discovery is the evaluator's own.** A callee is scheduled for a call
-//!   the frame's lowered slice selects, which the per-file function index
-//!   resolves to a same-file function exactly as the content lowering does
-//!   (a free, unshadowed, bare-identifier callee), and whose return the
-//!   direct-call rail takes from the body: the key is minted by the one key
-//!   construction that rail and the signature lowering both use. An
+//!   the frame's lowered slice selects whose free, bare-identifier callee
+//!   the call rails resolve to a function with a body-derived return: the
+//!   direct-call rail's same-file target, or the function the file's owner
+//!   scope resolves the name to through its imports, as the rail lowering
+//!   `typeof callee` resolves it. Each key is minted by the one key
+//!   construction the rails and the signature lowering share. An
 //!   instantiated frame demands what its uninstantiated frame's call
-//!   resolution demanded, under the instantiation's arguments: the
-//!   resolution's own answers are recorded as it makes them, and carried
-//!   over by binder name — the mapping the instantiated frame's binder
-//!   environment applies. A call nested inside another call's arguments, a
-//!   call the index cannot resolve, an instantiation whose arguments are
-//!   anything but forwarded binders, and every demand made through a type
-//!   position are left to the body, which evaluates them recursively
-//!   exactly as before.
+//!   resolution demanded, under the instantiation's arguments. When that
+//!   frame evaluated in this session, its resolution's own answers were
+//!   recorded as it made them and are carried over by binder name — the
+//!   mapping the instantiated frame's binder environment applies. When its
+//!   answer was already warm, the instantiation is read from the two
+//!   signatures the call executor reads, for a call that forwards the
+//!   frame's own binders. A call nested inside another call's arguments,
+//!   a call no rail resolves to a named function, an instantiation of any
+//!   other shape, and every demand made through a type position are left
+//!   to the body, which evaluates them recursively exactly as before.
 //! - **Cycles stay with the SCC machinery.** A callee whose discovered
 //!   closure reaches a frame in flight, an open member of a pending
 //!   component, or an entry below it on the explicit stack is never
@@ -57,12 +60,18 @@
 //!   charges the connected demand exactly as a nested one does, and a trip
 //!   ends the schedule; the body then meets the same sticky trip.
 //!
+//! What the schedule leaves to the recursive path stays bounded: an inline
+//! flow evaluation that would open more nested frames than the connected
+//! demand's depth cap is refused with the depth rail's typed
+//! incompleteness ([`ProjectSemanticDispatch::refuse_nested_flow_evaluation`])
+//! before the native stack can run out — the backstop beside the
+//! connected-query depth guard, which bounds nesting through queries.
+//!
 //! The schedule keeps one transaction-local session while any frame is
 //! evaluating: the callee returns it has already settled — evaluated, left
 //! to the body, or abandoned — so a nested frame's schedule never
 //! re-evaluates them, and the instantiated demands each uninstantiated
-//! frame made. The session is cleared when the outermost
-//! frame finishes.
+//! frame made. The session is cleared when the outermost frame finishes.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -71,10 +80,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowCallee, FlowEffect, FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::FrameSpan;
 use verter_semantic::analysis::function_program::{
-    FunctionEffectCallee, FunctionProgramEntry, FunctionProgramIndex, FunctionProgramKey,
-    FunctionReferenceBinding,
+    FunctionBindingKind, FunctionEffectCallee, FunctionProgramEntry, FunctionProgramIndex,
+    FunctionProgramKey, FunctionReferenceBinding,
 };
-use verter_type_expr::facts::FunctionPartIdentity;
+use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 
 use super::super::dispatch_txn::{CheckerDispatchTransaction, ObligationIdentity};
 use super::super::{BuildLocalTaintGuard, ProjectSemanticDispatch};
@@ -178,15 +187,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let scope = FlowScheduleScope {
             txn: &self.dispatch_txn,
         };
-        // A body with no direct call and no function value demands nothing
-        // the schedule can discover, unless an instantiation carries its
-        // uninstantiated frame's demands. A completed member is reusable
-        // only when its evaluation's reads were recorded, which takes a
-        // live tracer: without one, every scheduled evaluation would be
-        // thrown away.
-        let discoverable = !(entry.direct_calls.is_empty() && entry.nested_captures.is_empty())
-            || !is_uninstantiated(frame);
-        if discoverable
+        // A body that makes no call demands no callee return. A completed
+        // member is reusable only when its evaluation's reads were
+        // recorded, which takes a live tracer: without one, every scheduled
+        // evaluation would be thrown away.
+        if makes_calls(entry)
             && flow_return_schedule_enabled()
             && crate::resolver_core::resolver_context::fact_tracer_installed()
         {
@@ -194,6 +199,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.run_flow_return_schedule(roots);
         }
         scope
+    }
+
+    /// The backstop for native recursion the schedule does not predict:
+    /// whether one more inline flow evaluation would nest past the
+    /// connected demand's depth bound. Refused, it records the typed depth
+    /// refusal on the ledger and on the demanding build, before the native
+    /// stack can run out — the evaluation then fails with the budget
+    /// failure every tripped demand takes.
+    pub(super) fn refuse_nested_flow_evaluation(&self) -> bool {
+        let open = {
+            let txn = self.dispatch_txn.borrow();
+            let reentry = txn.reentry();
+            (0..reentry.depth())
+                .filter_map(|index| reentry.frame(index))
+                .filter(|frame| frame.identity.as_flow_return().is_some())
+                .count()
+        };
+        match self.connected_demand().nesting_trip(open) {
+            Some(reasons) => {
+                self.fold_local_partial_completeness(reasons);
+                true
+            }
+            None => false,
+        }
     }
 
     fn run_flow_return_schedule(&self, roots: Vec<FlowReturnKey>) {
@@ -376,10 +405,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(entry) = frame_entry(&index, key) else {
             return Vec::new();
         };
-        if entry.direct_calls.is_empty() && entry.nested_captures.is_empty() {
-            let mut out = Vec::new();
-            self.push_instantiated_callees(key, entry, &mut out);
-            return out;
+        if !makes_calls(entry) {
+            return Vec::new();
         }
         let flow_slice = self.ctx.project_type_store().flow_slice();
         let Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(planned)) =
@@ -399,10 +426,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.callees_of(key, &index, entry, &lowered)
     }
 
-    /// The callee returns `frame`'s body demands — through its own direct
-    /// calls, through the direct calls of the function values it composes,
-    /// and, for an instantiated frame, under the instantiation — in source
-    /// order, deduplicated.
+    /// The callee returns `frame`'s body demands — through its own calls,
+    /// through the calls of the function values it composes, and, for an
+    /// instantiated frame, under the instantiation — in source order,
+    /// deduplicated.
     fn callees_of(
         &self,
         frame: &FlowReturnKey,
@@ -413,41 +440,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut out: Vec<FlowReturnKey> = Vec::new();
         // A nested position's bare names can bind in the frames around it,
         // which its own index entry does not record as free.
-        if entry.lexical_parent.is_none() {
-            self.push_direct_callees(frame, index, entry, lowered, &mut out);
+        if entry.lexical_parent.is_some() {
+            return out;
         }
-        self.push_instantiated_callees(frame, entry, &mut out);
+        let calls = self.frame_calls(frame, entry, lowered);
+        for call in &calls {
+            push_unique(&mut out, self.flow_return_key_for(&call.identity));
+        }
+        // A function value the slice selects is composed where it sits: its
+        // body's return is evaluated inside this frame, calls and all.
+        let canonical = frame.function.declaration_slot.defining_canonical.as_ref();
+        let anchor = entry.span.start;
+        for nested in entry.nested_captures.iter() {
+            let relative = FrameSpan::rebase(anchor, nested.span);
+            let selected = lowered.exprs.iter().any(|expression| {
+                expression.role == FlowExprRole::Value && expression.span.contains(relative)
+            });
+            if selected {
+                self.push_composed_value_callees(
+                    canonical,
+                    entry,
+                    index,
+                    &nested.function,
+                    &mut out,
+                );
+            }
+        }
+        if !is_uninstantiated(frame) && !self.push_logged_instantiations(frame, entry, &mut out) {
+            self.push_forwarded_instantiations(frame, entry, &calls, &mut out);
+        }
         out
     }
 
-    /// The direct part of [`Self::callees_of`].
-    fn push_direct_callees(
+    /// The calls `frame`'s body evaluates for their value whose callee's
+    /// body-derived return the evaluator's call rails demand: a free
+    /// bare-identifier callee that is the direct-call rail's same-file
+    /// target, or that the file's owner scope resolves — through its
+    /// imports — to a function whose return is body-derived, exactly as
+    /// the rail lowering `typeof callee` resolves it.
+    fn frame_calls(
         &self,
         frame: &FlowReturnKey,
-        index: &FunctionProgramIndex,
         entry: &FunctionProgramEntry,
         lowered: &FlowSliceIR,
-        out: &mut Vec<FlowReturnKey>,
-    ) {
-        let canonical = frame.function.declaration_slot.defining_canonical.as_ref();
+    ) -> Vec<NamedCall> {
+        let slot = &frame.function.declaration_slot;
+        let canonical = slot.defining_canonical.as_ref();
         let anchor = entry.span.start;
-        // Only a call whose value the slice evaluates: an effect-only
-        // expression's calls are never demanded for their return.
-        let calls: Vec<(&str, verter_span::Span)> = lowered
-            .effects
-            .iter()
-            .filter_map(|effect| match effect {
-                FlowEffect::Call {
-                    site,
-                    callee: FlowCallee::Named(name),
-                    new_construct: false,
-                    span,
-                } if lowered.expr(*site).role == FlowExprRole::Value => {
-                    Some((name.as_ref(), span.to_absolute(anchor)))
-                }
-                _ => None,
-            })
-            .collect();
         let every_call: Vec<verter_span::Span> = lowered
             .effects
             .iter()
@@ -456,30 +495,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 FlowEffect::Write { .. } => None,
             })
             .collect();
-        for (name, span) in calls {
-            if nested_in_another_call(span, &every_call) {
+        let mut scope_payload = None;
+        let mut out = Vec::new();
+        // Only a call whose value the slice evaluates: an effect-only
+        // expression's calls are never demanded for their return.
+        for effect in lowered.effects.iter() {
+            let FlowEffect::Call {
+                site,
+                callee: FlowCallee::Named(name),
+                new_construct: false,
+                span,
+            } = effect
+            else {
+                continue;
+            };
+            let span = span.to_absolute(anchor);
+            if lowered.expr(*site).role != FlowExprRole::Value
+                || nested_in_another_call(span, &every_call)
+                || !callee_is_free(entry, name, span)
+            {
                 continue;
             }
-            self.push_direct_callee(canonical, entry, name, span, out);
-        }
-        // A function value the slice selects is composed where it sits: its
-        // body's return is evaluated inside this frame, calls and all.
-        for nested in entry.nested_captures.iter() {
-            let relative = FrameSpan::rebase(anchor, nested.span);
-            let selected = lowered.exprs.iter().any(|expression| {
-                expression.role == FlowExprRole::Value && expression.span.contains(relative)
-            });
-            if !selected {
-                continue;
+            let identity = match entry.direct_calls.iter().find(|direct| direct.span == span) {
+                // A call to the function itself is its own recursion hold.
+                Some(direct) if direct.target == entry.key => continue,
+                Some(direct) => self.direct_callee_identity(canonical, &direct.target),
+                None => {
+                    let payload = scope_payload.get_or_insert_with(|| {
+                        self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+                            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                                &bundle, slot.owner,
+                            )
+                        })
+                    });
+                    self.resolved_callee_identity(canonical, slot.owner, payload.as_ref(), name)
+                }
+            };
+            if let Some(identity) = identity {
+                out.push(NamedCall {
+                    span,
+                    name: Arc::clone(name),
+                    identity,
+                });
             }
-            self.push_composed_value_callees(canonical, entry, index, &nested.function, out);
         }
+        out
     }
 
     /// Record that the innermost evaluating flow frame demanded the
     /// instantiated callee return `key` — the call resolution's own
     /// answer, which an instantiation of that frame demands again under
-    /// its own arguments (see [`Self::push_instantiated_callees`]).
+    /// its own arguments (see [`Self::push_logged_instantiations`]).
     pub(super) fn note_flow_return_demand(&self, key: &FlowReturnKey) {
         if key.context.type_substitution.bindings().is_empty() {
             return;
@@ -505,39 +571,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// The instantiated callee returns an instantiation of `frame`'s
-    /// function demands: the ones its uninstantiated frame's call
-    /// resolution demanded this session, with the frame's own binders
-    /// replaced by the instantiation's arguments — by binder NAME, the
-    /// mapping the instantiated frame's binder environment applies. A
-    /// demand whose arguments are anything but the frame's own binders or
-    /// closed primitives and literals is not transported: its resolution
-    /// under the arguments is the body's to make.
-    fn push_instantiated_callees(
+    /// function demands, when its uninstantiated frame evaluated in this
+    /// session: the ones that frame's call resolution demanded, with the
+    /// frame's own binders replaced by the instantiation's arguments — by
+    /// binder NAME, the mapping the instantiated frame's binder environment
+    /// applies. A demand whose arguments are anything but the frame's own
+    /// binders or closed primitives and literals is not transported: its
+    /// resolution under the arguments is the body's to make. `false` when
+    /// the uninstantiated frame left no record.
+    fn push_logged_instantiations(
         &self,
         frame: &FlowReturnKey,
         entry: &FunctionProgramEntry,
         out: &mut Vec<FlowReturnKey>,
-    ) {
-        if is_uninstantiated(frame)
-            || entry.type_parameters.len() != frame.normalized_type_args.len()
-        {
-            return;
-        }
-        let mut uninstantiated = frame.clone();
-        uninstantiated.normalized_type_args = Arc::from(Vec::new().into_boxed_slice());
-        uninstantiated.context.type_substitution =
-            crate::semantic_query::CanonicalTypeSubstitution::empty();
+    ) -> bool {
         let Some(demanded) = self
             .dispatch_txn
             .borrow()
             .flow
             .schedule
             .demands
-            .get(&uninstantiated)
+            .get(&uninstantiated(frame))
             .cloned()
         else {
-            return;
+            return false;
         };
+        if entry.type_parameters.len() != frame.normalized_type_args.len() {
+            return true;
+        }
         let slot = &frame.function.declaration_slot;
         let graph = self.graph();
         let transport = |node: SemanticNodeId| -> Option<SemanticNodeId> {
@@ -578,10 +639,235 @@ impl<'a> ProjectSemanticDispatch<'a> {
             instantiated.normalized_type_args = Arc::from(arguments.into_boxed_slice());
             instantiated.context.type_substitution =
                 crate::semantic_query::CanonicalTypeSubstitution::new(bindings);
-            if !out.contains(&instantiated) {
-                out.push(instantiated);
-            }
+            push_unique(out, instantiated);
         }
+        true
+    }
+
+    /// The instantiated callee returns an instantiation of `frame`'s
+    /// function demands, when its uninstantiated frame did NOT evaluate in
+    /// this session (its answer was already warm): read from the
+    /// signatures both functions already have — the same ones the call
+    /// executor reads — for a call that FORWARDS the frame's binders.
+    ///
+    /// The call's every argument is a bare read of one of the frame's
+    /// parameters declared as one of the frame's own type parameters,
+    /// which the instantiated frame binds to that parameter's argument;
+    /// the callee's every parameter is declared as one of its own
+    /// unconstrained type parameters, and every type parameter is declared
+    /// by a parameter whose arguments all agree. Inference then fixes each
+    /// callee binder to exactly the forwarded argument — the instantiation
+    /// the executor demands. Every other shape, a parameter
+    /// the body writes, and a callee or frame whose uninstantiated answer
+    /// is not already in hand (reading its signature would evaluate it)
+    /// are left to the body.
+    fn push_forwarded_instantiations(
+        &self,
+        frame: &FlowReturnKey,
+        entry: &FunctionProgramEntry,
+        calls: &[NamedCall],
+        out: &mut Vec<FlowReturnKey>,
+    ) {
+        let slot = &frame.function.declaration_slot;
+        let canonical = slot.defining_canonical.as_ref();
+        let own = uninstantiated(frame);
+        if calls.is_empty() || !self.is_answered(&own) {
+            return;
+        }
+        let Some(own_signature) =
+            self.callable_signature(canonical, slot.owner, &slot.merged_symbol_name, &own)
+        else {
+            return;
+        };
+        if own_signature.type_parameters.len() != frame.normalized_type_args.len() {
+            return;
+        }
+        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
+            return;
+        };
+        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
+        // The image of the frame parameter a bare argument read names: its
+        // declared binder's argument in this instantiation.
+        let forwarded =
+            |argument: &verter_type_expr::IndexedValueCallArg,
+             root: &verter_semantic::analysis::type_eval_build::IndexedValueReadRoot|
+             -> Option<SemanticNodeId> {
+                let verter_type_expr::IndexedValueExpression::Value(
+                    verter_type_expr::TypeExpr::TypeOf(value),
+                ) = &argument.expression
+                else {
+                    return None;
+                };
+                let ([name], true) = (value.path.as_slice(), value.type_args.is_empty()) else {
+                    return None;
+                };
+                let verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::Identifier(
+                    root,
+                ) = root
+                else {
+                    return None;
+                };
+                let binding =
+                    entry
+                        .references
+                        .iter()
+                        .find_map(|reference| match &reference.binding {
+                            FunctionReferenceBinding::Resolved(binding)
+                                if reference.span == *root
+                                    && reference.name.as_ref() == name
+                                    && reference.path.is_empty() =>
+                            {
+                                Some(binding)
+                            }
+                            _ => None,
+                        })?;
+                if binding.kind != FunctionBindingKind::Param
+                    || binding.defining_function != entry.key
+                    || parameter_written(entry, binding)
+                {
+                    return None;
+                }
+                let ordinal = entry.params.iter().position(|param| {
+                    param.name.as_deref() == Some(name.as_str()) && !param.rest
+                })?;
+                let declared = own_signature.params.get(ordinal)?;
+                let binder = own_signature
+                    .type_parameters
+                    .iter()
+                    .position(|param| param.param == declared.ty)?;
+                frame.normalized_type_args.get(binder).copied()
+            };
+        for call in calls {
+            let generic = self.flow_return_key_for(&call.identity);
+            if !self.is_answered(&generic) {
+                continue;
+            }
+            let Some(callee) = self.callable_signature(canonical, slot.owner, &call.name, &generic)
+            else {
+                continue;
+            };
+            if callee.type_parameters.is_empty() {
+                continue;
+            }
+            let Some(indexed) = decl_bodies.indexed_call_expression_at(call.span) else {
+                continue;
+            };
+            let site = &indexed.call;
+            if site.kind != verter_type_expr::IndexedValueCallKind::Call
+                || site.receiver.is_some()
+                || !site.explicit_type_args.is_empty()
+                || site.args.len() != callee.params.len()
+                || indexed.argument_roots.len() != site.args.len()
+            {
+                continue;
+            }
+            let mut images: Vec<Option<SemanticNodeId>> = vec![None; callee.type_parameters.len()];
+            let mut forwards = true;
+            for ((param, argument), root) in callee
+                .params
+                .iter()
+                .zip(site.args.iter())
+                .zip(indexed.argument_roots.iter())
+            {
+                let binder = callee
+                    .type_parameters
+                    .iter()
+                    .position(|binder| binder.param == param.ty && binder.constraint.is_none());
+                let image = if param.rest || argument.spread {
+                    None
+                } else {
+                    forwarded(argument, root)
+                };
+                match (binder, image) {
+                    (Some(binder), Some(image))
+                        if images[binder].is_none_or(|seen| seen == image) =>
+                    {
+                        images[binder] = Some(image);
+                    }
+                    _ => {
+                        forwards = false;
+                        break;
+                    }
+                }
+            }
+            let Some(arguments) = forwards
+                .then(|| images.into_iter().collect::<Option<Vec<_>>>())
+                .flatten()
+            else {
+                continue;
+            };
+            let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+                callee
+                    .type_parameters
+                    .iter()
+                    .map(|binder| binder.param)
+                    .zip(arguments.iter().copied())
+                    .collect(),
+            );
+            push_unique(
+                out,
+                self.flow_return_key_for_instantiation(
+                    &callee.identity,
+                    Arc::from(arguments.into_boxed_slice()),
+                    substitution,
+                ),
+            );
+        }
+    }
+
+    /// The lone call signature `typeof name` has in `canonical`'s owner
+    /// scope — the lowering the call rails perform — when its return is the
+    /// body-derived return `expected` addresses.
+    fn callable_signature(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        expected: &FlowReturnKey,
+    ) -> Option<CallableSignature> {
+        let callee = self.lower_type_expr_in_owner_scope_with_context(
+            canonical,
+            owner,
+            &verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: name.split('.').map(str::to_string).collect(),
+                type_args: Vec::new(),
+            }),
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        let (call, construct) = self.shared_signature_buckets(callee).ok()?;
+        let ([signature], []) = (call.as_slice(), construct.as_slice()) else {
+            return None;
+        };
+        let data = self.graph().node_data(*signature)?;
+        let SemanticNodeData::Signature {
+            params,
+            type_parameters,
+            return_carrier:
+                crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                ),
+            ..
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        (self.flow_return_key_for(identity) == *expected).then(|| CallableSignature {
+            params: Arc::clone(params),
+            type_parameters: Arc::clone(type_parameters),
+            identity: identity.clone(),
+        })
+    }
+
+    /// Whether `key` is answered without evaluating it here: a warm
+    /// candidate, or a reusable completed member.
+    fn is_answered(&self, key: &FlowReturnKey) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .flow
+            .completed_members
+            .iter()
+            .any(|member| &member.key == key && member.reuse.is_some())
+            || self.graph().has_flow_return_candidate(key)
     }
 
     /// The direct callees of one composed function value's return sites.
@@ -617,74 +903,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if frame.bindings.iter().any(|binding| &binding.name == name) {
                 continue;
             }
-            self.push_direct_callee(canonical, value, name, effect.span, out);
+            let Some(direct) = value
+                .direct_calls
+                .iter()
+                .find(|direct| direct.span == effect.span)
+            else {
+                continue;
+            };
+            if direct.target == value.key || !callee_is_free(value, name, effect.span) {
+                continue;
+            }
+            if let Some(identity) = self.direct_callee_identity(canonical, &direct.target) {
+                push_unique(out, self.flow_return_key_for(&identity));
+            }
         }
     }
 
-    /// Push the flow-return key the direct-call rail demands for the call
-    /// at `span` in `entry`, when the content lowering resolves that call to
-    /// a same-file function and the rail takes its return from the body.
-    fn push_direct_callee(
-        &self,
-        canonical: &str,
-        entry: &FunctionProgramEntry,
-        name: &str,
-        span: verter_span::Span,
-        out: &mut Vec<FlowReturnKey>,
-    ) {
-        let Some(direct) = entry.direct_calls.iter().find(|direct| direct.span == span) else {
-            return;
-        };
-        // A call to the function itself is its own recursion hold.
-        if direct.target == entry.key {
-            return;
-        }
-        // The callee identifier must be FREE in this frame: a parameter,
-        // local or nested declaration of that name shadows the file's
-        // function, and the content lowering calls the binding instead.
-        let free = entry.references.iter().any(|reference| {
-            reference.name.as_ref() == name
-                && reference.span.start == span.start
-                && matches!(reference.binding, FunctionReferenceBinding::Free)
-        });
-        if !free {
-            return;
-        }
-        let Some(key) = self.direct_callee_flow_return_key(canonical, &direct.target) else {
-            return;
-        };
-        if !out.contains(&key) {
-            out.push(key);
-        }
-    }
-
-    /// The key the direct-call rail executes for `target` when it takes the
-    /// callee's return from its body — mirroring that rail's own choice: an
-    /// authored annotation types the callee instead, an overload group is
-    /// resolved by the call executor over its declared signatures, and a
-    /// declared return carries no body demand.
-    fn direct_callee_flow_return_key(
+    /// The return position the direct-call rail demands for `target` when
+    /// it takes the callee's return from its body — mirroring that rail's
+    /// own choice: an authored annotation types the callee instead, an
+    /// overload group is resolved by the call executor over its declared
+    /// signatures, and a declared return carries no body demand.
+    fn direct_callee_identity(
         &self,
         canonical: &str,
         target: &FunctionProgramKey,
-    ) -> Option<FlowReturnKey> {
+    ) -> Option<FlowFunctionReturnIdentity> {
         let prepared = self.ctx.prepared_value_decl_return_only(
             canonical,
             target.declaration.owner,
             target.declaration.name.as_ref(),
         );
-        if let Some(prepared) = prepared.as_ref() {
-            let annotated = matches!(
-                prepared.type_annotation.classification,
-                verter_type_expr::facts::ValueAnnotationClass::Direct
-                    | verter_type_expr::facts::ValueAnnotationClass::TypeOfAlias
-            ) && matches!(
-                prepared.type_annotation.annotation,
-                Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
-            );
-            if annotated || prepared.signatures.len() > 1 {
-                return None;
-            }
+        if prepared
+            .as_ref()
+            .is_some_and(|prepared| annotated(prepared) || prepared.signatures.len() > 1)
+        {
+            return None;
         }
         let ordinal = match &target.part {
             FunctionPartIdentity::DeclarationBody => target.overload_ordinal as usize,
@@ -699,26 +953,143 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .map(|signature| signature.return_source.clone())
             })
             .unwrap_or_else(|| {
-                verter_type_expr::facts::FunctionReturnSource::Flow(
-                    verter_type_expr::facts::FlowFunctionReturnIdentity {
-                        anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: Arc::from(canonical),
-                            owner: target.declaration.owner,
-                            symbol: Arc::clone(&target.declaration.name),
-                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                        },
-                        function_part: target.part.clone(),
-                        overload_ordinal: target.overload_ordinal,
+                verter_type_expr::facts::FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(canonical),
+                        owner: target.declaration.owner,
+                        symbol: Arc::clone(&target.declaration.name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
-                )
+                    function_part: target.part.clone(),
+                    overload_ordinal: target.overload_ordinal,
+                })
             });
         match source {
-            verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                Some(self.flow_return_key_for(&identity))
-            }
+            verter_type_expr::facts::FunctionReturnSource::Flow(identity) => Some(identity),
             verter_type_expr::facts::FunctionReturnSource::Declared(_)
             | verter_type_expr::facts::FunctionReturnSource::Absent => None,
         }
+    }
+
+    /// The return position a free callee `name` of `canonical`'s owner
+    /// scope takes from its body, resolved as the call rail's `typeof name`
+    /// lowering resolves it — through the scope's imports to the declaring
+    /// file, whose lone, unannotated function signature carries the
+    /// body-derived return.
+    fn resolved_callee_identity(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        name: &str,
+    ) -> Option<FlowFunctionReturnIdentity> {
+        let root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            canonical,
+            owner,
+            scope_payload,
+            name,
+        )?;
+        let prepared = self.ctx.prepared_value_decl_return_only(
+            root.canonical_id.as_ref(),
+            root.owner,
+            root.symbol_name.as_ref(),
+        )?;
+        if annotated(&prepared) {
+            return None;
+        }
+        let [signature] = prepared.signatures.as_slice() else {
+            return None;
+        };
+        let verter_type_expr::facts::FunctionReturnSource::Flow(identity) =
+            &signature.return_source
+        else {
+            return None;
+        };
+        // The extractor stamps the declaration name; canonical and owner
+        // come from the serving scope, as every signature composition fills
+        // them.
+        let mut identity = identity.clone();
+        identity.anchor.canonical_id = root.canonical_id;
+        identity.anchor.owner = root.owner;
+        Some(identity)
+    }
+}
+
+/// One call a frame's body evaluates for its value, whose callee's
+/// body-derived return the schedule can name.
+struct NamedCall {
+    /// The call expression's absolute span.
+    span: verter_span::Span,
+    /// The name the body calls the callee by, in the frame's owner scope.
+    name: Arc<str>,
+    /// The callee's body-derived return position.
+    identity: FlowFunctionReturnIdentity,
+}
+
+/// The parts of a lone call signature the forwarded-binder reading needs.
+struct CallableSignature {
+    params: Arc<[crate::semantic_query::FunctionParam]>,
+    type_parameters: Arc<[crate::semantic_query::TypeParamDecl]>,
+    identity: FlowFunctionReturnIdentity,
+}
+
+/// Whether a value declaration carries an AUTHORED annotation, which types
+/// it instead of its initializer's body.
+fn annotated(
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedValueDecl,
+) -> bool {
+    matches!(
+        prepared.type_annotation.classification,
+        verter_type_expr::facts::ValueAnnotationClass::Direct
+            | verter_type_expr::facts::ValueAnnotationClass::TypeOfAlias
+    ) && matches!(
+        prepared.type_annotation.annotation,
+        Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
+    )
+}
+
+/// Whether the body makes any call, in its own frame or a composed one.
+fn makes_calls(entry: &FunctionProgramEntry) -> bool {
+    !(entry.effects.is_empty() && entry.nested_captures.is_empty())
+}
+
+/// Whether the callee identifier of the call at `span` is FREE in `entry`:
+/// a parameter, local or nested declaration of that name shadows the
+/// file's binding, and the content lowering calls the binding instead.
+fn callee_is_free(entry: &FunctionProgramEntry, name: &str, span: verter_span::Span) -> bool {
+    entry.references.iter().any(|reference| {
+        reference.name.as_ref() == name
+            && reference.span.start == span.start
+            && matches!(reference.binding, FunctionReferenceBinding::Free)
+    })
+}
+
+/// Whether the body writes `binding`, so a read of it need not see its
+/// declared type.
+fn parameter_written(
+    entry: &FunctionProgramEntry,
+    binding: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+) -> bool {
+    entry.writes.iter().any(|write| {
+        write.targets.iter().any(|target| match target {
+            verter_semantic::analysis::function_program::FunctionWriteTarget::Binding {
+                reference,
+                ..
+            } => match &reference.binding {
+                FunctionReferenceBinding::Resolved(written) => written == binding,
+                _ => false,
+            },
+            verter_semantic::analysis::function_program::FunctionWriteTarget::Unsupported {
+                ..
+            } => true,
+        })
+    })
+}
+
+fn push_unique(out: &mut Vec<FlowReturnKey>, key: FlowReturnKey) {
+    if !out.contains(&key) {
+        out.push(key);
     }
 }
 
@@ -727,6 +1098,15 @@ fn is_uninstantiated(key: &FlowReturnKey) -> bool {
     key.normalized_type_args.is_empty() && key.context.type_substitution.bindings().is_empty()
 }
 
+/// `key` without its instantiation: the same function under the same
+/// demand, its own binders unbound.
+fn uninstantiated(key: &FlowReturnKey) -> FlowReturnKey {
+    let mut uninstantiated = key.clone();
+    uninstantiated.normalized_type_args = Arc::from(Vec::new().into_boxed_slice());
+    uninstantiated.context.type_substitution =
+        crate::semantic_query::CanonicalTypeSubstitution::empty();
+    uninstantiated
+}
 /// The served function position `frame` evaluates.
 fn frame_entry<'i>(
     index: &'i FunctionProgramIndex,
