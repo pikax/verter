@@ -4177,6 +4177,8 @@ mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
 #[cfg(test)]
+mod index_signature_access_tests;
+#[cfg(test)]
 mod indexed_access_relation_tests;
 #[cfg(test)]
 mod intersection_distribution_tests;

@@ -6199,6 +6199,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   assignable to anything): no skeleton match ⇒ `NotAssignable`
     ///   (two disjoint nonempty sets); a match ⇒ `None` (subset of a
     ///   singleton needs the template to BE that singleton).
+    /// - template → template: the same quasis over structurally identical
+    ///   placeholders are ONE type (the checker interns a template by its
+    ///   texts and types) ⇒ `Assignable`; any other pair ⇒ `None`.
     ///
     /// Quasis are stored as RAW source text; a quasi carrying an escape
     /// (`\\`) is not cooked-comparable and bails to `None`.
@@ -6294,6 +6297,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return Some(RelationResult::NotAssignable);
                 }
                 None
+            }
+            (
+                SemanticNodeData::TemplateLiteral {
+                    quasis: source_quasis,
+                    expressions: source_expressions,
+                },
+                SemanticNodeData::TemplateLiteral {
+                    quasis: target_quasis,
+                    expressions: target_expressions,
+                },
+            ) if source_quasis == target_quasis
+                && source_expressions.len() == target_expressions.len() =>
+            {
+                let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+                let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+                let identical = source_expressions
+                    .iter()
+                    .zip(target_expressions.iter())
+                    .all(|(source, target)| {
+                        matches!(
+                            super::canonical_algebra::compare_structural(
+                                self.graph(),
+                                *source,
+                                *target,
+                                &mut evidence,
+                                &mut budget,
+                            ),
+                            super::canonical_algebra::StructuralIdentity::Equal
+                        )
+                    });
+                identical.then(|| assignable(bindings))
             }
             _ => None,
         }

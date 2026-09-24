@@ -761,7 +761,7 @@ pub(crate) struct CanonicalComposite {
 /// of shallowly-distinct arms costs no budget — so exhaustion means genuine
 /// deep structural work, and it marks the evidence incomplete (ReturnOnly),
 /// never a wrong collapse.
-const COMPARE_WORK_BUDGET: u32 = 4096;
+pub(super) const COMPARE_WORK_BUDGET: u32 = 4096;
 
 /// Arm cap of the pairwise structural (tier-2) dedup: it runs only among
 /// CHILD-BEARING arms (childless payloads are fully deduplicated by the
