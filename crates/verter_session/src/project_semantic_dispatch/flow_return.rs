@@ -1642,6 +1642,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(ctx) = crate::request_context::current_request_context() {
             ctx.record_dispatched_query_tag(crate::semantic_query::SemanticQueryKeyTag::FlowReturn);
         }
+        // The callee schedule learns what each frame's call resolution
+        // demanded, for the frame's own instantiations.
+        self.note_flow_return_demand(&key);
         // (1) Reentry intercept.
         {
             let identity = ObligationIdentity::FlowReturn(key.clone());
@@ -1816,15 +1819,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
     }
 
-    /// A nested flow evaluation's INLINE cold compute: charge the
-    /// connected-demand ledger for the frame open (the machinery root's
-    /// charge covers only the root frame — a long DirectCall chain charges
-    /// one unit per inline frame), then push a frame, run the evaluation,
-    /// and close the frame through the SCC close. The publish is NEVER
-    /// direct — it is batched at this frame's SCC close and drained by the
-    /// machinery root onto the root's carrier.
+    /// A nested flow evaluation's INLINE cold compute: refuse it past the
+    /// native nesting bound, charge the connected-demand ledger for the
+    /// frame open (the machinery root's charge covers only the root frame —
+    /// a long DirectCall chain charges one unit per inline frame), then push
+    /// a frame, run the evaluation, and close the frame through the SCC
+    /// close. The publish is NEVER direct — it is batched at this frame's
+    /// SCC close and drained by the machinery root onto the root's
+    /// carrier.
     fn execute_flow_return_inline(&self, key: FlowReturnKey) -> FlowReturnStep {
-        if self.charge_connected_work().is_err() {
+        if self.refuse_nested_flow_evaluation() || self.charge_connected_work().is_err() {
             return FlowReturnStep::NoValue(FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
             ));
@@ -4716,6 +4720,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             };
+        // The callee returns this body demands are evaluated first,
+        // bottom-up, so the body reuses them instead of recursing.
+        let _schedule = self.schedule_flow_return_callees(key, &index, entry, &lowered);
         // The member-projection demand evaluates ONLY the demanded member
         // of a structural object return; the slice's VALUE selection
         // below already keeps every unselected sibling cold.
@@ -7080,6 +7087,9 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 
 #[path = "flow_return_class.rs"]
 mod class_expression;
+
+#[path = "flow_return_schedule.rs"]
+pub(super) mod schedule;
 
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {

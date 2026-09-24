@@ -33,17 +33,20 @@
 //! enters a shared cache: the build is marked `cache_suppress`, and that
 //! taint folds through every enclosing member/path/call query at the
 //! universal read boundary. The primitive-to-wrapper widening (`string` →
-//! `String`, `number` → `Number`, …) is a separate surface and is not
-//! produced here; those bases also return `Miss`.
+//! `String`, `number` → `Number`, `T[]` → `Array<T>`, …) is not this
+//! family's: those bases return `Miss` here, and signature discovery and the
+//! path walker read the wrapper through
+//! [`ProjectSemanticDispatch::global_wrapper_surface`], scoped by the
+//! request's project.
 
 use std::sync::Arc;
 
 use verter_semantic::resolver_core::ProjectStableKey;
 
 use crate::semantic_query::{
-    ApparentDemandScope, ApparentTypeContext, ProjectionMode, ProjectionReductionContext,
-    QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SemanticQueryOutput,
+    ApparentDemandScope, ApparentTypeContext, IndexKey, LiteralValue, PathSegment, PrimitiveKind,
+    ProjectionMode, ProjectionReductionContext, PropertyKey, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 
 use super::ProjectSemanticDispatch;
@@ -74,7 +77,224 @@ enum CallableAnchor {
     Undecided,
 }
 
+/// A global wrapper interface read for an apparent type
+/// ([`ProjectSemanticDispatch::global_wrapper_surface`]).
+pub(super) enum GlobalWrapper {
+    /// The instantiated interface's surface.
+    Surface(SemanticNodeId),
+    /// The project declares no such global (`noLib`): the checker's empty
+    /// apparent type.
+    Absent,
+    /// The canonical names no project, or the interface's instantiation did
+    /// not settle.
+    Unsettled,
+}
+
 impl ProjectSemanticDispatch<'_> {
+    /// The global wrapper interface `name` (`String`, `Number`,
+    /// `Array`, …) instantiated with `args` — the apparent type of a
+    /// primitive, a literal, an array or a tuple — read from the resolved
+    /// global population of `canonical`'s project, with `canonical`'s
+    /// dependency on that global recorded, so a re-registration of the
+    /// library invalidates it.
+    pub(super) fn global_wrapper_surface(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+        canonical: &str,
+    ) -> GlobalWrapper {
+        let Some(project) = self.project_stable_key_for_canonical(canonical) else {
+            return GlobalWrapper::Unsettled;
+        };
+        let Some(hit) = self.ctx.lookup_ambient_symbol(project, name) else {
+            return GlobalWrapper::Absent;
+        };
+        self.ctx
+            .record_ambient_dependency(canonical, hit.virtual_id.as_ref());
+        let slot = self.type_slot_for(
+            Arc::clone(&hit.virtual_id),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        );
+        match self
+            .execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    Arc::from(args.to_vec().into_boxed_slice()),
+                    self.instantiate_context_for(
+                        hit.virtual_id.as_ref(),
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    ),
+                ),
+            ))
+            .value
+        {
+            QueryResult::Value(surface) => GlobalWrapper::Surface(surface),
+            _ => GlobalWrapper::Unsettled,
+        }
+    }
+
+    /// The file a wrapper read that names no declaration of its own is
+    /// scoped by: the innermost demand site (a flow's member read pushes its
+    /// own file), else the request's file.
+    pub(super) fn wrapper_demand_canonical(&self) -> Option<Arc<str>> {
+        self.lexical_demand_scope
+            .borrow()
+            .last()
+            .cloned()
+            .or_else(crate::request_context::current_request_canonical)
+    }
+
+    /// The global wrapper whose members `node`'s non-index keys read — its
+    /// apparent type (`getApparentType`): `String` for a string, a string
+    /// literal or a template, `Number`, `Boolean`, `BigInt` and `Symbol`
+    /// likewise, and `Array` / `ReadonlyArray` over the element type of an
+    /// array or the element union of a tuple. `None` for any other node and
+    /// for a tuple whose rest element is not a settled array.
+    pub(super) fn apparent_wrapper_of(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(&'static str, Vec<SemanticNodeId>)> {
+        let data = self.graph().node_data(node)?;
+        let array_name = |readonly: bool| if readonly { "ReadonlyArray" } else { "Array" };
+        match &*data {
+            SemanticNodeData::Primitive(PrimitiveKind::String)
+            | SemanticNodeData::Literal(LiteralValue::String(_))
+            | SemanticNodeData::TemplateLiteral { .. } => Some(("String", Vec::new())),
+            SemanticNodeData::Primitive(PrimitiveKind::Number)
+            | SemanticNodeData::Literal(LiteralValue::Number(_)) => Some(("Number", Vec::new())),
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean)
+            | SemanticNodeData::Literal(LiteralValue::Boolean(_)) => Some(("Boolean", Vec::new())),
+            SemanticNodeData::Primitive(PrimitiveKind::BigInt)
+            | SemanticNodeData::Literal(LiteralValue::BigInt(_)) => Some(("BigInt", Vec::new())),
+            SemanticNodeData::Primitive(PrimitiveKind::Symbol) => Some(("Symbol", Vec::new())),
+            SemanticNodeData::Array { element, readonly } => {
+                Some((array_name(*readonly), vec![*element]))
+            }
+            SemanticNodeData::Tuple { elements, readonly } => {
+                let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len());
+                for element in elements.iter() {
+                    let value = if element.rest {
+                        self.rest_array_element(element.value)?
+                    } else {
+                        element.value
+                    };
+                    match self.graph().node_data(value).as_deref() {
+                        Some(SemanticNodeData::Union(members)) => arms.extend(members.iter()),
+                        _ => arms.push(value),
+                    }
+                }
+                let element = self.intern_normalized_union_or_intersection(&arms, true);
+                Some((array_name(*readonly), vec![element]))
+            }
+            _ => None,
+        }
+    }
+
+    /// The element type of a rest tuple element's array value, through
+    /// transparent aliases; `None` for a value that is not a settled array.
+    fn rest_array_element(&self, value: SemanticNodeId) -> Option<SemanticNodeId> {
+        let mut current = value;
+        // bounded-loop: at most 8 transparent Alias hops.
+        for _ in 0..8 {
+            match self.graph().node_data(current).as_deref() {
+                Some(SemanticNodeData::Alias(target)) => current = *target,
+                Some(SemanticNodeData::Array { element, .. }) => return Some(*element),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The property name `segment` reads when it is a string key that is
+    /// not a numeric position (`length`, `map`): the key an array, a tuple
+    /// or a primitive reads off its apparent wrapper.
+    pub(super) fn apparent_member_name(&self, segment: &PathSegment) -> Option<Arc<str>> {
+        let name = match segment {
+            PathSegment::Member(PropertyKey::String(name))
+            | PathSegment::Index(IndexKey::String(name)) => Arc::clone(name),
+            PathSegment::Index(IndexKey::Computed(node)) => {
+                match self.normalized_index_key_node(*node) {
+                    IndexKey::String(name) => name,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        (!super::walk::is_canonical_index_digits(&name)).then_some(name)
+    }
+
+    /// Whether reading `segment` off `node` reads `node`'s apparent wrapper:
+    /// any key of a primitive, and a non-index key of an array or of a tuple
+    /// (a tuple's `length` is its own).
+    fn segment_reads_apparent_wrapper(&self, node: SemanticNodeId, segment: &PathSegment) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Array { .. }) => self.apparent_member_name(segment).is_some(),
+            Some(SemanticNodeData::Tuple { .. }) => self
+                .apparent_member_name(segment)
+                .is_some_and(|name| name.as_ref() != "length"),
+            Some(
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. },
+            ) => true,
+            _ => false,
+        }
+    }
+
+    /// CHEAP probe: is `key` a path whose first step reads a scope-less
+    /// subject's apparent wrapper ([`Self::scope_apparent_wrapper_subject`])?
+    pub(super) fn key_reads_apparent_wrapper(&self, key: &SemanticQueryKey) -> bool {
+        match key {
+            SemanticQueryKey::ProjectPath { base, path, .. } => path.first().is_some_and(|first| {
+                self.graph()
+                    .node_scope(*base)
+                    .is_none_or(|scope| scope.canonical_file().is_none())
+                    && self.segment_reads_apparent_wrapper(*base, first)
+            }),
+            _ => false,
+        }
+    }
+
+    /// Rewrite a path whose first step reads the apparent wrapper of a
+    /// scope-less subject (`string`, `1`, `T[]`, `[1, 2]` — nodes every
+    /// project shares) to the path over the wrapper the demand's project
+    /// declares, BEFORE memo admission: `string.length` read for a file of a
+    /// project whose `String` declares it is `String.length` over THAT
+    /// surface, so the admitted entry is that project's and a warm repeat is
+    /// served from it. A project that declares no such wrapper reads the
+    /// path over the `Miss` subject, the answer every such project shares.
+    /// With no demand site and no request the key stays as it is, and the
+    /// path walker keeps that read out of the shared memo.
+    pub(super) fn scope_apparent_wrapper_subject(&self, key: SemanticQueryKey) -> SemanticQueryKey {
+        if !self.key_reads_apparent_wrapper(&key) {
+            return key;
+        }
+        let SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            context,
+        } = key
+        else {
+            unreachable!("only a ProjectPath reads an apparent wrapper");
+        };
+        let scoped = self
+            .apparent_wrapper_of(base)
+            .zip(self.wrapper_demand_canonical())
+            .and_then(|((name, args), canonical)| {
+                match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+                    GlobalWrapper::Surface(surface) => Some(surface),
+                    GlobalWrapper::Absent => Some(self.opaque(QueryError::Miss)),
+                    GlobalWrapper::Unsettled => None,
+                }
+            });
+        SemanticQueryKey::ProjectPath {
+            base: scoped.unwrap_or(base),
+            path,
+            context,
+        }
+    }
+
     /// Build the `ApparentType` value for `base`.
     pub(super) fn build_apparent_type(
         &self,

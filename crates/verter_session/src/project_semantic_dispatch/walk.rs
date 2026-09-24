@@ -867,7 +867,7 @@ struct NullishSplit {
 /// to the integer positions a tuple can hold: nonempty, ASCII digits
 /// only, and no leading zero unless the key is exactly `"0"`. `"01"`,
 /// `"+1"`, `"1.0"`, `" 1"` all fail.
-fn is_canonical_index_digits(key: &str) -> bool {
+pub(super) fn is_canonical_index_digits(key: &str) -> bool {
     let bytes = key.as_bytes();
     match bytes {
         [] => false,
@@ -952,6 +952,11 @@ pub(super) struct PathWalker<'a, 'b> {
     /// [`Self::expand_empty_path_terminal`] (the slot-binding indexed-
     /// access preservation policy at the empty-path terminal expander).
     original_path_non_empty: bool,
+    /// The file the walk's subject was declared in, when it was: an
+    /// apparent-wrapper read on the way is scoped to that file's project, so
+    /// the entry's key names the project it read
+    /// ([`Self::apparent_wrapper_read`]).
+    origin_file: Option<Arc<str>>,
 }
 
 impl<'a> super::ProjectSemanticDispatch<'a> {
@@ -1290,6 +1295,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             open_spread_partial: false,
             original_path_non_empty: false,
+            origin_file: None,
         }
     }
 
@@ -1527,6 +1533,62 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .intern_normalized_union(&arms, NullabilityPolicy::Erased)
     }
 
+    /// A tuple's `length`: `number` with a rest element, else the union of
+    /// the lengths from its required count to its element count
+    /// (`[1, 2?]['length']` is `1 | 2`).
+    fn tuple_length(&self, elements: &[crate::semantic_query::TupleElement]) -> SemanticNodeId {
+        use crate::semantic_query::PrimitiveKind;
+        if elements.iter().any(|element| element.rest) {
+            return self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        }
+        let required = elements.iter().filter(|element| !element.optional).count();
+        let lengths: Vec<SemanticNodeId> = (required..=elements.len())
+            .map(|length| {
+                self.graph().intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::Number(length as f64),
+                ))
+            })
+            .collect();
+        self.dispatch
+            .intern_normalized_union_or_intersection(&lengths, true)
+    }
+
+    /// The apparent wrapper surface a primitive, an array or a tuple reads
+    /// its non-index keys from
+    /// ([`ProjectSemanticDispatch::apparent_wrapper_of`]); `None` when the
+    /// project declares none or no project settles.
+    ///
+    /// The read is scoped to the project of the file the walk's subject was
+    /// declared in, so the entry's key names that project. A path whose
+    /// FIRST step reads a shared subject's wrapper arrives already rewritten
+    /// to the demand project's wrapper
+    /// ([`ProjectSemanticDispatch::scope_apparent_wrapper_subject`]); a
+    /// later step under a shared subject, or a read with no demand site at
+    /// all, is scoped to the demand, which the key cannot name — that entry
+    /// stays out of the shared memo.
+    fn apparent_wrapper_read(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use super::apparent_type::GlobalWrapper;
+        let (name, args) = self.dispatch.apparent_wrapper_of(node)?;
+        if let Some(origin) = self.origin_file.as_deref() {
+            match self.dispatch.global_wrapper_surface(name, &args, origin) {
+                GlobalWrapper::Surface(surface) => return Some(surface),
+                GlobalWrapper::Absent => return None,
+                GlobalWrapper::Unsettled => {}
+            }
+        }
+        self.dispatch.fold_into_top_build_local_taint(false, true);
+        let demand = self.dispatch.wrapper_demand_canonical()?;
+        match self
+            .dispatch
+            .global_wrapper_surface(name, &args, demand.as_ref())
+        {
+            GlobalWrapper::Surface(surface) => Some(surface),
+            GlobalWrapper::Absent | GlobalWrapper::Unsettled => None,
+        }
+    }
+
     /// Project a numeric demand into a tuple's element set.
     ///
     /// Reads follow `declaring_file`'s `strictNullChecks` as
@@ -1555,7 +1617,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             NumericIndexDemand::Position(position) => {
                 if let Some(rest_start) = elements.iter().position(|element| element.rest) {
                     if position >= rest_start {
-                        return None;
+                        let mut arms: Vec<SemanticNodeId> =
+                            Vec::with_capacity(elements.len() - rest_start);
+                        for element in &elements[rest_start..] {
+                            let read = if element.rest {
+                                self.rest_element_item_type(element.value)?
+                            } else {
+                                self.index_read(element.value, element.optional, declaring_file)
+                            };
+                            self.push_union_flattened(&mut arms, read);
+                        }
+                        return Some(
+                            self.dispatch
+                                .intern_normalized_union_or_intersection(&arms, true),
+                        );
                     }
                 }
                 let element = elements.get(position)?;
@@ -1646,6 +1721,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // terminal under the caller's mode (path-precision), whereas the
         // empty whole-surface projection stays carrier-preserving.
         self.original_path_non_empty = !path.is_empty();
+        self.origin_file = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
         let initial_path: Arc<[PathSegment]> = Arc::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
@@ -3346,12 +3425,53 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // projects the union of every element's contribution
                     // (optional slots contribute `undefined`, a rest
                     // element contributes its array ELEMENT type). On a
-                    // rest-bearing tuple, fixed positions BEFORE the rest
-                    // start resolve exactly; positions at/after the rest
-                    // start miss conservatively (suffix-dependent
-                    // arithmetic is never guessed).
+                    // rest-bearing tuple, a position before the rest start
+                    // resolves exactly and one at or past it reads every
+                    // element from the rest start on (the rest may be
+                    // empty). `length` is the tuple's possible lengths;
+                    // any other key is a member of the tuple's apparent
+                    // `Array`.
                     let elements = elements.clone();
                     drop(data);
+                    let member = self.dispatch.apparent_member_name(segment);
+                    if member.as_deref() == Some("length") {
+                        let length = self.tuple_length(&elements);
+                        let (edge_kind, meta) = match segment {
+                            PathSegment::Index(ix) => {
+                                (OriginEdgeKind::ProjectIndex, OriginMeta::Index(ix.clone()))
+                            }
+                            PathSegment::Member(key) => (
+                                OriginEdgeKind::ProjectMember,
+                                OriginMeta::ProjectedMember {
+                                    key: key.clone(),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                            ),
+                        };
+                        self.graph().record_origin_edge(
+                            length,
+                            edge_kind,
+                            Arc::from(vec![current].into_boxed_slice()),
+                            meta,
+                            Arc::clone(self.fence),
+                        );
+                        current = length;
+                        index += 1;
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
+                    }
+                    if member.is_some() {
+                        match self.apparent_wrapper_read(current) {
+                            Some(surface) => {
+                                current = surface;
+                                continue;
+                            }
+                            None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     let projected = self
                         .classify_numeric_index_segment(segment)
                         .and_then(|demand| {
@@ -3390,9 +3510,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Array { element, .. } => {
                     // Array indexed access: any numeric demand — a
                     // literal position or the broad `number` key —
-                    // projects the element type.
+                    // projects the element type; any other key is a
+                    // member of the apparent `Array` (`length`, `map`).
                     let element = *element;
                     drop(data);
+                    if self.dispatch.apparent_member_name(segment).is_some() {
+                        match self.apparent_wrapper_read(current) {
+                            Some(surface) => {
+                                current = surface;
+                                continue;
+                            }
+                            None => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        }
+                    }
                     match self.classify_numeric_index_segment(segment) {
                         Some(_) => {
                             let meta = match segment {
@@ -3462,6 +3595,26 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     match self.dispatch.apparent_type_of(current) {
                         Some(apparent) if apparent != current => {
                             current = apparent;
+                            continue;
+                        }
+                        _ => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
+                // A primitive's members are its apparent wrapper's
+                // (`string['length']` is `String['length']`, `number`),
+                // read with the same segment.
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                    if self.dispatch.apparent_wrapper_of(current).is_some() =>
+                {
+                    drop(data);
+                    match self.apparent_wrapper_read(current) {
+                        Some(surface) if surface != current => {
+                            current = surface;
                             continue;
                         }
                         _ => {
@@ -4692,7 +4845,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// Whether a projected path's terminal has a one-level surface to
     /// synthesise (see [`ProjectedTerminalSurface`]). Syntactic over the
     /// terminal's own node: a transparent `Alias` classifies its target,
-    /// a union classifies from its arms, and nothing is dispatched.
+    /// a union or an intersection classifies from its arms (`1 & (1 | 2)`
+    /// and `string & { tag: 1 }` are types of their own, not the members
+    /// of a surface), and nothing is dispatched.
     fn projected_terminal_surface(&self, node: SemanticNodeId) -> ProjectedTerminalSurface {
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack = vec![node];
@@ -4706,11 +4861,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             };
             match &*data {
                 SemanticNodeData::Object(_)
-                | SemanticNodeData::Intersection(_)
                 | SemanticNodeData::MergedDecl { .. }
                 | SemanticNodeData::ObjectSpreadProgram(_) => {}
                 SemanticNodeData::Alias(target) => stack.push(*target),
                 SemanticNodeData::Union(arms) => stack.extend(arms.iter().copied()),
+                SemanticNodeData::Intersection(arms) => stack.extend(arms.iter().copied()),
                 SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::InstantiationRef { .. }
                 | SemanticNodeData::BareRef(_)

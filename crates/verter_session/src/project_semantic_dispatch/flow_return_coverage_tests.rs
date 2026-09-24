@@ -2053,11 +2053,13 @@ fn generic_chain_work(levels: usize) -> (Outcome, usize) {
 /// own transaction, every repeat re-evaluated the body and the work
 /// DOUBLED per level (20504 units at eleven levels, against 306 now); the
 /// host's audited entry ran out of connected-work budget at eleven. Every
-/// added level must now cost the same.
+/// added level must now cost the same — at nine, ten and eleven levels,
+/// and on through 32, 64 and 128, which the callee schedule evaluates
+/// without nesting a level per call.
 ///
-/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB): eleven
-/// levels nest 22 connected queries, deeper than a default test thread
-/// holds in an unoptimized build.
+/// Runs on the production worker stack (`host_cpu_pool`'s 8 MiB), so a
+/// chain evaluated recursively reaches its typed depth refusal rather than
+/// the end of an unoptimized build's default test-thread stack.
 #[test]
 fn a_generic_call_chain_reuses_each_completed_callee() {
     let worker = std::thread::Builder::new()
@@ -2088,6 +2090,22 @@ fn a_generic_call_chain_reuses_each_completed_callee() {
                 work_ten - work_nine,
                 "every added level must cost the same connected work \
                  ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 levels)"
+            );
+            let (thirty_two, work_32) = generic_chain_work(32);
+            let (sixty_four, work_64) = generic_chain_work(64);
+            let (long, work_128) = generic_chain_work(128);
+            for (levels, outcome) in [(32, thirty_two), (64, sixty_four), (128, long)] {
+                assert_eq!(
+                    outcome, short,
+                    "a {levels}-level chain answers exactly like a two-level one"
+                );
+            }
+            let per_level = work_eleven - work_ten;
+            assert_eq!(
+                (work_64 - work_32, work_128 - work_64),
+                (32 * per_level, 64 * per_level),
+                "every added level must cost the same connected work \
+                 ({work_32} / {work_64} / {work_128} at 32 / 64 / 128 levels)"
             );
         })
         .expect("spawn the chain worker");
@@ -2124,6 +2142,12 @@ fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
         "an edit to the reused callee must reach the chain's answer: {after:?}"
     );
 }
+
+/// The callee schedule's chains: deep, on a small stack, under a reduced
+/// budget, through other call shapes, and around recursive components.
+#[path = "flow_return_schedule_tests.rs"]
+mod schedule;
+
 /// CANARY (landed) — a `super.m()` call in a derived class method
 /// resolves to the base member's declared return.
 ///

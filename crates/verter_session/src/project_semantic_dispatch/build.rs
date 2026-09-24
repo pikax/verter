@@ -7121,11 +7121,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Extract" | "Exclude" if args.len() == 2 => {
                 let source_arg = args[0];
                 let filter_arg = args[1];
-                // Context-propagating deferred
-                // resolution (see Pick comment above for chain).
-                let source_resolved = self
-                    .evaluate_deferred_semantic_node_with_context(source_arg, context)
-                    .into_active_query_build_node(self);
+                // Context-propagating resolution (see Pick comment above for
+                // chain). A declaration carrier settles to what it declares,
+                // so an application that is a union (`Partial<A | B>`)
+                // distributes like one.
+                let source_resolved = self.resolve_signature_source_carrier(source_arg, context);
                 // The FILTER operand resolves through the same deferred
                 // evaluator: a carrier filter (`R` still a reference shell)
                 // would judge every per-member relation `Unknown` and defer
@@ -7136,7 +7136,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let source_data = graph.node_data(source_resolved);
                 let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
                     Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::Primitive(_)) => {
+                    // A settled non-union type is the one constituent the
+                    // distribution filters.
+                    Some(
+                        SemanticNodeData::Literal(_)
+                        | SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                        | SemanticNodeData::TemplateLiteral { .. },
+                    ) => {
                         vec![source_resolved]
                     }
                     _ => {
@@ -7147,9 +7157,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return (QueryResult::Value(result), fence, false);
                     }
                 };
+                // A single constituent that survives is the source as
+                // written (`Extract<Face, { a: 1 }>` is `Face`).
+                let single = !matches!(source_data.as_deref(), Some(SemanticNodeData::Union(_)));
                 drop(source_data);
                 let keep_assignable = name == "Extract";
                 let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+                let written = |arm: SemanticNodeId| if single { source_arg } else { arm };
                 for arm in arms.iter().copied() {
                     // Per-arm routing through the SOLE relation authority
                     // (`execute(Relate)`); an undecided arm defers the whole
@@ -7159,12 +7173,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             ..
                         } => {
                             if keep_assignable {
-                                survivors.push(arm);
+                                survivors.push(written(arm));
                             }
                         }
                         crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
                             if !keep_assignable {
-                                survivors.push(arm);
+                                survivors.push(written(arm));
                             }
                         }
                         crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
@@ -9136,6 +9150,134 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots);
         keyof_output.result_is_partial = keyof_is_partial;
         keyof_output
+    }
+
+    /// `keyof` over a carrier the checker resolves: a declaration, an
+    /// application, a mapped type. A mapped type's keys are its key space
+    /// — for a homomorphic one, `keyof` of its source (`keyof Partial<X>`
+    /// is `keyof X`) — and a builtin utility's are the keys it produces
+    /// (`keyof Pick<X, 'a' | 'b'>` is `"a" | "b"`); a declaration's are its
+    /// public members, read off the surface it resolves to. A key union of
+    /// two or more over a declaration or a user generic application stays
+    /// that type's `keyof` carrier, the origin the checker prints (`keyof
+    /// Face`, `keyof G<1>`); one key is that key (`keyof D1` over `class
+    /// D1 { p = 1 }` is `"p"`). The key set a relation reads is
+    /// [`Self::key_set_of`]. `None` when the carrier does not resolve (an
+    /// open operand keeps its carrier).
+    pub(super) fn key_of_through_carrier(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let read = |base: SemanticNodeId| match self
+            .execute_read(SemanticQueryKey::KeyOf { base, context })
+            .value
+        {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        };
+        let settled_keys = |keys: SemanticNodeId| {
+            (!matches!(
+                self.graph().node_data(keys).as_deref(),
+                Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
+            ))
+            .then_some(keys)
+        };
+        let named = match self.graph().node_data(base).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+            Some(SemanticNodeData::InstantiationRef { base: identity, .. })
+                if identity.canonical_id.as_ref() != "__builtin__" =>
+            {
+                Some(identity.clone())
+            }
+            _ => None,
+        };
+        // A mapped type — written, or a builtin mapped utility's
+        // application — is read before it materializes, so a homomorphic
+        // one answers `keyof` its source. A declaration materializes once,
+        // under the demand every other reader of it shares.
+        let transit_settled = match self.graph().node_data(base).as_deref() {
+            Some(SemanticNodeData::Mapped { .. }) => Some(base),
+            Some(SemanticNodeData::InstantiationRef { base: identity, .. })
+                if identity.canonical_id.as_ref() == "__builtin__" =>
+            {
+                Some(self.resolve_signature_source_carrier(
+                    base,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ))
+            }
+            _ => None,
+        };
+        if let Some(SemanticNodeData::Mapped { source, mapper }) = transit_settled
+            .and_then(|settled| self.graph().node_data(settled))
+            .as_deref()
+        {
+            if mapper.name_remap.is_some()
+                || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                    self, *source, mapper,
+                )
+            {
+                return None;
+            }
+            return match self.graph().node_data(mapper.key_space).as_deref() {
+                Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
+                    read(*source).and_then(|keys| {
+                        // `keyof` over the source keeps its own printed form
+                        // (`keyof Partial<Face>` prints `keyof Face`).
+                        match self.graph().node_data(keys).as_deref() {
+                            Some(SemanticNodeData::Opaque(_)) => None,
+                            _ => Some(keys),
+                        }
+                    })
+                }
+                _ => settled_keys(
+                    self.evaluate_deferred_semantic_node_with_context(mapper.key_space, context)
+                        .into_active_query_build_node(self),
+                ),
+            };
+        }
+        let settled = self.resolve_signature_source_carrier(base, context);
+        if settled == base {
+            return None;
+        }
+        let keys = settled_keys(read(settled)?)?;
+        match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::Union(members)) if named.is_some() && members.len() > 1 => None,
+            _ => Some(keys),
+        }
+    }
+
+    /// The literal keys `keyof base` denotes — the set a relation or a
+    /// comparability question reads, whichever `keyof` carrier stands for
+    /// it in print. `None` when the keys do not settle.
+    pub(super) fn key_set_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
+        let published =
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let read = |base: SemanticNodeId| match self
+            .execute_read(SemanticQueryKey::KeyOf {
+                base,
+                context: published,
+            })
+            .value
+        {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        };
+        let keys = read(base)?;
+        let kept = match self.graph().node_data(keys).as_deref() {
+            Some(SemanticNodeData::KeyOf { base: kept }) => *kept,
+            _ => return Some(keys),
+        };
+        let settled = self.resolve_signature_source_carrier(kept, published);
+        if settled == kept {
+            return None;
+        }
+        let keys = read(settled)?;
+        (!matches!(
+            self.graph().node_data(keys).as_deref(),
+            Some(SemanticNodeData::KeyOf { .. })
+        ))
+        .then_some(keys)
     }
 
     pub(super) fn intern_keyspace_keys<I>(
