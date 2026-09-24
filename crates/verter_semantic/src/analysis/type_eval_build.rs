@@ -543,7 +543,7 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
             ));
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None);
+            collect_module_declaration(module, source, out, None, false);
         }
         Statement::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -742,7 +742,7 @@ fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut Lowe
             ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None);
+            collect_module_declaration(module, source, out, None, false);
         }
         Declaration::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -1616,7 +1616,9 @@ fn collect_module_declaration(
     source: &str,
     out: &mut LoweredStatementParts,
     prefix: Option<&str>,
+    ambient: bool,
 ) {
+    let ambient = ambient || decl.declare;
     // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
     // NOT a file-scope namespace. Its inner declarations augment the surface of
     // the module reached by `<specifier>` (the canonical Vue/Vite `declare
@@ -1645,11 +1647,12 @@ fn collect_module_declaration(
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            collect_module_declaration(inner, source, out, Some(module_name.as_str()));
+            collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let context = NamespaceBlockContext::of(block, ambient);
             for stmt in &block.body {
-                collect_namespaced_statement(stmt, source, out, module_name.as_str());
+                collect_namespaced_statement(stmt, source, out, module_name.as_str(), context);
             }
         }
     }
@@ -1950,11 +1953,41 @@ fn move_value_parts_into_augmentation(
     }
 }
 
+/// How a namespace block exports its members.
+#[derive(Clone, Copy)]
+pub(super) struct NamespaceBlockContext {
+    /// Whether the block is ambient (`declare namespace`, or nested in one).
+    pub(super) ambient: bool,
+    /// Whether every member declaration is IMPLICITLY exported: an ambient
+    /// block with no export declaration or assignment is an export context
+    /// (the checker's `setExportContextFlag`), so `declare namespace D {
+    /// function f(): void }` exports `D.f`.
+    pub(super) implicit_exports: bool,
+}
+
+impl NamespaceBlockContext {
+    pub(super) fn of(block: &TSModuleBlock<'_>, ambient: bool) -> Self {
+        let has_export_declarations = block.body.iter().any(|statement| match statement {
+            Statement::ExportNamedDeclaration(export) => export.declaration.is_none(),
+            Statement::ExportAllDeclaration(_) | Statement::TSExportAssignment(_) => true,
+            Statement::ExportDefaultDeclaration(export) => {
+                export.declaration.as_expression().is_some()
+            }
+            _ => false,
+        });
+        Self {
+            ambient,
+            implicit_exports: ambient && !has_export_declarations,
+        }
+    }
+}
+
 fn collect_namespaced_statement(
     stmt: &Statement<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
     namespace: &str,
+    context: NamespaceBlockContext,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -1982,7 +2015,7 @@ fn collect_namespaced_statement(
             }
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace), context.ambient);
         }
         // Namespace value indexing is EXPORT-ONLY: a non-exported
         // `namespace N { const hidden = … }` is private to the namespace body
@@ -1990,10 +2023,18 @@ fn collect_namespaced_statement(
         // `Statement::VariableDeclaration` is intentionally NOT indexed under
         // its qualified name. Only the exported path below
         // (`export const VERSION = …` → `collect_namespaced_declaration`)
-        // registers a qualified value member such as `N.VERSION`.
+        // registers a qualified value member such as `N.VERSION` — or an
+        // ambient export context, where every member is exported.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration(decl, source, out, namespace);
+                collect_namespaced_declaration(decl, source, out, namespace, context.ambient);
+            }
+        }
+        Statement::FunctionDeclaration(_) | Statement::VariableDeclaration(_)
+            if context.implicit_exports =>
+        {
+            if let Some(decl) = stmt.as_declaration() {
+                collect_namespaced_declaration(decl, source, out, namespace, context.ambient);
             }
         }
         _ => {}
@@ -2005,6 +2046,7 @@ fn collect_namespaced_declaration(
     source: &str,
     out: &mut LoweredStatementParts,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -2032,7 +2074,16 @@ fn collect_namespaced_declaration(
             }
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace), ambient);
+        }
+        // A namespaced function (`namespace NS { export function f() {} }`)
+        // registers under its QUALIFIED name `NS.f` — the name the function
+        // program index serves its body under — so `typeof NS.f` binds.
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(mut parts) = lower_function_parts(func, source) {
+                parts.name = qualified_name(namespace, &parts.name);
+                out.value_decls.push(parts);
+            }
         }
         // A namespaced value member (`namespace NS { export const M = … }`)
         // registers under its QUALIFIED name `NS.M` so `typeof NS.M` binds.

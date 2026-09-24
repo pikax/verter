@@ -37,6 +37,7 @@ use verter_type_expr_oxc::lower_property_key;
 
 use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelStatementOwner};
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
+use crate::analysis::type_eval_build::NamespaceBlockContext;
 
 #[path = "decl_headers_augmentation.rs"]
 mod augmentation;
@@ -581,7 +582,7 @@ fn index_top_level_statement(
             index_interface(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, None);
+            index_module_declaration(module, ctx, index, None, false);
         }
         Statement::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -663,7 +664,7 @@ fn index_declaration(
             index_interface(iface, iface.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, None);
+            index_module_declaration(module, ctx, index, None, false);
         }
         Declaration::TSGlobalDeclaration(global) => {
             index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
@@ -784,7 +785,9 @@ fn index_module_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     prefix: Option<&str>,
+    ambient: bool,
 ) {
+    let ambient = ambient || decl.declare;
     if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
         if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
             let scope = AugmentationScopeKind::Module(spec.value.to_string());
@@ -816,11 +819,12 @@ fn index_module_declaration(
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            index_module_declaration(inner, ctx, index, Some(module_name.as_str()));
+            index_module_declaration(inner, ctx, index, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let context = NamespaceBlockContext::of(block, ambient);
             for stmt in &block.body {
-                index_namespaced_statement(stmt, ctx, index, module_name.as_str());
+                index_namespaced_statement(stmt, ctx, index, module_name.as_str(), context);
             }
         }
     }
@@ -831,12 +835,14 @@ fn index_module_declaration(
 /// indexing is EXPORT-ONLY — only an `export const`/`let`/`var` (routed via the
 /// `ExportNamedDeclaration` path to `index_namespaced_declaration`) registers a
 /// qualified value member such as `N.VERSION`; a non-exported `const hidden = …`
-/// is private to the namespace body and is intentionally NOT indexed.
+/// is private to the namespace body and is intentionally NOT indexed — unless
+/// the block is an ambient export context, where every member is exported.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
+    context: NamespaceBlockContext,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -854,7 +860,7 @@ fn index_namespaced_statement(
             }
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, Some(namespace));
+            index_module_declaration(module, ctx, index, Some(namespace), context.ambient);
         }
         // Export-only: a DIRECT (non-exported) `VariableDeclaration` is private
         // to the namespace body and is intentionally NOT indexed. Only the
@@ -862,7 +868,14 @@ fn index_namespaced_statement(
         // `index_namespaced_declaration`) registers a qualified value member.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                index_namespaced_declaration(decl, ctx, index, namespace);
+                index_namespaced_declaration(decl, ctx, index, namespace, context.ambient);
+            }
+        }
+        Statement::FunctionDeclaration(_) | Statement::VariableDeclaration(_)
+            if context.implicit_exports =>
+        {
+            if let Some(decl) = stmt.as_declaration() {
+                index_namespaced_declaration(decl, ctx, index, namespace, context.ambient);
             }
         }
         _ => {}
@@ -874,6 +887,7 @@ fn index_namespaced_declaration(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -891,7 +905,7 @@ fn index_namespaced_declaration(
             }
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, ctx, index, Some(namespace));
+            index_module_declaration(module, ctx, index, Some(namespace), ambient);
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
@@ -902,6 +916,14 @@ fn index_namespaced_declaration(
                     &mut index.value_headers,
                     Some(namespace),
                 );
+            }
+        }
+        // A namespaced function registers under its qualified `Ns.f`,
+        // mirroring `collect_namespaced_declaration`.
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(id) = &func.id {
+                let name = format!("{namespace}.{}", id.name);
+                index_function_as(func, &name, ctx, &mut index.value_headers);
             }
         }
         _ => {}
@@ -1126,6 +1148,19 @@ fn index_function(
     ctx: HeaderStatementContext<'_>,
     table: &mut DeclMap<ValueDeclHeader>,
 ) {
+    if let Some(id) = &func.id {
+        index_function_as(func, id.name.as_str(), ctx, table);
+    }
+}
+
+/// Index a function declaration's header under `name` — its own name, or
+/// the qualified `Ns.f` of a namespaced one.
+fn index_function_as(
+    func: &oxc_ast::ast::Function<'_>,
+    name: &str,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<ValueDeclHeader>,
+) {
     let Some(id) = &func.id else {
         return;
     };
@@ -1135,7 +1170,7 @@ fn index_function(
         ValueDeclKind::Function
     };
     let entry = table
-        .entry(ctx.key(id.name.as_str()))
+        .entry(ctx.key(name))
         .or_insert_with(|| ValueDeclHeader {
             kind,
             span: func.span.into(),

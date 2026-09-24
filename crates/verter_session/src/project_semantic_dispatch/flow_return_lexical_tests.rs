@@ -3794,11 +3794,10 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// inference from a literal publishes the un-widened literal of the
 /// checker's widened answer. What remains is the shape TypeScript itself
 /// cannot infer (`gcBareInferred`, where `unknown` IS the checker's
-/// answer) and the routes the executor does not read: the annotated-alias
-/// value type (`gcViaAnnotated`) keeps the sb15 interim `unknown`, and a
-/// NAMESPACE-scoped callee (`GcNs.nsCall`) is outside the executor's
-/// reach — it refuses, and the position degrades as an unrepresentable
-/// callee rather than guessing.
+/// answer) and the route the executor does not read: the annotated-alias
+/// value type (`gcViaAnnotated`) keeps the sb15 interim `unknown`. A
+/// NAMESPACE-scoped callee (`GcNs.nsCall`) is read through its qualified
+/// declaration like a file-scope one.
 ///
 /// Oracle (tsgo checker, `--strict --declaration`):
 ///
@@ -3807,6 +3806,7 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// gcFlowExplicit(): string     gcFlowInferred(): string
 /// gcBareExplicit(): string     gcBareInferred(): unknown   ← exact
 /// gcViaAnnotated(): string     gcNonGeneric():   string
+/// GcNs.nsCall():    string
 /// new GcHolder<number>().viaCall(): string
 /// new GcHolder<number>().ownT():   number
 /// ```
@@ -3814,9 +3814,7 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// The `Literal(String("a"))` rows are the un-widened literals of the
 /// checker's widened `string`. `gcBareInferred` stays `unknown` — it is
 /// the row where sb15 IS the checker's answer. `gcViaAnnotated` keeps the
-/// interim (the annotated-alias route is not call-resolved), and
-/// `GcNs.nsCall` degrades (a namespace-scoped callee is outside the
-/// executor's reach).
+/// interim (the annotated-alias route is not call-resolved).
 ///
 /// Mutation recipes:
 ///
@@ -3827,11 +3825,6 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 ///   `gcFlow*` green and flips `gcDecl*` / `gcBare*`; dropping only the
 ///   FLOW branch's leaves `gcDecl*` / `gcBare*` green and flips
 ///   `gcFlow*`, `GcNs.nsCall`, and the `viaCall` identity row.
-/// - Reading the callee's clause off its PREPARED value declaration
-///   instead of the function program index leaves every file-scope row
-///   green and flips `GcNs.nsCall` alone: a namespace-scoped function has
-///   no prepared declaration, so the clause reads EMPTY and nothing is
-///   instantiated.
 /// - Dropping the deferred-head arm from the name-driven binder
 ///   collection (`include_unbound_heads`) leaves `gcFlow*` green and
 ///   flips `gcDecl*` / `gcBare*`: a DECLARED return `: GD` lowers in the
@@ -3916,13 +3909,21 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         },
     );
 
-    // A NAMESPACE-scoped generic callee is outside the executor's reach:
-    // it refuses, and the position degrades as an unrepresentable callee
-    // rather than guessing from a clause it cannot read.
-    assert_degraded(
+    // A NAMESPACE-scoped generic callee is read through its qualified
+    // declaration: its explicit type argument instantiates its clause
+    // exactly as a file-scope callee's does.
+    r5_node(
         &host,
         "GcNs.nsCall",
-        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "GcNs.nsCall must instantiate the callee's own type parameter, \
+                 never publish the callee's binder"
+            );
+        },
     );
 
     // CONTROLS — a NON-generic direct callee is untouched: the rule fires
