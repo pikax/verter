@@ -2485,12 +2485,6 @@ impl InferenceSession {
         true
     }
 
-    /// Whether `param_node` is one of this session's frozen inference
-    /// declarations — a deposit target the forward relation arm binds.
-    pub(crate) fn declares(&self, param_node: SemanticNodeId) -> bool {
-        self.infos.iter().any(|info| info.param_node == param_node)
-    }
-
     /// Record a FRESH primitive-literal deposit for `param_node`. A
     /// constrained parameter regularizes its preserved literal, so the
     /// note is a no-op there.

@@ -428,23 +428,16 @@ export type TOpenComputed = ReturnType<typeof mOpenComputed>;
     // and the spread's reduction — the things this test is about — are
     // exact either way.
     //
-    // RECORDED DIVERGENCE: the checker widens here (`{ ...base(), n: 1 }
-    // satisfies object` is `{ label: string; n: number }`, because
-    // `object` contextually types nothing) and pins where the target does
+    // The satisfies target contextually types the members: `{ ...base(),
+    // n: 1 } satisfies object` is `{ label: string; n: number }` because
+    // `object` contextually types nothing, while a literal target pins
     // (`{ mode: "dark" } satisfies { mode: "dark" | "light" }` is
     // `{ mode: "dark" }`, which `flow_return_catalog::
-    // flow_return_ob05_satisfies_preserves_value_shape` pins). Closing the
-    // split is the deferred contextual-widening contract, and it moves
-    // BOTH rows together.
+    // flow_return_ob05_satisfies_preserves_value_shape` pins).
     let satisfies = object_props(&resolve("TSatisfies"));
     assert_eq!(satisfies.keys().collect::<Vec<_>>(), vec!["label", "n"]);
     assert_primitive(&satisfies["label"].ty, PrimitiveName::String);
-    assert_eq!(
-        satisfies["n"].ty,
-        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
-        "`satisfies` preserves the member literal uniformly — the target-driven half of \
-         tsc's rule is the deferred contextual-widening contract"
-    );
+    assert_primitive(&satisfies["n"].ty, PrimitiveName::Number);
     assert!(
         !satisfies["n"].readonly,
         "`satisfies` is not a const assertion and mints no `readonly`"

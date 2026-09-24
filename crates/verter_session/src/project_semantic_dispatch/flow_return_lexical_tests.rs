@@ -180,15 +180,16 @@ export function r5CallOnConditionalVar(flag: boolean, cb: () => 1 | 2) {
   return cb();
 }
 
-export function r5LoopHelper(value: number) {
-  while (value > 0) {
-    return "a";
-  }
-  return "b";
+export function r5InvokedHelper(value: number) {
+  let r = value;
+  (() => {
+    r = 0;
+  })();
+  return r;
 }
 
 export function r5CallOnFailedInit(v: number) {
-  const q = r5LoopHelper(v);
+  const q = r5InvokedHelper(v);
   return q();
 }
 
@@ -334,7 +335,7 @@ export function r5MutualA(c: boolean) {
 
 export function r5MutualB(c: boolean) {
   let z = 1;
-  z += 2;
+  z ||= 2;
   return r5MutualA(!!z);
 }
 
@@ -2151,9 +2152,14 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
     // — clean `number`, exactly like the unlabeled twin.
     assert_clean_warm(&host, "r5UnlabeledBlockVar", number());
     assert_clean_warm(&host, "r5LabeledBlockVar", number());
-    // A return-free loop declaring a `var` escapes the loop: the typed
-    // loop rail fails closed.
-    assert_fails_closed(&host, "r5LabeledLoopVar");
+    // A return-free loop declaring a `var` escapes the loop: the loop
+    // lowers structurally, and the `var` the entering path never defines
+    // is conditionally defined past it, exactly like the `if` twin.
+    assert_degraded(
+        &host,
+        "r5LabeledLoopVar",
+        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+    );
     // A conditional `var` has no single reaching definition: degraded.
     assert_degraded(
         &host,
@@ -5405,9 +5411,8 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 /// ctArrow:         () => number
 /// ```
 ///
-/// Four rows carry a recorded, PRE-EXISTING divergence from that oracle,
-/// none of them introduced or removed here, all of them shape-level and
-/// none of them a leak:
+/// Four rows carry a recorded divergence from that oracle, all of them
+/// shape-level and none of them a leak:
 ///
 /// - `ctObjBoth` publishes two structurally identical arms where the
 ///   checker publishes one. Union dedup is by interned NODE id and two
@@ -5419,9 +5424,8 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 ///   (`Union([Union([2, { a }]), 3])`);
 ///   `intern_normalized_union_or_intersection` sorts and dedups but does
 ///   not flatten a union arm.
-/// - `ctObjEmpty` publishes `2 | {}` where the checker's subtype
-///   reduction collapses it to `{}`; `ctIdent` publishes `boolean | 2`
-///   where the checker narrows the consequent to `true`.
+/// - `ctIdent` publishes `boolean | 2` where the checker narrows the
+///   consequent to `true`.
 ///
 /// Mutation recipe: dispositioning `ObjectExpression` as
 /// `ValueDescent::Leaf` in the classifier flips every object row to a
@@ -5453,10 +5457,12 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // A nested branch join FLATTENS at union construction, exactly
         // like the checker's own `2 | 3 | { a: number }`.
         ("ctNestedTernary", "{a:number}|3|2"),
+        // The branch join is subtype-reduced as the checker's is: `2` is
+        // below the empty object type, so only `{}` survives.
+        ("ctObjEmpty", "{}"),
         // CONTROLS — rows whose constituent SET the descent must leave
         // alone; every row renders its members in `VerterStableV1`
         // (fingerprint, exact) order, not authored order.
-        ("ctObjEmpty", "{}|2"),
         ("ctArray", "number[]"),
         ("ctIdent", "boolean|2"),
         ("ctNull", "null|1"),
@@ -6428,10 +6434,6 @@ fn string() -> TypeExpr {
     TypeExpr::Primitive(PrimitiveName::String)
 }
 
-fn boolean() -> TypeExpr {
-    TypeExpr::Primitive(PrimitiveName::Boolean)
-}
-
 fn null() -> TypeExpr {
     TypeExpr::Primitive(PrimitiveName::Null)
 }
@@ -6501,17 +6503,19 @@ fn flow_return_labeled_break_drops_the_arm_assertion() {
 
 /// A conditional labeled break joins the break path's value with the
 /// fall-through path's write. Oracle: TypeScript 7.0.2 `tsc` prints
-/// `number | true` (the `boolean` arm assignment-reduced to its `true`
-/// constituent; first recorded as `number | boolean` on tsgo
-/// 7.0.0-dev.20260526.1 — the version difference is ledgered as SDL-1).
-/// The assertion below still records this substrate's `boolean` arm.
+/// `number | true` — the `true` initializer assignment-reduces the
+/// declared `boolean` to its `true` constituent (tsgo
+/// 7.0.0-dev.20260526.1 printed `number | boolean`).
 #[test]
 fn flow_return_conditional_labeled_break_joins_the_write() {
     let host = make_r1_host();
     assert_r1_clean_warm(
         &host,
         "r1ConditionalBreakWrite",
-        union(vec![number(), boolean()]),
+        union(vec![
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+            number(),
+        ]),
     );
 }
 

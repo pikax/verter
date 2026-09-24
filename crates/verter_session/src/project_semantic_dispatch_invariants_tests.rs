@@ -4251,9 +4251,11 @@ fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
 
 /// Strictness is a per-project tsconfig fact that reaches the relation
 /// engine through the project owning the REQUEST's canonical. Two projects
-/// in one workspace differing only in `strict` judge `null → string` and an
-/// optional-vs-required property row differently (the TS-default strict
-/// project rejects, the relaxed project admits), the two judgements occupy
+/// in one workspace differing only in `strict` judge `null → string`
+/// differently (the TS-default strict project rejects, the relaxed project
+/// admits) and an optional-vs-required property row alike (TypeScript
+/// 7.0.2 refuses `{ a?: string }` against `{ a: string }` with
+/// `strictNullChecks` on and off), the two judgements occupy
 /// DISTINCT memo slots because the request project's `type_env_hash`
 /// differs, and neither slot is ever served to the other project's request
 /// — a warm strict-on payload never answers a relaxed request, and
@@ -4333,9 +4335,10 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
         matches!(relaxed_verdict, RelationResult::Assignable { .. }),
         "strictNullChecks OFF admits null into string — the BEHAVIORAL branch"
     );
-    assert!(
-        matches!(relaxed_row_verdict, RelationResult::Assignable { .. }),
-        "strictNullChecks OFF relates the optional row on its value type alone"
+    assert_eq!(
+        relaxed_row_verdict,
+        RelationResult::NotAssignable,
+        "an optional row never fills a required slot, strictNullChecks off included"
     );
 
     // No cross-hit: each slot holds its own verdict.
@@ -4968,12 +4971,11 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     );
 }
 
-/// Mutable-array inference: a MUTABLE array `(infer U)[]` pattern still binds —
-/// `string[] extends (infer U)[] ? U : never` → `string`. The invariant
-/// element check for non-readonly arrays must not impose the reverse arm
-/// against an `Infer` element under an active session (the deposit IS the
-/// binding); the readonly Flatten fixture took the covariant-only path and
-/// hid this.
+/// Mutable-array inference: a MUTABLE array `(infer U)[]` pattern binds —
+/// `string[] extends (infer U)[] ? U : never` → `string`. An array relates
+/// its elements covariantly, mutable arrays included (measured on
+/// TypeScript 7.0.2: `string[] extends (string | number)[]` is true, the
+/// reverse false), so the forward deposit IS the binding.
 #[test]
 fn mutable_array_infer_element_binds_covariantly() {
     use crate::semantic_query::{
@@ -5017,9 +5019,9 @@ fn mutable_array_infer_element_binds_covariantly() {
         graph.node_data(result)
     );
 
-    // Negative control: non-`Infer` mutable arrays KEEP the invariant
-    // bidirectional element check — `string[] ≤ (string | number)[]`
-    // (mutable) stays NotAssignable (the reverse arm fails).
+    // Control: a non-`Infer` mutable array relates its element
+    // covariantly — `string[] ≤ (string | number)[]` holds and the reverse
+    // does not.
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let union_node = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
@@ -5030,10 +5032,17 @@ fn mutable_array_infer_element_binds_covariantly() {
         element: union_node,
         readonly: false,
     });
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_as_result_for_tests(check, union_array),
+            RelationResult::Assignable { .. }
+        ),
+        "a mutable array relates its element covariantly: string[] ≤ (string | number)[]"
+    );
     assert_eq!(
-        dispatch.execute_relate_pair_as_result_for_tests(check, union_array),
+        dispatch.execute_relate_pair_as_result_for_tests(union_array, check),
         RelationResult::NotAssignable,
-        "mutable non-Infer arrays must stay INVARIANT (string[] ≤ (string|number)[] rejects)"
+        "(string | number)[] is not below string[]"
     );
 }
 

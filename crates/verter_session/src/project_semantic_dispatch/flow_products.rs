@@ -326,6 +326,12 @@ impl FlowProductStore {
             }))
             .chain(self.values.range((4, 0)..).map(runtime))
     }
+    /// Whether two continuations of the same execution hold equal products
+    /// in every runtime domain — the loop fixed point's convergence test.
+    #[must_use]
+    pub fn same_products(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
+    }
     /// Structural sharing is observable only to the hermetic performance proof.
     #[cfg(any(test, feature = "test-support"))]
     pub fn shares_continuation_storage(&self, other: &Self) -> bool {

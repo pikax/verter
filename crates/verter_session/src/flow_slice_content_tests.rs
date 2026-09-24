@@ -23,9 +23,9 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, ReturnPredicateTest, SliceBindingKind, SliceCall, SliceCallSite,
-    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot,
-    SliceNarrowSubject, SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement,
-    SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
+    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceLoopBinding,
+    SliceLoopTest, SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry, SliceObjectMember,
+    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -730,26 +730,22 @@ fn return_free_loop_is_transparent() {
 }
 
 /// @ai-generated - a loop whose transfer depends on a downstream-selected
-/// binding must use the typed loop refusal until fixed-point semantics exist.
+/// binding lowers structurally, for the evaluator's fixed point.
 #[test]
-fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
+fn selected_loop_transfers_lower_structurally_but_inert_loops_stay_transparent() {
     for source in [
         "function makeProps(x: \"s\" | 0) { while (typeof x === \"string\") { } return x }",
         "declare function assertNumber(v: unknown): asserts v is number\nfunction makeProps(x: string | number) { do { assertNumber(x); break } while (true); return x }",
         "function makeProps(x: \"a\" | \"b\") { exit: while (true) { if (x === \"a\") break exit; throw 0 } return x }",
     ] {
         let node = content_for(source, "makeProps");
-        let unsupported = node.body.statements.iter().any(|statement| match statement {
-            SliceStatement::Unsupported(SliceUnsupported::Loop) => true,
-            SliceStatement::Labeled { body, .. } => matches!(
-                body.statements.first(),
-                Some(SliceStatement::Unsupported(SliceUnsupported::Loop))
-            ),
-            _ => false,
-        });
         assert!(
-            unsupported,
-            "a loop transfer involving the selected return binding must refuse: {source}"
+            region_contains_structural_loop(&node.body),
+            "a loop transfer involving the selected return binding lowers structurally: {source}"
+        );
+        assert!(
+            !region_contains_unsupported_loop(&node.body),
+            "no typed loop refusal: {source}"
         );
     }
 
@@ -788,6 +784,27 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
 }
 
 /// Whether any statement of `region` — recursing through the lowered
+/// containers loops nest under — is a structurally lowered loop.
+fn region_contains_structural_loop(region: &SliceRegion) -> bool {
+    region.statements.iter().any(|statement| match statement {
+        SliceStatement::Loop(_) => true,
+        SliceStatement::Labeled { body, .. } => region_contains_structural_loop(body),
+        SliceStatement::Block(body) => region_contains_structural_loop(body),
+        SliceStatement::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            region_contains_structural_loop(consequent)
+                || alternate
+                    .as_deref()
+                    .is_some_and(region_contains_structural_loop)
+        }
+        _ => false,
+    })
+}
+
+/// Whether any statement of `region` — recursing through the lowered
 /// containers the fixtures below nest loops under — is the typed loop
 /// refusal.
 fn region_contains_unsupported_loop(region: &SliceRegion) -> bool {
@@ -817,20 +834,22 @@ fn region_contains_unsupported_loop(region: &SliceRegion) -> bool {
 /// break skips is treated reachable. Measured against the checker,
 /// `outer: { for (;;) { break outer } return 0 } return x` on
 /// `x: string | null` is `string | 0 | null` (transparency published
-/// `number`), and the guarded twin is `0 | null`. Such a loop takes the
-/// typed refusal, exactly like a return-bearing one.
+/// `number`), and the guarded twin is `0 | null`. Such a loop lowers
+/// structurally, its body's `break` recorded for the enclosing label to
+/// absorb.
 ///
 /// The escaping fixtures are deliberately OUTSIDE the selected-transfer
 /// nets: an unconditional break, and one whose path condition reads a slot
 /// with no downstream-selected read inside the loop — neither a guard, a
 /// call, a write, nor an invoked closure catches them.
 ///
-/// The refusal is about the TARGET, not the label: a label chain DIRECTLY
-/// wrapping the loop names the loop's own exit — its continuation IS the
-/// loop's fall-through point — so those shapes keep the transparent path
-/// (measured: every direct-wrap control below stays `string | null`).
+/// The structural lowering is about the TARGET, not the label: a label
+/// chain DIRECTLY wrapping the loop names the loop's own exit — its
+/// continuation IS the loop's fall-through point — so those shapes keep the
+/// transparent path (measured: every direct-wrap control below stays
+/// `string | null`).
 #[test]
-fn loop_break_to_enclosing_label_refuses_while_direct_wrap_labels_stay_transparent() {
+fn loop_break_to_enclosing_label_lowers_structurally_while_direct_wrap_labels_stay_transparent() {
     for source in [
         // Unconditional break out of a labeled BLOCK: skips `return 0`.
         "export {};\nfunction f(x: string | null) { outer: { for (;;) { break outer } return 0 } return x }",
@@ -840,8 +859,12 @@ fn loop_break_to_enclosing_label_refuses_while_direct_wrap_labels_stay_transpare
     ] {
         let node = content_for(source, "f");
         assert!(
-            region_contains_unsupported_loop(&node.body),
-            "a break to an enclosing lowered target must refuse the loop: {source}"
+            region_contains_structural_loop(&node.body),
+            "a break to an enclosing lowered target lowers the loop structurally: {source}"
+        );
+        assert!(
+            !region_contains_unsupported_loop(&node.body),
+            "no typed loop refusal: {source}"
         );
     }
 
@@ -2549,10 +2572,6 @@ fn elided_declaration_position_effects_take_the_typed_gap() {
              function f(x: string | number) { const unused = (check(x), 0); return x }",
         ),
         (
-            "a write in an unselected binding's initializer",
-            "export {};\nfunction f(x: string | number) { const unused = (x = \"s\", 0); return x }",
-        ),
-        (
             "an assertion in a destructuring declarator's initializer",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
              function f(x: string | number) { const { a } = (assertString(x), { a: 0 }); return x }",
@@ -3549,9 +3568,11 @@ fn correlated_destructured_parameter_relations_take_the_typed_gap() {
     );
 }
 
-/// @ai-generated - return-bearing loop is typed-unsupported and stops the region
+/// @ai-generated - a return-bearing loop lowers structurally; a literal
+/// `true` test has no exit edge, so the return after it is unreachable and
+/// rides the trailing unreachable region (the checker still aggregates it)
 #[test]
-fn return_bearing_loop_is_unsupported() {
+fn return_bearing_loop_lowers_structurally() {
     let node = content_for(
         "function spin() {\n\
          \x20 while (true) {\n\
@@ -3561,12 +3582,145 @@ fn return_bearing_loop_is_unsupported() {
          }\n",
         "spin",
     );
-    assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Unsupported(SliceUnsupported::Loop)],
-        "the region stops at the unsupported marker; the trailing return is dropped"
-    );
+    let [SliceStatement::Loop(lowered), SliceStatement::Unreachable(unreachable)] =
+        node.body.statements.as_ref()
+    else {
+        panic!(
+            "the loop lowers structurally and the trailing return is unreachable: {:?}",
+            node.body.statements
+        );
+    };
+    assert!(matches!(
+        unreachable.statements.as_ref(),
+        [SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }]
+    ));
+    assert!(matches!(
+        lowered.test,
+        SliceLoopTest::Before {
+            guard: SliceGuard::None,
+            constant: Some(true)
+        }
+    ));
+    assert!(matches!(
+        lowered.body.statements.as_ref(),
+        [SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }]
+    ));
+    assert!(lowered.element.is_none());
     assert!(!node.can_fall_through.reaches_end_for_assertion());
+}
+
+/// @ai-generated - every loop form lowers its own parts: a `for`
+/// initializer and update, a `do…while`'s test after the body, a
+/// `for…of` element binding, a destructuring element that binds nothing,
+/// a `continue` naming the loop, and the literal-`false` `while` whose body
+/// no path enters
+#[test]
+fn every_loop_form_lowers_its_own_parts() {
+    let for_loop = content_for(
+        "export {};\nfunction f(n: number) { for (let i = 0; i < n; i++) { if (i) return i; } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Loop(lowered)) = for_loop.body.statements.first() else {
+        panic!("{:?}", for_loop.body.statements);
+    };
+    assert!(matches!(
+        lowered.init.statements.as_ref(),
+        [SliceStatement::Binding { .. }]
+    ));
+    assert!(matches!(
+        lowered.update.statements.as_ref(),
+        [SliceStatement::CompoundAssignment { .. }]
+    ));
+    assert!(matches!(
+        lowered.test,
+        SliceLoopTest::Before { constant: None, .. }
+    ));
+
+    let do_while = content_for(
+        "export {};\nfunction f(c: boolean) { let x: string | number = 1; do { if (c) return x; x = \"s\"; } while (c); return 0 }",
+        "f",
+    );
+    assert!(do_while.body.statements.iter().any(|statement| matches!(
+        statement,
+        SliceStatement::Loop(lowered)
+            if matches!(lowered.test, SliceLoopTest::After { constant: None, .. })
+    )));
+
+    let for_of = content_for(
+        "export {};\nfunction f(xs: string[]) { for (const x of xs) { if (x) return x; } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Loop(lowered)) = for_of.body.statements.first() else {
+        panic!("{:?}", for_of.body.statements);
+    };
+    assert!(matches!(lowered.test, SliceLoopTest::Exhausted));
+    let element = lowered
+        .element
+        .as_ref()
+        .expect("a for…of iterates an element");
+    assert!(!element.keys);
+    assert!(matches!(
+        element.binding,
+        Some(SliceLoopBinding {
+            kind: SliceBindingKind::Const,
+            ..
+        })
+    ));
+
+    let destructured = content_for(
+        "export {};\nfunction f(xs: [number, string][]) { for (const [a, b] of xs) { if (a) return b; } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Loop(lowered)) = destructured.body.statements.first() else {
+        panic!("{:?}", destructured.body.statements);
+    };
+    assert!(
+        lowered
+            .element
+            .as_ref()
+            .is_some_and(|element| element.binding.is_none()),
+        "a destructuring element binds nothing the evaluator models"
+    );
+
+    let labeled = content_for(
+        "export {};\nfunction f(c: boolean) { outer: while (c) { while (c) { if (c) return 1; continue outer; } } return 0 }",
+        "f",
+    );
+    let Some(SliceStatement::Labeled { body, .. }) = labeled.body.statements.first() else {
+        panic!("{:?}", labeled.body.statements);
+    };
+    let Some(SliceStatement::Loop(outer)) = body.statements.first() else {
+        panic!("{body:?}");
+    };
+    assert_eq!(outer.labels.as_ref(), &[Arc::<str>::from("outer")]);
+    let Some(SliceStatement::Loop(inner)) = outer.body.statements.first() else {
+        panic!("{:?}", outer.body);
+    };
+    assert!(matches!(
+        inner.body.statements.as_ref(),
+        [SliceStatement::If { .. }, SliceStatement::Continue { target: Some(label) }]
+            if label.as_ref() == "outer"
+    ));
+
+    let dead = content_for(
+        "export {};\nfunction f() { while (false) { return 1; } return 0 }",
+        "f",
+    );
+    assert!(
+        dead.body.statements.iter().any(|statement| matches!(
+            statement,
+            SliceStatement::Loop(lowered)
+                if matches!(lowered.test, SliceLoopTest::Before { constant: Some(false), .. })
+        )),
+        "a body the literal `false` test never enters lowers for the unreachable reading: {:?}",
+        dead.body.statements
+    );
 }
 
 /// @ai-generated - a switch lowers each case clause as its own region
@@ -4350,7 +4504,10 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
          function f(x: string | number) { try { throw (assertString(x), \"e\"); } catch { return x; } return x }",
         "f",
     );
-    let [SliceStatement::Try { block, .. }] = thrown.body.statements.as_ref() else {
+    // The trailing `return x` no path reaches rides the unreachable region.
+    let [SliceStatement::Try { block, .. }, SliceStatement::Unreachable(_)] =
+        thrown.body.statements.as_ref()
+    else {
         panic!("the try lowers as a region: {thrown:?}");
     };
     assert_eq!(
@@ -5090,14 +5247,14 @@ fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test
     assert_eq!(guard_gap_count(&unexpressible), 1, "{unexpressible:?}");
 }
 
-/// A loop TEST consults the same tri-state classifier — never lowering a
-/// guard, only deciding whether a return-free loop stays fall-through
-/// TRANSPARENT. A MODELED narrow and an UNEXPRESSIBLE one over a
-/// downstream-selected slot must both refuse identically: collapsing the
+/// A loop TEST goes through the same tri-state classifier as an `if`
+/// test. A MODELED narrow over a downstream-selected slot lowers the loop
+/// structurally with the modeled guard, and an UNEXPRESSIBLE one lowers it
+/// with the typed guard-narrowing gap ahead of the loop: collapsing the
 /// unexpressible answer to "no narrowing" would let the loop iterate
 /// under a narrow the checker applies and this half silently dropped.
 #[test]
-fn loop_test_consults_the_guard_classifier_for_both_a_modeled_and_an_unexpressible_narrow() {
+fn loop_test_lowers_through_the_guard_classifier_for_both_a_modeled_and_an_unexpressible_narrow() {
     let modeled = content_for(
         "export {};\nfunction f(x: string | number) { while (typeof x === \"string\") { } return x }",
         "f",
@@ -5105,26 +5262,34 @@ fn loop_test_consults_the_guard_classifier_for_both_a_modeled_and_an_unexpressib
     assert!(
         modeled.body.statements.iter().any(|statement| matches!(
             statement,
-            SliceStatement::Unsupported(SliceUnsupported::Loop)
+            SliceStatement::Loop(lowered)
+                if matches!(
+                    lowered.test,
+                    SliceLoopTest::Before {
+                        guard: SliceGuard::Typeof { .. },
+                        ..
+                    }
+                )
         )),
-        "a modeled narrow over a downstream-selected slot refuses: {modeled:?}"
+        "a modeled narrow over a downstream-selected slot lowers with its guard: {modeled:?}"
     );
+    assert_eq!(guard_gap_count(&modeled), 0, "{modeled:?}");
 
     let unexpressible = content_for(
         "export {};\nfunction f(x: { a: number } | { b: number }, k: string) { while (k in x) { } return x }",
         "f",
     );
+    let statements = &unexpressible.body.statements;
+    let loop_index = statements
+        .iter()
+        .position(|statement| matches!(statement, SliceStatement::Loop(_)))
+        .unwrap_or_else(|| panic!("the loop lowers structurally: {statements:?}"));
     assert!(
-        unexpressible
-            .body
-            .statements
-            .iter()
-            .any(|statement| matches!(
-                statement,
-                SliceStatement::Unsupported(SliceUnsupported::Loop)
-            )),
-        "an UNEXPRESSIBLE narrow over the same downstream-selected slot must refuse identically, \
-         never fall through as though it narrowed nothing: {unexpressible:?}"
+        loop_index > 0
+            && statements[loop_index - 1]
+                == SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        "an UNEXPRESSIBLE narrow over the same downstream-selected slot takes the typed gap \
+         ahead of the loop, never iterating as though it narrowed nothing: {statements:?}"
     );
 
     // Positive control: the SAME unexpressible test shape reaching no

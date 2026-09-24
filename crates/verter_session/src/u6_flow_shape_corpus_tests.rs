@@ -1188,6 +1188,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "42820c30d07fe3a6bbe4cb033e24a35b4f38f3d53fbf462613c5b55f89c4b7d2",
     ),
     (
+        "CC09_satisfies_widening_target",
+        "494b297536d3f12723b2b321090d17d5e171a20dc6e42fb428de2b43a009cd6c",
+    ),
+    (
         "D02_param_reassign",
         "45dd83b6d25a0dcc47846814ce8928b9cdec12407cb2b0f6f56d9d5bbf711e93",
     ),
@@ -1198,6 +1202,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "D04_destructured_param_write",
         "f4709dba61ebaac5df4635e845cfa81deda2487ddc9d3c1a91e85b7001bac666",
+    ),
+    (
+        "D05_loop_return",
+        "43cab67e0e91ef07c04da943d6572e44ed36ef49488862cbfa808170611ddb18",
     ),
     (
         "D06_switch_return",
@@ -1388,6 +1396,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "7c3c9f675623866d1625c5ddbda540c416b751080fcefc6983d9c8c97e9ee4f0",
     ),
     (
+        "N52_while_downstream_narrow",
+        "1dfe1a8c70d0c602d4940c78e883ae065e651bdcbc1788366503df0553213816",
+    ),
+    (
+        "N53_do_while_downstream_narrow",
+        "c300a24424bffdc179e4df7fd2443042711738f2f3f6622d83e082e5eae40cc5",
+    ),
+    (
+        "N54_for_loop_downstream_narrow",
+        "663d4cbacbd2a69e8eb2bd183125b3266b1a4fd1d4b675eca2f55fefdbbd2584",
+    ),
+    (
         "X01_spread_narrow_arm_source",
         "affeead1e071a2ba50875d5bfcfd86a842b79d4139751a55b03a172d5a33a25f",
     ),
@@ -1446,6 +1466,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X20_as_const_spread_source",
         "8d96e558b8acd65d989e885644bc0821703409eaac8bdbf38bf4704fe22ba549",
+    ),
+    (
+        "X21_satisfies_plain_return",
+        "4ca93cdac2b1e1ac56b8333a5124baad988f4e7e0fd999b9de020015ec40e6fe",
     ),
     (
         "X22_switch_break_case_entry",
@@ -1540,6 +1564,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "a4fd3c1f7a89d38b66d1ae4c22994f939b2ea656dcad6089000125fd4722ad43",
     ),
     (
+        "X58_effectful_while_loop_joins",
+        "3e1c4b1c81e0691665730cab9b4822154e0c1f017ee3ab080e5e83a48c14778d",
+    ),
+    (
+        "X59_effectful_do_loop_joins",
+        "ae78c7be8e6d2fb95590de09312934ce1b31c5220d131c5193951cd9ed31ab30",
+    ),
+    (
+        "X60_effectful_labeled_loop_joins",
+        "ac5edd76ae3ac2751ffc66e785c42fa86419c1a852ed5b7ccaca5e0ba6acbfd5",
+    ),
+    (
         "X61_finally_break_preserves_own_exit",
         "d3ead9f133fafd4379a26ec537f64f88f15bc01866a6404a422e6e8a928ed86e",
     ),
@@ -1610,6 +1646,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X81_while_false_body_write_is_inert",
         "c1c61c4d0855907ba23fa8b3ef7400f20c4e8d441229274144c189535d8e2851",
+    ),
+    (
+        "X82_loop_break_finally_return_keeps_undefined",
+        "1ce2c2e7101fc26cfdafdde6728c606445e655d24b398189bbe61770a9d706f0",
     ),
     (
         "X84_required_property_assignment_preserves_optional_union_arm",
@@ -3031,6 +3071,8 @@ mod corpus_suite {
             "N116_binding_fresh_call_const_widening_read",
             "N117_binding_fresh_call_let_widens_at_decl",
             "N122_membership_through_let_initializer_return",
+            "X58_effectful_while_loop_joins",
+            "X60_effectful_labeled_loop_joins",
         ];
         /// Deep-pinned rows whose `checker` text is NOT byte-comparable
         /// to the renderer, each with the PRESENTATION reason. Semantic
@@ -3038,6 +3080,11 @@ mod corpus_suite {
         /// the verdict-directed semantic test, and the byte-divergence
         /// claimed here is asserted live below.
         const RENDER_INCOMPARABLE: &[(&str, &str)] = &[
+            (
+                "X82_loop_break_finally_return_keeps_undefined",
+                "checker prints `\"a\" | undefined`; the renderer spells the same node \
+                 `Union(\"a\" | undefined)` — union spelling differs",
+            ),
             (
                 "X95_evolving_let_both_branches_join",
                 "checker prints `{ v: \"p\" | 1; }`; the renderer spells the same \
@@ -4676,11 +4723,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member `label` Union — deepening pins the exact constituent set",
     ),
     (
-        "CC09_satisfies_widening_target",
-        Owner::U6ContextualCore,
-        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
-    ),
-    (
         "E05_scalar_flow_answer_keeps_tsx_surface",
         Owner::SharedCompilePipeline,
         "root Literal — deepening pins the exact literal value",
@@ -4719,11 +4761,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "N23_impossible_conjunction_drops_dead_disjunction_alternative",
         Owner::U6NarrowLattice,
         "member `v` Union — deepening pins the exact constituent set",
-    ),
-    (
-        "X21_satisfies_plain_return",
-        Owner::U6ValueInference,
-        "member `label` Literal + member `n` Literal — deepening pins the exact literal value",
     ),
     (
         "X24_try_write_catch_read",
@@ -5049,9 +5086,6 @@ const OPEN_DEBTS: &[&str] = &[
     // resolve in this standalone environment, so the return is the typed
     // unmodelled-position marker.
     "X19_generator_yield",
-    // A return-bearing loop remains outside the value-inference surface. The
-    // NoValue refusal is honest until loop-owned break/return joining exists.
-    "X82_loop_break_finally_return_awaits_return_bearing_loop_support",
     // A scalar literal is correctly rejected as a props macro type, but that
     // runtime diagnostic must not delete the file's IDE TSX surface.
     "E05_scalar_flow_answer_keeps_tsx_surface",
@@ -5061,13 +5095,6 @@ const OPEN_DEBTS: &[&str] = &[
     // byte-identically — a pre-existing mapped source-member enumeration
     // defect whose reach the heritage work extended.
     "C14_mapped_heritage_drops_index_signature",
-    // ── satisfies-contextual widening (value inference) ────────────────
-    // The satisfies TARGET never contextually types the operand's members:
-    // a fresh member literal keeps its `Literal` node where the checker's
-    // contextual target widens it — a strict subtype of the truth, warm.
-    // The gap and its repair are named on both rows' notes.
-    "CC09_satisfies_widening_target",
-    "X21_satisfies_plain_return",
     // ── NARROWING VOCABULARY — guard forms the flow lattice does not
     //    carry. Every row publishes an HONEST SUPERSET as a typed
     //    ReturnOnly (zero candidates, recomputed cold), never a
@@ -5165,10 +5192,15 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // MatchesChecker: 81 matching, 9 parked. An initializer-less evolving
     // `let` holding `undefined` until its first write moves X94 and X97 —
     // the one-branch and default-less-switch joins that keep `undefined` —
-    // to MatchesChecker: 83 matching, 7 parked.
-    (Owner::U6ValueInference, 93, 83, 7),
-    (Owner::U6LoopClosure, 6, 1, 2),
-    (Owner::U6ContextualCore, 8, 7, 1),
+    // to MatchesChecker: 83 matching, 7 parked. The satisfies target
+    // contextually typing its operand moves X21 to MatchesChecker: 84
+    // matching, 6 parked.
+    (Owner::U6ValueInference, 93, 84, 6),
+    // Loops iterate to the checker's fixed point: D05's return-bearing loop
+    // is the substrate's, and the N52–N54 downstream narrows and X82's
+    // loop break crossing an abrupt finally match the checker.
+    (Owner::U6LoopClosure, 6, 5, 1),
+    (Owner::U6ContextualCore, 8, 8, 0),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one
     // from D13's 64 to 63. The async return wrap greens X18 (the
@@ -5177,7 +5209,9 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // their tagged-template twins D12, D13 and G07 keep the unmodelled
     // position, and X12's class getter read through the constructed
     // instance is parked (the getter publishes its function type).
-    (Owner::U6FlowReturnSubstrate, 66, 51, 3),
+    // Loops iterate to the checker's fixed point: D05 and the X58–X60
+    // loop transfers match the checker.
+    (Owner::U6FlowReturnSubstrate, 66, 55, 3),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
     // `let`-aliased condition control (N84) publishes complete: 32 match.

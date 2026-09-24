@@ -161,7 +161,7 @@ fn flow_surface_return_free_loop_stays_fallthrough_transparent() {
 /// that `any` was a fabricated value at a call position — clean, warm,
 /// and wrong (TypeScript 7.0.2 `tsc` types `SubThisCall#run` as
 /// `number`). The classifier now decides the call position on the FORM,
-/// so this joins the return-bearing-loop / `switch` rows above.
+/// so it publishes the positional marker instead.
 #[test]
 fn flow_surface_this_call_return_fails_closed() {
     let host = make_host_with_footprint();
@@ -171,12 +171,14 @@ fn flow_surface_this_call_return_fails_closed() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+/// A return-bearing loop joins its body's return with the return past it
+/// at the loop's fixed point. TypeScript 7.0.2 `tsc`: `number`.
 #[test]
-fn flow_surface_return_bearing_loop_is_degraded_not_narrowed() {
+fn flow_surface_return_bearing_loop_resolves_its_fixed_point() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubLoopReturn");
-    assert_semantic_miss(&expr);
+    assert_primitive(&expr, PrimitiveName::Number);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -308,11 +310,11 @@ fn flow_return_substrate_serves_return_free_loop_transparent() {
 }
 
 #[test]
-fn flow_return_substrate_keeps_return_bearing_loop_degraded() {
+fn flow_return_substrate_serves_return_bearing_loop() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubLoopReturn");
-    assert_semantic_miss(&expr);
+    assert_primitive(&expr, PrimitiveName::Number);
     assert_flow_return_dispatched(&record, "SubLoopReturn");
 }
 

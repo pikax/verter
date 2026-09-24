@@ -95,19 +95,27 @@ fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
             parts.join(" | ")
         }
         SemanticNodeData::Object(surface) => {
-            let members: Vec<String> = surface
-                .positive_members()
+            let mut members: Vec<String> = surface
+                .index_signatures
                 .iter()
-                .map(|member| {
+                .map(|signature| {
                     format!(
-                        "{}{}{}: {}",
-                        if member.readonly { "readonly " } else { "" },
-                        member.key.as_string().unwrap_or("<key>"),
-                        if member.optional { "?" } else { "" },
-                        answer_text(host, member.value)
+                        "{}[k: {}]: {}",
+                        if signature.readonly { "readonly " } else { "" },
+                        answer_text(host, signature.key_type),
+                        answer_text(host, signature.value_type)
                     )
                 })
                 .collect();
+            members.extend(surface.positive_members().iter().map(|member| {
+                format!(
+                    "{}{}{}: {}",
+                    if member.readonly { "readonly " } else { "" },
+                    member.key.as_string().unwrap_or("<key>"),
+                    if member.optional { "?" } else { "" },
+                    answer_text(host, member.value)
+                )
+            }));
             format!("{{ {} }}", members.join("; "))
         }
         SemanticNodeData::Signature {
@@ -120,7 +128,8 @@ fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
                 .iter()
                 .map(|param| {
                     format!(
-                        "{}{}: {}",
+                        "{}{}{}: {}",
+                        if param.rest { "..." } else { "" },
                         param.name.as_deref().unwrap_or("_"),
                         if param.optional { "?" } else { "" },
                         answer_text(host, param.ty)
@@ -1518,14 +1527,14 @@ fn generator_yields_of_parameters_and_locals_join_like_returns() {
     );
 }
 
-/// A yield the join does not model — inside a loop, nested in another
-/// expression, or a `yield*` delegation — never leaves a partial yield
-/// type. TypeScript 7.0.2 types every one of these (`genWhile`,
-/// `genNested`, `genInCall` and `genDelegate` are `Generator<string,
-/// void, unknown>`; `genWhileBare` is `Generator<undefined, void,
-/// unknown>`, `Generator<any, void, unknown>` with `strictNullChecks`
-/// off); the lane answers no value for a loop, as it does for a
-/// return-bearing one, and a typed gap for the rest.
+/// A yield the join does not model — nested in another expression, or a
+/// `yield*` delegation — never leaves a partial yield type, while a yield
+/// inside a loop joins like any other. TypeScript 7.0.2 types every one of
+/// these (`genWhile`, `genNested`, `genInCall` and `genDelegate` are
+/// `Generator<string, void, unknown>`; `genWhileBare` is
+/// `Generator<undefined, void, unknown>`, `Generator<any, void, unknown>`
+/// with `strictNullChecks` off); the lane answers the loops' yields and a
+/// typed gap for the rest.
 #[test]
 fn yields_the_join_does_not_model_never_publish_a_partial_yield_type() {
     const SOURCE: &str = r#"
@@ -1541,13 +1550,20 @@ export function* genDelegate(xs: string[]) { yield* xs; }
     for root in [STRICT_ROOT, LOOSE_ROOT] {
         let canonical = format!("{root}/yield-gaps.ts");
         upsert(&host, &canonical, SOURCE);
-        for symbol in ["genWhile", "genWhileBare"] {
-            assert_eq!(
-                observe(&host, &canonical, symbol),
-                "<no value: Failure(Unsupported(Loop))>",
-                "{canonical} `{symbol}`"
-            );
-        }
+        assert_eq!(
+            observe(&host, &canonical, "genWhile"),
+            "Generator<string, void, unknown>",
+            "{canonical} `genWhile`"
+        );
+        assert_eq!(
+            observe(&host, &canonical, "genWhileBare"),
+            if root == STRICT_ROOT {
+                "Generator<undefined, void, unknown>"
+            } else {
+                "Generator<any, void, unknown>"
+            },
+            "{canonical} `genWhileBare`"
+        );
         for symbol in ["genNested", "genInCall", "genDelegate"] {
             let observed = observe(&host, &canonical, symbol);
             assert!(
@@ -2115,8 +2131,9 @@ fn observe_at_checker_altitude(host: &VerterHost, canonical: &str, symbol: &str)
 const CONDITIONAL_APPLICATION_SOURCE: &str = r#"
 type Exclude<T, U> = T extends U ? never : T;
 type Extract<T, U> = T extends U ? T : never;
-type NonNullable<T> = T & {};
 type Box<T> = T extends null ? "none" : { v: T };
+interface Foo { a: string }
+class Bar { b = 1 }
 type IsNullable<T> = null extends T ? true : false;
 type IsUndef<T> = undefined extends T ? "y" : "n";
 declare function boxOf<T>(v: T): Box<T>;
@@ -2128,6 +2145,9 @@ export function excludeNullCall(v: string | null) { return exNull(v); }
 export function excludeUndefNull(v: Exclude<string | undefined, null>) { return v; }
 export function extractNull(v: Extract<string | null, null>) { return v; }
 export function nonNullableParam(v: NonNullable<string | null>) { return v; }
+export function nonNullableIface(v: NonNullable<Foo | null>) { return v; }
+export function nonNullableClass(v: NonNullable<Bar | undefined>) { return v; }
+export function nonNullableUnion(v: NonNullable<string | number | null>) { return v; }
 export function isNullableStr(x: IsNullable<string>) { return x; }
 export function isUndefNum(x: IsUndef<number>) { return x; }
 "#;
@@ -2139,9 +2159,14 @@ export function isUndefNum(x: IsUndef<number>) { return x; }
 /// `never`), and a check relating `null` / `undefined` holds as it does
 /// without `strictNullChecks` (`null extends string`). Read at the
 /// checker's print altitude, each row is its project's TypeScript 7.0.2
-/// answer. `NonNullable<T>` (`T & {}`) is `string` for both projects on
-/// the checker, with or without the null member the strict argument keeps:
-/// its erased argument is the only difference, and it changes nothing.
+/// answer. The library `NonNullable<T>` (`T & {}`) prints its reduced
+/// type for both projects, with or without the null member the strict
+/// argument keeps: `NonNullable<string | null>` is `string`, and over an
+/// interface or class reference it is that reference (`Foo`, `Bar`). A
+/// result that is still a union (`NonNullable<string | number | null>`)
+/// is the union here, where the checker's print keeps the alias name it
+/// attaches to that union — the one presentation difference, the two
+/// being the same type.
 #[test]
 fn conditional_applications_decide_under_the_functions_own_algebra() {
     let host = two_policy_host();
@@ -2174,6 +2199,19 @@ fn conditional_applications_decide_under_the_functions_own_algebra() {
         // "y" / "n"
         (LOOSE_ROOT, "isUndefNum", "\"y\""),
         (STRICT_ROOT, "isUndefNum", "\"n\""),
+        // string / string
+        (STRICT_ROOT, "nonNullableParam", "string"),
+        (LOOSE_ROOT, "nonNullableParam", "string"),
+        // Foo / Foo
+        (STRICT_ROOT, "nonNullableIface", "Foo"),
+        (LOOSE_ROOT, "nonNullableIface", "Foo"),
+        // Bar / Bar
+        (STRICT_ROOT, "nonNullableClass", "Bar"),
+        (LOOSE_ROOT, "nonNullableClass", "Bar"),
+        // NonNullable<string | number | null> / NonNullable<string | number>
+        // (the alias the checker names the union by)
+        (STRICT_ROOT, "nonNullableUnion", "number | string"),
+        (LOOSE_ROOT, "nonNullableUnion", "number | string"),
     ];
     let mut mismatches = Vec::new();
     for (root, symbol, expected) in rows {
@@ -2185,14 +2223,6 @@ fn conditional_applications_decide_under_the_functions_own_algebra() {
             ));
         }
     }
-    assert_eq!(
-        observe(&host, &strict, "nonNullableParam"),
-        "NonNullable<null | string>"
-    );
-    assert_eq!(
-        observe(&host, &loose, "nonNullableParam"),
-        "NonNullable<string>"
-    );
     assert!(
         mismatches.is_empty(),
         "flow-return answers differ from the measured TypeScript 7.0.2 prints:\n{}",
@@ -2375,5 +2405,2195 @@ fn object_arms_reduce_to_their_supertype_before_widening() {
         mismatches.is_empty(),
         "flow-return answers differ from the measured TypeScript 7.0.2 table:\n{}",
         mismatches.join("\n")
+    );
+}
+
+/// Loops holding returns, yields, breaks, continues and writes: every loop form, labeled jumps, a test that narrows, element bindings, dependent writes and an inferred binding the checker cannot type.
+const LOOP_SOURCE: &str = r#"
+interface Generator<T, TReturn, TNext> {}
+declare function assertNumber(v: unknown): asserts v is number;
+export function retInFor(n: number) { for (let i = 0; i < n; i++) { if (i > 3) return "big"; } return 0; }
+export function retInForOf(xs: string[]) { for (const x of xs) { if (x) return x; } return null; }
+export function retLoopVar(c: boolean) { let x: string | number = 1; while (c) { if (c) return x; x = "s"; } return 0; }
+export function retLoopVar3(c: boolean) { let x: string | number | boolean = 1; while (c) { if (c) return x; if (x === 1) { x = "s"; } else { x = true; } } return 0; }
+export function retDoWhile(c: boolean) { let x: string | number | boolean = 1; do { if (c) return x; x = "s"; } while (c); return x; }
+export function retDoWhileFalse(c: boolean) { let x: "a" | "b" = "a"; do { if (c) x = "b"; } while (false); return x; }
+export function retForIn(o: object) { for (const k in o) { return k; } return 0; }
+export function retWhileTrue(c: boolean) { let x: number | string = 1; while (true) { if (c) return x; x = "s"; } }
+export function retBreak(c: boolean) { let x: string | number | boolean = 1; while (c) { if (c) { x = true; break; } x = "s"; } return x; }
+export function retContinue(c: boolean) { let x: string | number | boolean = 1; while (c) { if (c) { x = true; continue; } x = "s"; if (c) return x; } return 0; }
+export function retLabeled(c: boolean) { let x: string | number | boolean = 1; outer: while (c) { while (c) { if (c) return x; x = "s"; if (c) break outer; } x = true; } return x; }
+export function retContinueOuter(c: boolean) { let x: string | number = 1; outer: while (c) { while (c) { x = "s"; continue outer; } } return x; }
+export function retWriteAfter(c: boolean) { let x: string | number = 1; while (c) { x = "s"; } return x; }
+export function retNarrowTest(x: string | number) { while (typeof x === "string") { return x; } return x; }
+export function retNarrowTestW(y: string | number) { let x = y; while (typeof x === "string") { x = 1; } return x; }
+export function retVarLoop(n: number) { for (var i = 0; i < n; i++) { if (i) return i; } return "none"; }
+export function retVarAfter(n: number) { for (var i = 0; i < n; i++) {} return i; }
+export function retForOfLet(xs: number[]) { let last: number | string = "none"; for (const x of xs) { last = x; } return last; }
+export function retForOfNarrow(xs: (string | number)[]) { for (const x of xs) { if (typeof x === "string") return x; } return 0; }
+export function retForOfTupleArr(xs: [number, string]) { for (const x of xs) { if (typeof x === "string") return x; } return true; }
+export function retForOfString(s: string) { for (const ch of s) { return ch; } return 0; }
+export function retChain(c: boolean) { let x: 1 | 2 | 3 = 1; while (c) { if (x === 1) x = 2; else if (x === 2) x = 3; } return x; }
+export function retChainIn(c: boolean) { let x: 1 | 2 | 3 = 1; while (c) { if (x === 3) return x; if (x === 1) x = 2; else if (x === 2) x = 3; } return 0; }
+export function retChain4(c: boolean) { let x: 1 | 2 | 3 | 4 = 1; while (c) { if (x === 1) x = 2; else if (x === 2) x = 3; else if (x === 3) x = 4; } return x; }
+export function retTwoVars(c: boolean) { let a: 1 | 2 | 3 = 1; let b: 1 | 2 | 3 = 1; while (c) { a = b; b = 2; if (c) b = 3; } return a; }
+export function retSwap(c: boolean) { let a: 1 | 2 | 3 = 1; let b: 1 | 2 | 3 = 2; while (c) { const t = a; a = b; b = t; } return [a, b]; }
+export function retNarrowChain(c: boolean) { let x: string | number | boolean = 1; while (c) { if (typeof x === "number") x = "s"; else if (typeof x === "string") x = true; } return x; }
+export function retAssertInLoop(x: string | number) { do { assertNumber(x); break; } while (true); return x; }
+export function retLabeledExit(x: "a" | "b") { exit: while (true) { if (x === "a") break exit; throw 0; } return x; }
+export function retCompoundLoop(n: number) { let total = 0; for (let i = 0; i < n; i++) { total += i; } return total; }
+export function retBreakOuterBlock(x: string | null) { outer: { if (x === null) { for (;;) { break outer } } return 0 } return x }
+export function* yieldLoop(n: number) { for (let i = 0; i < n; i++) yield i; }
+export function* yieldLoopVar(c: boolean) { let x: string | number = 1; while (c) { yield x; x = "s"; } }
+export function* yieldForOf(xs: string[]) { for (const x of xs) yield x; return 1; }
+export function* yieldDoWhile(c: boolean) { let x: string | number | boolean = 1; do { yield x; x = c ? "s" : true; } while (c); }
+export function* yieldBoth(c: boolean) { while (c) { yield 1; if (c) return "done"; } return 0; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`LOOP_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const LOOP_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "big" | 0 / "big" | 0 / "big" | 0 / "big" | 0
+    (
+        "retInFor",
+        "\"big\" | 0",
+        "\"big\" | 0",
+        "\"big\" | 0",
+        "\"big\" | 0",
+    ),
+    // string | null / string / string | null / string
+    (
+        "retInForOf",
+        "null | string",
+        "string",
+        "null | string",
+        "string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "retLoopVar",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "retLoopVar3",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "retDoWhile",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // "a" | "b" / "a" | "b" / "a" | "b" / "a" | "b"
+    (
+        "retDoWhileFalse",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "retForIn",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "retWhileTrue",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "retBreak",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "retContinue",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "retLabeled",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "retContinueOuter",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "retWriteAfter",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "retNarrowTest",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // number / number / number / number
+    ("retNarrowTestW", "number", "number", "number", "number"),
+    // number | "none" / number | "none" / number | "none" / number | "none"
+    (
+        "retVarLoop",
+        "\"none\" | number",
+        "\"none\" | number",
+        "\"none\" | number",
+        "\"none\" | number",
+    ),
+    // number / number / number / number
+    ("retVarAfter", "number", "number", "number", "number"),
+    // string | number / string | number / string | number / string | number
+    (
+        "retForOfLet",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "retForOfNarrow",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // string | true / string | true / string | true / string | true
+    (
+        "retForOfTupleArr",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "retForOfString",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // 1 | 2 | 3 / 1 | 2 | 3 / 1 | 2 | 3 / 1 | 2 | 3
+    (
+        "retChain",
+        "1 | 2 | 3",
+        "1 | 2 | 3",
+        "1 | 2 | 3",
+        "1 | 2 | 3",
+    ),
+    // 0 | 3 / 0 | 3 / 0 | 3 / 0 | 3
+    ("retChainIn", "0 | 3", "0 | 3", "0 | 3", "0 | 3"),
+    // 1 | 2 | 3 | 4 / 1 | 2 | 3 | 4 / 1 | 2 | 3 | 4 / 1 | 2 | 3 | 4
+    (
+        "retChain4",
+        "1 | 2 | 3 | 4",
+        "1 | 2 | 3 | 4",
+        "1 | 2 | 3 | 4",
+        "1 | 2 | 3 | 4",
+    ),
+    // 1 | 2 | 3 / 1 | 2 | 3 / 1 | 2 | 3 / 1 | 2 | 3
+    (
+        "retTwoVars",
+        "1 | 2 | 3",
+        "1 | 2 | 3",
+        "1 | 2 | 3",
+        "1 | 2 | 3",
+    ),
+    // (1 | 2 | 3)[] / (1 | 2 | 3)[] / (1 | 2 | 3)[] / (1 | 2 | 3)[]
+    (
+        "retSwap",
+        "(1 | 2 | 3)[]",
+        "(1 | 2 | 3)[]",
+        "(1 | 2 | 3)[]",
+        "(1 | 2 | 3)[]",
+    ),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "retNarrowChain",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // number / number / number / number
+    ("retAssertInLoop", "number", "number", "number", "number"),
+    // "a" / "a" / "a" / "a"
+    ("retLabeledExit", "\"a\"", "\"a\"", "\"a\"", "\"a\""),
+    // number / number / number / number
+    ("retCompoundLoop", "number", "number", "number", "number"),
+    // 0 | null / string | 0 / 0 | null / string | 0
+    (
+        "retBreakOuterBlock",
+        "0 | null",
+        "0 | string",
+        "0 | null",
+        "0 | string",
+    ),
+    // Generator<number, void, unknown> / Generator<number, void, unknown> / Generator<number, void, unknown> / Generator<number, void, unknown>
+    (
+        "yieldLoop",
+        "Generator<number, void, unknown>",
+        "Generator<number, void, unknown>",
+        "Generator<number, void, unknown>",
+        "Generator<number, void, unknown>",
+    ),
+    // Generator<string | number, void, unknown> / Generator<string | number, void, unknown> / Generator<string | number, void, unknown> / Generator<string | number, void, unknown>
+    (
+        "yieldLoopVar",
+        "Generator<number | string, void, unknown>",
+        "Generator<number | string, void, unknown>",
+        "Generator<number | string, void, unknown>",
+        "Generator<number | string, void, unknown>",
+    ),
+    // Generator<string, number, unknown> / Generator<string, number, unknown> / Generator<string, number, unknown> / Generator<string, number, unknown>
+    (
+        "yieldForOf",
+        "Generator<string, number, unknown>",
+        "Generator<string, number, unknown>",
+        "Generator<string, number, unknown>",
+        "Generator<string, number, unknown>",
+    ),
+    // Generator<string | number | true, void, unknown> / Generator<string | number | true, void, unknown> / Generator<string | number | true, void, unknown> / Generator<string | number | true, void, unknown>
+    (
+        "yieldDoWhile",
+        "Generator<number | string | true, void, unknown>",
+        "Generator<number | string | true, void, unknown>",
+        "Generator<number | string | true, void, unknown>",
+        "Generator<number | string | true, void, unknown>",
+    ),
+    // Generator<number, "done" | 0, unknown> / Generator<number, "done" | 0, unknown> / Generator<number, "done" | 0, unknown> / Generator<number, "done" | 0, unknown>
+    (
+        "yieldBoth",
+        "Generator<number, \"done\" | 0, unknown>",
+        "Generator<number, \"done\" | 0, unknown>",
+        "Generator<number, \"done\" | 0, unknown>",
+        "Generator<number, \"done\" | 0, unknown>",
+    ),
+];
+
+/// A loop is evaluated to the checker's fixed point: the state at its head
+/// joins the state entering it with every back edge (the body's end and
+/// each `continue`, after a `for` update), iterated until it stops
+/// changing, and every return, yield and break of the body reads the
+/// converged head. `retChain` reaches `3` only on the third pass;
+/// `retSwap` binds the checker's `any` for `t`, whose initializer the
+/// loop feeds from `t` itself through a union-declared binding (TS7022
+/// under `noImplicitAny`). Each cell matches its own project's
+/// TypeScript 7.0.2 answer.
+#[test]
+fn loops_iterate_to_the_checkers_fixed_point() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(&host, "loops.ts", LOOP_SOURCE, LOOP_TABLE);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Returns and yields no path reaches: after a return, an exhaustive `if`, a labeled break, a throw, a loop that never completes, a literal-`false` loop test, and an abrupt `finally` crossed by a break.
+const UNREACHABLE_SOURCE: &str = r#"
+interface Generator<T, TReturn, TNext> {}
+export function afterReturn(x: string) { return 1; return x; }
+export function afterIfElse(x: string | number) { if (typeof x === "string") { return 1; } else { return 2; } return x; }
+export function afterBreakOuter(x: string | null) { outer: { break outer; return 0; } return x; }
+export function afterThrow(x: string | number) { throw 0; return x; }
+export function afterWriteReadsDeclared(x: string | number) { x = "s"; return 1; return x; }
+export function afterReturnString() { return 1; return "a"; }
+export function deadWhile() { while (false) { return 1; } return "a"; }
+export function deadFor() { for (let i = 0; false; i++) { return i; } return "a"; }
+export function afterForever(x: string | null) { outer: { for (;;) { break outer } return 0 } return x }
+export function breakFinally() { while (true) { try { break } finally { return "a" as const } } }
+export function breakFinallyAfter(c: boolean) { while (c) { try { break } finally { return "a" as const } } return "b" as const; }
+export function switchBreakFinally(x: number) { switch (x) { case 1: try { break } finally { return "a" as const } } }
+export function labeledFinallyThen() { OUT: INNER: { try { break INNER; } finally { return "a" as const; } } return "b" as const; }
+export function* yieldAfterReturn() { yield 1; return 0; yield "s"; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`UNREACHABLE_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const UNREACHABLE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string | 1 / string | 1 / string | 1 / string | 1
+    (
+        "afterReturn",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "afterIfElse",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | 0 | null / string | 0 / string | 0 | null / string | 0
+    (
+        "afterBreakOuter",
+        "0 | null | string",
+        "0 | string",
+        "0 | null | string",
+        "0 | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "afterThrow",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "afterWriteReadsDeclared",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // "a" | 1 / "a" | 1 / "a" | 1 / "a" | 1
+    (
+        "afterReturnString",
+        "\"a\" | 1",
+        "\"a\" | 1",
+        "\"a\" | 1",
+        "\"a\" | 1",
+    ),
+    // "a" | 1 / "a" | 1 / "a" | 1 / "a" | 1
+    (
+        "deadWhile",
+        "\"a\" | 1",
+        "\"a\" | 1",
+        "\"a\" | 1",
+        "\"a\" | 1",
+    ),
+    // number | "a" / number | "a" / number | "a" / number | "a"
+    (
+        "deadFor",
+        "\"a\" | number",
+        "\"a\" | number",
+        "\"a\" | number",
+        "\"a\" | number",
+    ),
+    // string | 0 | null / string | 0 / string | 0 | null / string | 0
+    (
+        "afterForever",
+        "0 | null | string",
+        "0 | string",
+        "0 | null | string",
+        "0 | string",
+    ),
+    // "a" | undefined / "a" / "a" | undefined / "a"
+    (
+        "breakFinally",
+        "\"a\" | undefined",
+        "\"a\"",
+        "\"a\" | undefined",
+        "\"a\"",
+    ),
+    // "a" | "b" / "a" | "b" / "a" | "b" / "a" | "b"
+    (
+        "breakFinallyAfter",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // "a" | undefined / "a" / "a" | undefined / "a"
+    (
+        "switchBreakFinally",
+        "\"a\" | undefined",
+        "\"a\"",
+        "\"a\" | undefined",
+        "\"a\"",
+    ),
+    // "a" | "b" / "a" | "b" / "a" | "b" / "a" | "b"
+    (
+        "labeledFinallyThen",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // Generator<"s" | 1, number, unknown> / Generator<"s" | 1, number, unknown> / Generator<"s" | 1, number, unknown> / Generator<"s" | 1, number, unknown>
+    (
+        "yieldAfterReturn",
+        "Generator<\"s\" | 1, number, unknown>",
+        "Generator<\"s\" | 1, number, unknown>",
+        "Generator<\"s\" | 1, number, unknown>",
+        "Generator<\"s\" | 1, number, unknown>",
+    ),
+];
+
+/// The checker aggregates every return and yield of a body, those no path
+/// reaches included, and reads every reference there at its declared type:
+/// `afterWriteReadsDeclared` reads `x: string | number` after `x = "s"`.
+/// A break an abrupt `finally` replaces still contributes its implicit
+/// `undefined` when the statement after its target reaches the end.
+/// Each cell matches its own project's TypeScript 7.0.2 answer.
+#[test]
+fn unreachable_returns_and_yields_read_declared_types() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "unreachable.ts",
+        UNREACHABLE_SOURCE,
+        UNREACHABLE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Whole-binding writes whose value nothing consumes — an unselected initializer, an expression statement, `void` of a write, a conditional arm, a sequence operand, an object member, an array element — and compound writes.
+const DISCARDED_WRITE_SOURCE: &str = r#"
+export function voidInit() { let x: string | number = 1; const y = void (x = "s"); return x; }
+export function voidInObj() { let x: string | number = 1; const o = { a: void (x = "s") }; return x; }
+export function voidArr() { let x: string | number = 1; return [void (x = "s"), x]; }
+export function voidTernary(c: boolean) { let x: string | number = 1; const y = c ? void (x = "s") : 0; return x; }
+export function voidValue() { let x = 1; return void (x = 2); }
+export function voidLetEvolve() { let x; const y = void (x = "s"); return x; }
+export function voidSelected() { let x: string | number = 1; const y = void (x = "s"); return [x, y]; }
+export function voidSelectedObj() { let x: string | number = 1; const o = { a: void (x = "s") }; return [x, o]; }
+export function voidAssignTernary() { let x: string | number = 1; return [void (x = true ? "s" : 2), x]; }
+export function asgInit() { let x: string | number = 1; const y = (x = "s"); return x; }
+export function asgInObj() { let x: string | number = 1; const o = { a: (x = "s") }; return x; }
+export function asgTernary(c: boolean) { let x: string | number = 1; const y = c ? (x = "s") : 0; return x; }
+export function stmtTernary(c: boolean) { let x: string | number = 1; c ? (x = "s") : 0; return x; }
+export function stmtBothArms(c: boolean) { let x: string | number | boolean = 1; c ? (x = "s") : (x = true); return x; }
+export function stmtSeq() { let x: string | number = 1; (x = "s", 0); return x; }
+export function stmtObj() { let x: string | number = 1; ({ a: (x = "s") }); return x; }
+export function stmtArr() { let x: string | number = 1; [0, void (x = "s")]; return x; }
+export function initSeqOrder() { let x: string | number = 1; const y = (x = "s", x = 2); return x; }
+export function initNested(c: boolean) { let x: string | number | boolean = 1; const y = { a: c ? void (x = "s") : [x = true] }; return x; }
+export function unselectedWrite(x: string | number) { const unused = (x = "s", 0); return x }
+export function compoundParam(x: string | number) { x += "s"; return x; }
+export function compoundLiteral() { let x: 1 | 2 = 1; x++; return x; }
+export function compoundString() { let s = "a"; s += 1; return s; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`DISCARDED_WRITE_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const DISCARDED_WRITE_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string / string / string / string
+    ("voidInit", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("voidInObj", "string", "string", "string", "string"),
+    // (string | undefined)[] / string[] / (string | undefined)[] / string[]
+    (
+        "voidArr",
+        "(string | undefined)[]",
+        "string[]",
+        "(string | undefined)[]",
+        "string[]",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "voidTernary",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // undefined / any / undefined / any
+    ("voidValue", "undefined", "any", "undefined", "any"),
+    // string / string / any / any
+    ("voidLetEvolve", "string", "string", "any", "any"),
+    // (string | undefined)[] / any[] / (string | undefined)[] / any[]
+    (
+        "voidSelected",
+        "(string | undefined)[]",
+        "any[]",
+        "(string | undefined)[]",
+        "any[]",
+    ),
+    // (string | { a: undefined; })[] / (string | { a: any; })[] / (string | { a: undefined; })[] / (string | { a: any; })[]
+    (
+        "voidSelectedObj",
+        "(string | { a: undefined })[]",
+        "(string | { a: any })[]",
+        "(string | { a: undefined })[]",
+        "(string | { a: any })[]",
+    ),
+    // (string | number | undefined)[] / (string | number)[] / (string | number | undefined)[] / (string | number)[]
+    (
+        "voidAssignTernary",
+        "(number | string | undefined)[]",
+        "(number | string)[]",
+        "(number | string | undefined)[]",
+        "(number | string)[]",
+    ),
+    // string / string / string / string
+    ("asgInit", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("asgInObj", "string", "string", "string", "string"),
+    // string | number / string | number / string | number / string | number
+    (
+        "asgTernary",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "stmtTernary",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | true / string | true / string | true / string | true
+    (
+        "stmtBothArms",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string / string / string / string
+    ("stmtSeq", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("stmtObj", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("stmtArr", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("initSeqOrder", "number", "number", "number", "number"),
+    // string | true / string | true / string | true / string | true
+    (
+        "initNested",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string / string / string / string
+    ("unselectedWrite", "string", "string", "string", "string"),
+    // string | number / string | number / string | number / string | number
+    (
+        "compoundParam",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // number / number / number / number
+    ("compoundLiteral", "number", "number", "number", "number"),
+    // string / string / string / string
+    ("compoundString", "string", "string", "string", "string"),
+];
+
+/// A discarded value's whole-binding writes apply in evaluation order: the
+/// write under `void`, in a conditional's arm (joined under its test), a
+/// sequence operand, an object literal's member or an array literal's
+/// element, whether the value is an expression statement or a declarator
+/// initializer the demand did not select. A compound write retypes its
+/// target to the base type of what it held. Each cell matches its own
+/// project's TypeScript 7.0.2 answer.
+#[test]
+fn discarded_values_apply_their_writes_in_evaluation_order() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "discarded.ts",
+        DISCARDED_WRITE_SOURCE,
+        DISCARDED_WRITE_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Writes to a declared union holding `boolean`: a boolean literal, a `boolean`, a conditional, joined across branches.
+const DECLARED_BOOLEAN_SOURCE: &str = r#"
+export function asgBool() { let x: string | number | boolean = 1; x = true; return x; }
+export function asgBoolIf(c: boolean) { let x: string | number | boolean = 1; if (c) { x = true; } else { x = "s"; } return x; }
+export function asgBoolOneArm(c: boolean) { let x: string | boolean = "a"; if (c) { x = true; } return x; }
+export function asgBoolBoth(c: boolean) { let x: number | boolean = 1; if (c) { x = true; } else { x = false; } return x; }
+export function asgBoolArray(c: boolean) { let x: string | number | boolean = 1; if (c) { x = true; } else { x = "s"; } return [x]; }
+export function asgBoolConst(c: boolean) { let x: string | number | boolean = 1; if (c) { x = true; } else { x = "s"; } const y = x; return y; }
+export function asgBoolParam(c: boolean, s: string) { let x: string | number | boolean = 1; if (c) { x = true; } else { x = s; } return x; }
+export function asgBoolFromBoolean(b: boolean) { let x: string | number | boolean = 1; x = b; return x; }
+export function asgBoolAlone() { let x: boolean = false; x = true; return x; }
+export function asgBoolInit() { let x: boolean = true; return x; }
+export function asgBoolInitUnion() { let x: string | boolean = true; return x; }
+export function asgTernaryUnion(c: boolean) { let x: string | number | boolean = 1; x = c ? "s" : 2; return x; }
+export function asgTernaryTrue() { let x: string | number = 1; x = true ? "s" : 2; return x; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`DECLARED_BOOLEAN_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row; `false | true` is the lane's spelling of the checker's `boolean`, the one the oracle normalizer equates).
+const DECLARED_BOOLEAN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // boolean / boolean / boolean / boolean
+    ("asgBool", "boolean", "boolean", "boolean", "boolean"),
+    // string | true / string | true / string | true / string | true
+    (
+        "asgBoolIf",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true / string | true / string | true / string | true
+    (
+        "asgBoolOneArm",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // boolean / boolean / boolean / boolean
+    (
+        "asgBoolBoth",
+        "false | true",
+        "false | true",
+        "false | true",
+        "false | true",
+    ),
+    // (string | boolean)[] / (string | boolean)[] / (string | boolean)[] / (string | boolean)[]
+    (
+        "asgBoolArray",
+        "(boolean | string)[]",
+        "(boolean | string)[]",
+        "(boolean | string)[]",
+        "(boolean | string)[]",
+    ),
+    // string | true / string | true / string | true / string | true
+    (
+        "asgBoolConst",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // string | true / string | true / string | true / string | true
+    (
+        "asgBoolParam",
+        "string | true",
+        "string | true",
+        "string | true",
+        "string | true",
+    ),
+    // boolean / boolean / boolean / boolean
+    (
+        "asgBoolFromBoolean",
+        "boolean",
+        "boolean",
+        "boolean",
+        "boolean",
+    ),
+    // boolean / boolean / boolean / boolean
+    ("asgBoolAlone", "boolean", "boolean", "boolean", "boolean"),
+    // boolean / boolean / boolean / boolean
+    ("asgBoolInit", "boolean", "boolean", "boolean", "boolean"),
+    // boolean / boolean / boolean / boolean
+    (
+        "asgBoolInitUnion",
+        "boolean",
+        "boolean",
+        "boolean",
+        "boolean",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "asgTernaryUnion",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "asgTernaryTrue",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+];
+
+/// A declared union's reduction reads `boolean` as `true | false` and keeps
+/// every constituent SOME member of the assigned value is assignable to
+/// (`getAssignmentReducedType` over `typeMaybeAssignableTo`): `x = true`
+/// keeps `true`, `x = c ? "s" : 2` keeps `string` and `number`. A fresh
+/// boolean literal stays fresh, so a lone `true` read at a return widens to
+/// `boolean`, while a join (`string | true`) keeps it. Each cell matches
+/// its own project's TypeScript 7.0.2 answer.
+#[test]
+fn declared_boolean_unions_keep_the_assigned_constituent() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "declared-boolean.ts",
+        DECLARED_BOOLEAN_SOURCE,
+        DECLARED_BOOLEAN_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Array and tuple relations asked through a conditional type: covariant mutable arrays, `readonly` arrays, and tuples against arrays and tuples of fixed, optional, rest and `readonly` shape.
+const ARRAY_TUPLE_RELATION_SOURCE: &str = r#"
+declare const __v_arrCov: (string[]) extends ((string | number)[]) ? "y" : "n";
+export function arrCov() { return __v_arrCov; }
+declare const __v_arrContra: ((string | number)[]) extends (string[]) ? "y" : "n";
+export function arrContra() { return __v_arrContra; }
+declare const __v_arrLit: ("a"[]) extends (string[]) ? "y" : "n";
+export function arrLit() { return __v_arrLit; }
+declare const __v_arrNever: (never[]) extends (string[]) ? "y" : "n";
+export function arrNever() { return __v_arrNever; }
+declare const __v_arrToRo: (string[]) extends (readonly (string | number)[]) ? "y" : "n";
+export function arrToRo() { return __v_arrToRo; }
+declare const __v_arrRoToMut: (readonly string[]) extends (string[]) ? "y" : "n";
+export function arrRoToMut() { return __v_arrRoToMut; }
+declare const __v_arrRoRo: (readonly string[]) extends (readonly (string | number)[]) ? "y" : "n";
+export function arrRoRo() { return __v_arrRoRo; }
+declare const __v_arrObjSub: ({ a: string; b: number }[]) extends ({ a: string }[]) ? "y" : "n";
+export function arrObjSub() { return __v_arrObjSub; }
+declare const __v_arrObjSup: ({ a: string }[]) extends ({ a: string; b: number }[]) ? "y" : "n";
+export function arrObjSup() { return __v_arrObjSup; }
+declare const __v_arrNull: (null[]) extends (string[]) ? "y" : "n";
+export function arrNull() { return __v_arrNull; }
+declare const __v_arrAny: (any[]) extends (string[]) ? "y" : "n";
+export function arrAny() { return __v_arrAny; }
+declare const __v_arrToAny: (string[]) extends (any[]) ? "y" : "n";
+export function arrToAny() { return __v_arrToAny; }
+declare const __v_arrUnknown: (unknown[]) extends (string[]) ? "y" : "n";
+export function arrUnknown() { return __v_arrUnknown; }
+declare const __v_arrNested: (string[][]) extends ((string | number)[][]) ? "y" : "n";
+export function arrNested() { return __v_arrNested; }
+declare const __v_tupLonger: ([string, string]) extends ([string]) ? "y" : "n";
+export function tupLonger() { return __v_tupLonger; }
+declare const __v_tupShorter: ([string]) extends ([string, string]) ? "y" : "n";
+export function tupShorter() { return __v_tupShorter; }
+declare const __v_tupToOpt: ([string]) extends ([string, string?]) ? "y" : "n";
+export function tupToOpt() { return __v_tupToOpt; }
+declare const __v_tupOptToReq: ([string, string?]) extends ([string]) ? "y" : "n";
+export function tupOptToReq() { return __v_tupOptToReq; }
+declare const __v_tupOptOpt: ([string, string?]) extends ([string, string?]) ? "y" : "n";
+export function tupOptOpt() { return __v_tupOptOpt; }
+declare const __v_tupOptToReq2: ([string, string?]) extends ([string, string]) ? "y" : "n";
+export function tupOptToReq2() { return __v_tupOptToReq2; }
+declare const __v_tupFixedToRest: ([string, number]) extends ([string, ...number[]]) ? "y" : "n";
+export function tupFixedToRest() { return __v_tupFixedToRest; }
+declare const __v_tupFixedToRest2: ([string, number, number]) extends ([string, ...number[]]) ? "y" : "n";
+export function tupFixedToRest2() { return __v_tupFixedToRest2; }
+declare const __v_tupFixedToRestBad: ([string, string]) extends ([string, ...number[]]) ? "y" : "n";
+export function tupFixedToRestBad() { return __v_tupFixedToRestBad; }
+declare const __v_tupRestToFixed: ([string, ...number[]]) extends ([string, number]) ? "y" : "n";
+export function tupRestToFixed() { return __v_tupRestToFixed; }
+declare const __v_tupRestRest: ([string, ...number[]]) extends ([string, ...number[]]) ? "y" : "n";
+export function tupRestRest() { return __v_tupRestRest; }
+declare const __v_tupRestToArr: ([string, ...number[]]) extends ((string | number)[]) ? "y" : "n";
+export function tupRestToArr() { return __v_tupRestToArr; }
+declare const __v_tupRestToArrBad: ([string, ...number[]]) extends (string[]) ? "y" : "n";
+export function tupRestToArrBad() { return __v_tupRestToArrBad; }
+declare const __v_arrToTup1: (string[]) extends ([string]) ? "y" : "n";
+export function arrToTup1() { return __v_arrToTup1; }
+declare const __v_arrToTupRest: (string[]) extends ([...string[]]) ? "y" : "n";
+export function arrToTupRest() { return __v_arrToTupRest; }
+declare const __v_arrToTupReqRest: (string[]) extends ([string, ...string[]]) ? "y" : "n";
+export function arrToTupReqRest() { return __v_arrToTupReqRest; }
+declare const __v_arrToTupRestBad: (number[]) extends ([...string[]]) ? "y" : "n";
+export function arrToTupRestBad() { return __v_arrToTupRestBad; }
+declare const __v_tupEmpty: ([]) extends ([]) ? "y" : "n";
+export function tupEmpty() { return __v_tupEmpty; }
+declare const __v_tupEmptyToOpt: ([]) extends ([string?]) ? "y" : "n";
+export function tupEmptyToOpt() { return __v_tupEmptyToOpt; }
+declare const __v_tupOptToEmpty: ([string?]) extends ([]) ? "y" : "n";
+export function tupOptToEmpty() { return __v_tupOptToEmpty; }
+declare const __v_tupRoToMut: (readonly [string]) extends ([string]) ? "y" : "n";
+export function tupRoToMut() { return __v_tupRoToMut; }
+declare const __v_tupToRo: ([string]) extends (readonly [string]) ? "y" : "n";
+export function tupToRo() { return __v_tupToRo; }
+declare const __v_tupRoToRoArr: (readonly [string]) extends (readonly string[]) ? "y" : "n";
+export function tupRoToRoArr() { return __v_tupRoToRoArr; }
+declare const __v_tupRoToArr: (readonly [string]) extends (string[]) ? "y" : "n";
+export function tupRoToArr() { return __v_tupRoToArr; }
+declare const __v_tupToArr: ([string, number]) extends ((string | number)[]) ? "y" : "n";
+export function tupToArr() { return __v_tupToArr; }
+declare const __v_tupOptToArr: ([string, number?]) extends ((string | number)[]) ? "y" : "n";
+export function tupOptToArr() { return __v_tupOptToArr; }
+declare const __v_tupOptToArrU: ([string, number?]) extends ((string | number | undefined)[]) ? "y" : "n";
+export function tupOptToArrU() { return __v_tupOptToArrU; }
+declare const __v_tupToArrBad: ([string, number]) extends (string[]) ? "y" : "n";
+export function tupToArrBad() { return __v_tupToArrBad; }
+declare const __v_tupElemCov: (["a", 1]) extends ([string, number]) ? "y" : "n";
+export function tupElemCov() { return __v_tupElemCov; }
+declare const __v_tupElemBad: ([string, number]) extends ([string, string]) ? "y" : "n";
+export function tupElemBad() { return __v_tupElemBad; }
+declare const __v_tupEmptyToArr: ([]) extends (string[]) ? "y" : "n";
+export function tupEmptyToArr() { return __v_tupEmptyToArr; }
+declare const __v_tupLeadingRest: ([...string[], number]) extends ([...string[], number]) ? "y" : "n";
+export function tupLeadingRest() { return __v_tupLeadingRest; }
+declare const __v_tupLeadingRestBad: ([...string[], number]) extends ([string, number]) ? "y" : "n";
+export function tupLeadingRestBad() { return __v_tupLeadingRestBad; }
+declare const __v_tupMidRest: ([string, ...number[], boolean]) extends ([string, ...(number | boolean)[]]) ? "y" : "n";
+export function tupMidRest() { return __v_tupMidRest; }
+declare const __v_tupOptRest: ([string?, ...number[]]) extends ([string?, ...number[]]) ? "y" : "n";
+export function tupOptRest() { return __v_tupOptRest; }
+declare const __v_tupToOptRest: ([string, number]) extends ([string?, ...number[]]) ? "y" : "n";
+export function tupToOptRest() { return __v_tupToOptRest; }
+type FS = (x: string) => void;
+type FSN = (x: string | number) => void;
+declare const __v_arrFnContra: (FS[]) extends (FSN[]) ? "y" : "n";
+export function arrFnContra() { return __v_arrFnContra; }
+declare const __v_arrFnCov: (FSN[]) extends (FS[]) ? "y" : "n";
+export function arrFnCov() { return __v_arrFnCov; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`ARRAY_TUPLE_RELATION_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const ARRAY_TUPLE_RELATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "y" / "y" / "y" / "y"
+    ("arrCov", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("arrContra", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("arrLit", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("arrNever", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("arrToRo", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("arrRoToMut", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("arrRoRo", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("arrObjSub", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("arrObjSup", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "y" / "n" / "y"
+    ("arrNull", "\"n\"", "\"y\"", "\"n\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("arrAny", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("arrToAny", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("arrUnknown", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("arrNested", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupLonger", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("tupShorter", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupToOpt", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupOptToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupOptOpt", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupOptToReq2", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupFixedToRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupFixedToRest2", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupFixedToRestBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("tupRestToFixed", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupRestRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupRestToArr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupRestToArrBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("arrToTup1", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("arrToTupRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("arrToTupReqRest", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("arrToTupRestBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupEmpty", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupEmptyToOpt", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupOptToEmpty", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("tupRoToMut", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupToRo", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupRoToRoArr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupRoToArr", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupToArr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "y" / "n" / "y"
+    ("tupOptToArr", "\"n\"", "\"y\"", "\"n\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupOptToArrU", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupToArrBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupElemCov", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupElemBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupEmptyToArr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupLeadingRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("tupLeadingRestBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("tupMidRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupOptRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("tupToOptRest", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("arrFnContra", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("arrFnCov", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+];
+
+/// Array relations over aliased and interface element types.
+const ALIASED_ARRAY_RELATION_SOURCE: &str = r#"
+type FS = (x: string) => void;
+type FSN = (x: string | number) => void;
+interface IA { a: string }
+declare const __v_fnAlias: (FS) extends (FSN) ? "y" : "n";
+export function fnAlias() { return __v_fnAlias; }
+declare const __v_fnAliasRev: (FSN) extends (FS) ? "y" : "n";
+export function fnAliasRev() { return __v_fnAliasRev; }
+declare const __v_fnArrAlias: (FS[]) extends (FSN[]) ? "y" : "n";
+export function fnArrAlias() { return __v_fnArrAlias; }
+declare const __v_ifaceArr: (IA[]) extends ({ a: string }[]) ? "y" : "n";
+export function ifaceArr() { return __v_ifaceArr; }
+declare const __v_ifaceArr2: ({ a: string; b: number }[]) extends (IA[]) ? "y" : "n";
+export function ifaceArr2() { return __v_ifaceArr2; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`ALIASED_ARRAY_RELATION_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const ALIASED_ARRAY_RELATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "n" / "n" / "n" / "n"
+    ("fnAlias", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("fnAliasRev", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("fnArrAlias", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("ifaceArr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("ifaceArr2", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+];
+
+/// Array and tuple relations over interface element types.
+const INTERFACE_ELEMENT_RELATION_SOURCE: &str = r#"
+interface IA { a: string }
+declare const __v_ifaceBare: (IA) extends ({ a: string }) ? "y" : "n";
+export function ifaceBare() { return __v_ifaceBare; }
+declare const __v_ifaceTup: ([IA]) extends ([{ a: string }]) ? "y" : "n";
+export function ifaceTup() { return __v_ifaceTup; }
+declare const __v_ifaceArr: (IA[]) extends ({ a: string }[]) ? "y" : "n";
+export function ifaceArr() { return __v_ifaceArr; }
+declare const __v_ifaceRo: (readonly IA[]) extends (readonly { a: string }[]) ? "y" : "n";
+export function ifaceRo() { return __v_ifaceRo; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`INTERFACE_ELEMENT_RELATION_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const INTERFACE_ELEMENT_RELATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "y" / "y" / "y" / "y"
+    ("ifaceBare", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("ifaceTup", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("ifaceArr", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("ifaceRo", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+];
+
+/// A mutable array relates COVARIANTLY in its element, as the checker's
+/// `Array<T>` does (`string[]` is assignable to `(string | number)[]`), and
+/// a tuple relates by the checker's arity rules: a fixed tuple to a fixed
+/// one of the same length, optional and rest elements by position, a tuple
+/// to an array through every element, an array to a tuple never (unless the
+/// tuple is all rest), and a `readonly` source never to a mutable target.
+/// Each cell matches its own project's TypeScript 7.0.2 answer.
+#[test]
+fn array_and_tuple_relations_follow_the_checker() {
+    let host = four_policy_host();
+    let mut mismatches = Vec::new();
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "array-tuple-relations.ts",
+        ARRAY_TUPLE_RELATION_SOURCE,
+        ARRAY_TUPLE_RELATION_TABLE,
+    ));
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "aliased-array-relations.ts",
+        ALIASED_ARRAY_RELATION_SOURCE,
+        ALIASED_ARRAY_RELATION_TABLE,
+    ));
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "interface-element-relations.ts",
+        INTERFACE_ELEMENT_RELATION_SOURCE,
+        INTERFACE_ELEMENT_RELATION_TABLE,
+    ));
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Return joins whose arms the checker's strict subtype relation orders: `any` and `unknown` members, optional and `readonly` members, signatures of different arity, derived interfaces and classes, arrays, tuples, empty objects and index signatures.
+const STRICT_SUBTYPE_JOIN_SOURCE: &str = r#"
+interface Generator<T, TReturn, TNext> {}
+interface A1 { x: string }
+interface B1 { x: string }
+interface D1 extends A1 { y: number }
+class CA { x = 1 }
+class CB { x = 1 }
+class CD extends CA { y = 2 }
+export function retAnyObj(c: boolean, a: { x: any }, b: { x: string }) { if (c) return a; return b; }
+export function retObjAny(c: boolean, a: { x: string }, b: { x: any }) { if (c) return a; return b; }
+export function retUnknownObj(c: boolean, a: { x: unknown }, b: { x: string }) { if (c) return a; return b; }
+export function retOptDecl(c: boolean, a: { x: string }, b: { x: string; y?: number }) { if (c) return a; return b; }
+export function retOptDeclRev(c: boolean, a: { x: string; y?: number }, b: { x: string }) { if (c) return a; return b; }
+export function retOptLit(c: boolean, b: { x: string; y?: number }) { if (c) return { x: "s" }; return b; }
+export function retLitOpt(c: boolean, a: { x: string; y?: number }) { if (c) return a; return { x: "s" }; }
+export function retRoProp(c: boolean, a: { readonly x: string }, b: { x: string }) { if (c) return a; return b; }
+export function retRoPropRev(c: boolean, a: { x: string }, b: { readonly x: string }) { if (c) return a; return b; }
+export function retFnOpt(c: boolean, a: (s?: string) => number, b: () => number) { if (c) return a; return b; }
+export function retFnOptRev(c: boolean, a: () => number, b: (s?: string) => number) { if (c) return a; return b; }
+export function retFnRest(c: boolean, a: (...s: string[]) => number, b: () => number) { if (c) return a; return b; }
+export function retSameIface(c: boolean, a: A1, b: B1) { if (c) return a; return b; }
+export function retSameIfaceRev(c: boolean, a: B1, b: A1) { if (c) return a; return b; }
+export function retDerivedIface(c: boolean, a: A1, b: D1) { if (c) return a; return b; }
+export function retDerivedIfaceRev(c: boolean, a: D1, b: A1) { if (c) return a; return b; }
+export function retClassSame(c: boolean, a: CA, b: CB) { if (c) return a; return b; }
+export function retClassDerived(c: boolean, a: CA, b: CD) { if (c) return a; return b; }
+export function retClassDerivedRev(c: boolean, a: CD, b: CA) { if (c) return a; return b; }
+export function retArrSubtype(c: boolean, a: string[], b: (string | number)[]) { if (c) return a; return b; }
+export function retArrSupertypeFirst(c: boolean, a: (string | number)[], b: string[]) { if (c) return a; return b; }
+export function retRoArr(c: boolean, a: readonly string[], b: string[]) { if (c) return a; return b; }
+export function retTupArr(c: boolean, a: [string], b: string[]) { if (c) return a; return b; }
+export function retTupLonger(c: boolean, a: [string, string], b: [string]) { if (c) return a; return b; }
+export function retNullArr(c: boolean) { if (c) return [null]; return ["s"]; }
+export function retEmptyArr(c: boolean) { if (c) return []; return ["s"]; }
+export function retNullArrDecl(c: boolean, b: string[]) { if (c) return [null]; return b; }
+export function arrNullArr() { return [[null], ["s"]]; }
+export function retEmptyObj(c: boolean, a: {}, b: { x: string }) { if (c) return a; return b; }
+export function retEmptyObjPrim(c: boolean, a: {}, b: string) { if (c) return a; return b; }
+export function retObjectPrim(c: boolean, a: object, b: { x: string }) { if (c) return a; return b; }
+export function retUnknownAnyArr(c: boolean, a: any[], b: unknown[]) { if (c) return a; return b; }
+export function retIndexSig(c: boolean, a: { [k: string]: string }, b: { x: string }) { if (c) return a; return b; }
+export function retIndexSigAny(c: boolean, a: { [k: string]: any }, b: { x: string }) { if (c) return a; return b; }
+export function* genAnyObj(a: { x: any }, b: { x: string }) { yield a; yield b; }
+export function arrAnyObj(a: { x: any }, b: { x: string }) { return [a, b]; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`STRICT_SUBTYPE_JOIN_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const STRICT_SUBTYPE_JOIN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // { x: any; } / { x: any; } / { x: any; } / { x: any; }
+    (
+        "retAnyObj",
+        "{ x: any }",
+        "{ x: any }",
+        "{ x: any }",
+        "{ x: any }",
+    ),
+    // { x: any; } / { x: any; } / { x: any; } / { x: any; }
+    (
+        "retObjAny",
+        "{ x: any }",
+        "{ x: any }",
+        "{ x: any }",
+        "{ x: any }",
+    ),
+    // { x: unknown; } / { x: unknown; } / { x: unknown; } / { x: unknown; }
+    (
+        "retUnknownObj",
+        "{ x: unknown }",
+        "{ x: unknown }",
+        "{ x: unknown }",
+        "{ x: unknown }",
+    ),
+    // { x: string; } / { x: string; } / { x: string; } / { x: string; }
+    (
+        "retOptDecl",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // { x: string; } / { x: string; } / { x: string; } / { x: string; }
+    (
+        "retOptDeclRev",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // { x: string; y?: number | undefined; } / { x: string; y?: number; } / { x: string; y?: number | undefined; } / { x: string; y?: number; }
+    (
+        "retOptLit",
+        "{ x: string; y?: number }",
+        "{ x: string; y?: number }",
+        "{ x: string; y?: number }",
+        "{ x: string; y?: number }",
+    ),
+    // { x: string; y?: number | undefined; } / { x: string; y?: number; } / { x: string; y?: number | undefined; } / { x: string; y?: number; }
+    (
+        "retLitOpt",
+        "{ x: string; y?: number }",
+        "{ x: string; y?: number }",
+        "{ x: string; y?: number }",
+        "{ x: string; y?: number }",
+    ),
+    // { readonly x: string; } / { readonly x: string; } / { readonly x: string; } / { readonly x: string; }
+    (
+        "retRoProp",
+        "{ readonly x: string }",
+        "{ readonly x: string }",
+        "{ readonly x: string }",
+        "{ readonly x: string }",
+    ),
+    // { readonly x: string; } / { readonly x: string; } / { readonly x: string; } / { readonly x: string; }
+    (
+        "retRoPropRev",
+        "{ readonly x: string }",
+        "{ readonly x: string }",
+        "{ readonly x: string }",
+        "{ readonly x: string }",
+    ),
+    // (s?: string | undefined) => number / (s?: string) => number / (s?: string | undefined) => number / (s?: string) => number
+    (
+        "retFnOpt",
+        "(s?: string) => number",
+        "(s?: string) => number",
+        "(s?: string) => number",
+        "(s?: string) => number",
+    ),
+    // (s?: string | undefined) => number / (s?: string) => number / (s?: string | undefined) => number / (s?: string) => number
+    (
+        "retFnOptRev",
+        "(s?: string) => number",
+        "(s?: string) => number",
+        "(s?: string) => number",
+        "(s?: string) => number",
+    ),
+    // (...s: string[]) => number / (...s: string[]) => number / (...s: string[]) => number / (...s: string[]) => number
+    (
+        "retFnRest",
+        "(...s: string[]) => number",
+        "(...s: string[]) => number",
+        "(...s: string[]) => number",
+        "(...s: string[]) => number",
+    ),
+    // A1 / A1 / A1 / A1
+    ("retDerivedIface", "A1", "A1", "A1", "A1"),
+    // A1 / A1 / A1 / A1
+    ("retDerivedIfaceRev", "A1", "A1", "A1", "A1"),
+    // CA | CB / CA | CB / CA | CB / CA | CB
+    ("retClassSame", "CA | CB", "CA | CB", "CA | CB", "CA | CB"),
+    // CA / CA / CA / CA
+    ("retClassDerived", "CA", "CA", "CA", "CA"),
+    // CA / CA / CA / CA
+    ("retClassDerivedRev", "CA", "CA", "CA", "CA"),
+    // (string | number)[] / (string | number)[] / (string | number)[] / (string | number)[]
+    (
+        "retArrSubtype",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // (string | number)[] / (string | number)[] / (string | number)[] / (string | number)[]
+    (
+        "retArrSupertypeFirst",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // readonly string[] / readonly string[] / readonly string[] / readonly string[]
+    (
+        "retRoArr",
+        "readonly string[]",
+        "readonly string[]",
+        "readonly string[]",
+        "readonly string[]",
+    ),
+    // string[] / string[] / string[] / string[]
+    ("retTupArr", "string[]", "string[]", "string[]", "string[]"),
+    // [string] | [string, string] / [string] | [string, string] / [string] | [string, string] / [string] | [string, string]
+    (
+        "retTupLonger",
+        "[string, string] | [string]",
+        "[string, string] | [string]",
+        "[string, string] | [string]",
+        "[string, string] | [string]",
+    ),
+    // null[] | string[] / string[] / null[] | string[] / string[]
+    (
+        "retNullArr",
+        "null[] | string[]",
+        "string[]",
+        "null[] | string[]",
+        "string[]",
+    ),
+    // string[] / string[] / string[] / string[]
+    (
+        "retEmptyArr",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+    // null[] | string[] / string[] / null[] | string[] / string[]
+    (
+        "retNullArrDecl",
+        "null[] | string[]",
+        "string[]",
+        "null[] | string[]",
+        "string[]",
+    ),
+    // (null[] | string[])[] / string[][] / (null[] | string[])[] / string[][]
+    (
+        "arrNullArr",
+        "(null[] | string[])[]",
+        "string[][]",
+        "(null[] | string[])[]",
+        "string[][]",
+    ),
+    // {} / {} / {} / {}
+    ("retEmptyObj", "{  }", "{  }", "{  }", "{  }"),
+    // {} / {} / {} / {}
+    ("retEmptyObjPrim", "{  }", "{  }", "{  }", "{  }"),
+    // object / object / object / object
+    ("retObjectPrim", "object", "object", "object", "object"),
+    // any[] / any[] / any[] / any[]
+    ("retUnknownAnyArr", "any[]", "any[]", "any[]", "any[]"),
+    // { [k: string]: string; } | { x: string; } / { [k: string]: string; } | { x: string; } / { [k: string]: string; } | { x: string; } / { [k: string]: string; } | { x: string; }
+    (
+        "retIndexSig",
+        "{ [k: string]: string } | { x: string }",
+        "{ [k: string]: string } | { x: string }",
+        "{ [k: string]: string } | { x: string }",
+        "{ [k: string]: string } | { x: string }",
+    ),
+    // { [k: string]: any; } | { x: string; } / { [k: string]: any; } | { x: string; } / { [k: string]: any; } | { x: string; } / { [k: string]: any; } | { x: string; }
+    (
+        "retIndexSigAny",
+        "{ [k: string]: any } | { x: string }",
+        "{ [k: string]: any } | { x: string }",
+        "{ [k: string]: any } | { x: string }",
+        "{ [k: string]: any } | { x: string }",
+    ),
+    // Generator<{ x: any; }, void, unknown> / Generator<{ x: any; }, void, unknown> / Generator<{ x: any; }, void, unknown> / Generator<{ x: any; }, void, unknown>
+    (
+        "genAnyObj",
+        "Generator<{ x: any }, void, unknown>",
+        "Generator<{ x: any }, void, unknown>",
+        "Generator<{ x: any }, void, unknown>",
+        "Generator<{ x: any }, void, unknown>",
+    ),
+    // { x: any; }[] / { x: any; }[] / { x: any; }[] / { x: any; }[]
+    (
+        "arrAnyObj",
+        "{ x: any }[]",
+        "{ x: any }[]",
+        "{ x: any }[]",
+        "{ x: any }[]",
+    ),
+];
+
+/// Return and array joins over interface-typed members, elements and tuple positions.
+const DECLARED_MEMBER_JOIN_SOURCE: &str = r#"
+interface A1 { x: string }
+interface D1 extends A1 { y: number }
+interface P1 { v: A1 }
+interface P2 { v: D1 }
+export function retIfaceArr(c: boolean, a: A1[], b: D1[]) { if (c) return a; return b; }
+export function retIfaceMember(c: boolean, a: P1, b: P2) { if (c) return a; return b; }
+export function retIfaceTuple(c: boolean, a: [A1], b: [D1]) { if (c) return a; return b; }
+export function retObjWithIface(c: boolean, a: { v: A1 }, b: { v: D1 }) { if (c) return a; return b; }
+export function arrIfaceElems(a: A1, b: D1) { return [a, b]; }
+export function retIface(c: boolean, a: A1, b: D1) { if (c) return a; return b; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`DECLARED_MEMBER_JOIN_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const DECLARED_MEMBER_JOIN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // A1[] / A1[] / A1[] / A1[]
+    ("retIfaceArr", "A1[]", "A1[]", "A1[]", "A1[]"),
+    // P1 / P1 / P1 / P1
+    ("retIfaceMember", "P1", "P1", "P1", "P1"),
+    // [A1] / [A1] / [A1] / [A1]
+    ("retIfaceTuple", "[A1]", "[A1]", "[A1]", "[A1]"),
+    // { v: A1; } / { v: A1; } / { v: A1; } / { v: A1; }
+    (
+        "retObjWithIface",
+        "{ v: A1 }",
+        "{ v: A1 }",
+        "{ v: A1 }",
+        "{ v: A1 }",
+    ),
+    // A1[] / A1[] / A1[] / A1[]
+    ("arrIfaceElems", "A1[]", "A1[]", "A1[]", "A1[]"),
+    // A1 / A1 / A1 / A1
+    ("retIface", "A1", "A1", "A1", "A1"),
+];
+
+/// A join's arms reduce by the checker's STRICT subtype relation
+/// (`isTypeStrictSubtypeOf` in `removeSubtypes`): `any` is never below
+/// `unknown`, a `readonly` member never below a mutable one, a signature
+/// never below one taking fewer parameters, an optional member never below
+/// a required one, an index signature is inferred only for an object
+/// literal, and structurally identical classes reduce only through
+/// derivation. `if (c) return [null]; return ["s"]` is `string[]` with
+/// `strictNullChecks` off, the covariant array absorbing `null[]`. Each
+/// cell matches its own project's TypeScript 7.0.2 answer.
+#[test]
+fn joins_reduce_by_the_checkers_strict_subtype_relation() {
+    let host = four_policy_host();
+    let mut mismatches = Vec::new();
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "strict-subtype-joins.ts",
+        STRICT_SUBTYPE_JOIN_SOURCE,
+        STRICT_SUBTYPE_JOIN_TABLE,
+    ));
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "declared-member-joins.ts",
+        DECLARED_MEMBER_JOIN_SOURCE,
+        DECLARED_MEMBER_JOIN_TABLE,
+    ));
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Conditional expressions returned, bound, nested and read as members or elements.
+const CONDITIONAL_EXPRESSION_SOURCE: &str = r#"
+interface A1 { x: string }
+interface B1 { x: string }
+export function ternDeclSubtype(c: boolean, a: { x: string }, b: { x: string; y: number }) { return c ? a : b; }
+export function ternDeclSubtypeLocal(c: boolean, a: { x: string }, b: { x: string; y: number }) { const r = c ? a : b; return r; }
+export function ternNullObj(c: boolean) { return c ? { a: null } : { a: "s" }; }
+export function ternNullArr(c: boolean) { return c ? [null] : ["s"]; }
+export function ternAnyObj(c: boolean, a: { x: any }, b: { x: string }) { return c ? a : b; }
+export function ternArr(c: boolean, a: string[], b: (string | number)[]) { return c ? a : b; }
+export function ternLitSubtype(c: boolean) { return c ? "a" : "b" as string; }
+export function ternLitKeep(c: boolean) { return c ? "a" : "b"; }
+export function ternLitNum(c: boolean) { return c ? 1 : 2; }
+export function ternMixed(c: boolean, s: string) { return c ? "a" : s; }
+export function ternObjLits(c: boolean) { return c ? { a: 1, b: 2 } : { a: 1 }; }
+export function ternSameIface(c: boolean, a: A1, b: B1) { return c ? a : b; }
+export function ternNested(c: boolean, d: boolean, a: { x: string }, b: { x: string; y: number }, e: { x: string; z: 1 }) { return c ? a : d ? b : e; }
+export function ternInArr(c: boolean, a: { x: string }, b: { x: string; y: number }) { return [c ? a : b]; }
+export function ternInObj(c: boolean, a: { x: string }, b: { x: string; y: number }) { return { v: c ? a : b }; }
+export function ternLetLocal(c: boolean, a: { x: string }, b: { x: string; y: number }) { let r = c ? a : b; return r; }
+export function ternArg(c: boolean, a: { x: string }, b: { x: string; y: number }) { return id(c ? a : b); }
+export function* genTern(c: boolean, a: { x: string }, b: { x: string; y: number }) { yield c ? a : b; }
+export function ternFnOpt(c: boolean, a: (s?: string) => number, b: () => number) { return c ? a : b; }
+export function ternNullLit(c: boolean) { return c ? null : "s"; }
+export function ternUndefObj(c: boolean, a: { x: string }) { return c ? undefined : a; }
+declare function id<T>(v: T): T;
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`CONDITIONAL_EXPRESSION_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const CONDITIONAL_EXPRESSION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // { x: string; } / { x: string; } / { x: string; } / { x: string; }
+    (
+        "ternDeclSubtype",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // { x: string; } / { x: string; } / { x: string; } / { x: string; }
+    (
+        "ternDeclSubtypeLocal",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // { a: null; } | { a: string; } / { a: string; } / { a: null; } | { a: string; } / { a: string; }
+    (
+        "ternNullObj",
+        "{ a: null } | { a: string }",
+        "{ a: string }",
+        "{ a: null } | { a: string }",
+        "{ a: string }",
+    ),
+    // null[] | string[] / string[] / null[] | string[] / string[]
+    (
+        "ternNullArr",
+        "null[] | string[]",
+        "string[]",
+        "null[] | string[]",
+        "string[]",
+    ),
+    // { x: any; } / { x: any; } / { x: any; } / { x: any; }
+    (
+        "ternAnyObj",
+        "{ x: any }",
+        "{ x: any }",
+        "{ x: any }",
+        "{ x: any }",
+    ),
+    // (string | number)[] / (string | number)[] / (string | number)[] / (string | number)[]
+    (
+        "ternArr",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // string / string / string / string
+    ("ternLitSubtype", "string", "string", "string", "string"),
+    // "a" | "b" / "a" | "b" / "a" | "b" / "a" | "b"
+    (
+        "ternLitKeep",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // 1 | 2 / 1 | 2 / 1 | 2 / 1 | 2
+    ("ternLitNum", "1 | 2", "1 | 2", "1 | 2", "1 | 2"),
+    // string / string / string / string
+    ("ternMixed", "string", "string", "string", "string"),
+    // { x: string; } / { x: string; } / { x: string; } / { x: string; }
+    (
+        "ternNested",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // { x: string; }[] / { x: string; }[] / { x: string; }[] / { x: string; }[]
+    (
+        "ternInArr",
+        "{ x: string }[]",
+        "{ x: string }[]",
+        "{ x: string }[]",
+        "{ x: string }[]",
+    ),
+    // { v: { x: string; }; } / { v: { x: string; }; } / { v: { x: string; }; } / { v: { x: string; }; }
+    (
+        "ternInObj",
+        "{ v: { x: string } }",
+        "{ v: { x: string } }",
+        "{ v: { x: string } }",
+        "{ v: { x: string } }",
+    ),
+    // { x: string; } / { x: string; } / { x: string; } / { x: string; }
+    (
+        "ternLetLocal",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // (s?: string | undefined) => number / (s?: string) => number / (s?: string | undefined) => number / (s?: string) => number
+    (
+        "ternFnOpt",
+        "(s?: string) => number",
+        "(s?: string) => number",
+        "(s?: string) => number",
+        "(s?: string) => number",
+    ),
+    // "s" | null / string / "s" | null / string
+    (
+        "ternNullLit",
+        "\"s\" | null",
+        "string",
+        "\"s\" | null",
+        "string",
+    ),
+    // { x: string; } | undefined / { x: string; } / { x: string; } | undefined / { x: string; }
+    (
+        "ternUndefObj",
+        "undefined | { x: string }",
+        "{ x: string }",
+        "undefined | { x: string }",
+        "{ x: string }",
+    ),
+];
+
+/// A conditional expression's arms reduce like a return join's
+/// (`checkConditionalExpression` unions its arms with subtype reduction):
+/// `c ? a : b` over `a: { x: string }` and `b: { x: string; y: number }`
+/// is `{ x: string }` wherever the value lands. Each cell matches its own
+/// project's TypeScript 7.0.2 answer.
+#[test]
+fn conditional_expressions_reduce_like_return_joins() {
+    let host = four_policy_host();
+    let mut mismatches = Vec::new();
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "conditional-expressions.ts",
+        CONDITIONAL_EXPRESSION_SOURCE,
+        CONDITIONAL_EXPRESSION_TABLE,
+    ));
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Object, array and tuple literals under `satisfies` targets of every shape.
+const SATISFIES_SOURCE: &str = r#"
+interface IK { k: "a" | "b" }
+export function satWiden() { return { label: "x", n: 1 } satisfies { label: string; n: number }; }
+export function satRecord() { return { label: "x", n: 1 } satisfies Record<string, string | number>; }
+export function satLitUnion() { return { label: "x", n: 1 } satisfies { label: "x" | "y"; n: 1 | 2 }; }
+export function satObject() { return { n: 1 } satisfies object; }
+export function satUnknown() { return { n: 1 } satisfies unknown; }
+export function satNestedKeep() { return { a: { b: "x" } } satisfies { a: { b: "x" | "y" } }; }
+export function satNestedWiden() { return { a: { b: "x" } } satisfies { a: { b: string } }; }
+export function satArrWiden() { return ["a"] satisfies string[]; }
+export function satArrKeep() { return ["a"] satisfies ("a" | "b")[]; }
+export function satTuple() { return ["a", 1] satisfies [string, number]; }
+export function satTupleLit() { return ["a", 1] satisfies ["a", 1]; }
+export function satTupleRo() { return ["a", 1] satisfies readonly [string, number]; }
+export function satArrUnknown() { return [1] satisfies unknown; }
+export function satStr() { return "a" satisfies string; }
+export function satStrLit() { return "a" satisfies "a" | "b"; }
+export function satUnionTarget() { return { a: 1 } satisfies { a: number } | { b: string }; }
+export function satKind() { return { kind: "a" } satisfies { kind: "a" | "b" }; }
+export function satIndexLit() { return { n: 1 } satisfies { [k: string]: 1 | 2 }; }
+export function satArrObj() { return [{ k: "a" }] satisfies { k: "a" | "b" }[]; }
+export function satObjArr() { return { xs: ["a"] } satisfies { xs: string[] }; }
+export function satObjTuple() { return { xs: ["a", 1] } satisfies { xs: [string, number] }; }
+export function satIface() { return { k: "a" } satisfies IK; }
+export function satOptional() { return { f: 1 } satisfies { f?: 1 }; }
+export function satTemplate() { return { a: "x" } satisfies { a: `x${string}` }; }
+export function satLocal() { const o = { k: "a" } satisfies IK; return o; }
+export function satLetLocal() { let o = { k: "a" } satisfies IK; return o; }
+export function satBool() { return { b: true } satisfies { b: boolean }; }
+export function satBoolLit() { return { b: true } satisfies { b: true }; }
+export function satTupleSpread(t: [number]) { return ["a", ...t] satisfies [string, number]; }
+export function satTupleOpt() { return ["a"] satisfies [string, number?]; }
+export function satEmptyTuple() { return [] satisfies []; }
+export function satAny() { return { n: 1 } satisfies any; }
+export function satNumIndex() { return [1, 2] satisfies { [i: number]: 1 | 2 }; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`SATISFIES_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const SATISFIES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // { label: string; n: number; } / { label: string; n: number; } / { label: string; n: number; } / { label: string; n: number; }
+    (
+        "satWiden",
+        "{ label: string; n: number }",
+        "{ label: string; n: number }",
+        "{ label: string; n: number }",
+        "{ label: string; n: number }",
+    ),
+    // { label: string; n: number; } / { label: string; n: number; } / { label: string; n: number; } / { label: string; n: number; }
+    (
+        "satRecord",
+        "{ label: string; n: number }",
+        "{ label: string; n: number }",
+        "{ label: string; n: number }",
+        "{ label: string; n: number }",
+    ),
+    // { label: "x"; n: 1; } / { label: "x"; n: 1; } / { label: "x"; n: 1; } / { label: "x"; n: 1; }
+    (
+        "satLitUnion",
+        "{ label: \"x\"; n: 1 }",
+        "{ label: \"x\"; n: 1 }",
+        "{ label: \"x\"; n: 1 }",
+        "{ label: \"x\"; n: 1 }",
+    ),
+    // { n: number; } / { n: number; } / { n: number; } / { n: number; }
+    (
+        "satObject",
+        "{ n: number }",
+        "{ n: number }",
+        "{ n: number }",
+        "{ n: number }",
+    ),
+    // { n: number; } / { n: number; } / { n: number; } / { n: number; }
+    (
+        "satUnknown",
+        "{ n: number }",
+        "{ n: number }",
+        "{ n: number }",
+        "{ n: number }",
+    ),
+    // { a: { b: "x"; }; } / { a: { b: "x"; }; } / { a: { b: "x"; }; } / { a: { b: "x"; }; }
+    (
+        "satNestedKeep",
+        "{ a: { b: \"x\" } }",
+        "{ a: { b: \"x\" } }",
+        "{ a: { b: \"x\" } }",
+        "{ a: { b: \"x\" } }",
+    ),
+    // { a: { b: string; }; } / { a: { b: string; }; } / { a: { b: string; }; } / { a: { b: string; }; }
+    (
+        "satNestedWiden",
+        "{ a: { b: string } }",
+        "{ a: { b: string } }",
+        "{ a: { b: string } }",
+        "{ a: { b: string } }",
+    ),
+    // string[] / string[] / string[] / string[]
+    (
+        "satArrWiden",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+    // "a"[] / "a"[] / "a"[] / "a"[]
+    ("satArrKeep", "\"a\"[]", "\"a\"[]", "\"a\"[]", "\"a\"[]"),
+    // [string, number] / [string, number] / [string, number] / [string, number]
+    (
+        "satTuple",
+        "[string, number]",
+        "[string, number]",
+        "[string, number]",
+        "[string, number]",
+    ),
+    // ["a", 1] / ["a", 1] / ["a", 1] / ["a", 1]
+    (
+        "satTupleLit",
+        "[\"a\", 1]",
+        "[\"a\", 1]",
+        "[\"a\", 1]",
+        "[\"a\", 1]",
+    ),
+    // [string, number] / [string, number] / [string, number] / [string, number]
+    (
+        "satTupleRo",
+        "[string, number]",
+        "[string, number]",
+        "[string, number]",
+        "[string, number]",
+    ),
+    // number[] / number[] / number[] / number[]
+    (
+        "satArrUnknown",
+        "number[]",
+        "number[]",
+        "number[]",
+        "number[]",
+    ),
+    // string / string / string / string
+    ("satStr", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("satStrLit", "string", "string", "string", "string"),
+    // { a: number; } / { a: number; } / { a: number; } / { a: number; }
+    (
+        "satUnionTarget",
+        "{ a: number }",
+        "{ a: number }",
+        "{ a: number }",
+        "{ a: number }",
+    ),
+    // { kind: "a"; } / { kind: "a"; } / { kind: "a"; } / { kind: "a"; }
+    (
+        "satKind",
+        "{ kind: \"a\" }",
+        "{ kind: \"a\" }",
+        "{ kind: \"a\" }",
+        "{ kind: \"a\" }",
+    ),
+    // { n: 1; } / { n: 1; } / { n: 1; } / { n: 1; }
+    (
+        "satIndexLit",
+        "{ n: 1 }",
+        "{ n: 1 }",
+        "{ n: 1 }",
+        "{ n: 1 }",
+    ),
+    // { k: "a"; }[] / { k: "a"; }[] / { k: "a"; }[] / { k: "a"; }[]
+    (
+        "satArrObj",
+        "{ k: \"a\" }[]",
+        "{ k: \"a\" }[]",
+        "{ k: \"a\" }[]",
+        "{ k: \"a\" }[]",
+    ),
+    // { xs: string[]; } / { xs: string[]; } / { xs: string[]; } / { xs: string[]; }
+    (
+        "satObjArr",
+        "{ xs: string[] }",
+        "{ xs: string[] }",
+        "{ xs: string[] }",
+        "{ xs: string[] }",
+    ),
+    // { xs: [string, number]; } / { xs: [string, number]; } / { xs: [string, number]; } / { xs: [string, number]; }
+    (
+        "satObjTuple",
+        "{ xs: [string, number] }",
+        "{ xs: [string, number] }",
+        "{ xs: [string, number] }",
+        "{ xs: [string, number] }",
+    ),
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "satIface",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { f: 1; } / { f: 1; } / { f: 1; } / { f: 1; }
+    (
+        "satOptional",
+        "{ f: 1 }",
+        "{ f: 1 }",
+        "{ f: 1 }",
+        "{ f: 1 }",
+    ),
+    // { a: "x"; } / { a: "x"; } / { a: "x"; } / { a: "x"; }
+    (
+        "satTemplate",
+        "{ a: \"x\" }",
+        "{ a: \"x\" }",
+        "{ a: \"x\" }",
+        "{ a: \"x\" }",
+    ),
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "satLocal",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "satLetLocal",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { b: true; } / { b: true; } / { b: true; } / { b: true; }
+    (
+        "satBool",
+        "{ b: true }",
+        "{ b: true }",
+        "{ b: true }",
+        "{ b: true }",
+    ),
+    // { b: true; } / { b: true; } / { b: true; } / { b: true; }
+    (
+        "satBoolLit",
+        "{ b: true }",
+        "{ b: true }",
+        "{ b: true }",
+        "{ b: true }",
+    ),
+    // [string, number] / [string, number] / [string, number] / [string, number]
+    (
+        "satTupleSpread",
+        "[string, number]",
+        "[string, number]",
+        "[string, number]",
+        "[string, number]",
+    ),
+    // [string] / [string] / [string] / [string]
+    (
+        "satTupleOpt",
+        "[string]",
+        "[string]",
+        "[string]",
+        "[string]",
+    ),
+    // [] / [] / [] / []
+    ("satEmptyTuple", "[]", "[]", "[]", "[]"),
+    // { n: number; } / { n: number; } / { n: number; } / { n: number; }
+    (
+        "satAny",
+        "{ n: number }",
+        "{ n: number }",
+        "{ n: number }",
+        "{ n: number }",
+    ),
+    // (1 | 2)[] / (1 | 2)[] / (1 | 2)[] / (1 | 2)[]
+    (
+        "satNumIndex",
+        "(1 | 2)[]",
+        "(1 | 2)[]",
+        "(1 | 2)[]",
+        "(1 | 2)[]",
+    ),
+];
+
+/// A `satisfies` literal bound to a `let` and read.
+const SATISFIES_LOCAL_SOURCE: &str = r#"
+interface IK { k: "a" | "b" }
+export function letInline() { let o = { k: "a" } satisfies { k: "a" | "b" }; return o; }
+export function letIface() { let o = { k: "a" } satisfies IK; return o; }
+export function letParen() { let o = ({ k: "a" }) satisfies IK; return o; }
+export function letRead() { let o = { k: "a" } satisfies IK; const p = o; return p; }
+export function letAsConst() { let o = { k: "a" } as const; return o; }
+export function letArr() { let o = ["a"] satisfies ("a" | "b")[]; return o; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`SATISFIES_LOCAL_SOURCE`], each the lane's spelling of
+/// the checker's TypeScript 7.0.2 answer (the checker's prints follow each
+/// row).
+const SATISFIES_LOCAL_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "letInline",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "letIface",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "letParen",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { k: "a"; } / { k: "a"; } / { k: "a"; } / { k: "a"; }
+    (
+        "letRead",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+        "{ k: \"a\" }",
+    ),
+    // { readonly k: "a"; } / { readonly k: "a"; } / { readonly k: "a"; } / { readonly k: "a"; }
+    (
+        "letAsConst",
+        "{ readonly k: \"a\" }",
+        "{ readonly k: \"a\" }",
+        "{ readonly k: \"a\" }",
+        "{ readonly k: \"a\" }",
+    ),
+    // "a"[] / "a"[] / "a"[] / "a"[]
+    ("letArr", "\"a\"[]", "\"a\"[]", "\"a\"[]", "\"a\"[]"),
+];
+
+/// `satisfies` contextually types its literal operand the way the checker
+/// does: a fresh member or element literal keeps its literal type exactly
+/// where the target's matching position is a literal context (a union of
+/// literals, a literal, a type parameter constrained by one), an array
+/// literal in a tuple context is a tuple, and every other position widens
+/// as an unannotated literal does. Each cell matches its own project's
+/// TypeScript 7.0.2 answer.
+#[test]
+fn satisfies_contextually_types_its_literal() {
+    let host = four_policy_host();
+    let mut mismatches = Vec::new();
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "satisfies.ts",
+        SATISFIES_SOURCE,
+        SATISFIES_TABLE,
+    ));
+    mismatches.extend(matrix_mismatches(
+        &host,
+        "satisfies-local.ts",
+        SATISFIES_LOCAL_SOURCE,
+        SATISFIES_LOCAL_TABLE,
+    ));
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Equality tests against `null` and `undefined`.
+const NULLISH_EQUALITY_SOURCE: &str = r#"
+export function eqNullThen(x: string | null) { if (x === null) return x; return 0; }
+export function eqNullElse(x: string | null) { if (x === null) { return 1; } return x; }
+export function neNullThen(x: string | null) { if (x !== null) return x; return 0; }
+export function eqUndefThen(x: string | undefined) { if (x === undefined) return x; return 0; }
+export function eqNullObj(x: { a: string } | null) { if (x === null) return x; return 0; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`NULLISH_EQUALITY_SOURCE`], each the lane's
+/// spelling of the checker's TypeScript 7.0.2 answer (the checker's prints
+/// follow each row).
+const NULLISH_EQUALITY_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // 0 | null / string | 0 / 0 | null / string | 0
+    (
+        "eqNullThen",
+        "0 | null",
+        "0 | string",
+        "0 | null",
+        "0 | string",
+    ),
+    // string | 1 / string | 1 / string | 1 / string | 1
+    (
+        "eqNullElse",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+    ),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "neNullThen",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // 0 | undefined / string | 0 / 0 | undefined / string | 0
+    (
+        "eqUndefThen",
+        "0 | undefined",
+        "0 | string",
+        "0 | undefined",
+        "0 | string",
+    ),
+    // 0 | null / 0 | { a: string; } / 0 | null / 0 | { a: string; }
+    (
+        "eqNullObj",
+        "0 | null",
+        "0 | { a: string }",
+        "0 | null",
+        "0 | { a: string }",
+    ),
+];
+
+/// With `strictNullChecks` off an equality with `null` or `undefined`
+/// narrows nothing on either edge (`narrowTypeByEquality` returns the type
+/// unchanged): `if (x === null) return x` over `x: string | null` returns
+/// `string`, never an empty narrow that drops the arm. Each cell matches its
+/// own project's TypeScript 7.0.2 answer.
+#[test]
+fn strict_null_checks_off_equality_with_nullish_narrows_nothing() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "nullish-equality.ts",
+        NULLISH_EQUALITY_SOURCE,
+        NULLISH_EQUALITY_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:
+{}",
+        mismatches.join(
+            "
+"
+        )
+    );
+}
+
+/// `if (c) return { a: null }; return { a: undefined }` with
+/// `strictNullChecks` off: the checker prints `{ a: any; } | { a: any; }` —
+/// two fresh object identities of one structure, which the discriminant
+/// shortcut keeps apart before widening — and the lane answers the one
+/// object `{ a: any }` the canonical union collapses them to
+/// (`T | T = T`; the discarded arm's member spans stay recoverable through
+/// the normalization origin edge). Nothing but that print tells the two
+/// apart. Measured on TypeScript 7.0.2 over the checker's own answer `R`:
+/// `keyof R` is `"a"`, `R["a"]` is `any`, `R` is neither callable nor
+/// constructable, `R` and `{ a: any }` are assignable each to the other,
+/// and a consumer joining the value again reduces the twins to one
+/// (`c ? twin(c) : { a: 1 }` is `{ a: any; }`). The lane's answer carries
+/// the same effects: one member `a` of type `any`, no call, construct or
+/// index signature, assignable each way with the lane's own `{ a: any }`,
+/// and the same rejoined answer.
+#[test]
+fn an_object_join_of_structural_twins_differs_only_in_presentation() {
+    const SOURCE: &str = r#"
+export function twin(c: boolean) { if (c) return { a: null }; return { a: undefined }; }
+export function single(v: any) { return { a: v }; }
+export function twinTernary(c: boolean) { return c ? twin(c) : { a: 1 }; }
+"#;
+    let host = two_policy_host();
+    let canonical = format!("{LOOSE_ROOT}/twins.ts");
+    upsert(&host, &canonical, SOURCE);
+    // { a: any; } | { a: any; }
+    assert_eq!(observe(&host, &canonical, "twin"), "{ a: any }");
+    // { a: any; }
+    assert_eq!(observe(&host, &canonical, "twinTernary"), "{ a: any }");
+    let node_of = |symbol: &str| {
+        host.get_flow_return_type_with_audit(
+            &identity(&canonical, symbol),
+            ReturnProjectionDemand::whole_return(),
+        )
+        .as_result()
+        .map(|result| result.return_type())
+        .unwrap_or_else(|_| panic!("`{symbol}` answers a value"))
+    };
+    let twin = node_of("twin");
+    let single = node_of("single");
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let graph = dispatch.graph();
+    let Some(SemanticNodeData::Object(view)) = graph.node_data(twin).as_deref().cloned() else {
+        panic!("the twins collapse to one object");
+    };
+    assert!(
+        view.call_signatures.is_empty()
+            && view.construct_signatures.is_empty()
+            && view.index_signatures.is_empty(),
+        "neither twin is callable, constructable or indexed"
+    );
+    let [member] = view.positive_members() else {
+        panic!("one member: {:?}", view.positive_members());
+    };
+    assert_eq!(member.key.as_string(), Some("a"));
+    assert!(matches!(
+        graph.node_data(member.value).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+    ));
+    for (source, target) in [(twin, single), (single, twin)] {
+        assert!(
+            matches!(
+                dispatch.execute_relate_pair(source, target),
+                super::dispatch_txn::RelationStep::Assignable { .. }
+            ),
+            "the twins' object and `{{ a: any }}` are assignable each to the other"
+        );
+    }
+}
+
+/// `if (c) return a; return b` (and `c ? a : b`) over two structurally
+/// identical interfaces `A1` and `B1`: each is a strict subtype of the
+/// other, so the checker's `removeSubtypes` keeps the one its own type
+/// order visits first and prints `A1` (TypeScript 7.0.2, with and without
+/// `strictNullChecks`). The lane visits the operands in the union's
+/// `VerterStableV1` order and keeps the one that order puts first, which
+/// the stable key decides per project: in the `strictNullChecks`-off
+/// project at `/off/p.ts` it is `B1`. The counterfactual isolates the order
+/// as the only cause: a fresh store with ONLY its union order reversed
+/// answers the checker's `A1`, and a fresh store under the stable order
+/// answers `B1` again.
+#[test]
+fn a_structural_twin_survivor_follows_the_stable_union_order() {
+    const SOURCE: &str = r#"
+interface A1 { x: string }
+interface B1 { x: string }
+export function retSameIface(c: boolean, a: A1, b: B1) { if (c) return a; return b; }
+export function ternSameIface(c: boolean, a: A1, b: B1) { return c ? a : b; }
+"#;
+    let survivors = |reversed: bool| {
+        let host = VerterHost::new_standalone_with_tsconfig_projects(
+            HostConfig::default(),
+            &[(
+                "/off",
+                r#"{ "compilerOptions": { "strict": true, "strictNullChecks": false } }"#,
+            )],
+        );
+        if reversed {
+            host.project_type_store()
+                .semantic_graph()
+                .reverse_union_order_for_tests();
+        }
+        upsert(&host, "/off/p.ts", SOURCE);
+        ["retSameIface", "ternSameIface"].map(|symbol| observe(&host, "/off/p.ts", symbol))
+    };
+    // A1 / A1 on the checker.
+    assert_eq!(
+        survivors(false),
+        ["B1", "B1"],
+        "the stable order's survivors"
+    );
+    assert_eq!(
+        survivors(true),
+        ["A1", "A1"],
+        "reversing ONLY the union order answers the checker's survivor"
+    );
+    assert_eq!(
+        survivors(false),
+        ["B1", "B1"],
+        "the stable order recovers the recorded survivor"
     );
 }
