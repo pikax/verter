@@ -30,6 +30,23 @@ impl SemanticGraphStore {
         self.begin_inline_member_flight(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
     }
 
+    /// Whether the `FlowReturn` family holds any candidate for `key`,
+    /// valid or not: a presence peek that validates nothing, bubbles no
+    /// read, touches no LRU order and counts neither a hit nor a miss. The
+    /// flow-return callee schedule reads it to leave a callee whose answer
+    /// may already be warm to that callee's own demand.
+    pub(crate) fn has_flow_return_candidate(
+        &self,
+        key: &crate::semantic_query::FlowReturnKey,
+    ) -> bool {
+        let family = FamilyKey::FlowReturn {
+            key: Box::new(key.clone()),
+        };
+        self.entries_lock_diagnosed()
+            .get(&family)
+            .is_some_and(|slots| slots.slot_has_candidates(ModeSlot::Single))
+    }
+
     /// The strict warm read of the `FlowReturn` family (design §3.4):
     /// the TWO-GATE hit — `cached_satisfies` over the entry's RECORDED
     /// materialised point against the key's OWN demand point (never the

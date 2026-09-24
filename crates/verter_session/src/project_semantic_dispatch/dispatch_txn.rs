@@ -2911,6 +2911,10 @@ pub(crate) struct FlowReturnDomainRuntime {
     /// values, so a degraded root's typed failure rides the transaction to
     /// the demanding caller (never admitted, never a cache value).
     pub(crate) last_root_failure: Option<crate::semantic_query::FlowReturnFailure>,
+    /// The callee schedule session while frames evaluate: the callee
+    /// returns a schedule already settled, and the instantiated returns
+    /// each uninstantiated frame's call resolution demanded.
+    pub(crate) schedule: super::flow_return::schedule::FlowScheduleSession,
 }
 
 /// The call-resolution domain runtime.
