@@ -3229,13 +3229,8 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             FunctionNode::Arrow(arrow) => arrow.span.end,
         };
         let frame_span = verter_span::Span::new(function_start, function_end);
-        let (call_addresses, construct_addresses) = match self.nodes.as_mut() {
-            Some(nodes) => (Some(&mut nodes.calls), Some(&mut nodes.constructs)),
-            None => (None, None),
-        };
         let mut inventory = InventoryVisitor {
-            call_addresses,
-            construct_addresses,
+            call_addresses: self.nodes.as_mut().map(|nodes| &mut nodes.call_sites),
             frame_span,
             ..InventoryVisitor::default()
         };
@@ -3265,7 +3260,6 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         }
         let InventoryVisitor {
             call_addresses: _,
-            construct_addresses: _,
             bindings,
             unmodeled_bindings,
             in_parameter_list: _,
@@ -3408,13 +3402,7 @@ pub fn inventory_statement_list(statements: &[Statement<'_>]) -> StatementListIn
 #[derive(Default)]
 struct InventoryVisitor<'sink, 'ast> {
     call_addresses:
-        Option<&'sink mut rustc_hash::FxHashMap<verter_span::Span, &'ast CallExpression<'ast>>>,
-    construct_addresses: Option<
-        &'sink mut rustc_hash::FxHashMap<
-            verter_span::Span,
-            &'ast oxc_ast::ast::NewExpression<'ast>,
-        >,
-    >,
+        Option<&'sink mut rustc_hash::FxHashMap<verter_span::Span, IndexedCallSite<'ast>>>,
     bindings: Vec<FunctionBindingRecord>,
     unmodeled_bindings: Vec<FunctionBindingRecord>,
     /// Set while the frame's formal parameters are walked.
@@ -3567,7 +3555,6 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
             frame_span: self.frame_span,
             scope_stack: self.scope_stack.clone(),
             call_addresses: self.call_addresses.as_deref_mut(),
-            construct_addresses: self.construct_addresses.as_deref_mut(),
             ..InventoryVisitor::default()
         };
         if class.r#type == oxc_ast::ast::ClassType::ClassExpression {
@@ -3847,7 +3834,9 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         });
         let call = self.alloc(it);
         if let Some(addresses) = &mut self.call_addresses {
-            addresses.entry(it.span.into()).or_insert(call);
+            addresses
+                .entry(it.span.into())
+                .or_insert(IndexedCallSite::Call(call));
         }
         let callee = match &it.callee {
             Expression::Identifier(id) => {
@@ -3875,12 +3864,30 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
 
     fn visit_new_expression(&mut self, it: &oxc_ast::ast::NewExpression<'a>) {
         let construct = self.alloc(it);
-        if let Some(addresses) = &mut self.construct_addresses {
-            addresses.entry(it.span.into()).or_insert(construct);
+        if let Some(addresses) = &mut self.call_addresses {
+            addresses
+                .entry(it.span.into())
+                .or_insert(IndexedCallSite::Construct(construct));
         }
         let previous = self.read_role;
         self.read_role = self.read_role.with_call();
         walk::walk_new_expression(self, it);
+        self.read_role = previous;
+    }
+
+    fn visit_tagged_template_expression(
+        &mut self,
+        it: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+    ) {
+        let tagged = self.alloc(it);
+        if let Some(addresses) = &mut self.call_addresses {
+            addresses
+                .entry(it.span.into())
+                .or_insert(IndexedCallSite::TaggedTemplate(tagged));
+        }
+        let previous = self.read_role;
+        self.read_role = self.read_role.with_call();
+        walk::walk_tagged_template_expression(self, it);
         self.read_role = previous;
     }
 }
@@ -4046,25 +4053,35 @@ pub fn function_from_expression<'a>(expression: &'a Expression<'a>) -> Option<Fu
 #[derive(Default)]
 pub struct FunctionProgramNodes<'a> {
     functions: rustc_hash::FxHashMap<FunctionProgramKey, ResolvedFunctionNode<'a>>,
-    calls: rustc_hash::FxHashMap<verter_span::Span, &'a CallExpression<'a>>,
-    constructs: rustc_hash::FxHashMap<verter_span::Span, &'a oxc_ast::ast::NewExpression<'a>>,
+    call_sites: rustc_hash::FxHashMap<verter_span::Span, IndexedCallSite<'a>>,
 }
 impl<'a> FunctionProgramNodes<'a> {
     /// Borrow one exact indexed function. A missing key never falls back to a locator walk.
     pub fn get(&self, key: &FunctionProgramKey) -> Option<ResolvedFunctionNode<'a>> {
         self.functions.get(key).cloned()
     }
-    /// Borrow one indexed call without enumerating unrelated function bodies.
+    /// Borrow one indexed call-shaped expression without enumerating
+    /// unrelated function bodies.
+    pub fn call_site(&self, span: verter_span::Span) -> Option<IndexedCallSite<'a>> {
+        self.call_sites.get(&span).copied()
+    }
+    /// Borrow one indexed call expression.
     pub fn call(&self, span: verter_span::Span) -> Option<&'a CallExpression<'a>> {
-        self.calls.get(&span).copied()
+        match self.call_site(span)? {
+            IndexedCallSite::Call(call) => Some(call),
+            IndexedCallSite::Construct(_) | IndexedCallSite::TaggedTemplate(_) => None,
+        }
     }
-    /// Borrow one indexed `new` expression, addressed exactly like a call.
-    pub fn construct(
-        &self,
-        span: verter_span::Span,
-    ) -> Option<&'a oxc_ast::ast::NewExpression<'a>> {
-        self.constructs.get(&span).copied()
-    }
+}
+
+/// One indexed expression the call executor resolves: a call, a `new`, or a
+/// tagged template (a call of its tag with the template strings and the
+/// substitutions as its arguments). Each is addressed by its own span.
+#[derive(Clone, Copy)]
+pub enum IndexedCallSite<'a> {
+    Call(&'a CallExpression<'a>),
+    Construct(&'a oxc_ast::ast::NewExpression<'a>),
+    TaggedTemplate(&'a oxc_ast::ast::TaggedTemplateExpression<'a>),
 }
 
 /// One resolved function position: the node, its bare-identifier self

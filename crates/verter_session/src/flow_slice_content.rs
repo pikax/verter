@@ -57,7 +57,8 @@
 //! [`SliceCall::Direct`] — and any other call rides the symbolic
 //! `ReturnType<typeof …>` carrier (or `any` for an unrepresentable
 //! callee) as [`SliceCall::Symbolic`]. A `new` expression is
-//! [`SliceCall::Construct`] over its lowered constructor value.
+//! [`SliceCall::Construct`] over its lowered constructor value, and a
+//! tagged template is [`SliceCall::TaggedTemplate`] over its lowered tag.
 
 use std::sync::Arc;
 
@@ -1289,6 +1290,17 @@ fn construct_site(new: &oxc_ast::ast::NewExpression<'_>) -> SliceCallSite {
     )
 }
 
+/// The [`SliceCallSite`] of one authored tagged template: the template
+/// strings are its first argument and every substitution one more.
+fn tagged_template_site(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) -> SliceCallSite {
+    SliceCallSite::new(
+        u32::try_from(tagged.quasi.expressions.len() + 1).unwrap_or(u32::MAX),
+        false,
+        tagged.type_arguments.is_some(),
+        tagged.span.into(),
+    )
+}
+
 fn authored_call_site(
     arguments: &[oxc_ast::ast::Argument<'_>],
     has_explicit_type_arguments: bool,
@@ -1364,6 +1376,10 @@ pub enum SliceCall {
     /// through the call executor over the constructor's construct
     /// signatures — the checker's `resolveNewExpression`.
     Construct(Box<SliceExpr>),
+    /// A tagged template: a call of its tag, lowered as a flow value like
+    /// a constructor, whose arguments are the template strings and then
+    /// each substitution — the checker's `resolveTaggedTemplateExpression`.
+    TaggedTemplate(Box<SliceExpr>),
 }
 
 /// One name an answer references that the frame's LEXICAL AUTHORITY
@@ -7456,6 +7472,13 @@ impl Lowerer<'_> {
                 SliceCall::Construct(Box::new(self.lower_expr(&new.callee, mode))),
                 construct_site(new),
             ),
+            // A tagged template calls its tag: the tag is a flow value of
+            // this frame, and the call resolves at the same sink, with the
+            // template strings as its first argument.
+            Expression::TaggedTemplateExpression(tagged) => SliceExpr::Call(
+                SliceCall::TaggedTemplate(Box::new(self.lower_expr(&tagged.tag, mode))),
+                tagged_template_site(tagged),
+            ),
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
                     let name = callee.name.as_str();
@@ -7742,8 +7765,8 @@ impl Lowerer<'_> {
                             guard,
                         }
                     }
-                    // A CALL POSITION with no structural arm (`` tag`…` ``,
-                    // `f?.()`, `` (0, tag`…`) ``). The
+                    // A CALL POSITION with no structural arm (`f?.()`,
+                    // `(0, f?.())`, `z = f()`). The
                     // fail-closed verdict is the CLASSIFIER's, taken on the
                     // expression FORM — not on whether the shallow pass
                     // happened to mint a `ReturnType<callee>` carrier the
@@ -8890,6 +8913,8 @@ impl Lowerer<'_> {
     /// when the callee provably establishes no narrowing:
     /// - a `new` construct (a construct signature cannot be a type
     ///   predicate, and the checker derives no narrowing from one);
+    /// - a tagged template (the checker derives no narrowing from one,
+    ///   whatever its tag's signature);
     /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
     ///   same-file declaration ([`Self::closed_callee_declaration`]: a
     ///   module-scoped file, a call site outside every namespace block,
@@ -8921,6 +8946,7 @@ impl Lowerer<'_> {
     /// follows it. A discarded call is decided above ONLY when the
     /// callee provably establishes no narrowing:
     /// - a `new` construct (a construct signature is never an assertion);
+    /// - a tagged template (the checker binds no assertion for one);
     /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
     ///   same-file declaration ([`Self::closed_callee_declaration`])
     ///   whose return annotation is absent or is not an `asserts`
@@ -8997,7 +9023,7 @@ impl Lowerer<'_> {
         let mut unprovable = false;
         for call in calls {
             let span = match call {
-                ControlCall::Construct(span) => span,
+                ControlCall::Construct(span) | ControlCall::TaggedTemplate(span) => span,
                 ControlCall::Call {
                     span,
                     callee,
@@ -9356,6 +9382,10 @@ enum WritePolicy {
 /// callee's receiver root — `asserts this`).
 enum ControlCall {
     Construct(verter_span::Span),
+    /// A tagged template: the checker binds no call flow node for one, so
+    /// its tag narrows nothing even when it is a type predicate or an
+    /// `asserts` signature.
+    TaggedTemplate(verter_span::Span),
     Call {
         span: verter_span::Span,
         callee: Option<(String, oxc_span::Span)>,
@@ -9766,6 +9796,21 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.discarded.push(ControlCall::Construct(new.span.into()));
         }
         walk::walk_new_expression(self, new);
+    }
+    fn visit_tagged_template_expression(
+        &mut self,
+        tagged: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+    ) {
+        if self.nested_frame_nesting > 0 {
+            self.decided.push(tagged.span.into());
+        } else if self.control_nesting > 0 {
+            self.control
+                .push(ControlCall::TaggedTemplate(tagged.span.into()));
+        } else {
+            self.discarded
+                .push(ControlCall::TaggedTemplate(tagged.span.into()));
+        }
+        walk::walk_tagged_template_expression(self, tagged);
     }
     // Nested function / arrow / class bodies are their own frames.
     fn visit_function(

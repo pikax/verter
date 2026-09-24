@@ -2555,28 +2555,16 @@ fn optional_chained_call_return_unions_undefined() {
     );
 }
 
-/// CANARY — a TAGGED TEMPLATE call returns the tag function's return.
+/// CANARY (landed) — a TAGGED TEMPLATE call returns the tag function's
+/// return.
 ///
 /// Oracle: `ReturnType<typeof callTagged>` is `boolean`.
 ///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: callTagged
-///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
-///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
-/// ```///
-/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
-/// result is a degraded success and nothing warms — so the row observes a
-/// VALUE rather than `Miss`. The capability gap named below is unchanged.
-///
-/// Owning layer: the TAGGED-TEMPLATE call capability — the tag
-/// function's signature is never consulted. The admission half is
-/// settled: it fails closed as a `ValueDescent::UnmodeledCall` rather
-/// than publishing `any` warm.
+/// The tagged template rides the one call carrier as a call of its tag
+/// (`SliceCall::TaggedTemplate`), whose first argument is the template
+/// strings and whose remaining arguments are the substitutions, so the
+/// value is the tag's return, clean and warm.
 #[test]
-#[ignore = "TaggedTemplateExpression has no call arm: the tag call fails closed as an unmodeled call position"]
 fn tagged_template_call_return_is_the_tag_return() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callTagged", boolean());
@@ -4198,33 +4186,32 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// therefore broader than the mechanism, which is the defect.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the fail-closed arm declines to
-/// produce, every one of them different from `any`:
+/// --ignoreConfig`) — the answer the fail-closed arm declines to
+/// produce, different from `any`:
 ///
 /// ```text
 /// callOptional    maybeFn?.()                     number | undefined
-/// callTagged      tag`a${1}b`                     boolean
 /// ```
 ///
 /// `await asyncSrc()` is NOT in this set: an awaited
 /// call is a modelled form (`ValueDescent::Awaited`) whose operand rides
 /// the call carrier, so `callAwait` publishes `Promise<number>` (see
 /// `awaited_call_return_is_the_awaited_value_wrapped_again`). Neither is
-/// `new`: a construction rides the call carrier to the construct
-/// signatures (see `construct_expression_return_is_the_instance_type`).
+/// `new` nor a tagged template: a construction rides the call carrier to
+/// the construct signatures (see
+/// `construct_expression_return_is_the_instance_type`), and a tagged
+/// template to its tag's call signatures (see
+/// `tagged_template_call_return_is_the_tag_return`).
 ///
 /// Mutation recipe: `value_is_unmodeled_call` is the single authority
 /// (both `value_descent`'s guarded arm and the content half's residual
 /// type-carrier check delegate to it), so flipping one of its arms flips
-/// exactly the matching rows — `TaggedTemplateExpression` to `false`
-/// flips `callTagged` back to a warm `any`, and
-/// `ChainElement::CallExpression` to `false` flips `callOptional`.
+/// exactly the matching rows — `ChainElement::CallExpression` to `false`
+/// flips `callOptional` back to a warm `any`.
 #[test]
 fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
     let host = ts_host();
-    for name in ["callOptional", "callTagged"] {
-        assert_fails_closed(&host, CALLS, name);
-    }
+    assert_fails_closed(&host, CALLS, "callOptional");
 }
 
 /// D7 — the SEQUENCE wrapping of a call does not change the call's
@@ -4233,14 +4220,15 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 /// The sequence's value is its last operand, so a call there lowers
 /// through the SAME structural call rails its bare spelling takes:
 /// `(0, restFn(1, 2, 3))` surfaces `restFn`'s `"rest"` clean and warm,
-/// exactly like the bare `callRest` twin, and `(0, new CtorC(1))`
-/// surfaces the constructed `CtorC` exactly like the bare `callNew` —
-/// the sequence context never converts a resolved call into a
-/// fail-closed marker.
+/// exactly like the bare `callRest` twin, `(0, new CtorC(1))` surfaces
+/// the constructed `CtorC` exactly like the bare `callNew`, and
+/// `` (0, tag`a${1}b`) `` surfaces the tag's `boolean` exactly like the
+/// bare `callTagged` — the sequence context never converts a resolved
+/// call into a fail-closed marker.
 ///
-/// The discriminator runs the other way with the same fixture: every
-/// call form with NO structural arm (an optional call, a tagged
-/// template) keeps the fail-closed verdict when a sequence wraps it —
+/// The discriminator runs the other way with the same fixture: a call
+/// form with NO structural arm (an optional call) keeps the fail-closed
+/// verdict when a sequence wraps it —
 /// the sequence context never converts an unmodeled call into a
 /// published value either. The delegation answers the CALL's own
 /// question; it invents no arm. An `await` last operand is a MODELLED
@@ -4253,22 +4241,23 @@ fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() 
 ///
 /// ```text
 /// callSeqNew       CtorC                (published)
+/// callSeqTagged    boolean              (published)
 /// callSeqOptional  number | undefined   (declined — fails closed)
-/// callSeqTagged    boolean              (declined — fails closed)
 /// ```
 ///
 /// Mutation recipe: dropping the sequence delegation from the content
-/// half's sequence arm flips `callSeqRest`, `callSeqNew` and
-/// `callSeqAwait` to the fail-closed marker; widening the delegation past
-/// the paren-transparent `CallExpression` / `NewExpression` forms (a chain
-/// / tagged last operand) flips the two negative rows to a published
-/// value.
+/// half's sequence arm flips `callSeqRest`, `callSeqNew`, `callSeqTagged`
+/// and `callSeqAwait` to the fail-closed marker; widening the delegation
+/// past the paren-transparent `CallExpression` / `NewExpression` /
+/// `TaggedTemplateExpression` forms (a chain last operand) flips the
+/// negative row to a published value.
 #[test]
 fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
     let host = ts_host();
     // A resolved call surfaces through the sequence, clean and warm.
     assert_clean_warm(&host, CALLS, "callSeqRest", string_lit("rest"));
     assert_clean_warm(&host, CALLS, "callSeqNew", type_ref("CtorC"));
+    assert_clean_warm(&host, CALLS, "callSeqTagged", boolean());
     // An awaited call keeps its own modelled verdict through the
     // sequence: resolved operand, `Awaited` unwrap, async re-wrap.
     assert_clean_warm(
@@ -4280,10 +4269,8 @@ fn a_sequence_wrapped_call_keeps_the_calls_own_verdict() {
             type_arguments: Arc::from(vec![number()].into_boxed_slice()),
         },
     );
-    // Every form with no structural arm keeps failing closed.
-    for name in ["callSeqOptional", "callSeqTagged"] {
-        assert_fails_closed(&host, CALLS, name);
-    }
+    // A form with no structural arm keeps failing closed.
+    assert_fails_closed(&host, CALLS, "callSeqOptional");
 }
 
 /// The DISCRIMINATOR for the call-position rule: the forms that are NOT

@@ -47,8 +47,8 @@
 //! bare `any` with no carrier in it, so nothing fired and a
 //! fabricated `any` published warm and clean under a promise that a call
 //! with no structural arm fails closed. (A sequence whose value operand
-//! is a BARE call or `new` is not in that class: the content half's sequence arm
-//! routes it to the structural call rails —
+//! is a BARE call, `new` or tagged template is not in that class: the
+//! content half's sequence arm routes it to the structural call rails —
 //! [`sequence_value_takes_call_rail`].) Whether an expression is a call
 //! position is a property of the FORM, so it is decided here, where the
 //! form is.
@@ -100,10 +100,11 @@ pub enum ValueDescent<'a, 'ast> {
     /// half — only its evaluation effects are.
     Branches(&'a ConditionalExpression<'ast>),
     /// A CALL POSITION with no structural arm: this form's VALUE is
-    /// produced by a call the substrate does not model —
-    /// `new f()`, `` tag`…` ``, an optional call chain (`f?.()`), or a
-    /// sequence whose last operand is one of those (a sequence whose last
-    /// operand is a bare call or `new` routes to the call rails instead —
+    /// produced by a call the substrate does not model — an optional call
+    /// chain (`f?.()`), an assignment whose right-hand side is a call form
+    /// (`z = f()`), or a sequence whose last operand is one of those (a
+    /// sequence whose last operand is a bare call, `new` or tagged
+    /// template routes to the call rails instead —
     /// [`sequence_value_takes_call_rail`]; an awaited call is a modeled
     /// [`Self::Awaited`] form, not this one).
     ///
@@ -133,10 +134,11 @@ pub enum ValueDescent<'a, 'ast> {
     /// match — so the classifier and the content half's residual
     /// type-carrier check cannot disagree about a single form.
     ///
-    /// A bare [`Expression::CallExpression`] lands here too, and is
-    /// harmless in both halves: the content half owns six structural call
-    /// arms (direct, direct-self, on-binding, symbolic, IIFE,
-    /// local-function shadow) and takes them BEFORE it consults the
+    /// A bare [`Expression::CallExpression`], [`Expression::NewExpression`]
+    /// or [`Expression::TaggedTemplateExpression`] lands here too, and is
+    /// harmless in both halves: the content half owns structural arms for
+    /// all three (for a call: direct, direct-self, on-binding, symbolic,
+    /// IIFE, local-function shadow) and takes them BEFORE it consults the
     /// classifier, so a modeled call never reaches this verdict; and for
     /// the planner `UnmodeledCall` and `Leaf` are the same disposition.
     /// If those arms were ever removed, failing closed is the safe
@@ -407,9 +409,10 @@ pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str>
 /// Whether `operand` — a sequence's LAST operand, the one that provides
 /// the sequence's value — is a call form the content half's sequence arm
 /// routes to its structural call rails: a paren-transparent
-/// [`Expression::CallExpression`] or [`Expression::NewExpression`], or a
-/// nested sequence (recursively the same question, because a nested
-/// sequence's value is its own last operand).
+/// [`Expression::CallExpression`], [`Expression::NewExpression`] or
+/// [`Expression::TaggedTemplateExpression`], or a nested sequence
+/// (recursively the same question, because a nested sequence's value is
+/// its own last operand).
 ///
 /// The routed call then answers its OWN question through the call rails
 /// — a callee they cannot represent keeps the positional fail-closed
@@ -418,7 +421,7 @@ pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str>
 /// plain [`ValueDescent::Sequence`] (last operand provides the value,
 /// the discarded ones ride the effect obligations). Every OTHER last
 /// operand keeps the verdict [`value_is_unmodeled_call`]'s recursion
-/// already gave it (`` (0, tag`x`) `` still fails closed).
+/// already gave it (`(0, f?.())` still fails closed).
 ///
 /// ONE home, consumed by BOTH halves: the classifier's sequence arm
 /// decides its verdict through this predicate, and the content half's
@@ -430,7 +433,9 @@ pub fn sequence_value_takes_call_rail(expression: &Expression<'_>) -> bool {
         Expression::ParenthesizedExpression(paren) => {
             sequence_value_takes_call_rail(&paren.expression)
         }
-        Expression::CallExpression(_) | Expression::NewExpression(_) => true,
+        Expression::CallExpression(_)
+        | Expression::NewExpression(_)
+        | Expression::TaggedTemplateExpression(_) => true,
         Expression::SequenceExpression(sequence) => sequence
             .expressions
             .last()
@@ -551,7 +556,7 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
 ///
 /// The two predicates exist because the leaf lowering has two failure
 /// shapes. `value_is_unmodeled_call` catches the case where the WHOLE
-/// answer is the fabricated `any` (`` return tag`x` ``). This one catches
+/// answer is the fabricated `any` (`return f?.()`). This one catches
 /// the case where the fabricated `any` is NESTED inside an answer that
 /// otherwise looks modelled: `["s", new Box()]` answers
 /// `Array<string | any>`, which embeds no call-return carrier and is not

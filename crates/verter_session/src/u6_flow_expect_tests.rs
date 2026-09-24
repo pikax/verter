@@ -3400,12 +3400,13 @@ mod expectation_controls {
     }
 
     /// The degraded (`ReturnOnly`, cold-replay) control program — the
-    /// D12_helper_tagged shape. Shared by every control that needs a REAL
-    /// degraded trace.
-    const DEGRADED_SCRIPT: &str = "class Box { readonly tag = \"box\" }\n\
-                                   declare function box(strings: TemplateStringsArray): Box\n\
-                                   function makeProps() { \
-                                   const f = () => box`b`; return { label: \"x\", made: f() } \
+    /// D16_helper_undeclared_callee shape. Shared by every control that
+    /// needs a REAL degraded trace. `notDeclared` is declared nowhere, so
+    /// its call is TS2304 and the checker's error type is recovery the
+    /// flow-return lane does not model: `made` is an unmodelled position
+    /// by design.
+    const DEGRADED_SCRIPT: &str = "function makeProps() { \
+                                   const f = () => notDeclared(); return { label: \"x\", made: f() } \
                                    }";
 
     /// CONTROL — exact literal values, BOTH live variants: `"a"` accepts
@@ -4683,7 +4684,7 @@ mod expectation_controls {
             "a wrong degradation pin must fail EXACTLY the typed-degradation clause: {fails:?}"
         );
 
-        // Degraded program (the D12_helper_tagged shape): ReturnOnly, never warm.
+        // Degraded program (the D16_helper_undeclared_callee shape): ReturnOnly, never warm.
         let degraded =
             drive_expect_boundary("", "ctl_degraded", DEGRADED_SCRIPT, "makeProps", None);
         let degraded_json = degraded
@@ -4694,7 +4695,7 @@ mod expectation_controls {
         assert!(
             check_boundary(
                 &degraded_json,
-                Degr::UnmodeledPosition,
+                Degr::UnrepresentableCallee,
                 false,
                 &degraded.boundary
             )
@@ -4705,7 +4706,7 @@ mod expectation_controls {
         );
         let fails = check_boundary(
             &degraded_json,
-            Degr::UnmodeledPosition,
+            Degr::UnrepresentableCallee,
             true,
             &degraded.boundary,
         );
@@ -4750,7 +4751,12 @@ mod expectation_controls {
             second_error: None,
             second_error_kind: None,
         };
-        let fails = check_boundary(&degraded_json, Degr::UnmodeledPosition, false, &flagless);
+        let fails = check_boundary(
+            &degraded_json,
+            Degr::UnrepresentableCallee,
+            false,
+            &flagless,
+        );
         assert!(
             fails.len() == 1 && fails[0].contains("COLD-COMPUTE again"),
             "warm_replay=false with from_cache=false but ZERO cold computes must fail exactly \
@@ -4836,7 +4842,7 @@ mod expectation_controls {
         };
         let fails = check_boundary(
             &degraded_json,
-            Degr::UnmodeledPosition,
+            Degr::UnrepresentableCallee,
             false,
             &degr_drifted,
         );
@@ -5128,7 +5134,7 @@ mod expectation_controls {
         );
     }
 
-    /// CONTROL — the typed unmodelled-position marker: the D12_helper_tagged shape's
+    /// CONTROL — the typed unmodelled-position marker: the D16_helper_undeclared_callee shape's
     /// `made` member measures `Opaque(UnmodeledPosition)`; the pin matches
     /// it there and REJECTS a modelled member, so the variant is
     /// exercised and discriminating, not a dead vocabulary row.
@@ -5144,7 +5150,7 @@ mod expectation_controls {
                     &ExpectedNode::Object(&[("label", STR), ("made", OPAQUE)])
                 )
                 .is_empty(),
-                "the D12_helper_tagged shape must pin its unmodelled member with the TYPED marker \
+                "the D16_helper_undeclared_callee shape must pin its unmodelled member with the TYPED marker \
                      (measured {})",
                 render_node(dispatch, node, 0)
             );
@@ -5362,7 +5368,7 @@ mod expectation_controls {
         };
         let fails = check_boundary(
             &degraded_json,
-            Degr::UnmodeledPosition,
+            Degr::UnrepresentableCallee,
             true,
             &cold_but_flagless,
         );

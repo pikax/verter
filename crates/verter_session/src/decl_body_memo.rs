@@ -94,8 +94,9 @@ pub(crate) struct IndexedFlowCallExpression {
         Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
 }
 
-/// Lower one call (or `new`) through `lower` while collecting the read root
-/// of each of its `argument_count` arguments and of its receiver.
+/// Lower one call, `new` or tagged template through `lower` while
+/// collecting the read root of each of its `argument_count` arguments and
+/// of its receiver.
 ///
 /// Absence of an observer result stays distinct from an explicit
 /// `NonBinding` disposition: an argument or receiver the lowering did not
@@ -1481,19 +1482,21 @@ impl DeclBodyMemo {
         Some(Arc::new(node))
     }
 
-    /// Transient typed IR for one authored call or `new` expression,
-    /// re-read from the retained snapshot at `span`. The call's
+    /// Transient typed IR for one authored call, `new` expression or tagged
+    /// template, re-read from the retained snapshot at `span`. The call's
     /// served-function entry is found through the program index (a
     /// flow-selected call is inside a served function by construction); no
-    /// body `TypeExpr` is memo-owned. The lowered call's `kind` says which
-    /// form the span addressed.
+    /// body `TypeExpr` is memo-owned. The lowered call's `kind` says whether
+    /// it calls or constructs.
     pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
+        use verter_semantic::analysis::function_program::IndexedCallSite;
         use verter_semantic::analysis::type_eval_build::{
             lower_indexed_call_expression_with_read_roots,
             lower_indexed_new_expression_with_read_roots,
+            lower_indexed_tagged_template_expression_with_read_roots,
         };
         let service = self.service.as_ref()?;
         self.ensure_lease();
@@ -1502,17 +1505,25 @@ impl DeclBodyMemo {
             program.and_then(|parsed| {
                 let source = parsed.source_str();
                 parsed
-                    .with_indexed_call(span, |call| {
-                        observed_indexed_call(call.arguments.len(), |observe| {
-                            lower_indexed_call_expression_with_read_roots(call, source, observe)
-                        })
-                    })
-                    .or_else(|| {
-                        parsed.with_indexed_construct(span, |call| {
+                    .with_indexed_call_site(span, |site| match site {
+                        IndexedCallSite::Call(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_call_expression_with_read_roots(call, source, observe)
+                            })
+                        }
+                        IndexedCallSite::Construct(call) => {
                             observed_indexed_call(call.arguments.len(), |observe| {
                                 lower_indexed_new_expression_with_read_roots(call, source, observe)
                             })
-                        })
+                        }
+                        // The template strings are the first argument.
+                        IndexedCallSite::TaggedTemplate(tagged) => {
+                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
+                                lower_indexed_tagged_template_expression_with_read_roots(
+                                    tagged, source, observe,
+                                )
+                            })
+                        }
                     })
                     .flatten()
             })

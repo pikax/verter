@@ -4763,6 +4763,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ))
     }
 
+    /// The global `TemplateStringsArray` type — a tagged template's first
+    /// argument — read from `canonical`'s `owner` scope.
+    ///
+    /// The checker types the template strings with its GLOBAL type, so a
+    /// same-named declaration or import in the call's own scope does not
+    /// rename them. A scope that binds no such name resolves the bare
+    /// reference exactly like an authored reference to the global (the
+    /// program's global declaration, else the unresolved lib carrier every
+    /// reference in the scope shares); a scope that shadows it reads the
+    /// program's global declaration from its own file, and has no answer
+    /// when the program declares none.
+    pub(super) fn global_template_strings_array(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Option<SemanticNodeId> {
+        const NAME: &str = "TemplateStringsArray";
+        let reference = verter_type_expr::TypeExpr::Ref {
+            name: Arc::from(NAME),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                &bundle, owner,
+            )
+        });
+        let shadowed = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            canonical,
+            owner,
+            payload.as_ref(),
+            NAME,
+        )
+        .is_some();
+        let global;
+        let (scope_canonical, scope_owner) = if shadowed {
+            global = self.first_global_declaration(NAME)?;
+            (global.canonical_id.as_ref(), global.owner)
+        } else {
+            (canonical, owner)
+        };
+        self.lower_type_expr_in_owner_scope_with_mode(
+            scope_canonical,
+            scope_owner,
+            &reference,
+            crate::semantic_query::ProjectionMode::Navigate,
+        )
+    }
+
     /// Whether the TYPE declaration `name` in `canonical` is (one
     /// declaration of) a GLOBAL declaration: a `declare global` interface
     /// of a module that has no file-scope symbol of the name, or a

@@ -1088,6 +1088,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::request_context::mark_request_result_partial();
                 None
             }
+            IndexedValueExpression::TemplateStrings { .. } => {
+                self.global_template_strings_array(canonical, owner)
+            }
             IndexedValueExpression::Call(call) => {
                 let callee = self.evaluate_indexed_value_expression_node_inner(
                     canonical,
@@ -5731,8 +5734,11 @@ fn expression_write_tree(
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
             }
-            SliceExpr::Call(SliceCall::Construct(constructor), _) => {
-                walk(constructor, out);
+            SliceExpr::Call(
+                SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee),
+                _,
+            ) => {
+                walk(callee, out);
             }
             _ => {}
         }
@@ -15783,6 +15789,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
                 self.eval_call_via_resolve_call(constructor, site)
                     .unwrap_or_else(|| self.degraded_unrepresentable_callee())
+            }
+            crate::flow_slice_content::SliceCall::TaggedTemplate(tag) => {
+                // `` tag`a${x}b` `` — the checker's
+                // `resolveTaggedTemplateExpression`: a call of the tag whose
+                // first argument is the template strings. It takes the
+                // routes an ordinary call over a resolved callee takes: an
+                // overloaded or inference-bearing tag resolves through the
+                // executor, a lone signature through the one call sink.
+                let tag = match self.eval_expr(tag) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                if self.call_group_needs_executor(tag, site) {
+                    let overloaded = matches!(
+                        self.dispatch.shared_signature_buckets(tag),
+                        Ok((call_sigs, construct_sigs))
+                            if call_sigs.len() + construct_sigs.len() > 1
+                    );
+                    if let Some(value) = self.eval_call_via_resolve_call(tag, site) {
+                        return value;
+                    }
+                    if overloaded {
+                        return self.degraded_unrepresentable_callee();
+                    }
+                }
+                self.call_return_of_callee_node(tag, site)
             }
         }
     }

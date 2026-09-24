@@ -2865,19 +2865,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         let graph = self.graph();
         for (param, bound) in substitution.bindings() {
-            if !matches!(
-                graph.node_data(*bound).as_deref(),
-                Some(SemanticNodeData::Literal(_))
-            ) {
+            // A bound is one candidate, or several combined into a union
+            // (the arguments of a rest parameter): every fresh literal
+            // candidate stays fresh.
+            let candidates: Vec<SemanticNodeId> = match graph.node_data(*bound).as_deref() {
+                Some(SemanticNodeData::Literal(_)) => vec![*bound],
+                Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                _ => continue,
+            };
+            if !self.deposit_at_union_top_level(structure, *param) {
                 continue;
             }
-            if !self.binding_is_fresh_literal_deposit(session_id, *param, *bound) {
-                continue;
-            }
-            if self.deposit_at_union_top_level(structure, *param)
-                && !fresh_literal_returns.contains(bound)
-            {
-                fresh_literal_returns.push(*bound);
+            for candidate in candidates {
+                if matches!(
+                    graph.node_data(candidate).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                ) && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
+                    && !fresh_literal_returns.contains(&candidate)
+                {
+                    fresh_literal_returns.push(candidate);
+                }
             }
         }
     }
@@ -2953,12 +2960,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .bindings()
             .iter()
             .map(|(param, bound)| {
-                let widened = match graph.node_data(*bound).as_deref() {
+                // One candidate widens when it is a fresh literal deposit.
+                let widen_fresh = |candidate: SemanticNodeId| match graph
+                    .node_data(candidate)
+                    .as_deref()
+                {
                     Some(SemanticNodeData::Literal(value))
-                        if self.binding_is_fresh_literal_deposit(session_id, *param, *bound)
-                            && !return_structure.is_some_and(|structure| {
-                                self.deposit_at_top_level(structure, *param)
-                            }) =>
+                        if self.binding_is_fresh_literal_deposit(session_id, *param, candidate) =>
                     {
                         let primitive = match value {
                             verter_type_expr::LiteralValue::String(_) => PrimitiveKind::String,
@@ -2967,6 +2975,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             verter_type_expr::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
                         };
                         graph.intern_node(SemanticNodeData::Primitive(primitive))
+                    }
+                    _ => candidate,
+                };
+                let kept = return_structure
+                    .is_some_and(|structure| self.deposit_at_top_level(structure, *param));
+                let widened = match graph.node_data(*bound).as_deref() {
+                    _ if kept => *bound,
+                    Some(SemanticNodeData::Literal(_)) => widen_fresh(*bound),
+                    // Several candidates combined into a union (the
+                    // arguments of a rest parameter): each fresh arm
+                    // widens, then the arms combine again.
+                    Some(SemanticNodeData::Union(members)) => {
+                        let arms: Vec<SemanticNodeId> =
+                            members.iter().map(|arm| widen_fresh(*arm)).collect();
+                        if arms
+                            .iter()
+                            .zip(members.iter())
+                            .any(|(arm, member)| arm != member)
+                        {
+                            self.relation_combine_candidates(&arms, VariancePhase::Covariant)
+                        } else {
+                            *bound
+                        }
                     }
                     _ => *bound,
                 };

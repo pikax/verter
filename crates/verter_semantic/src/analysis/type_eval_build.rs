@@ -82,7 +82,8 @@ pub enum IndexedCallReadSite {
 pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
     match expression {
         IndexedValueExpression::Value(_) => {}
-        IndexedValueExpression::UnsupportedCall { point } => *point = point.saturating_add(base),
+        IndexedValueExpression::UnsupportedCall { point }
+        | IndexedValueExpression::TemplateStrings { point } => *point = point.saturating_add(base),
         IndexedValueExpression::Call(call) => {
             call.point = call.point.saturating_add(base);
             offset_indexed_value_expression(&mut call.callee, base);
@@ -6164,10 +6165,10 @@ fn lower_value_expression_with_read_root(
 
 /// Lower an already-parsed value expression into indexed typed IR.
 ///
-/// Direct calls and constructs are explicit records. A call-free expression
-/// keeps the established value-inference result. A compound that contains a
-/// call but is not itself a direct call fails typed — value-expression
-/// inference carries no call authority at all.
+/// Direct calls, constructs and tagged templates are explicit records. A
+/// call-free expression keeps the established value-inference result. A
+/// compound that contains a call but is not itself a direct call fails
+/// typed — value-expression inference carries no call authority at all.
 pub fn lower_indexed_value_expression(
     expr: &Expression<'_>,
     source: &str,
@@ -6209,6 +6210,9 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
         }
         Expression::NewExpression(call) => {
             IndexedValueExpression::Call(lower_indexed_new_expression(call, source))
+        }
+        Expression::TaggedTemplateExpression(tagged) => {
+            IndexedValueExpression::Call(lower_indexed_tagged_template_expression(tagged, source))
         }
         Expression::FunctionExpression(function) => {
             let signature = extract_function_signature(function, source);
@@ -6401,6 +6405,72 @@ fn lower_indexed_new_expression_observed(
     }
 }
 
+fn lower_indexed_tagged_template_expression(
+    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    source: &str,
+) -> IndexedValueCall {
+    lower_indexed_tagged_template_expression_observed(tagged, source, None)
+}
+
+/// The tagged-template twin of
+/// [`lower_indexed_call_expression_with_read_roots`]: `` tag`a${x}b` `` is
+/// a call of `tag` whose first argument is the template strings (a
+/// non-binding read) and whose remaining arguments are the substitutions,
+/// in order. Every ordinal and the tag's receiver are reported exactly as
+/// a call's are.
+pub fn lower_indexed_tagged_template_expression_with_read_roots(
+    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    source: &str,
+    observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+) -> IndexedValueCall {
+    lower_indexed_tagged_template_expression_observed(tagged, source, Some(observe))
+}
+
+fn lower_indexed_tagged_template_expression_observed(
+    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    source: &str,
+    mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCall {
+    let (callee, receiver) = indexed_callee_and_receiver(&tagged.tag, source, &mut observe);
+    let mut args = Vec::with_capacity(tagged.quasi.expressions.len() + 1);
+    if let Some(observe) = observe.as_mut() {
+        observe(
+            IndexedCallReadSite::Argument(0),
+            IndexedValueReadRoot::NonBinding,
+        );
+    }
+    args.push(IndexedValueCallArg {
+        expression: IndexedValueExpression::TemplateStrings {
+            point: tagged.quasi.span.start,
+        },
+        point: tagged.quasi.span.start,
+        spread: false,
+        literal_mode: IndexedValueLiteralMode::Literal,
+        context_sensitive: false,
+        function_return_source: None,
+    });
+    for (index, expression) in tagged.quasi.expressions.iter().enumerate() {
+        args.push(lower_indexed_call_argument(
+            expression,
+            false,
+            index + 1,
+            source,
+            &mut observe,
+        ));
+    }
+    IndexedValueCall {
+        point: tagged.span.start,
+        kind: IndexedValueCallKind::Call,
+        callee: Box::new(callee),
+        receiver,
+        args: Arc::from(args.into_boxed_slice()),
+        explicit_type_args: lower_indexed_explicit_type_arguments(
+            tagged.type_arguments.as_deref(),
+            source,
+        ),
+    }
+}
+
 /// The argument list of one call or `new` expression, each ordinal
 /// (including a spread) reported to `observe` exactly once.
 fn lower_indexed_call_arguments(
@@ -6411,51 +6481,48 @@ fn lower_indexed_call_arguments(
     let args = arguments
         .iter()
         .enumerate()
-        .map(|(ordinal, argument)| {
-            let mut read_root = IndexedValueReadRoot::NonBinding;
-            let (expression, point, spread, literal_mode, context_sensitive) = match argument {
-                oxc_ast::ast::Argument::SpreadElement(spread) => (
-                    lower_indexed_value_expression_with_policy_and_read_root(
-                        &spread.argument,
-                        source,
-                        MemberLiteralPolicy::Argument,
-                        observe.as_ref().map(|_| &mut read_root),
-                    ),
-                    spread.argument.span().start,
-                    true,
-                    indexed_literal_mode(Some(&spread.argument)),
-                    indexed_context_sensitive(Some(&spread.argument)),
-                ),
-                argument => {
-                    let expression = argument.to_expression();
-                    (
-                        lower_indexed_value_expression_with_policy_and_read_root(
-                            expression,
-                            source,
-                            MemberLiteralPolicy::Argument,
-                            observe.as_ref().map(|_| &mut read_root),
-                        ),
-                        expression.span().start,
-                        false,
-                        indexed_literal_mode(Some(expression)),
-                        indexed_context_sensitive(Some(expression)),
-                    )
-                }
-            };
-            if let Some(observe) = observe.as_mut() {
-                observe(IndexedCallReadSite::Argument(ordinal), read_root);
+        .map(|(ordinal, argument)| match argument {
+            oxc_ast::ast::Argument::SpreadElement(spread) => {
+                lower_indexed_call_argument(&spread.argument, true, ordinal, source, &mut observe)
             }
-            IndexedValueCallArg {
-                expression,
-                point,
-                spread,
-                literal_mode,
-                context_sensitive,
-                function_return_source: None,
-            }
+            argument => lower_indexed_call_argument(
+                argument.to_expression(),
+                false,
+                ordinal,
+                source,
+                &mut observe,
+            ),
         })
         .collect::<Vec<_>>();
     Arc::from(args.into_boxed_slice())
+}
+
+/// One argument position, reported to `observe` at `ordinal` exactly once.
+fn lower_indexed_call_argument(
+    expression: &Expression<'_>,
+    spread: bool,
+    ordinal: usize,
+    source: &str,
+    observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCallArg {
+    let mut read_root = IndexedValueReadRoot::NonBinding;
+    let lowered = lower_indexed_value_expression_with_policy_and_read_root(
+        expression,
+        source,
+        MemberLiteralPolicy::Argument,
+        observe.as_ref().map(|_| &mut read_root),
+    );
+    if let Some(observe) = observe.as_mut() {
+        observe(IndexedCallReadSite::Argument(ordinal), read_root);
+    }
+    IndexedValueCallArg {
+        expression: lowered,
+        point: expression.span().start,
+        spread,
+        literal_mode: indexed_literal_mode(Some(expression)),
+        context_sensitive: indexed_context_sensitive(Some(expression)),
+        function_return_source: None,
+    }
 }
 
 fn lower_indexed_explicit_type_arguments(
@@ -6507,6 +6574,14 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
             self.0 = true;
         }
 
+        // A tagged template CALLS its tag: its type is the tag's return.
+        fn visit_tagged_template_expression(
+            &mut self,
+            _tagged: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+        ) {
+            self.0 = true;
+        }
+
         fn visit_function(
             &mut self,
             _function: &oxc_ast::ast::Function<'a>,
@@ -6522,10 +6597,7 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
 
         // A template literal is `string` whatever its interpolations
         // evaluate to (an EMPTY one is its own string literal), so an
-        // interpolated call contributes nothing to the answer. A TAGGED
-        // template's type comes from the tag's signature instead, and this
-        // lowering carries no arm for it at all — it answers `any`, the
-        // unrepresentable carrier, before this probe is consulted.
+        // interpolated call contributes nothing to the answer.
         fn visit_template_literal(&mut self, _template: &oxc_ast::ast::TemplateLiteral<'a>) {}
     }
 

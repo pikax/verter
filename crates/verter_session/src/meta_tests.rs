@@ -2144,12 +2144,14 @@ import { obj } from './obj'
 /// unmodelled one, reports partial, and warms NOTHING.
 ///
 /// `defineProps<ReturnType<typeof makeProps>>()` over
-/// `` { label: "x", made: box`b` } ``. The substrate has no arm for the
-/// tagged template `` box`b` ``, but `label` is fully known,
-/// and a props surface is a COMPOSITE: routing one unmodelled member to a
-/// whole-frame failure published `[]`, complete and warm, where the
-/// checker publishes `{ label: string; made: Box }`. A wrong value at a
-/// public boundary, entering `ComponentMetaResultDb`.
+/// `{ label: "x", made: notDeclared() }`. `notDeclared` is declared
+/// nowhere, so the call is TS2304 and the checker types it with its error
+/// type — recovery for a program that does not type-check, which the
+/// flow-return lane does not model. But `label` is fully known, and a props
+/// surface is a COMPOSITE: routing one unmodelled member to a whole-frame
+/// failure published `[]`, complete and warm, where the checker publishes
+/// `{ label: string; made: any }`. A wrong value at a public boundary,
+/// entering `ComponentMetaResultDb`.
 ///
 /// Four independent assertions, because three of them pass on the wrong
 /// implementation:
@@ -2164,7 +2166,7 @@ import { obj } from './obj'
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `ReturnType<typeof makeProps>` is
-/// `{ label: string; made: Box }`.
+/// `{ label: string; made: any }`, with TS2304 at the call.
 ///
 /// Mutation recipe: restoring the whole-frame `Err` for a positional
 /// non-modelling drops BOTH props and assertion 1 fails (verbatim: "the
@@ -2317,8 +2319,8 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
         ),
         (
             "/src/U1HelperBare.vue",
-            "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
-            "{ label: string; made: Box }",
+            "function makeProps() { const f = () => notDeclared(); return { label: \"x\", made: f() } }",
+            "{ label: string; made: any } (TS2304: `notDeclared` is declared nowhere)",
         ),
         (
             "/src/U1HelperArray.vue",
@@ -3076,6 +3078,10 @@ defineProps<P>()
     );
 }
 
+/// `notDeclared` is declared nowhere, so `made`'s call is TS2304: the
+/// checker's error type is recovery for a program that does not type-check,
+/// which the flow-return lane does not model — an unmodelled position by
+/// design.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
@@ -3086,10 +3092,8 @@ fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
         .upsert_base(
             "/src/C1.vue",
             r#"<script setup lang="ts">
-class Box { readonly tag = "box" }
-declare function box(strings: TemplateStringsArray): Box
 function makeProps() {
-  return { label: "x", made: box`b` }
+  return { label: "x", made: notDeclared() }
 }
 defineProps<ReturnType<typeof makeProps>>()
 </script>
@@ -3314,7 +3318,9 @@ fn render_runtime_macro(
 /// is a runtime behaviour change, not a cosmetic one.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
-/// `ReturnType<typeof makeProps>` is `{ label: string; made: Box }`.
+/// `ReturnType<typeof makeProps>` is `{ label: string; made: any }`, with
+/// TS2304 at `notDeclared()` — a name declared nowhere, whose error type
+/// the flow-return lane does not model.
 ///
 /// Discrimination: restoring the short-circuit fails the `label: { type:
 /// String` assertion; publishing a fabricated constructor for the unmodelled
@@ -3324,7 +3330,7 @@ fn render_runtime_macro(
 fn runtime_props_derive_each_member_from_that_members_own_evidence() {
     let RenderedRuntime::Props(props) = render_runtime_props(
         "/src/R1Helper.vue",
-        "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
+        "function makeProps() { const f = () => notDeclared(); return { label: \"x\", made: f() } }",
     ) else {
         panic!(
             "a FAITHFUL degraded surface (marker at one position, every sibling exact) has a \
@@ -3362,16 +3368,18 @@ fn runtime_props_derive_each_member_from_that_members_own_evidence() {
 /// Two families reach the root: a NO-VALUE outcome (`R2Loop`: a
 /// return-bearing loop the substrate does not model) and an object literal
 /// whose SPREAD SOURCE the substrate cannot type — directly
-/// (`S5TaggedSpread`) or one call away (`S6MarkerSpread`, whose callee's own
-/// frame is what cannot type its return). An unknown source makes the
-/// literal's KEY SET unknown, and an object surface has no way to say
-/// "and an unknown number of further keys". tsgo types both as
-/// `{ label: …; n: number }`, so publishing `{ n }` alone would be a
-/// surface missing a declared prop — not a conservative answer.
+/// (`S5UndeclaredSpread`) or one call away (`S6MarkerSpread`, whose
+/// callee's own frame is what cannot type its return). Both sources call
+/// `notDeclared`, a name declared nowhere (TS2304), whose error type is
+/// recovery the flow-return lane does not model. An unknown source makes
+/// the literal's KEY SET unknown, and an object surface has no way to say
+/// "and an unknown number of further keys". tsgo types both as `any` — the
+/// spread of its error type — so there is no key set to publish, and
+/// `{ n }` alone would declare one.
 ///
-/// `S5TaggedSpread` is the row that discriminates the evaluator's spread
-/// fail-closed rail: dropping an unevaluable spread source instead of
-/// failing the literal closed publishes `props: { n: { type: Number } }`
+/// `S5UndeclaredSpread` is the row that discriminates the evaluator's
+/// spread fail-closed rail: dropping an unevaluable spread source instead
+/// of failing the literal closed publishes `props: { n: { type: Number } }`
 /// for it. `S6MarkerSpread` reaches the same verdict one rail earlier
 /// (the callee's frame failure propagates) and is coverage for that
 /// authored shape rather than a second discriminator for the same arm.
@@ -3401,18 +3409,18 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
             "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
         ),
         (
-            "/src/S5TaggedSpread.vue",
-            "class Box { readonly label = \"x\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { return { ...box`b`, n: 1 } }",
+            "/src/S5UndeclaredSpread.vue",
+            "function makeProps() { return { ...notDeclared(), n: 1 } }",
         ),
         // The same fact one CALL away — the spread source is a modelled
         // direct call whose own frame is the one that cannot type its
-        // return. It exercises a different rail from S5 (which the
-        // content half refuses at the classifier) and reaches the same
-        // verdict: publishing `{ n }` here would declare a props surface
-        // missing `label`.
+        // return. It exercises a different rail from S5 (whose spread
+        // source is the unresolvable call itself) and reaches the same
+        // verdict: publishing `{ n }` here would declare a key set the
+        // checker does not have.
         (
             "/src/S6MarkerSpread.vue",
-            "class Box { readonly label = \"x\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction base() { return box`b` }\nfunction makeProps() { return { ...base(), n: 1 } }",
+            "function base() { return notDeclared() }\nfunction makeProps() { return { ...base(), n: 1 } }",
         ),
     ];
 
@@ -3609,7 +3617,10 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// every row's `ReturnType<typeof makeProps>` is an ordinary object type, so
-/// the emitted TSX type-checks in all five cases.
+/// the emitted TSX type-checks in four cases; `R1Helper` calls `notDeclared`,
+/// a name declared nowhere, so its TSX carries exactly that TS2304 and types
+/// `made` as the checker's error type — the unmodelled position the
+/// flow-return lane leaves to the checker by design.
 ///
 /// Discrimination: making the TSX lane fault on any flow-return class fails
 /// the row for that class — `R1Helper` for the uninferred class, `R4Write` for
@@ -3624,7 +3635,7 @@ fn the_tsx_lane_emits_for_every_flow_return_degradation_class() {
         // A FAITHFUL degraded surface — a marker at one interior position.
         (
             "/src/R1Helper.vue",
-            "class Box { readonly tag = \"box\" }\ndeclare function box(strings: TemplateStringsArray): Box\nfunction makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
+            "function makeProps() { const f = () => notDeclared(); return { label: \"x\", made: f() } }",
         ),
         // A NO-VALUE outcome.
         (
@@ -34559,13 +34570,13 @@ fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
     /// `(canonical, script, macro call, option key, needles)` — a composed
     /// surface whose flow arm degraded FAITHFULLY (a marker at one position,
     /// every sibling exact) still has a complete member set, so it must
-    /// publish it.
+    /// publish it. The marker is the call of `notDeclared`, a name declared
+    /// nowhere (TS2304), whose error type the flow-return lane does not
+    /// model.
     const PUBLISHES: &[(&str, &str, &str, &str, &[&str])] = &[
         (
             "/src/X5FaithfulInter.vue",
-            "class Box { readonly tag = \"box\" }\n\
-             declare function box(strings: TemplateStringsArray): Box\n\
-             function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }",
+            "function makeProps() { const f = () => notDeclared(); return { label: \"x\", made: f() } }",
             "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
             "props: ",
             &[
@@ -34691,18 +34702,22 @@ fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
 ///
 /// A spread source the evaluator cannot produce a surface for is a fact
 /// about the literal's KEY SET, so the literal fails closed and the emits
-/// projection has no member set. The previous implementation published
-/// `["evB"]` for this program — silently dropping `evA`, which routes every
-/// `@evA` listener to `$attrs` instead of the declared emit. Refusing is the
-/// block's deliberate trade and it needs a landed assertion of its own: the
+/// projection has no member set. Publishing `["evB"]` would declare an
+/// event set the source's unknown keys can extend — an `evA` event it
+/// carries routes every `@evA` listener to `$attrs` instead of the declared
+/// emit. Refusing is the block's deliberate trade and it needs a landed
+/// assertion of its own: the
 /// props side is pinned by
 /// `a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props`,
 /// and nothing pinned the emits side.
 ///
+/// The spread source calls `notDeclared`, a name declared nowhere (TS2304),
+/// whose error type is recovery the flow-return lane does not model.
+///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
-/// `ReturnType<typeof makeEmits>` is `{ evA: (p: string) => boolean; evB:
-/// (n: number) => boolean }`, so `["evB"]` is a member-missing surface
-/// rather than a conservative one.
+/// `ReturnType<typeof makeEmits>` is `any` — the spread of the call's error
+/// type — so there is no event set to publish, and `["evB"]` would declare
+/// one.
 ///
 /// Discrimination: publishing `["evB"]` again fails the `Refused` match;
 /// the control row (a MODELLED spread source) fails under a blanket
@@ -34711,14 +34726,12 @@ fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
 #[test]
 fn an_unevaluable_emits_spread_source_refuses_rather_than_dropping_the_event() {
     match render_runtime_emits(
-        "/src/E3TaggedSpread.vue",
-        "class Box { readonly evA = (p: string) => true }\n\
-         declare function box(strings: TemplateStringsArray): Box\n\
-         function makeEmits() { return { ...box`b`, evB: (n: number) => true } }",
+        "/src/E3UndeclaredSpread.vue",
+        "function makeEmits() { return { ...notDeclared(), evB: (n: number) => true } }",
     ) {
         RenderedRuntime::Refused => {}
         RenderedRuntime::Props(emitted) => panic!(
-            "/src/E3TaggedSpread.vue: the spread source has no evaluable surface, so the event \
+            "/src/E3UndeclaredSpread.vue: the spread source has no evaluable surface, so the event \
              set is incomplete — publishing `{emitted}` drops `evA` and routes its listeners \
              to `$attrs`"
         ),

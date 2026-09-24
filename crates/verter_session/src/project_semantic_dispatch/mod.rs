@@ -141,6 +141,8 @@ mod flow_return_products;
 #[cfg(test)]
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
+mod flow_return_tagged_template_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_tests;
 #[cfg(test)]
 mod flow_return_type_argument_default_tests;
