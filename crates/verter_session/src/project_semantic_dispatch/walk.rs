@@ -2985,6 +2985,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = expanded;
                 }
+                // A declaration's self-reference inside its own body
+                // (`interface Chain { next: Chain }` — the `Chain` of
+                // `next`) is the application it records: continue the walk
+                // from that carrier, exactly as from the same reference
+                // written anywhere else. One that names no addressable
+                // application keeps the terminal miss.
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => {
+                    drop(data);
+                    match self.dispatch.self_reference_declaration(current) {
+                        Some(carrier) => current = carrier,
+                        None => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
                 // D26 lazy carriers.
                 // DeclRef in any mode resolves through ResolveDecl
                 // ("aliases follow") — Navigate is lazy at the lowering
@@ -3303,6 +3319,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     results.push(self.opaque_miss());
                     return;
                 }
+            }
+        }
+        // A projected member that is its declaration's self-reference
+        // (`Chain['next']`) is the application it records, under every
+        // mode — the terminal rules below then treat it like any other
+        // declaration carrier.
+        if self.original_path_non_empty {
+            if let Some(carrier) = self.dispatch.self_reference_declaration(current) {
+                current = carrier;
             }
         }
         // For `mode: Expanded` with empty path, expand terminal

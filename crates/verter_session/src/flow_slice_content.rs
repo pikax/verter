@@ -73,10 +73,10 @@ use crate::flow_completion_inventory::{
 };
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    object_entry_descent, sequence_value_takes_await_arm, sequence_value_takes_call_rail,
-    value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton, NameMeaning,
-    ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, SkeletonBindingId, SkeletonBindingKind,
-    SkeletonPathSegment, ValueDescent,
+    array_element_descent, object_entry_descent, sequence_value_takes_await_arm,
+    sequence_value_takes_call_rail, value_descent, ArrayElementDescent, FlowBindingRef, FrameSpan,
+    FunctionBodySkeleton, NameMeaning, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind,
+    SkeletonBindingId, SkeletonBindingKind, SkeletonPathSegment, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, FunctionControlRegion, FunctionDescentStep,
@@ -871,7 +871,7 @@ impl GatedLeaf {
 /// One expression of the slice content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceExpr {
-    /// A fully lowered leaf: literals, arrays, object literals this half
+    /// A fully lowered leaf: literals, `as const` arrays, object literals this half
     /// cannot lower structurally (spread members in one of those ride as
     /// `ObjectMember::Spread`, for the shared object-spread projection),
     /// templates, `typeof` paths, `as` / `satisfies` / parenthesized
@@ -963,6 +963,18 @@ pub enum SliceExpr {
         /// The entries in source order — construction order is meaning
         /// (a later entry overrides what an earlier one provisioned).
         entries: Arc<[SliceObjectEntry]>,
+    },
+    /// An array-literal value evaluated STRUCTURALLY: every element is a
+    /// flow expression (parameter / local references substitute, an
+    /// `await` unwraps, a call rides the one call sink), and the element
+    /// type is the union of the element values. A fresh literal element
+    /// widens exactly as an object member's does (the element slot is
+    /// mutable). An `as const` literal, and an empty one initializing a
+    /// binding (the checker's evolving array), keep the whole-literal leaf
+    /// lowering.
+    Array {
+        /// The elements in source order.
+        elements: Arc<[SliceArrayElement]>,
     },
     /// A nested function VALUE (a function / arrow expression or an
     /// object-literal method in any expression position): its parameters
@@ -1513,6 +1525,19 @@ pub enum SliceObjectEntry {
         /// The spread source's lowered value.
         source: Box<SliceExpr>,
     },
+}
+
+/// One ELEMENT of a structurally lowered array literal, in authored order
+/// — the three dispositions
+/// `verter_semantic::analysis::flow::array_element_descent` assigns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceArrayElement {
+    /// A plain element's lowered value.
+    Value(SliceExpr),
+    /// A SPREAD (`...source`): the source's iterated element type.
+    Spread(SliceExpr),
+    /// A hole (`[1, , 2]`): an `undefined` element.
+    Hole,
 }
 
 /// How one structurally lowered object-literal member NAMES its key.
@@ -2725,6 +2750,39 @@ fn pure_optional_member_root_identifier<'a>(
 /// wrappers. A const assertion (`1 as const`), a type assertion
 /// (`1 as 1`), or any other expression shape is NOT bare — its literal is
 /// pinned or derived, never widening.
+/// Widen the fresh literals of one lowered MUTABLE-SLOT value — an object
+/// literal's data member or an array literal's element — to their
+/// primitives: tsc's widening of a fresh literal at a mutable position.
+///
+/// The widening reaches INTO a branch join: a ternary's fresh literal arm
+/// is the slot's fresh literal, and tsc widens it exactly like a direct
+/// literal. A narrowed reference arm is NOT fresh (the checker's own
+/// early-return-guard shapes keep their literal unions), so only leaf arms
+/// widen here.
+fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
+    let widen_leaf = |leaf: GatedLeaf| {
+        SliceExpr::Type(
+            leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
+        )
+    };
+    match value {
+        SliceExpr::Type(leaf) => widen_leaf(leaf),
+        SliceExpr::Union { arms, guard } => SliceExpr::Union {
+            arms: Arc::from(
+                arms.iter()
+                    .map(|arm| match arm {
+                        SliceExpr::Type(leaf) => widen_leaf(leaf.clone()),
+                        other => other.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            guard,
+        },
+        other => other,
+    }
+}
+
 fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
     match unwrap_freshness_transparent(expression) {
         Expression::StringLiteral(_)
@@ -7663,6 +7721,7 @@ impl Lowerer<'_> {
                         mode,
                         ObjectMemberPolicy::Widen,
                     ),
+                    ValueDescent::Array(array) => self.lower_array_literal(array, other, mode),
                     // A CONDITIONAL's value is the union of its branch
                     // values, and each branch is lowered as a flow
                     // expression — so a call in a branch rides
@@ -8065,32 +8124,10 @@ impl Lowerer<'_> {
                 );
             let value = self.lower_expr(value_expression, mode);
             let assignment_value = value.clone();
-            let value = match (widen_member, value) {
-                (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
-                    leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
-                ),
-                // The member slot's widening reaches INTO a branch join:
-                // a ternary member's fresh literal arm is the member's
-                // fresh literal, and tsc widens it at the property
-                // exactly like a direct literal member. A narrowed
-                // reference arm is NOT fresh (the checker's own
-                // early-return-guard shapes keep their literal unions),
-                // so only leaf arms widen here.
-                (true, SliceExpr::Union { arms, guard }) => SliceExpr::Union {
-                    arms: Arc::from(
-                        arms.iter()
-                            .map(|arm| match arm {
-                                SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
-                                    verter_semantic::analysis::type_eval_build::widen_shallow_literal,
-                                )),
-                                other => other.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
-                    guard,
-                },
-                (_, value) => value,
+            let value = if widen_member {
+                widen_mutable_slot_literals(value)
+            } else {
+                value
             };
             let assignment_value = (assignment_value != value).then_some(assignment_value);
             entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
@@ -8108,6 +8145,89 @@ impl Lowerer<'_> {
             }
         } else {
             self.lower_leaf(whole, mode)
+        }
+    }
+
+    /// Lower an array literal STRUCTURALLY — see [`SliceExpr::Array`]. Each
+    /// element takes the per-element disposition of the ONE shared element
+    /// classifier the planner also opened its sites by; an element outside
+    /// the demand selection rides the typed `Elided` carrier, exactly like
+    /// an object member value.
+    fn lower_array_literal(
+        &mut self,
+        array: &oxc_ast::ast::ArrayExpression<'_>,
+        whole: &Expression<'_>,
+        mode: ExprMode,
+    ) -> SliceExpr {
+        // `const a = []` / `let a = []` is the checker's EVOLVING array
+        // (auto-typed `any[]` under `noImplicitAny`), a binding rule the
+        // leaf lowering already answers; `[]` anywhere else is `never[]`.
+        if array.elements.is_empty() && matches!(mode, ExprMode::BindingInit { .. }) {
+            return self.lower_leaf(whole, mode);
+        }
+        // `strictNullChecks` off: the element type unions under the loose
+        // algebra, which erases a nullable element beside any other, and a
+        // literal of ONLY bare `null` / `undefined` / `void` elements and
+        // holes is the widening nullable type, which widens to `any` (tsc
+        // 7.0.2 `--strict false`: `[null]` and `[, ,]` are `any[]`,
+        // `[null, 1]` is `number[]`).
+        let widening_nullish_only = !self.nullability.is_strict()
+            && !array.elements.is_empty()
+            && array
+                .elements
+                .iter()
+                .all(|element| match array_element_descent(element) {
+                    ArrayElementDescent::Value(value) => expr_is_widening_nullish(value),
+                    ArrayElementDescent::Hole => true,
+                    ArrayElementDescent::Spread(_) => false,
+                });
+        let mut elements = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let (value, spread) = match array_element_descent(element) {
+                ArrayElementDescent::Value(value) => (value, false),
+                ArrayElementDescent::Spread(source) => (source, true),
+                ArrayElementDescent::Hole => {
+                    elements.push(if widening_nullish_only {
+                        SliceArrayElement::Value(SliceExpr::SemanticAny)
+                    } else {
+                        SliceArrayElement::Hole
+                    });
+                    continue;
+                }
+            };
+            let lowered = if !self.value_span_selected(value.span()) {
+                self.scan_unmodeled_position_effects(value);
+                SliceExpr::Elided
+            } else if widening_nullish_only {
+                self.scan_unmodeled_position_effects(value);
+                SliceExpr::SemanticAny
+            } else if spread {
+                // A spread source's own elements already widened where it
+                // was built; its iterated type is what enters here.
+                self.lower_expr(value, mode)
+            } else {
+                // An element's fresh literal widens to its primitive, as an
+                // object member's does, unless the element itself is a
+                // const assertion.
+                let widen = !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                    value,
+                    self.source,
+                );
+                let lowered = self.lower_expr(value, mode);
+                if widen {
+                    widen_mutable_slot_literals(lowered)
+                } else {
+                    lowered
+                }
+            };
+            elements.push(if spread {
+                SliceArrayElement::Spread(lowered)
+            } else {
+                SliceArrayElement::Value(lowered)
+            });
+        }
+        SliceExpr::Array {
+            elements: Arc::from(elements.into_boxed_slice()),
         }
     }
 

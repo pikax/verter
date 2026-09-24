@@ -32,10 +32,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_no_typeexpr::NoTypeExpr;
 
 use super::{
-    FlowBindingRef, FlowNameId, FlowReadKind, FunctionBodySkeleton, SkeletonBindingId,
-    SkeletonExprShape, SkeletonExprSiteId, SkeletonObjectEntry, SkeletonObjectKey,
-    SkeletonPathSegment, SkeletonRegionId, SkeletonReturnSiteId, SkeletonWriteCertainty,
-    SkeletonWriteTarget,
+    FlowBindingRef, FlowNameId, FlowReadKind, FunctionBodySkeleton, SkeletonArrayElement,
+    SkeletonBindingId, SkeletonExprShape, SkeletonExprSiteId, SkeletonObjectEntry,
+    SkeletonObjectKey, SkeletonPathSegment, SkeletonRegionId, SkeletonReturnSiteId,
+    SkeletonWriteCertainty, SkeletonWriteTarget,
 };
 
 #[cfg(test)]
@@ -140,6 +140,9 @@ pub enum FlowEdgeKind {
 pub enum PathWriteSource {
     /// Entries in one object literal execute in authored order.
     ObjectLiteralEntry,
+    /// An array literal's element writes the element type at an unknown
+    /// index; no element overrides another.
+    ArrayLiteralElement,
     /// A runtime assignment remains a candidate until control flow executes it.
     Assignment,
 }
@@ -589,6 +592,32 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                             ));
                         }
                     }
+                }
+            }
+            // An array literal's elements write the element type under an
+            // UNKNOWN index: a whole-value demand selects every element,
+            // and a projected demand reaches each element both consuming
+            // its head (an index) and unshifted (a member of the array
+            // itself) — never fewer elements than the value needs.
+            SkeletonExprShape::ArrayLiteral { elements } => {
+                for element in elements.iter() {
+                    let (site, certainty) = match element {
+                        SkeletonArrayElement::Value(site) => {
+                            (*site, SkeletonWriteCertainty::Definite)
+                        }
+                        SkeletonArrayElement::Spread(site) => {
+                            (*site, SkeletonWriteCertainty::Optional)
+                        }
+                    };
+                    edges.push((
+                        node,
+                        site_node(site),
+                        FlowEdgeKind::PathWrite {
+                            source: PathWriteSource::ArrayLiteralElement,
+                            path: Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice()),
+                            certainty,
+                        },
+                    ));
                 }
             }
             SkeletonExprShape::Other => {}

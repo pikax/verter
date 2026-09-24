@@ -585,6 +585,10 @@ export function tlMissCarrierInArray(x: HasQ) {
   return [x.q];
 }
 
+export function tlMissCarrierInConstArray(x: HasQ) {
+  return [x.q] as const;
+}
+
 export function tlMissCarrierInNestedFunction(x: HasQ) {
   return () => x.q;
 }
@@ -3539,12 +3543,10 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
     // The same read at the nesting depths the evaluation composes as
-    // FLOW expressions: an object-literal member value and a nested
-    // function's return. Each resolves through the parameter's
-    // annotation — clean, warm, the checker's own answer (`{ q: string }`,
-    // `() => string`). (An ARRAY element rides inside the array literal's
-    // single composite leaf — a different ingress, still declined; see
-    // `a_value_reaching_a_miss_carrier_is_never_admitted_warm`.)
+    // FLOW expressions: an object-literal member value, an array-literal
+    // element and a nested function's return. Each resolves through the
+    // parameter's annotation — clean, warm, the checker's own answer
+    // (`{ q: string }`, `string[]`, `() => string`).
     let assert_clean = |name: &str| -> TypeExpr {
         match eval(&host, TL, name) {
             Outcome::Value {
@@ -3566,6 +3568,13 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     assert_eq!(
         projected_member(&object, "q"),
         &TypeExpr::Primitive(PrimitiveName::String)
+    );
+    assert_eq!(
+        assert_clean("tlMissCarrierInArray"),
+        TypeExpr::Array {
+            element: Arc::new(string()),
+            readonly: false,
+        }
     );
     let nested = assert_clean("tlMissCarrierInNestedFunction");
     assert_eq!(
@@ -4118,8 +4127,9 @@ fn assert_unresolved_value(
 /// function's return): each declined a frame-rooted `x.q` read as a
 /// miss-carrier value. The frame-rooted member-path projection now
 /// resolves the reads the evaluation composes as FLOW expressions (the
-/// plain read, the object member, the nested-function return — clean,
-/// warm, the checker's own `string`), so those moved to the canary
+/// plain read, the object member, the array element, the nested-function
+/// return — clean, warm, the checker's own `string`), so those moved to
+/// the canary
 /// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`.
 /// What remains is the genuinely unresolvable read and the
 /// composite-leaf interior the projection never sees:
@@ -4127,16 +4137,18 @@ fn assert_unresolved_value(
 /// ```text
 /// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
 ///                                carrier is involved at all
-/// tlMissCarrierInArray           nested inside ONE leaf lowering's own
-///                                answer (`Array{element}`), which no
-///                                shallow ingress check could see
+/// tlMissCarrierInConstArray      nested inside ONE leaf lowering's own
+///                                answer (an `as const` array keeps the
+///                                whole-carrier leaf: `readonly [typeof
+///                                x.q]`), which no shallow ingress check
+///                                could see
 /// ```
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
-/// to publish for it at all. The array row's `string[]` is the answer
-/// the composite-leaf ingress still declines to produce.
+/// to publish for it at all. The const array row's `readonly [string]` is
+/// the answer the composite-leaf ingress still declines to produce.
 ///
 /// Mutation recipe: returning `false` unconditionally from
 /// `flow_return_value_is_unresolved` flips each row to a warm
@@ -4149,16 +4161,16 @@ fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
     assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
         assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
     });
-    // Nested inside ONE leaf lowering's own composite answer: the array
-    // literal lowers as ONE leaf (`Array{element: typeof x.q}`), so the
+    // Nested inside ONE leaf lowering's own composite answer: the `as
+    // const` array lowers as ONE leaf (`readonly [typeof x.q]`), so the
     // frame-rooted member path never reaches the evaluator's projection
     // — a composite-leaf interior is a distinct, still-declined ingress.
-    assert_unresolved_value(&host, TL, "tlMissCarrierInArray", |dispatch, node| {
+    assert_unresolved_value(&host, TL, "tlMissCarrierInConstArray", |dispatch, node| {
         let data = dispatch.graph().node_data(node);
-        let Some(SemanticNodeData::Array { element, .. }) = data.as_deref() else {
-            panic!("the array row must still produce an Array node");
+        let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
+            panic!("the const array row must still produce a Tuple node");
         };
-        let element = *element;
+        let element = elements[0].value;
         drop(data);
         assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
     });
@@ -5767,6 +5779,8 @@ export async function awaitGenericTree(a: GenericTree<string>) { const value = a
 export function libGenericTree() { const x: Awaited<GenericTree<string>> = null as any; return x; }
 export function libGrowThen() { const x: Awaited<GrowThen<string>> = null as any; return x; }
 export async function awaitGrowThen(a: GrowThen<string>) { const value = await a; return value; }
+export async function returnGrowThen(a: GrowThen<string>) { return a; }
+export async function awaitRecInArray(r: Rec) { return [await r]; }
 "#;
 
 /// The checker diagnostic a recovery carrier names, if `node` is one.
@@ -6346,11 +6360,13 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
 /// same count.
 ///
 /// The runtime relation has NO such rule in the checker: a 5000-deep chain
-/// of distinct thenables awaits to its value, and `await` of a
-/// `GrowThen<string>` did not terminate within 25 minutes (0.9 GB and
-/// climbing) on tsc 7.0.2 — no oracle answer exists for it. The relation
-/// here stops at its own operational budget instead, a typed partial that
-/// never warms, and never claims the checker's diagnostic.
+/// of distinct thenables awaits to its value, and neither `await` of a
+/// `GrowThen<string>` nor returning one from an async function terminated
+/// within 25 minutes (0.9 GB and climbing) on tsc 7.0.2 — no oracle answer
+/// exists for them. The relation here stops at its own operational budget
+/// instead: the `await` has no value and the async return publishes the
+/// typed gap — never the thenable the relation stopped at, never warm, and
+/// never the checker's diagnostic.
 #[test]
 fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
     use crate::semantic_query::{
@@ -6367,6 +6383,75 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
     );
     assert_eq!(raised, any());
     assert_fails_closed(&host, RECURSIVE_THENABLE, "awaitGrowThen");
+    assert_degraded(
+        &host,
+        RECURSIVE_THENABLE,
+        "returnGrowThen",
+        FlowReturnDegradation::UnresolvedValue,
+    );
+}
+
+/// A chain of DISTINCT thenables `C0 → C1 → … → number` longer than this
+/// substrate's operational budget: each step of the runtime relation
+/// re-enters its own query, so a long enough chain reaches the connected
+/// demand's nested-query depth bound (a stack-safety bound, not a rule of
+/// the checker). tsc 7.0.2 answers at any length (5000 steps measured for
+/// `await`; at both 8 and 40 steps `awaitChain` and `returnChain` are
+/// `Promise<number>`, `yieldChain` `AsyncGenerator<number, void, unknown>`
+/// and `returnFromGenerator` `AsyncGenerator<never, number, unknown>`).
+/// Here the 8-step chain answers exactly that, and the 40-step chain is a
+/// typed incompleteness — the `await` has no value and every wrap publishes
+/// the typed gap — never the thenable the relation stopped at, which a
+/// budget-tripped read used to hand the wrap as its payload
+/// (`Promise<C14>` for fifteen steps).
+#[test]
+fn a_thenable_chain_past_the_operational_budget_is_a_typed_incompleteness() {
+    let chain = |steps: usize| {
+        let mut source = String::new();
+        for index in 0..steps {
+            let next = if index + 1 == steps {
+                "number".to_owned()
+            } else {
+                format!("C{}", index + 1)
+            };
+            source.push_str(&format!(
+                "interface C{index} {{ then(onfulfilled: (v: {next}) => void): void }}\n"
+            ));
+        }
+        source
+            .push_str("export async function awaitChain(c: C0) { const v = await c; return v; }\n");
+        source.push_str("export async function returnChain(c: C0) { return c; }\n");
+        // The lib generator surface this standalone host has no
+        // `lib*.d.ts` for.
+        source.push_str("interface AsyncGenerator<T, TReturn, TNext> {}\n");
+        source.push_str("export async function* yieldChain(c: C0) { yield c; }\n");
+        source.push_str("export async function* returnFromGenerator(c: C0) { return c; }\n");
+        source
+    };
+    const SHORT: &str = "/ws/cov/thenable_chain_short.ts";
+    const LONG: &str = "/ws/cov/thenable_chain_long.ts";
+    let short = chain(8);
+    let long = chain(40);
+    let host = host_with(&[(SHORT, short.as_str()), (LONG, long.as_str())]);
+    for name in ["awaitChain", "returnChain"] {
+        assert_clean_warm(&host, SHORT, name, promise_of(number()));
+    }
+    assert_clean_warm(
+        &host,
+        SHORT,
+        "yieldChain",
+        async_generator_of(number(), void()),
+    );
+    assert_clean_warm(
+        &host,
+        SHORT,
+        "returnFromGenerator",
+        async_generator_of(never(), number()),
+    );
+    assert_fails_closed(&host, LONG, "awaitChain");
+    for name in ["returnChain", "yieldChain", "returnFromGenerator"] {
+        assert_degraded(&host, LONG, name, FlowReturnDegradation::UnresolvedValue);
+    }
 }
 
 /// A chain of distinct thenables `C0 → C1 → … → number`, one step per
@@ -6819,5 +6904,410 @@ fn class_expression_static_block_assertion_is_not_dropped() {
         CLASSES,
         "staticBlockAssertion",
         FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing),
+    );
+}
+
+/// An array literal's element is a flow value, so `[await r]` over a
+/// recursive thenable carries the await's recovery as its element.
+///
+/// tsc 7.0.2: `awaitRecInArray` (`return [await r]`) is `Promise<any[]>`,
+/// with TS1062 at the `await`. The element is the `AwaitOperand` recovery
+/// carrier; like every answer built over a TS1062 failure it never warms.
+#[test]
+fn an_awaited_recursive_thenable_in_an_array_literal_is_the_recovery_element() {
+    use crate::semantic_query::CheckerDiagnosticOperation;
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    assert_eq!(
+        eval(&host, RECURSIVE_THENABLE, "awaitRecInArray"),
+        Outcome::Value {
+            ty: promise_of(TypeExpr::Array {
+                element: Arc::new(any()),
+                readonly: false,
+            }),
+            degradation: None,
+            candidates: 0,
+        }
+    );
+    let element = async_payload(
+        &host,
+        "awaitRecInArray",
+        false,
+        |dispatch, payload| match dispatch.graph().node_data(payload).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => {
+                checker_recovery_of(dispatch, *element)
+            }
+            other => panic!("`[await r]` is an array, got {other:?}"),
+        },
+    );
+    assert_eq!(
+        element,
+        Some(recursive_fulfillment(
+            CheckerDiagnosticOperation::AwaitOperand
+        ))
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// A declaration's self-reference read through a member path
+// ──────────────────────────────────────────────────────────────────────
+
+/// Declarations that reference themselves inside their own bodies. Every
+/// expected answer below is measured on tsc 7.0.2 over this module
+/// (`--noEmit --strict --target es2022`, each type read through the tuple
+/// wrapper quoted by TS2322).
+const SELF_REFERENCE: &str = "/ws/cov/self_reference.ts";
+const SELF_REFERENCE_SRC: &str = r#"
+interface Chain { next: Chain; v: number }
+interface Holder { self: Holder; items: Holder[] }
+interface Box<T> { inner: Box<T>; value: T }
+export function readNext(a: Chain) { return a.next; }
+export function readNextNext(a: Chain) { return a.next.next.v; }
+export function readSelf(h: Holder) { return h.self; }
+export function readSelfItems(h: Holder) { return h.self.items; }
+export function readBoxInnerValue(b: Box<string>) { return b.inner.inner.value; }
+export function indexedNext() { const x: Chain['next'] = null as any; return x; }
+export function indexedNextV() { const x: Chain['next']['v'] = null as any; return x; }
+"#;
+
+/// A member read whose member is its declaration's own self-reference
+/// (`next: Chain` inside `Chain`) reads that declaration, and a longer
+/// path walks on through it.
+///
+/// tsc 7.0.2: `readNext` (`a.next`) is `Chain`, `readNextNext`
+/// (`a.next.next.v`) `number`, `readSelf` (`h.self`) `Holder`,
+/// `readSelfItems` (`h.self.items`) `Holder[]`, and the generic
+/// `readBoxInnerValue` (`b.inner.inner.value` over `Box<string>`)
+/// `string`. A declaration's body lowers the self-reference as the
+/// `RecursiveRef` sentinel, and the path walk used to end at it in a miss.
+#[test]
+fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
+    let host = host_with(&[(SELF_REFERENCE, SELF_REFERENCE_SRC)]);
+    assert_clean_warm(&host, SELF_REFERENCE, "readNext", type_ref("Chain"));
+    assert_clean_warm(&host, SELF_REFERENCE, "readNextNext", number());
+    assert_clean_warm(&host, SELF_REFERENCE, "readSelf", type_ref("Holder"));
+    assert_clean_warm(&host, SELF_REFERENCE, "readBoxInnerValue", string());
+    match &eval(&host, SELF_REFERENCE, "readSelfItems") {
+        Outcome::Value {
+            ty:
+                TypeExpr::Array {
+                    element,
+                    readonly: false,
+                },
+            degradation: None,
+            candidates: 1,
+        } => assert!(
+            matches!(element.as_ref(), TypeExpr::RecursiveRef { name, .. }
+                | TypeExpr::Ref { name, .. } if name.as_ref() == "Holder"),
+            "`h.self.items` is `Holder[]`, got {element:?}"
+        ),
+        other => panic!("`h.self.items` is a clean, warm `Holder[]`, got {other:?}"),
+    }
+    // A projected path that crosses the self-reference MID-walk: the flow
+    // reads above project one member at a time, a type path does not. The
+    // base is `Chain`'s own expanded surface, whose `next` is the sentinel.
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch, SELF_REFERENCE, "indexedNext");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("indexedNext must produce a value");
+        };
+        let surface = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+            )
+            .into_complete_node()
+            .expect("`Chain['next']` reduces");
+        let member = |name: &str| {
+            crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier(name),
+            )
+        };
+        let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base: surface,
+            path: Arc::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("`Chain` projects `next.next.v`, got {other:?}"),
+        };
+        assert_eq!(
+            dispatch.graph().node_data(projected).as_deref(),
+            Some(&SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            "`Chain['next']['next']['v']` is `number`"
+        );
+    });
+}
+
+/// An indexed access whose member is its declaration's self-reference is
+/// that declaration.
+///
+/// tsc 7.0.2: `Chain['next']` is `Chain` and `Chain['next']['v']` is
+/// `number`. The flow lane publishes the authored annotation; a consumer
+/// that reduces it (the corpus lane's structural-fact demand) used to read
+/// a miss at the self-reference. Under that expanded demand
+/// `Chain['next']` now reduces to `Chain`'s own surface, `next` the
+/// self-reference and `v` a `number`.
+#[test]
+fn an_indexed_access_of_a_self_reference_is_the_declaration() {
+    let host = host_with(&[(SELF_REFERENCE, SELF_REFERENCE_SRC)]);
+    let (data, raised) = reduced_annotation_in(&host, SELF_REFERENCE, "indexedNextV");
+    assert_eq!(data, SemanticNodeData::Primitive(PrimitiveKind::Number));
+    assert_eq!(raised, number());
+    let (data, raised) = reduced_annotation_in(&host, SELF_REFERENCE, "indexedNext");
+    assert!(
+        matches!(&data, SemanticNodeData::Object(_)),
+        "`Chain['next']` reduces to `Chain`'s surface, got {data:?}"
+    );
+    assert_eq!(projected_member(&raised, "v"), &number());
+    assert!(
+        matches!(projected_member(&raised, "next"), TypeExpr::RecursiveRef { name, .. }
+            | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
+        "`next` is the self-reference, got {raised:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Array literals as flow values
+// ──────────────────────────────────────────────────────────────────────
+
+/// Array literals whose elements are flow values: parameters, locals,
+/// awaits, calls. Every expected answer below is measured on tsc 7.0.2
+/// over this module (`--noEmit --strict --target es2022`, each type read
+/// through the tuple wrapper quoted by TS2322).
+const ARRAY_LITERALS: &str = "/ws/cov/array_literals.ts";
+const ARRAY_LITERALS_SRC: &str = r#"
+export function arrayOfParam(v: string) { return [v]; }
+export function arrayMixed(v: string) { return [v, 1]; }
+export function arrayOfConstLiteral() { const x = 1; return [x]; }
+export function arrayOfLiteralUnion(a: 'x' | 'y') { return [a]; }
+export async function arrayOfAwait(p: Promise<number>) { return [await p]; }
+export function arrayOfNullable(a: string | null) { return [a]; }
+export function arrayOfObject(v: string) { return [{ v }]; }
+export function arrayNested(v: string) { return [[v]]; }
+export function arrayOfCall(f: () => number) { return [f()]; }
+export function arrayOfSubtypes(a: { x: 1 }, b: { x: 1, y: 2 }) { return [b, a]; }
+export function freshBesideDeclared(v: { a: number }) { return [v, { a: 1, b: 2 }]; }
+export function declaredBesideFresh(w: { a: number; b: number }) { return [{ a: 1 }, w]; }
+export function returnOfDeclaredSubtypes(c: boolean, a: { x: 1 }, b: { x: 1, y: 2 }) { if (c) return a; return b; }
+export function emptyArray() { return []; }
+export function emptyLocal() { const a = []; return a; }
+export function holedArray() { return [1, , 2]; }
+export function spreadArray(xs: number[]) { return [0, ...xs]; }
+export function spreadTuple(t: [1, 2?]) { return [...t]; }
+export function spreadRestTuple(t: [1, ...string[]]) { return [...t]; }
+export function spreadUnion(xs: number[] | string[]) { return [...xs]; }
+export function spreadString(s: string) { return [...s]; }
+export function spreadIterable(s: Iterable<number>) { return [...s]; }
+"#;
+
+/// The element type of one CLEAN, warm array answer.
+#[track_caller]
+fn clean_array_element(host: &Arc<VerterHost>, name: &str) -> TypeExpr {
+    match &eval(host, ARRAY_LITERALS, name) {
+        Outcome::Value {
+            ty:
+                TypeExpr::Array {
+                    element,
+                    readonly: false,
+                },
+            degradation: None,
+            candidates: 1,
+        } => element.as_ref().clone(),
+        other => panic!("{name} is a clean, warm array, got {other:?}"),
+    }
+}
+
+/// The union constituents of `ty` (itself when it is not a union).
+fn constituents(ty: &TypeExpr) -> Vec<TypeExpr> {
+    match ty {
+        TypeExpr::Union(arms) => arms.to_vec(),
+        other => vec![other.clone()],
+    }
+}
+
+/// The property names of an object answer, in order.
+#[track_caller]
+fn object_keys(ty: &TypeExpr) -> Vec<String> {
+    let TypeExpr::Object(object) = ty else {
+        panic!("expected an object, got {ty:?}");
+    };
+    object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(property) => {
+                property.key.as_string().map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// An array literal's elements are flow expressions: a parameter, a local,
+/// an await and a call substitute their values, a fresh literal element
+/// widens at the mutable element slot, and a declared literal type stays.
+///
+/// tsc 7.0.2: `arrayOfParam` is `string[]`, `arrayMixed` (`[v, 1]`)
+/// `(string | number)[]`, `arrayOfConstLiteral` (`const x = 1; [x]`)
+/// `number[]`, `arrayOfLiteralUnion` (`a: 'x' | 'y'`) `("x" | "y")[]`,
+/// `arrayOfAwait` (`[await p]` over `Promise<number>`) `Promise<number[]>`,
+/// `arrayOfNullable` `(string | null)[]`, `arrayOfObject` (`[{ v }]`)
+/// `{ v: string; }[]`, `arrayNested` (`[[v]]`) `string[][]`, and
+/// `arrayOfCall` (`[f()]` over `f: () => number`) `number[]`. The literal
+/// used to lower as one leaf answer resolving every name in file scope, so
+/// each of these was a typed gap.
+#[test]
+fn array_literal_elements_are_flow_values() {
+    let host = host_with(&[(ARRAY_LITERALS, ARRAY_LITERALS_SRC)]);
+    assert_eq!(clean_array_element(&host, "arrayOfParam"), string());
+    let mixed = constituents(&clean_array_element(&host, "arrayMixed"));
+    assert_eq!(mixed.len(), 2, "{mixed:?}");
+    assert!(
+        mixed.contains(&string()) && mixed.contains(&number()),
+        "{mixed:?}"
+    );
+    assert_eq!(clean_array_element(&host, "arrayOfConstLiteral"), number());
+    let literals = constituents(&clean_array_element(&host, "arrayOfLiteralUnion"));
+    assert_eq!(literals.len(), 2, "{literals:?}");
+    for value in ["x", "y"] {
+        assert!(
+            literals.contains(&TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                value.to_owned()
+            ))),
+            "{literals:?}"
+        );
+    }
+    assert_clean_warm(
+        &host,
+        ARRAY_LITERALS,
+        "arrayOfAwait",
+        promise_of(TypeExpr::Array {
+            element: Arc::new(number()),
+            readonly: false,
+        }),
+    );
+    let nullable = constituents(&clean_array_element(&host, "arrayOfNullable"));
+    assert_eq!(nullable.len(), 2, "{nullable:?}");
+    assert!(
+        nullable.contains(&string())
+            && nullable.contains(&TypeExpr::Primitive(PrimitiveName::Null)),
+        "{nullable:?}"
+    );
+    let object = clean_array_element(&host, "arrayOfObject");
+    assert_eq!(object_keys(&object), vec!["v".to_owned()]);
+    assert_eq!(projected_member(&object, "v"), &string());
+    assert_eq!(
+        clean_array_element(&host, "arrayNested"),
+        TypeExpr::Array {
+            element: Arc::new(string()),
+            readonly: false,
+        }
+    );
+    assert_eq!(clean_array_element(&host, "arrayOfCall"), number());
+}
+
+/// The element type is the union of the element values under the
+/// checker's SUBTYPE reduction, which relates declared surfaces and
+/// refuses a pair with a fresh object literal whose keys differ.
+///
+/// tsc 7.0.2: `arrayOfSubtypes` (`[b, a]` over `a: { x: 1 }`, `b: { x: 1;
+/// y: 2 }`) is `{ x: 1; }[]` — `b` is absorbed; `freshBesideDeclared`
+/// (`[v, { a: 1, b: 2 }]` over `v: { a: number }`) is `({ a: number; } |
+/// { a: number; b: number; })[]` and `declaredBesideFresh` (`[{ a: 1 },
+/// w]` over `w: { a: number; b: number }`) `({ a: number; b: number; } |
+/// { a: number; })[]` — neither absorbed. The return join applies the same
+/// reduction: `returnOfDeclaredSubtypes` (`if (c) return a; return b`) is
+/// `{ x: 1; }`.
+#[test]
+fn array_literal_elements_union_under_subtype_reduction() {
+    let host = host_with(&[(ARRAY_LITERALS, ARRAY_LITERALS_SRC)]);
+    let reduced = clean_array_element(&host, "arrayOfSubtypes");
+    assert_eq!(object_keys(&reduced), vec!["x".to_owned()], "{reduced:?}");
+    for name in ["freshBesideDeclared", "declaredBesideFresh"] {
+        let element = clean_array_element(&host, name);
+        let mut key_sets: Vec<Vec<String>> =
+            constituents(&element).iter().map(object_keys).collect();
+        key_sets.sort();
+        assert_eq!(
+            key_sets,
+            vec![vec!["a".to_owned()], vec!["a".to_owned(), "b".to_owned()]],
+            "{name}: both constituents survive, got {element:?}"
+        );
+    }
+    match eval(&host, ARRAY_LITERALS, "returnOfDeclaredSubtypes") {
+        Outcome::Value {
+            ty,
+            degradation: None,
+            candidates: 1,
+        } => assert_eq!(object_keys(&ty), vec!["x".to_owned()], "{ty:?}"),
+        other => panic!("returnOfDeclaredSubtypes is a clean, warm `{{ x: 1 }}`, got {other:?}"),
+    }
+}
+
+/// A spread contributes its source's iterated element type, a hole an
+/// `undefined` element, and a literal with no element is `never[]` — the
+/// shapes that used to fold into one leaf answer and publish `any[]`.
+///
+/// tsc 7.0.2: `emptyArray` (`[]`) is `never[]`, while `emptyLocal`
+/// (`const a = []; return a`) is the evolving array, `any[]` (TS7034 /
+/// TS7005 under `noImplicitAny`); `holedArray` (`[1, , 2]`) is
+/// `(number | undefined)[]`; `spreadArray` (`[0, ...xs]` over `number[]`)
+/// `number[]`; `spreadTuple` (`[...t]` over `[1, 2?]`) `(1 | 2 |
+/// undefined)[]`; `spreadRestTuple` (over `[1, ...string[]]`) `(string |
+/// 1)[]`; `spreadUnion` (over `number[] | string[]`) `(string | number)[]`;
+/// `spreadString` (over `string`) `string[]`; and `spreadIterable` (over
+/// `Iterable<number>`) `number[]` — an iterable this evaluation does not
+/// iterate, so its position is the typed marker and the answer degrades.
+#[test]
+fn array_literal_spreads_holes_and_empty_literals_follow_the_checker() {
+    let host = host_with(&[(ARRAY_LITERALS, ARRAY_LITERALS_SRC)]);
+    let undefined = TypeExpr::Primitive(PrimitiveName::Undefined);
+    let literal = |value: f64| TypeExpr::number_literal(value);
+    assert_eq!(
+        clean_array_element(&host, "emptyArray"),
+        TypeExpr::Primitive(PrimitiveName::Never)
+    );
+    assert_eq!(clean_array_element(&host, "emptyLocal"), any());
+    let holed = constituents(&clean_array_element(&host, "holedArray"));
+    assert_eq!(holed.len(), 2, "{holed:?}");
+    assert!(
+        holed.contains(&number()) && holed.contains(&undefined),
+        "{holed:?}"
+    );
+    assert_eq!(clean_array_element(&host, "spreadArray"), number());
+    let tuple = constituents(&clean_array_element(&host, "spreadTuple"));
+    assert_eq!(tuple.len(), 3, "{tuple:?}");
+    assert!(
+        tuple.contains(&literal(1.0))
+            && tuple.contains(&literal(2.0))
+            && tuple.contains(&undefined),
+        "{tuple:?}"
+    );
+    let rest = constituents(&clean_array_element(&host, "spreadRestTuple"));
+    assert_eq!(rest.len(), 2, "{rest:?}");
+    assert!(
+        rest.contains(&literal(1.0)) && rest.contains(&string()),
+        "{rest:?}"
+    );
+    let union = constituents(&clean_array_element(&host, "spreadUnion"));
+    assert_eq!(union.len(), 2, "{union:?}");
+    assert!(
+        union.contains(&number()) && union.contains(&string()),
+        "{union:?}"
+    );
+    assert_eq!(clean_array_element(&host, "spreadString"), string());
+    assert_degraded(
+        &host,
+        ARRAY_LITERALS,
+        "spreadIterable",
+        FlowReturnDegradation::UnmodeledPosition,
     );
 }

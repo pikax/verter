@@ -364,15 +364,17 @@ fn string_lit(value: &str) -> TypeExpr {
 /// was `(() => "OUTERNEST")[]`, and `{ ...spreadBait, x: 1 }` was
 /// `{ a: "OUTERSPREAD"; x: number }` (tsgo: `{ a: number; x: number }`).
 ///
-/// A CONDITIONAL expression and an object SPREAD are no longer
-/// fail-closed rows: both have a structural arm now, so their operands
-/// resolve through the frame's own lexical authority. `c ? condBait : 2`
-/// is the checker's `1 | 2` and `{ ...spreadBait, x: 1 }` is the
-/// checker's `{ a: number; x: number }` — the local and the parameter,
-/// exactly. They stay in this suite as the rows that prove the frame
-/// binding WINS rather than merely blocking an answer: an owner-scope
-/// resolution of the same names reads `"OUTERCOND" | 2` and
-/// `{ a: "OUTERSPREAD"; x: number }`.
+/// A CONDITIONAL expression, an object SPREAD and an ARRAY literal are no
+/// longer fail-closed rows: each has a structural arm now, so their
+/// operands resolve through the frame's own lexical authority.
+/// `c ? condBait : 2` is the checker's `1 | 2`, `{ ...spreadBait, x: 1 }`
+/// is the checker's `{ a: number; x: number }`, `[arrBait]` is `number[]`
+/// and `[() => nestBait]` is `(() => number)[]` — the locals and the
+/// parameter, exactly. They stay in this suite as the rows that prove the
+/// frame binding WINS rather than merely blocking an answer: an
+/// owner-scope resolution of the same names reads `"OUTERCOND" | 2`,
+/// `{ a: "OUTERSPREAD"; x: number }`, `"OUTERARR"[]` and
+/// `(() => "OUTERNEST")[]`.
 ///
 /// Mutation recipe: dropping the gate's answer half republishes every one
 /// of these as the bait value, cleanly and warm.
@@ -383,12 +385,29 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
         "gateStaticMemberOnLocalClass",
         "gateMethodCallOnLocal",
         "gateStaticMemberOnParam",
-        "gateArrayElement",
-        "gateNestedArrowInArray",
         "gateTypeSpaceLocalClass",
     ] {
         assert_fails_closed(&host, name);
     }
+
+    // The array elements RESOLVE — to the frame's own bindings, never the
+    // owner-scope bait (tsc 7.0.2: `number[]` and `(() => number)[]`).
+    assert_clean_warm(
+        &host,
+        "gateArrayElement",
+        TypeExpr::Array {
+            element: std::sync::Arc::new(number()),
+            readonly: false,
+        },
+    );
+    let nested = projected(&host, "gateNestedArrowInArray");
+    let TypeExpr::Array { element, .. } = &nested else {
+        panic!("`[() => nestBait]` is an array, got {nested:?}");
+    };
+    let TypeExpr::Function(function) = element.as_ref() else {
+        panic!("its element is the arrow, got {element:?}");
+    };
+    assert_eq!(function.return_type.as_deref(), Some(&number()));
 
     // The conditional arm RESOLVES — to the frame's own binding, never
     // the owner-scope bait.

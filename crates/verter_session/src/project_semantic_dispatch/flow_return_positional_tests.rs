@@ -63,12 +63,10 @@ export function objectWithUnmodeledBinding() {
 
 // ── B-F2: an array element at a call position ────────────────────────
 //
-// The composite that survives here is the OBJECT, not the array: `made`
-// collapses to ONE marker rather than `Array<string | MARKER>`, losing
-// the modelled `"s"` element (tsgo: `{ label: string; made: (string |
-// Box)[] }`). That collapse is a KNOWN OWED granularity gap, NOT the
-// rule this file states — characterized, with its owner, by
-// `flow_return_frame_seal_tests::an_unmodeled_array_element_collapses_the_array_and_is_owed`.
+// The array's elements lower structurally, so the unmodelled position is
+// ONE ELEMENT: `made` is `(string | MARKER)[]`, the modelled `"s"` kept
+// (tsgo: `{ label: string; made: (string | Box)[] }`) — see
+// `flow_return_frame_seal_tests::an_unmodeled_array_element_marks_only_its_element`.
 export function arrayWithUnmodeledCall() {
   return { label: "x", made: ["s", new Box()] };
 }
@@ -286,7 +284,7 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
         ),
         (
             "arrayWithUnmodeledCall",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
+            FlowReturnDegradation::UnmodeledPosition,
         ),
         (
             "computedMemberOffCall",
@@ -315,8 +313,32 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
                 dispatch.graph().node_data(label)
             );
             let made = member(dispatch, outcome.node, "made");
+            // The array row's unmodelled position is ONE ELEMENT: `made`
+            // is `(string | MARKER)[]`, the modelled `"s"` kept.
+            let marked = match dispatch.graph().node_data(made).as_deref() {
+                Some(SemanticNodeData::Array { element, .. })
+                    if name == "arrayWithUnmodeledCall" =>
+                {
+                    match dispatch.graph().node_data(*element).as_deref() {
+                        Some(SemanticNodeData::Union(arms)) => {
+                            assert!(
+                                arms.iter().any(|arm| matches!(
+                                    dispatch.graph().node_data(*arm).as_deref(),
+                                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                                )),
+                                "{name}: the modelled `string` element survives"
+                            );
+                            arms.iter()
+                                .copied()
+                                .find(|arm| is_unresolved_marker(dispatch, *arm))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => Some(made),
+            };
             assert!(
-                is_unresolved_marker(dispatch, made),
+                marked.is_some_and(|node| is_unresolved_marker(dispatch, node)),
                 "{name}: the unmodelled position must carry the typed marker, got {:?}",
                 dispatch.graph().node_data(made)
             );

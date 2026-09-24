@@ -54,8 +54,8 @@
 //! form is.
 
 use oxc_ast::ast::{
-    AwaitExpression, ChainElement, ConditionalExpression, Expression, ObjectExpression,
-    ObjectProperty, ObjectPropertyKind, PropertyKey, PropertyKind,
+    ArrayExpression, ArrayExpressionElement, AwaitExpression, ChainElement, ConditionalExpression,
+    Expression, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey, PropertyKind,
 };
 
 /// The value-structural disposition of one expression.
@@ -94,6 +94,10 @@ pub enum ValueDescent<'a, 'ast> {
     /// An object literal: its member VALUES are the descent, each one a
     /// value provider of exactly the key it provisions.
     Object(&'a ObjectExpression<'ast>),
+    /// An array literal: its ELEMENTS are the descent ([`array_element_descent`]),
+    /// each one a value provider of the element type, under an unknown
+    /// index.
+    Array(&'a ArrayExpression<'ast>),
     /// A branch JOIN: EVERY arm provides the whole value, so a demand
     /// for the join's value (or for a projection under it) is a demand
     /// for each arm's. The test's value is never consumed by either
@@ -187,6 +191,7 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
             ValueDescent::TypeCarrier(&inner.expression)
         }
         Expression::ObjectExpression(object) => ValueDescent::Object(object),
+        Expression::ArrayExpression(array) => ValueDescent::Array(array),
         Expression::ConditionalExpression(conditional) => ValueDescent::Branches(conditional),
         // Matched BEFORE the call-position guard: an await is a modeled
         // form whose OPERAND rides its own rails (a call operand through
@@ -239,7 +244,6 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::TemplateLiteral(_)
         | Expression::MetaProperty(_)
         | Expression::Super(_)
-        | Expression::ArrayExpression(_)
         | Expression::AssignmentExpression(_)
         | Expression::BinaryExpression(_)
         | Expression::ChainExpression(_)
@@ -254,6 +258,42 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::V8IntrinsicExpression(_)
         | Expression::ComputedMemberExpression(_)
         | Expression::PrivateFieldExpression(_) => ValueDescent::Leaf,
+    }
+}
+
+/// The value-structural disposition of ONE array-literal element — the
+/// second half of [`ValueDescent::Array`], and the single authority both
+/// halves iterate, exactly as [`object_entry_descent`] is for an object
+/// literal's entries.
+#[derive(Debug)]
+pub enum ArrayElementDescent<'a, 'ast> {
+    /// A plain element: its value is one constituent of the element type.
+    Value(&'a Expression<'ast>),
+    /// A SPREAD (`...source`): `source`'s iterated elements provide
+    /// constituents. Both halves descend into `source`, an ordinary value
+    /// position.
+    Spread(&'a Expression<'ast>),
+    /// A hole (`[1, , 2]`): no expression; it contributes an `undefined`
+    /// element.
+    Hole,
+}
+
+/// The value-structural disposition of `element` — see
+/// [`ArrayElementDescent`]. The match is exhaustive over the element's
+/// three shapes.
+#[must_use]
+pub fn array_element_descent<'a, 'ast>(
+    element: &'a ArrayExpressionElement<'ast>,
+) -> ArrayElementDescent<'a, 'ast> {
+    match element {
+        ArrayExpressionElement::SpreadElement(spread) => {
+            ArrayElementDescent::Spread(&spread.argument)
+        }
+        ArrayExpressionElement::Elision(_) => ArrayElementDescent::Hole,
+        other => match other.as_expression() {
+            Some(expression) => ArrayElementDescent::Value(expression),
+            None => ArrayElementDescent::Hole,
+        },
     }
 }
 
@@ -631,7 +671,7 @@ pub fn value_composes_unmodeled_call(expression: &Expression<'_>) -> bool {
                 || value_composes_unmodeled_call(&logical.right)
         }
         Expression::UnaryExpression(unary) => value_composes_unmodeled_call(&unary.argument),
-        // An `await x` FOLDED INTO a leaf answer (inside an array, a
+        // An `await x` FOLDED INTO a leaf answer (inside an `as const` array, a
         // non-structural object, a template) is answered by the shallow
         // pass's fallback: the value-position await is modeled through
         // [`ValueDescent::Awaited`], but a leaf-composed one never reaches

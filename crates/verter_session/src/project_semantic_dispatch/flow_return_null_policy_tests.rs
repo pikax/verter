@@ -390,6 +390,9 @@ export function arrObjNull() { return [{ a: null }]; }
 export function arrArrNull() { return [[null]]; }
 export function objArrUndef() { return { a: [undefined] }; }
 export function tupleNull() { return [null] as const; }
+export function arrEmpty() { return []; }
+export function arrHoles() { return [, ,]; }
+export function arrHoleBeside(v: string) { return [v, , v]; }
 export function letNull() { let x = null; return x; }
 export function letUndef() { let y = undefined; return y; }
 export function varNull() { var y = null; return y; }
@@ -459,6 +462,12 @@ const NESTED_TABLE: &[(&str, &str, &str)] = &[
     ("objArrUndef", "{ a: undefined[] }", "{ a: any[] }"),
     // readonly [null] / readonly [any]
     ("tupleNull", "readonly [null]", "readonly [any]"),
+    // never[] / any[]
+    ("arrEmpty", "never[]", "any[]"),
+    // undefined[] / any[] — a hole is an `undefined` element
+    ("arrHoles", "undefined[]", "any[]"),
+    // (string | undefined)[] / string[]
+    ("arrHoleBeside", "(string | undefined)[]", "string[]"),
     // null / any — the auto-typed `let` reads the widening `null`
     ("letNull", "null", "any"),
     // undefined / any

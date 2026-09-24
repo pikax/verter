@@ -758,8 +758,9 @@ defineProps<Payload>()
 #[test]
 fn tsc_class_inference_budget_is_exact_partial_and_non_cacheable() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    // A deep array nest is lowered element-wise by the flow IR's own
-    // structural lowering, so it charges that lowering's nesting envelope.
+    // A deep `as const` array nest folds into ONE shallow-pass leaf answer
+    // (a plain array literal lowers element by element), so it charges
+    // that pass's nesting envelope.
     let mut inferred = "[0]".to_owned();
     for _ in 0..80 {
         inferred = format!("[{inferred}]");
@@ -769,7 +770,7 @@ fn tsc_class_inference_budget_is_exact_partial_and_non_cacheable() {
         "/src/InferenceBudget.vue",
         &format!(
             r#"<script setup lang="ts">
-class Payload {{ method() {{ return {inferred} }} }}
+class Payload {{ method() {{ return {inferred} as const }} }}
 defineProps<Payload>()
 </script>"#
         ),
@@ -813,8 +814,9 @@ defineProps<Payload>()
 #[test]
 fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    // A deep array nest is lowered element-wise by the flow IR's own
-    // structural lowering, so it charges that lowering's nesting envelope.
+    // A deep `as const` array nest folds into ONE shallow-pass leaf answer
+    // (a plain array literal lowers element by element), so it charges
+    // that pass's nesting envelope.
     let mut inferred = "[0]".to_owned();
     for _ in 0..80 {
         inferred = format!("[{inferred}]");
@@ -824,7 +826,7 @@ fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
         "/src/InferenceBudgetSibling.vue",
         &format!(
             r#"<script setup lang="ts">
-class Payload {{ method() {{ return {inferred} }} }}
+class Payload {{ method() {{ return {inferred} as const }} }}
 defineProps<{{ payload: Payload }}>()
 defineModel<string>('selected')
 </script>"#

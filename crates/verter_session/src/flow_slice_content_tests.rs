@@ -22,10 +22,10 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
-    FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry,
-    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
-    SliceUnsupported,
+    FlowSliceSelection, SliceArrayElement, SliceBindingKind, SliceCall, SliceCallSite,
+    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot,
+    SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest,
+    SliceTypeofKind, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -1926,20 +1926,48 @@ fn class_heritage_sequence_calls_are_never_blanket_certified() {
 /// A CONTROL position nested inside a leaf-lowered expression is still a
 /// control position: the checker binds a predicate call in a ternary test
 /// or a `&&` / `||` left operand into the branch narrowing even when the
-/// WHOLE form folds into one shallow-pass leaf answer (`[isString(x) ? x
-/// : false]` is `(string | boolean)[]` in the checker). Blanket-certifying
-/// that call decided-above dropped the narrowing while the unnarrowed
-/// superset completed clean. A call inside a leaf takes the SAME
-/// per-callee certification the statement-level control arm applies:
+/// WHOLE form folds into one shallow-pass leaf answer (a template literal
+/// `` `${isString(x) ? x : false}` ``, or a carrier-folded `&&`).
+/// Blanket-certifying that call decided-above dropped the narrowing while
+/// the unnarrowed superset completed clean. A call inside a leaf takes the
+/// SAME per-callee certification the statement-level control arm applies:
 /// certified only when the callee provably establishes no narrowing,
 /// otherwise the enclosing statement takes the typed gap.
+///
+/// An ARRAY literal is not such a leaf: its elements lower structurally,
+/// so `[isString(x) ? x : false]` (`(string | boolean)[]` in the checker)
+/// carries the ternary's predicate guard as a modelled narrowing — no gap
+/// and nothing decided above.
 #[test]
 fn leaf_nested_control_position_calls_are_never_blanket_certified() {
+    let structural = content_for(
+        "export {};\nfunction isString(x: unknown): x is string { return typeof x === \"string\" }\n\
+         function f(x: string | number) { return [isString(x) ? x : false] }",
+        "f",
+    );
+    assert!(
+        matches!(
+            &structural.body.statements[..],
+            [SliceStatement::Return {
+                argument: Some(SliceExpr::Array { elements }),
+                ..
+            }] if matches!(
+                &elements[..],
+                [SliceArrayElement::Value(SliceExpr::Union {
+                    guard: SliceGuard::TypePredicate { .. },
+                    ..
+                })]
+            )
+        ),
+        "the array element is the guarded ternary: {structural:?}"
+    );
+    assert!(structural.decided_above_call_spans.is_empty());
+    assert_eq!(guard_gap_count(&structural), 0, "{structural:?}");
     let refused = [
         (
             "a closed same-file predicate in a ternary test",
             "export {};\nfunction isString(x: unknown): x is string { return typeof x === \"string\" }\n\
-             function f(x: string | number) { return [isString(x) ? x : false] }",
+             function f(x: string | number) { return `${isString(x) ? x : false}` }",
         ),
         (
             "a closed same-file predicate in a `&&` left operand folded by a carrier",
@@ -1949,12 +1977,12 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "an imported callee in a ternary test",
             "import { isString } from \"./is\";\n\
-             function f(x: string | number) { return [isString(x) ? x : false] }",
+             function f(x: string | number) { return `${isString(x) ? x : false}` }",
         ),
         (
             "a closed UNANNOTATED same-file callee in a ternary test",
             "export {};\nfunction check(x: string | number) { return true }\n\
-             function f(x: string | number) { return [check(x) ? x : false] }",
+             function f(x: string | number) { return `${check(x) ? x : false}` }",
         ),
     ];
     for (case, source) in refused {
@@ -1974,7 +2002,7 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "a closed non-predicate-annotated callee in a ternary test",
             "export {};\nfunction check(x: string | number): boolean { return true }\n\
-             function f(x: string | number) { return [check(x) ? x : false] }",
+             function f(x: string | number) { return `${check(x) ? x : false}` }",
         ),
         (
             "a closed non-predicate-annotated callee in a `&&` left operand folded by a carrier",

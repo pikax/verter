@@ -2278,13 +2278,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// refusal: the family answers the checker's TS1062 recovery, the error
     /// type an `await` continues with.
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AwaitedNormalize {
-                operand: node,
-                context: self.structural_reduce_context(),
-            })
-            .value
-        {
+        let read = self.execute_read(SemanticQueryKey::AwaitedNormalize {
+            operand: node,
+            context: self.structural_reduce_context(),
+        });
+        // A PARTIAL read (the connected demand's budget ran out part-way
+        // down a chain of thenables) is where the relation stopped, not
+        // what the operand awaits to: never an answer.
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
             QueryResult::Value(reduced) => Some(reduced),
             _ => None,
         }
@@ -2299,13 +2303,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `AsyncGenerator<Awaited<T>, …>`. The two flow positions take two
     /// different relations, which is why they are two families.
     fn async_return_payload_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AsyncReturnPayload {
-                operand: node,
-                context: self.structural_reduce_context(),
-            })
-            .value
-        {
+        let read = self.execute_read(SemanticQueryKey::AsyncReturnPayload {
+            operand: node,
+            context: self.structural_reduce_context(),
+        });
+        // A PARTIAL read is where the relation stopped (the connected
+        // demand's budget), not the payload: `Promise<C14>` for a chain
+        // `C0 → … → C14 → number` would publish a thenable the checker
+        // unwraps.
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
             QueryResult::Value(payload) => Some(payload),
             _ => None,
         }
@@ -5229,8 +5238,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Whether two return arms are two PLAIN object surfaces listing
-    /// DIFFERENT keys — the shape the checker's own return reunion can
-    /// never put in a subtype relation.
+    /// DIFFERENT keys, at least one of them possibly a fresh object
+    /// literal — the shape the checker's own return reunion can never put
+    /// in a subtype relation.
     ///
     /// When a function returns object literals with different key sets,
     /// the checker normalizes each arm with `key?: undefined` for every
@@ -5273,6 +5283,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let arm_members = arm_surface.closed().complete_members();
         let peer_members = peer_surface.closed().complete_members();
+        // Normalization and the excess-property check are the FRESH
+        // literal's: two DECLARED surfaces relate like any other pair, so
+        // the reduction absorbs the subtype (tsc 7.0.2: `if (c) return a;
+        // return b` over `a: { x: 1 }`, `b: { x: 1; y: 2 }` is `{ x: 1 }`,
+        // and so is `[b, a]`). A surface with no members may be a fresh
+        // `{}`.
+        let may_be_fresh = |members: &[crate::semantic_query::SurfaceMember]| {
+            members.is_empty()
+                || members.iter().any(|member| {
+                    member.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
+                })
+        };
+        if !may_be_fresh(arm_members) && !may_be_fresh(peer_members) {
+            return false;
+        }
         arm_members.len() != peer_members.len()
             || !arm_members.iter().all(|member| {
                 // A COMPUTED key cannot be matched against the peer's
@@ -5701,8 +5726,8 @@ fn collect_assignment_spans(
 /// Collect the spans of every expression-position write in an expression
 /// tree — the same spans [`collect_assignment_spans`] subtracts for value
 /// roots, walked over every structurally-lowered nesting a write can sit
-/// in (object members and keys, spreads, branch arms, an IIFE's nested
-/// function value, the write's own right-hand side).
+/// in (object members and keys, spreads, branch arms, array elements, an
+/// IIFE's nested function value, the write's own right-hand side).
 fn collect_expression_write_spans(
     expr: &crate::flow_slice_content::SliceExpr,
     out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
@@ -5748,6 +5773,17 @@ fn expression_write_tree(
             SliceExpr::Union { arms, .. } => {
                 for arm in arms.iter() {
                     walk(arm, out);
+                }
+            }
+            SliceExpr::Array { elements } => {
+                for element in elements.iter() {
+                    match element {
+                        crate::flow_slice_content::SliceArrayElement::Value(value)
+                        | crate::flow_slice_content::SliceArrayElement::Spread(value) => {
+                            walk(value, out)
+                        }
+                        crate::flow_slice_content::SliceArrayElement::Hole => {}
+                    }
                 }
             }
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
@@ -7431,6 +7467,132 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 has_index_signature: false,
             },
         )))
+    }
+
+    /// Evaluate one STRUCTURAL array literal: `E[]`, where `E` is the
+    /// union of the element values under TypeScript's SUBTYPE reduction
+    /// (`checkArrayLiteral` unions its element types with
+    /// `UnionReduction.Subtype`: `[b, a]` over `a: { x: 1 }` and
+    /// `b: { x: 1; y: 2 }` is `{ x: 1 }[]`). The reduction is the one the
+    /// return join applies, through the shared relation authority; an
+    /// undecided one keeps every element behind the typed relation gap.
+    ///
+    /// Each element settles like an object member value: a hold nested in
+    /// one cannot be a partial element, so it is the unmodelled position,
+    /// and a read of a widening-literal local widens at the mutable
+    /// element slot (`const x = 1; return [x]` is `number[]`). A hole is
+    /// an `undefined` element, a spread contributes its source's iterated
+    /// element type ([`Self::spread_element_type`]), and a literal with no
+    /// element is `never[]` (`any[]` with `strictNullChecks` off).
+    fn eval_array_literal(
+        &mut self,
+        elements: &[crate::flow_slice_content::SliceArrayElement],
+    ) -> Positional<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let mut values = Vec::with_capacity(elements.len());
+        for element in elements {
+            let value = match element {
+                crate::flow_slice_content::SliceArrayElement::Hole => {
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                }
+                crate::flow_slice_content::SliceArrayElement::Value(expr) => {
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(expr);
+                    let value = self.settle_composite_part(outcome, holds_before);
+                    self.widen_value_position_read(expr, value)
+                }
+                crate::flow_slice_content::SliceArrayElement::Spread(source) => {
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(source);
+                    let source = self.settle_composite_part(outcome, holds_before);
+                    match self.spread_element_type(source) {
+                        Some(element) => element,
+                        None => self.unmodeled_position(),
+                    }
+                }
+            };
+            values.push(value);
+        }
+        if values.len() >= 2 {
+            match self.dispatch.reduce_return_arms_to_supertypes(&values) {
+                ReunionReduction::Reduced(reduced) => values = reduced,
+                ReunionReduction::Undecided => self.record_degradation(
+                    FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::NominalRelation),
+                ),
+            }
+        }
+        let element = if values.is_empty() {
+            graph.intern_node(SemanticNodeData::Primitive(
+                if self.nullability.is_strict() {
+                    PrimitiveKind::Never
+                } else {
+                    PrimitiveKind::Any
+                },
+            ))
+        } else {
+            self.union(&values)
+        };
+        Positional::Value(graph.intern_node(SemanticNodeData::Array {
+            element,
+            readonly: false,
+        }))
+    }
+
+    /// The element type a spread of `source` contributes to an array
+    /// literal: an array's element, a tuple's element union (a rest
+    /// element's own element; an optional element with `undefined` under
+    /// `strictNullChecks`), a string's `string`, `any` and `never`
+    /// themselves, and a union's per-arm union (tsc 7.0.2: `[...t]` over
+    /// `t: [1, 2?]` is `(1 | 2 | undefined)[]`, over `number[] | string[]`
+    /// `(string | number)[]`, over a `string` `string[]`). `None` for any
+    /// other source — an iterable this evaluation does not iterate (a
+    /// `Set`, a generator) — which the caller marks as the unmodelled
+    /// position.
+    fn spread_element_type(&self, source: SemanticNodeId) -> Option<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        let data = graph.node_data(source)?;
+        match data.as_ref() {
+            SemanticNodeData::Array { element, .. } => Some(*element),
+            SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::String | PrimitiveKind::Never,
+            ) => Some(source),
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_)) => {
+                Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)))
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                let elements = elements.clone();
+                drop(data);
+                let mut members = Vec::with_capacity(elements.len());
+                for element in elements.iter() {
+                    if element.rest {
+                        members.push(self.spread_element_type(element.value)?);
+                        continue;
+                    }
+                    members.push(element.value);
+                    if element.optional && self.nullability.is_strict() {
+                        members
+                            .push(graph.intern_node(SemanticNodeData::Primitive(
+                                PrimitiveKind::Undefined,
+                            )));
+                    }
+                }
+                Some(if members.is_empty() {
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                } else {
+                    self.union(&members)
+                })
+            }
+            SemanticNodeData::Union(arms) => {
+                let arms = arms.clone();
+                drop(data);
+                let members = arms
+                    .iter()
+                    .map(|arm| self.spread_element_type(*arm))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(self.union(&members))
+            }
+            _ => None,
+        }
     }
 
     /// Evaluate a class EXPRESSION to its value: the class's constructor
@@ -14717,6 +14879,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             crate::flow_slice_content::SliceExpr::Object { entries } => {
                 self.eval_object_literal(entries, false)
+            }
+            crate::flow_slice_content::SliceExpr::Array { elements } => {
+                self.eval_array_literal(elements)
             }
             crate::flow_slice_content::SliceExpr::Assignment {
                 target,

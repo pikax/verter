@@ -444,7 +444,9 @@ fn object_entries(
 ) -> Vec<SkeletonObjectEntry> {
     match &skeleton.expr_site(site).shape {
         SkeletonExprShape::ObjectLiteral { entries } => entries.to_vec(),
-        SkeletonExprShape::BranchJoin { .. } | SkeletonExprShape::Other => {
+        SkeletonExprShape::BranchJoin { .. }
+        | SkeletonExprShape::ArrayLiteral { .. }
+        | SkeletonExprShape::Other => {
             panic!("site must be an object literal")
         }
     }
@@ -1081,18 +1083,35 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 
 /// A site is not a callback identity. Several callables share one
 /// expression site whenever the site is a compound the skeleton does not
-/// open per element — a call's argument list, an array literal — so the
-/// site-level capture union answers "is this cell retained here" and can
-/// never answer "which callback retains it". The per-callable inventory
-/// is the partition that can: exactly one record per authored callable,
-/// in authored order, each carrying only its OWN captures. Without it a
-/// two-callback call is one undifferentiated capture set, and a
-/// capture-free callback is indistinguishable from no callback at all.
+/// open per element — a call's argument list, a binary expression's
+/// operands — so the site-level capture union answers "is this cell
+/// retained here" and can never answer "which callback retains it". The
+/// per-callable inventory is the partition that can: exactly one record
+/// per authored callable, in authored order, each carrying only its OWN
+/// captures. Without it a two-callback call is one undifferentiated
+/// capture set, and a capture-free callback is indistinguishable from no
+/// callback at all. (An ARRAY literal is opened per element: each element
+/// callable sits on its own site.)
 #[test]
 fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
+    let prepared = indexed_structure_of(
+        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+    );
+    let per_element: Vec<usize> = prepared
+        .skeleton()
+        .expr_sites
+        .iter()
+        .map(|site| site.closures.len())
+        .filter(|closures| *closures > 0)
+        .collect();
+    assert_eq!(
+        per_element,
+        vec![1, 1],
+        "each array element callable has its own site"
+    );
     for source in [
         "function root() { const a = 1; const b = 2; sink(() => a, () => b); return 1; }",
-        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+        "function root() { const a = 1; const b = 2; return (() => a) === (() => b); }",
     ] {
         let prepared = indexed_structure_of(source);
         let skeleton = prepared.skeleton();

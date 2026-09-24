@@ -182,6 +182,43 @@ fn assert_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, w
     );
 }
 
+/// `(string | MARKER)[]`: the modelled `"s"` element widened beside the
+/// typed marker of the one element the substrate does not model.
+#[track_caller]
+fn assert_string_or_marker_array(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    what: &str,
+) {
+    let element = match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Array { element, .. }) => *element,
+        other => panic!("{what}: an Array keeps its modelled element, got {other:?}"),
+    };
+    let arms = match dispatch.graph().node_data(element).as_deref() {
+        Some(SemanticNodeData::Union(arms)) => arms.to_vec(),
+        other => panic!("{what}: the element type is `string | MARKER`, got {other:?}"),
+    };
+    assert_eq!(arms.len(), 2, "{what}: two element constituents");
+    assert!(
+        arms.iter().any(|arm| matches!(
+            dispatch.graph().node_data(*arm).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+        )),
+        "{what}: the modelled `string` element survives"
+    );
+    let marker = arms
+        .iter()
+        .find(|arm| {
+            !matches!(
+                dispatch.graph().node_data(**arm).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+        })
+        .copied()
+        .expect("a second constituent");
+    assert_marker(dispatch, marker, what);
+}
+
 #[track_caller]
 fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, what: &str) {
     let label = member(dispatch, node, "label");
@@ -216,7 +253,8 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 /// `Array<string \| any>` with NO degradation and WARM — a fabricated
 /// `any` inside a clean result. The target is neither: the composite
 /// survives, the unmodelled slot carries the typed marker, and nothing
-/// admits.
+/// admits. An array literal's elements lower structurally, so in the
+/// array rows the marker is ONE element's: `made` is `(string | MARKER)[]`.
 ///
 /// Mutation recipe: minting the marker as `QueryError::Miss` again makes
 /// `of_signature_node` classify it `ReturnMiss`, and all three rows lose
@@ -224,25 +262,22 @@ fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNod
 #[test]
 fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
     let host = make_seal_host();
-    for (name, degradation) in [
-        (
-            "q1LocalHelperBare",
-            FlowReturnDegradation::UnmodeledPosition,
-        ),
-        (
-            "q1LocalHelperArray",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
-        ),
-        (
-            "q1IifeArray",
-            FlowReturnDegradation::FlowGap(crate::semantic_query::FlowGap::UnmodeledExpression),
-        ),
+    for (name, array) in [
+        ("q1LocalHelperBare", false),
+        ("q1LocalHelperArray", true),
+        ("q1IifeArray", true),
     ] {
+        let degradation = FlowReturnDegradation::UnmodeledPosition;
         let outcome =
             evaluate(&host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
         with_dispatch(&host, |dispatch| {
             assert_string_label(dispatch, outcome.node, name);
-            assert_marker(dispatch, member(dispatch, outcome.node, "made"), name);
+            let made = member(dispatch, outcome.node, "made");
+            if array {
+                assert_string_or_marker_array(dispatch, made, name);
+            } else {
+                assert_marker(dispatch, made, name);
+            }
         });
         assert_eq!(
             outcome.degradation,
@@ -354,57 +389,33 @@ fn the_clean_control_is_undegraded_and_warms() {
     });
 }
 
-/// CHARACTERIZATION, not an endorsement: an unmodelled ELEMENT collapses
-/// the whole ARRAY to one marker.
+/// An unmodelled ELEMENT marks only its own position inside the ARRAY.
 ///
 /// `return { label: "x", made: ["s", new Box()] }` — TypeScript 7.0.2
-/// `tsc` types `made` as `(string | Box)[]`. This
-/// substrate publishes a BARE marker for `made`, losing the modelled
-/// `string` element: the positional rule holds at the OBJECT level
-/// (`label` survives) but NOT inside the array, because an array literal
-/// has no structural carrier in the slice content at all — it is lowered
-/// as one leaf, and the leaf gate refuses the whole answer when it embeds
-/// a fabricated `any`.
+/// `tsc` types `made` as `(string | Box)[]`. The array literal lowers
+/// structurally: the SHARED value-descent classifier gives it the `Array`
+/// disposition, the demand planner opens one site per element (so every
+/// element value is selected), the content half lowers each element as a
+/// flow expression, and the evaluator unions them. The modelled `"s"`
+/// element survives as `string` beside the typed marker of the
+/// `new Box()` position — `(string | MARKER)[]` — where it once collapsed
+/// the whole array to one marker.
 ///
-/// The granularity is OWED, not settled. Fixing it is a coordinated
-/// change to the SHARED value-descent classifier
-/// (`verter_semantic::analysis::flow::value_descent`), the demand PLANNER
-/// (which must select element value spans, or a structural array's
-/// elements lower as `SliceExpr::Elided` and are lost), the content half,
-/// and the evaluator — the two halves must gain the same disposition in
-/// one change, exactly as `ValueDescent::Object` did. A content-only
-/// structural array would disagree with the planner about SELECTION.
-///
-/// The row is asserted so the gap cannot drift silently, and so the
-/// no-wrong-and-warm half stays pinned: whatever the granularity, the
-/// result is DEGRADED and admits nothing.
+/// The no-wrong-and-warm half stays pinned: the result is DEGRADED and
+/// admits nothing.
 #[test]
-fn an_unmodeled_array_element_collapses_the_array_and_is_owed() {
+fn an_unmodeled_array_element_marks_only_its_element() {
     let host = make_seal_host();
     let outcome = evaluate(&host, "arrayWithUnmodeledElement")
         .expect("arrayWithUnmodeledElement produces a value");
     with_dispatch(&host, |dispatch| {
         assert_string_label(dispatch, outcome.node, "arrayWithUnmodeledElement");
         let made = member(dispatch, outcome.node, "made");
-        // THE OWED SHAPE is `Array { element: String | MARKER }`. Today it
-        // is the bare marker; the assertion states which one is live so
-        // the owning change flips exactly this line.
-        assert_marker(dispatch, made, "arrayWithUnmodeledElement");
-        assert!(
-            !matches!(
-                dispatch.graph().node_data(made).as_deref(),
-                Some(SemanticNodeData::Array { .. })
-            ),
-            "if this now interns an Array, the granularity landed — update the row \
-             and the owed shape above"
-        );
+        assert_string_or_marker_array(dispatch, made, "arrayWithUnmodeledElement");
     });
-    // The half that is NOT owed: no wrong answer, and nothing warms.
     assert_eq!(
         outcome.degradation,
-        Some(FlowReturnDegradation::FlowGap(
-            crate::semantic_query::FlowGap::UnmodeledExpression
-        ))
+        Some(FlowReturnDegradation::UnmodeledPosition)
     );
     assert_eq!(outcome.candidates, 0);
 }

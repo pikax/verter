@@ -8802,14 +8802,20 @@ function f(x: string | number) {
 
 /// A CONTROL position nested inside a leaf-lowered expression is still a
 /// control position: the checker binds the predicate call in the ternary
-/// test into the branch narrowing even though the WHOLE array folds into
-/// one shallow-pass leaf answer — `[isString(x) ? x : false]` is
-/// `(string | boolean)[]` in the checker. Blanket-certifying the nested
-/// test call decided-above dropped that narrowing and the unnarrowed
-/// superset sealed complete and warm. The nested control call takes the
-/// per-callee certification instead: a predicate callee is unprovable
-/// here, so the element keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// test into the branch narrowing even when the WHOLE form folds into one
+/// shallow-pass leaf answer — `[isString(x) ? x : false] as const` is
+/// `readonly [string | false]` in the checker. Blanket-certifying the
+/// nested test call decided-above dropped that narrowing and the
+/// unnarrowed superset sealed complete and warm. The nested control call
+/// takes the per-callee certification instead: a predicate callee is
+/// unprovable there, so the element keeps the unnarrowed join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+///
+/// A plain ARRAY literal is not such a leaf: its element lowers as a flow
+/// expression, so the ternary evaluates under its predicate guard exactly
+/// as a bare ternary does, and `[isString(x) ? x : false]` is the
+/// checker's own `(string | boolean)[]`, clean and warm.
 #[test]
 fn leaf_nested_conditional_predicate_never_certifies_decided_above() {
     const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
@@ -8821,6 +8827,10 @@ function isString(x: unknown): x is string {
 }
 
 function f(x: string | number) {
+  return [isString(x) ? x : false] as const;
+}
+
+function g(x: string | number) {
   return [isString(x) ? x : false];
 }
 "#;
@@ -8832,24 +8842,18 @@ function f(x: string | number) {
         let expr = host
             .project_node_to_type_expr_for_test(result.return_type())
             .expect("return node must project to TypeExpr");
-        let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
-            panic!("f: the return is an array, got {expr:?}");
+        let verter_type_expr::TypeExpr::Tuple { elements, .. } = &expr else {
+            panic!("f: the return is a tuple, got {expr:?}");
         };
         // The dropped branch narrowing never collapses the element to the
-        // narrowed branch read: the `false` arm survives and no arm is the
-        // narrowed `string`. (The consequent's bare `typeof x` root rides
-        // its own typed miss carrier — bare frame-rooted `typeof` roots
-        // are not path-projected, before and after this change.)
-        let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
-            panic!("f: the element keeps the unnarrowed join, got {expr:?}");
+        // narrowed branch read: no arm is the narrowed `string`.
+        let element = &elements[0].ty;
+        let arms: Vec<&verter_type_expr::TypeExpr> = match element {
+            verter_type_expr::TypeExpr::Union(arms) => arms.iter().collect(),
+            other => vec![other],
         };
         assert!(
-            arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)),
-            "f: the `false` arm survives, got {expr:?}"
-        );
-        assert!(
-            !arms.iter().any(|arm| *arm
+            !arms.iter().any(|arm| **arm
                 == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
             "f: the narrowed branch read never publishes, got {expr:?}"
         );
@@ -8866,6 +8870,36 @@ function f(x: string | number) {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             0,
             "f: an unprovable nested control call never warms"
+        );
+
+        let key = whole_return_key(dispatch, CANONICAL, "g");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(result.degradation(), None, "g: the narrowing is modelled");
+        let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
+            panic!("g: the return is an array, got {expr:?}");
+        };
+        let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
+            panic!("g: the element is `string | boolean`, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Boolean,
+        ] {
+            assert!(
+                arms.contains(&verter_type_expr::TypeExpr::Primitive(primitive)),
+                "g: `{primitive:?}` is an element constituent, got {expr:?}"
+            );
+        }
+        assert_eq!(arms.len(), 2, "g: {expr:?}");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "g: a clean complete result admits warm"
         );
     });
 }
