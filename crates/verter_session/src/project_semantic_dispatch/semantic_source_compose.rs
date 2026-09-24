@@ -744,6 +744,8 @@ impl ProjectSemanticDispatch<'_> {
                 optional: param.optional,
                 rest: param.rest,
                 span: None,
+                // A raised body slot carries no authored type syntax.
+                declared_literal: false,
             })
             .collect();
         // A body-derived return carries the predicate the checker infers

@@ -701,6 +701,7 @@ fn normalized_projection_shape_equivalent(
                 if left_mapper.optionality != right_mapper.optionality
                     || left_mapper.readonly != right_mapper.readonly
                     || left_mapper.kind != right_mapper.kind
+                    || left_mapper.over_type_variable != right_mapper.over_type_variable
                     || !push_optional_proof_pair(
                         &mut stack,
                         left_mapper.name_remap,

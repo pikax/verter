@@ -12,6 +12,19 @@ use crate::semantic_query::{
 };
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 
+/// The project a probe module is checked in: its sibling files and, when
+/// set, the `compilerOptions` of the tsconfig that owns them (TypeScript's
+/// defaults with `strict` otherwise).
+#[derive(Clone, Copy, Default)]
+pub(super) struct ProbeProject<'a> {
+    /// `(file name, source)` modules beside the probe module, in program
+    /// order.
+    pub(super) files: &'a [(&'a str, &'a str)],
+    /// The owning tsconfig's `compilerOptions` object.
+    pub(super) compiler_options: Option<&'a str>,
+}
+
+const PROBE_ROOT: &str = "/wb";
 const PROBE_FILE: &str = "/wb/checker_probe.ts";
 
 /// Answer `probe` in TYPE position over a module of `source` and hand the
@@ -21,8 +34,40 @@ pub(super) fn with_probe<R>(
     probe: &str,
     read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
 ) -> R {
+    with_probe_in(ProbeProject::default(), source, probe, read)
+}
+
+/// [`with_probe`] in `project`.
+pub(super) fn with_probe_in<R>(
+    project: ProbeProject<'_>,
+    source: &str,
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
-    let host = make_audit_host();
+    let host = match project.compiler_options {
+        None => make_audit_host(),
+        Some(options) => Arc::new(crate::VerterHost::new_standalone_with_tsconfig_projects(
+            crate::HostConfig {
+                analysis_level: crate::types::AnalysisLevel::Full,
+                audit_enabled: true,
+                footprint_capture: false,
+                ..crate::HostConfig::default()
+            },
+            &[(
+                PROBE_ROOT,
+                &format!(r#"{{ "compilerOptions": {options} }}"#),
+            )],
+        )),
+    };
+    for (name, file_source) in project.files {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            &format!("{PROBE_ROOT}/{name}"),
+            file_source,
+            crate::FileLanguage::script_ts(),
+        );
+    }
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
             const __probe: {probe} = null as any; \
@@ -69,15 +114,53 @@ pub(super) fn with_probe<R>(
 /// Every `(probe, checker print)` pair whose live answer does not match the
 /// print structurally, each with what the lane measured.
 pub(super) fn mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<String> {
+    mismatches_in(ProbeProject::default(), source, rows)
+}
+
+/// [`mismatches`] in `project`.
+pub(super) fn mismatches_in(
+    project: ProbeProject<'_>,
+    source: &str,
+    rows: &[(&str, &str)],
+) -> Vec<String> {
     rows.iter()
         .filter_map(|(probe, checker)| {
             let expected = checker_syntax::parse(checker)
                 .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
-            with_probe(source, probe, |dispatch, node| {
+            with_probe_in(project, source, probe, |dispatch, node| {
                 (!checker_syntax::matches_node(dispatch, node, &expected, 0)).then(|| {
                     format!(
                         "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
                         render_node(dispatch, node, 0)
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+/// Every `(probe, checker type)` pair whose EVALUATED value does not match
+/// the checker type structurally. The lane keeps a declaration application
+/// by name, as the checker prints it (`Partial<Face | Obj>`); this reads
+/// what the application evaluates to under a publication demand, compared
+/// with a type the checker holds mutually assignable to it.
+pub(super) fn evaluated_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|(probe, checker)| {
+            let expected = checker_syntax::parse(checker)
+                .unwrap_or_else(|err| panic!("the checker type `{checker}` must parse: {err}"));
+            with_probe(source, probe, |dispatch, node| {
+                let value = dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+                (!checker_syntax::matches_node(dispatch, value, &expected, 0)).then(|| {
+                    format!(
+                        "`{probe}`: the checker holds `{checker}`, the lane evaluated `{}`",
+                        render_node(dispatch, value, 0)
                     )
                 })
             })
@@ -99,16 +182,5 @@ pub(super) fn tuple_labels(source: &str, probe: &str) -> Vec<Option<String>> {
                 render_node(dispatch, node, 0)
             ),
         }
-    })
-}
-
-/// Whether the lane still holds `probe` as an undecided conditional — the
-/// relation behind its branch selection gave no verdict.
-pub(super) fn holds_deferred_conditional(source: &str, probe: &str) -> bool {
-    with_probe(source, probe, |dispatch, node| {
-        matches!(
-            dispatch.graph().node_data(node).as_deref(),
-            Some(SemanticNodeData::Conditional { .. })
-        )
     })
 }

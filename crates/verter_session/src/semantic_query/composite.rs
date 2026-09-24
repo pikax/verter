@@ -39,10 +39,22 @@
 //!   — the shell stays recoverable for display while any DERIVED composite
 //!   built FROM it routes canonical.
 //! * [`CompositeCarrierCategory::OrderedCarrier`] — every order-sensitive
-//!   overload carrier: same-name method overload groups, possibly-callable
-//!   member-value intersections, and their companion filters. Arm order is
+//!   overload carrier of an intersection TYPE: possibly-callable
+//!   member-value intersections and their companion filters. Arm order is
 //!   overload precedence and rendered-type-text fidelity; a commutative
 //!   sort would silently reverse the observed overload set.
+//! * [`CompositeCarrierCategory::OverloadGroup`] and
+//!   [`CompositeCarrierCategory::MergedOverloadGroup`] — a same-name
+//!   method's overloads accumulated across the declarations of one merged
+//!   symbol. An `OverloadGroup`'s arms are ONE declaration's overloads in
+//!   source order; a `MergedOverloadGroup`'s arms are the declarations in
+//!   declaration order, each arm one overload or that declaration's
+//!   `OverloadGroup`. Either is ONE method's signature list, not an
+//!   intersection type: `SignaturesOfType` concatenates the arms'
+//!   signatures and drops nothing (two identical overloads both stay, as
+//!   TypeScript's `getSignaturesOfSymbol` keeps every declaration), and the
+//!   merged arms are the declarations call resolution groups its candidates
+//!   by.
 //! * [`CompositeCarrierCategory::Heritage`] — an interface or class
 //!   declaration body with `extends` heritage, its bases in clause order
 //!   and its own body LAST (a single declaration's projected body and the
@@ -346,6 +358,12 @@ impl<K: CompositeKind> CompositeList<K> {
                 CompositeOriginCategory::OrderedCarrier
             }
             CompositeCarrierCategory::Heritage(_witness) => CompositeOriginCategory::Heritage,
+            CompositeCarrierCategory::OverloadGroup(_witness) => {
+                CompositeOriginCategory::OverloadGroup
+            }
+            CompositeCarrierCategory::MergedOverloadGroup(_witness) => {
+                CompositeOriginCategory::MergedOverloadGroup
+            }
             CompositeCarrierCategory::PreservingRebuild(_witness) => {
                 CompositeOriginCategory::PreservingRebuild
             }
@@ -390,7 +408,8 @@ impl<K: CompositeKind> CompositeList<K> {
 
     /// The order-preserving member-wise rebuild of a composite minted under
     /// `original`: a [`CompositeOriginCategory::Heritage`] body stays a
-    /// heritage body, every other category preserves as
+    /// heritage body and an overload group stays an overload group of the
+    /// same kind; every other category preserves as
     /// [`CompositeCarrierCategory::PreservingRebuild`].
     #[must_use]
     pub(crate) fn rebuilt_from(
@@ -401,6 +420,14 @@ impl<K: CompositeKind> CompositeList<K> {
             CompositeOriginCategory::Heritage => Self::minted(
                 members,
                 CompositeCarrierCategory::Heritage(HeritageMint { _sealed: () }),
+            ),
+            CompositeOriginCategory::OverloadGroup => Self::minted(
+                members,
+                CompositeCarrierCategory::OverloadGroup(OverloadGroupMint { _sealed: () }),
+            ),
+            CompositeOriginCategory::MergedOverloadGroup => Self::minted(
+                members,
+                CompositeCarrierCategory::MergedOverloadGroup(OverloadGroupMint { _sealed: () }),
             ),
             CompositeOriginCategory::Canonical(_)
             | CompositeOriginCategory::CanonicalUnproven
@@ -445,6 +472,27 @@ impl CompositeList<IntersectionKind> {
             CompositeCarrierCategory::Heritage(HeritageMint { _sealed: () }),
         )
     }
+
+    /// Mint one declaration's overloads of a merged method under
+    /// [`CompositeCarrierCategory::OverloadGroup`], in source order.
+    #[must_use]
+    pub(crate) fn overload_group(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::minted(
+            members,
+            CompositeCarrierCategory::OverloadGroup(OverloadGroupMint { _sealed: () }),
+        )
+    }
+
+    /// Mint a merged method's overloads under
+    /// [`CompositeCarrierCategory::MergedOverloadGroup`]: one arm per
+    /// declaration, in declaration order.
+    #[must_use]
+    pub(crate) fn merged_overload_group(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::minted(
+            members,
+            CompositeCarrierCategory::MergedOverloadGroup(OverloadGroupMint { _sealed: () }),
+        )
+    }
 }
 
 impl<K: CompositeKind> std::ops::Deref for CompositeList<K> {
@@ -482,9 +530,15 @@ pub(crate) enum CompositeOriginCategory {
     /// Authored-syntax / locator-shape shell: authored order, authored
     /// scope. A member-wise rebuild of one is a DERIVED result.
     AuthoredShell,
-    /// Order-sensitive overload carrier: arm order is overload precedence —
-    /// never re-decided.
+    /// Order-sensitive overload carrier of an intersection type: arm order
+    /// is overload precedence — never re-decided.
     OrderedCarrier,
+    /// One declaration's overloads of a merged method, in source order: a
+    /// signature list, never re-decided.
+    OverloadGroup,
+    /// A merged method's overloads, one arm per declaration in declaration
+    /// order: a signature list, never re-decided.
+    MergedOverloadGroup,
     /// An interface or class declaration body with heritage (bases in
     /// clause order, own body last): it inherits by concatenation, never
     /// by the intersection rules, and is never re-decided.
@@ -511,9 +565,14 @@ pub(crate) enum CompositeCarrierCategory {
     /// Authored-syntax / locator-shape shell lowering: authored order,
     /// authored scope, no reduction.
     AuthoredShell(AuthoredShellMint),
-    /// An order-sensitive overload carrier: arm order is overload
-    /// precedence and rendered-type-text fidelity.
+    /// An order-sensitive overload carrier of an intersection type: arm
+    /// order is overload precedence and rendered-type-text fidelity.
     OrderedCarrier(OrderedCarrierMint),
+    /// One declaration's overloads of a merged method, in source order.
+    OverloadGroup(OverloadGroupMint),
+    /// A merged method's overloads, one arm per declaration in declaration
+    /// order.
+    MergedOverloadGroup(OverloadGroupMint),
     /// An interface or class declaration body with heritage: bases in
     /// clause order, own body last, inherited by concatenation.
     Heritage(HeritageMint),
@@ -538,6 +597,12 @@ pub(crate) struct AuthoredShellMint {
 
 /// Witness of an [`CompositeCarrierCategory::OrderedCarrier`] mint.
 pub(crate) struct OrderedCarrierMint {
+    _sealed: (),
+}
+
+/// Witness of a [`CompositeCarrierCategory::OverloadGroup`] or
+/// [`CompositeCarrierCategory::MergedOverloadGroup`] mint.
+pub(crate) struct OverloadGroupMint {
     _sealed: (),
 }
 

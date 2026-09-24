@@ -787,6 +787,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // identity `T[K]` remains identity after the
                                 // type-parameter rewrite.
                                 kind: mapper.kind,
+                                // Substitution instantiates the type
+                                // variable; the mapping stays homomorphic
+                                // over its instantiation.
+                                over_type_variable: mapper.over_type_variable,
                             },
                         },
                     ),
@@ -998,8 +1002,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ty: sub_ty,
                         optional: param.optional,
                         rest: param.rest,
-                        // Substitution preserves the parameter's OXC span.
+                        // Substitution preserves the parameter's OXC span
+                        // and its declaration facts.
                         span: param.span,
+                        declared_literal: param.declared_literal,
                     });
                 }
                 let (sub_return, return_changed) =
@@ -1171,6 +1177,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: param.optional,
                         rest: param.rest,
                         span: param.span,
+                        declared_literal: param.declared_literal,
                     });
                 }
                 let mut new_type_parameters = Vec::with_capacity(parts.type_parameters.len());

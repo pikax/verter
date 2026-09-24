@@ -25,12 +25,12 @@ use crate::semantic_query::{
     CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE,
 };
 use crate::signature_kernel::{
-    heritage_signatures, intersection_signatures, publish_signature, set_from_candidates,
-    union_signatures, AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId,
-    DeclarationParentId, DiscoveryError, DiscoveryTypes, ParamInput, RestInput, ResultDemand,
-    ResultInput, SemanticReadView, SignatureCandidate, SignatureDescriptorId, SignatureInput,
-    SignatureKind, SignatureProvenance, SignatureResultRecipe, SignatureSemanticFlags,
-    SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
+    heritage_signatures, intersection_signatures, merged_declaration_signatures, publish_signature,
+    set_from_candidates, union_signatures, AppliedResult, AppliedResultId, BinderInput,
+    DeclarationGroupId, DeclarationParentId, DiscoveryError, DiscoveryTypes, ParamInput, RestInput,
+    ResultDemand, ResultInput, SemanticReadView, SignatureCandidate, SignatureDescriptorId,
+    SignatureInput, SignatureKind, SignatureProvenance, SignatureResultRecipe,
+    SignatureSemanticFlags, SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
 };
 use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
 
@@ -305,16 +305,10 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 drop(data);
                 self.discover(surface)
             }
-            SemanticNodeData::MergedDecl { .. } => {
+            SemanticNodeData::MergedDecl { contributors } => {
+                let contributors = Arc::clone(contributors);
                 drop(data);
-                match self.dispatch().unwrap_identity_carrier_for_relation(node) {
-                    super::relation::IdentityCarrierUnwrap::Concrete(settled)
-                        if settled != node =>
-                    {
-                        self.discover(settled)
-                    }
-                    _ => unsettled(),
-                }
+                self.discover_merged_declaration(&contributors)
             }
             SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
                 drop(data);
@@ -326,18 +320,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                     GraphSignatureKind::Construct => Arc::clone(&surface.construct_signatures),
                 };
                 drop(data);
-                let mut out = Vec::with_capacity(list.len());
-                for (ordinal, sig) in list.iter().enumerate() {
-                    let sig = self.dispatch().resolve_signature_source_carrier(
-                        *sig,
-                        ProjectionReductionContext::structural_transit(),
-                    );
-                    match self.leaf(sig, ordinal as u32)? {
-                        Some(candidate) => out.push(candidate),
-                        None => return unsupported(),
-                    }
-                }
-                Ok(out)
+                self.signature_list(&list, 0)
             }
             SemanticNodeData::TypeParam { constraint, .. } => {
                 let constraint = *constraint;
@@ -363,25 +346,42 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 union_signatures(self.types.store, self.types, &lists)
             }
             SemanticNodeData::Intersection(members) => {
-                // An interface or class body with heritage is a
-                // declaration, not an intersection type: it inherits its
-                // bases' signatures by concatenation, own first.
-                let heritage = members.origin_category() == CompositeOriginCategory::Heritage;
+                let category = members.origin_category();
                 let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                 drop(data);
                 let mut lists = Vec::with_capacity(members.len());
                 for member in members {
                     lists.push(self.discover(member)?);
                 }
-                if heritage {
-                    Ok(heritage_signatures(&lists))
-                } else {
-                    intersection_signatures(
+                match category {
+                    // An interface or class body with heritage is a
+                    // declaration, not an intersection type: it inherits
+                    // its bases' signatures by concatenation, own first.
+                    CompositeOriginCategory::Heritage => Ok(heritage_signatures(&lists)),
+                    // One method's overloads are its signature list, every
+                    // declaration's kept.
+                    CompositeOriginCategory::OverloadGroup => Ok(lists.concat()),
+                    CompositeOriginCategory::MergedOverloadGroup => {
+                        merged_declaration_signatures(self.types.store, &lists)
+                    }
+                    CompositeOriginCategory::Canonical(_)
+                    | CompositeOriginCategory::CanonicalUnproven
+                    | CompositeOriginCategory::AuthoredShell
+                    | CompositeOriginCategory::OrderedCarrier
+                    | CompositeOriginCategory::PreservingRebuild
+                    | CompositeOriginCategory::QuerySubject => intersection_signatures(
                         self.types.store,
                         self.types,
                         kernel_kind(self.kind),
                         &lists,
-                    )
+                    ),
+                    #[cfg(any(test, feature = "test-support"))]
+                    CompositeOriginCategory::TestFixture => intersection_signatures(
+                        self.types.store,
+                        self.types,
+                        kernel_kind(self.kind),
+                        &lists,
+                    ),
                 }
             }
             SemanticNodeData::Primitive(primitive) => {
@@ -561,6 +561,66 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             crate::semantic_query::QueryResult::Value(surface) => self.discover(surface),
             _ => unsettled(),
         }
+    }
+
+    /// The candidates of an ordered list of signature nodes — one object's
+    /// call or construct list — whose ordinals start at `first_ordinal`.
+    fn signature_list(&mut self, list: &[SemanticNodeId], first_ordinal: u32) -> Found {
+        let mut out = Vec::with_capacity(list.len());
+        for (offset, sig) in list.iter().enumerate() {
+            let sig = self.dispatch().resolve_signature_source_carrier(
+                *sig,
+                ProjectionReductionContext::structural_transit(),
+            );
+            match self.leaf(sig, first_ordinal + offset as u32)? {
+                Some(candidate) => out.push(candidate),
+                None => return unsupported(),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The signatures of a merged declaration: every contributor's own
+    /// signatures in contributor order — one symbol, each contributor its
+    /// own declaration ([`merged_declaration_signatures`]) — then its
+    /// `extends` bases in clause order, each base once (the heritage rule
+    /// over the peer-merged body `reduce_merged_decl_with_graph` builds).
+    fn discover_merged_declaration(&mut self, contributors: &[SemanticNodeId]) -> Found {
+        let graph = self.dispatch().graph();
+        let mut own: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(contributors.len());
+        let mut bases: Vec<SemanticNodeId> = Vec::new();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        for contributor in contributors {
+            let mut surfaces = Vec::new();
+            super::walk::collect_merged_contributor_arms(
+                graph,
+                *contributor,
+                &mut surfaces,
+                &mut bases,
+            );
+            own.push(
+                surfaces
+                    .iter()
+                    .flat_map(|surface| match self.kind {
+                        GraphSignatureKind::Call => surface.call_signatures.iter(),
+                        GraphSignatureKind::Construct => surface.construct_signatures.iter(),
+                    })
+                    .copied()
+                    .filter(|signature| seen.insert(*signature))
+                    .collect(),
+            );
+        }
+        let mut lists = Vec::with_capacity(own.len());
+        let mut ordinal = 0u32;
+        for signatures in &own {
+            lists.push(self.signature_list(signatures, ordinal)?);
+            ordinal += signatures.len() as u32;
+        }
+        let mut out = merged_declaration_signatures(self.types.store, &lists)?;
+        for base in bases {
+            out.extend(self.discover(base)?);
+        }
+        Ok(out)
     }
 
     /// One authored signature node as a published candidate, or `None` when
@@ -748,6 +808,11 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
             )
         });
+        // TypeScript's `HasLiteralTypes`: a parameter (the `this`
+        // receiver included) whose DECLARED type is a literal type makes
+        // the signature a specialized one, which call resolution tries
+        // first. A declaration fact, kept through instantiation.
+        let specialized = params.iter().any(|param| param.declared_literal);
         let locator = span.map_or(0, |s| hash_u64(&(s.start, s.end)));
         let input = SignatureInput {
             kind: kernel_kind(kind),
@@ -758,10 +823,12 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             receiver: receiver.map(to_param),
             params: fixed,
             rest,
-            flags: if untyped_js {
-                SignatureSemanticFlags::UNTYPED_JS
-            } else {
-                SignatureSemanticFlags::NONE
+            flags: match (untyped_js, specialized) {
+                (true, true) => SignatureSemanticFlags::UNTYPED_JS
+                    .union(SignatureSemanticFlags::LITERAL_SPECIALIZATION),
+                (true, false) => SignatureSemanticFlags::UNTYPED_JS,
+                (false, true) => SignatureSemanticFlags::LITERAL_SPECIALIZATION,
+                (false, false) => SignatureSemanticFlags::NONE,
             },
             result,
             provenance: SignatureProvenance::authored(
@@ -1483,6 +1550,20 @@ impl ProjectSemanticDispatch<'_> {
         self.shared_signature_nodes_from(subject, kind, first)
     }
 
+    /// [`Self::shared_signature_nodes`] in the order call resolution tries
+    /// them: the kernel's [`crate::signature_kernel::resolution_order`]
+    /// (TypeScript's `reorderCandidates`) over the same candidates. Only
+    /// call resolution reads this order; conditional inference, which reads
+    /// the LAST signature, reads declaration order.
+    pub(super) fn shared_signature_nodes_in_resolution_order(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> SharedSignatureNodes {
+        let first = self.signature_set_value(subject, kind);
+        self.shared_signature_nodes_ordered(subject, kind, first, true)
+    }
+
     /// [`Self::shared_signature_nodes`] over an already-dispatched first
     /// read.
     fn shared_signature_nodes_from(
@@ -1491,8 +1572,20 @@ impl ProjectSemanticDispatch<'_> {
         kind: GraphSignatureKind,
         first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
     ) -> SharedSignatureNodes {
+        self.shared_signature_nodes_ordered(subject, kind, first, false)
+    }
+
+    /// The shared read in declaration order, or with `resolution` in the
+    /// order call resolution tries the candidates.
+    fn shared_signature_nodes_ordered(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+        resolution: bool,
+    ) -> SharedSignatureNodes {
         match self.read_signature_set(subject, kind, first, |value| {
-            self.signature_nodes_of(kind, value)
+            self.signature_nodes_of(kind, value, resolution)
         }) {
             Ok(nodes) => SharedSignatureNodes::Nodes(nodes),
             Err(reason) => SharedSignatureNodes::Incomplete(reason),
@@ -1500,31 +1593,49 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// The node form of every candidate of one dispatched set, in candidate
-    /// order.
+    /// order — or, with `resolution`, in the kernel's resolution order.
     fn signature_nodes_of(
         &self,
         kind: GraphSignatureKind,
         value: &crate::signature_kernel::SignatureSetValue,
+        resolution: bool,
     ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
         let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
         let store = self.graph().signature_store();
-        let candidates: Vec<SignatureCandidate> = {
+        let (candidates, order): (Vec<SignatureCandidate>, Vec<usize>) = {
             let view = SemanticReadView::pin(store);
             if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
                 return Err(SignatureSetReadFailure::Retired);
             }
-            match view.read_set(value.set) {
+            let candidates = match view.read_set(value.set) {
                 Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
                 Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
                 Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
                 Err(_) => return Err(unsettled),
-            }
+            };
+            let order = if resolution {
+                match crate::signature_kernel::resolution_order(&view, &candidates) {
+                    Ok(order) => order,
+                    Err(error) if is_retired_handle(&error) => {
+                        return Err(SignatureSetReadFailure::Retired)
+                    }
+                    Err(error) => {
+                        return Err(SignatureSetReadFailure::Incomplete(
+                            error.incomplete_reason(),
+                        ))
+                    }
+                }
+            } else {
+                (0..candidates.len()).collect()
+            };
+            (candidates, order)
         };
         if candidates.len() != value.nodes.len() {
             return Err(unsettled);
         }
         let mut nodes = Vec::with_capacity(candidates.len());
-        for (index, candidate) in candidates.iter().enumerate() {
+        for index in order {
+            let candidate = &candidates[index];
             let node = match value.nodes[index].authored {
                 Some(node) => node,
                 // The composite's node form is built after the view above is

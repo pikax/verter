@@ -6,6 +6,7 @@ pub mod attribute_operations;
 pub mod binder_capture;
 pub mod binding_views;
 pub mod options_api;
+pub mod public_constructor;
 pub mod script_setup;
 
 #[cfg(test)]
@@ -16,5 +17,7 @@ mod binder_capture_tests;
 mod binding_views_tests;
 #[cfg(test)]
 mod options_api_tests;
+#[cfg(test)]
+mod public_constructor_tests;
 #[cfg(test)]
 mod script_setup_tests;

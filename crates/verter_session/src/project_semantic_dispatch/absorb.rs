@@ -76,7 +76,7 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// Intern a bare primitive node.
-    fn primitive_node(&self, kind: PrimitiveKind) -> SemanticNodeId {
+    pub(super) fn primitive_node(&self, kind: PrimitiveKind) -> SemanticNodeId {
         self.graph().intern_node(SemanticNodeData::Primitive(kind))
     }
 
@@ -90,7 +90,7 @@ impl ProjectSemanticDispatch<'_> {
 
     /// `{}` — the empty object surface (`keyof unknown = never` mapped, mapped
     /// over `never`).
-    fn empty_object(&self) -> SemanticNodeId {
+    pub(super) fn empty_object(&self) -> SemanticNodeId {
         self.graph()
             .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view()))
     }
