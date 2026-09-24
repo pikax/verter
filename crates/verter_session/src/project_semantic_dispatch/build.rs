@@ -237,6 +237,30 @@ pub(super) fn same_class_identity(
     a.canonical_id == b.canonical_id && a.owner == b.owner && a.decl_name == b.decl_name
 }
 
+/// The `prototype` property of a class constructor type, whose type is
+/// `prototype` — the class instance with `any` for each of its own type
+/// parameters. The checker declares it for every class (declaration and
+/// expression alike): public, writable, with no authored declaration site.
+pub(super) fn class_prototype_member(
+    prototype: SemanticNodeId,
+    declaration_origin: Option<Arc<str>>,
+) -> SurfaceMember {
+    SurfaceMember {
+        key: crate::semantic_query::AuthoredPropertyKey::string("prototype"),
+        value: prototype,
+        optional: false,
+        readonly: false,
+        method_kind: None,
+        has_implementation_body: false,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        spans: verter_type_expr::MemberSpans::default(),
+        declaration_origin,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+    }
+}
+
 /// Upper bound on the template-literal keyspace product width
 /// `∏ |choice_set_i|` enumerated by
 /// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
@@ -2027,8 +2051,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // substitution reaches only the constructor signatures the
                 // shells survive into (a static method's OWN same-name
                 // generic is protected by the shadow-aware collection).
-                // `prototype` is synthesized at projection time (the
-                // walker's member hop), never stored here.
+                // The composed surface carries the `prototype` property the
+                // checker gives every class constructor type
+                // ([`Self::with_class_prototype_property`]), so `keyof`,
+                // indexed access, property reads and relations all read it.
                 //
                 // Effective post-fallback identity (the ONE shared
                 // export-target fallback rail — `build_typeof` keys NEW
@@ -2146,6 +2172,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         composed_node = self.merge_static_surfaces(composed_node, base_node);
                     }
                 }
+                composed_node = self.with_class_prototype_property(
+                    own_canonical.as_ref(),
+                    own_owner,
+                    own_symbol.as_ref(),
+                    composed_node,
+                );
                 // Specialize THIS class's own type parameters with the key's
                 // `type_args` (produced by a derived class's heritage hop
                 // above, or any caller instantiating the static surface).
@@ -2657,6 +2689,78 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             })
             .collect()
+    }
+
+    /// The composed static surface of a declared class with the `prototype`
+    /// property the checker gives every class constructor type: the class
+    /// instance with `any` for each of its type parameters
+    /// (`getTypeOfPrototypeProperty` — `(typeof G)['prototype']` is
+    /// `G<any>`), first among the members. It replaces a `prototype` the
+    /// class declares as a static (TS2699, whose declared type the checker
+    /// does not read) or inherits from its base's constructor.
+    fn with_class_prototype_property(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        surface: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let view = match self.graph().node_data(surface).as_deref() {
+            Some(SemanticNodeData::Object(view)) => view.clone(),
+            _ => return surface,
+        };
+        let Some(indexed) = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return surface;
+        };
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: None,
+        };
+        let identity = crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from(symbol));
+        let arity = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, symbol)
+            .map_or(0, |type_decl| type_decl.type_parameters.len());
+        let prototype = if arity == 0 {
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope)
+        } else {
+            let any = self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+            let args: Arc<[SemanticNodeId]> = vec![any; arity].into();
+            self.graph().intern_node_with_scope(
+                SemanticNodeData::InstantiationRef {
+                    base: identity,
+                    args,
+                },
+                scope,
+            )
+        };
+        let member = class_prototype_member(prototype, Some(Arc::from(canonical)));
+        let mut entries: Vec<SurfaceEntry> = Vec::with_capacity(view.entries.len() + 1);
+        entries.push(SurfaceEntry::Member(member));
+        entries.extend(
+            view.entries
+                .iter()
+                .filter(|entry| {
+                    !matches!(entry, SurfaceEntry::Member(existing)
+                if existing.key.as_string() == Some("prototype"))
+                })
+                .cloned(),
+        );
+        self.graph()
+            .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                view.keyspace,
+                view.has_known_index_signature(),
+            )))
     }
 
     /// Substitute a class's OWN type parameters positionally with the

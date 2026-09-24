@@ -4169,6 +4169,8 @@ mod base_signature_tests;
 #[cfg(test)]
 mod checker_probe_lane_tests;
 #[cfg(test)]
+mod class_prototype_property_tests;
+#[cfg(test)]
 mod class_value_heritage_tests;
 #[cfg(test)]
 mod heritage_signature_tests;

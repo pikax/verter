@@ -1358,62 +1358,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.dispatch.opaque(QueryError::Miss)
     }
 
-    /// The instance a constructor's `prototype` reads through one construct
-    /// signature: the class instantiated with `any` for every type
-    /// parameter it has (the checker's `getTypeOfPrototypeProperty`) — the
-    /// signature's own (a generic class's), and a class expression's outer
-    /// ones still at their own parameters (`inside<T>`'s `C.prototype` is
-    /// `inside.C`, measured on 7.0.2).
-    fn prototype_instance_of(&self, signature: SemanticNodeId) -> Option<SemanticNodeId> {
-        let any = self.graph().intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Any,
-        ));
-        let instance = match self.graph().node_data(signature).as_deref() {
-            Some(SemanticNodeData::Signature {
-                type_parameters,
-                return_type,
-                ..
-            }) if type_parameters.is_empty() => *return_type,
-            Some(SemanticNodeData::Signature {
-                type_parameters, ..
-            }) => {
-                let instantiated = self
-                    .dispatch
-                    .instantiate_call_candidate(signature, &vec![any; type_parameters.len()])?;
-                match self.graph().node_data(instantiated).as_deref() {
-                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        let Some(SemanticNodeData::ClassExpressionInstance {
-            identity,
-            type_arguments,
-            ..
-        }) = self.graph().node_data(instance).as_deref().cloned()
-        else {
-            return Some(instance);
-        };
-        let parameters = identity
-            .outer_clauses
-            .iter()
-            .flat_map(|clause| clause.parameters.iter());
-        let mut prototype = instance;
-        for (name, argument) in parameters.zip(type_arguments.iter()) {
-            let at_parameter = matches!(
-                self.graph().node_data(*argument).as_deref(),
-                Some(SemanticNodeData::TypeParam { display_name, .. }) if display_name == name
-            );
-            if at_parameter {
-                prototype = self
-                    .dispatch
-                    .substitute_semantic_type_param(prototype, *argument, any);
-            }
-        }
-        Some(prototype)
-    }
-
     /// Dispatch a nested subquery and FOLD its A2 partiality flag into the
     /// walker's accumulated `result_is_partial` before returning the bare
     /// [`QueryResult`].
@@ -2160,47 +2104,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             self.intermediate_nodes.push(Some(current));
                         }
                         None => {
-                            // `prototype` is a PROJECTION-TIME hop onto the
-                            // instance side of a constructor object — never a
-                            // stored member. A constructor-shaped surface (one
-                            // carrying construct signatures) projects
-                            // `prototype` as the construct signature's
-                            // instance return (`typeof C.prototype.greet`
-                            // walks the instance surface from there). The
-                            // LAST construct signature is the selected one,
-                            // mirroring the signature-utility overload rule.
-                            // The member spelling and the element-access
-                            // spelling are one key (`(typeof C)['prototype']`
-                            // reads what `C.prototype` reads), and a generic
-                            // class's prototype is its instance with `any`
-                            // for every type parameter (`GDecl<any>`, the
-                            // checker's `getTypeOfPrototypeProperty`). A
-                            // member-bearing surface that DECLARES a
-                            // `prototype` member never reaches this arm (the
-                            // member lookup above wins).
-                            if known_key.as_string() == Some("prototype") {
-                                if let Some(instance) = surface
-                                    .construct_signatures
-                                    .last()
-                                    .and_then(|sig| self.prototype_instance_of(*sig))
-                                {
-                                    self.graph().record_origin_edge(
-                                        instance,
-                                        OriginEdgeKind::ProjectMember,
-                                        Arc::from(vec![current].into_boxed_slice()),
-                                        OriginMeta::ProjectedMember {
-                                            key: PropertyKey::identifier("prototype"),
-                                            provenance:
-                                                verter_audit::MemberEdgeProvenance::PathProjection,
-                                        },
-                                        Arc::clone(self.fence),
-                                    );
-                                    current = instance;
-                                    index += 1;
-                                    self.intermediate_nodes.push(Some(current));
-                                    continue;
-                                }
-                            }
                             // A surface that carries CALL SIGNATURES exposes
                             // the members of the ambient callable-function
                             // interface in addition to its own. Its own
