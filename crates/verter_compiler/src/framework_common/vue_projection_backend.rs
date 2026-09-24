@@ -75,8 +75,8 @@ use crate::ide::vue_projection::public_constructor::project_public_constructor;
 /// backend.
 pub use crate::ide::vue_projection::public_constructor::{
     ConstructorCompatibilityReceipt, ConstructorSource, DeclaredSurface, ExposeSurface,
-    ExposedMember, InstanceMemberOrigin, PropsRequirement, PublicBinderParam, PublicInstanceMember,
-    PublicInstanceProjection, PublicModel, PublicSurface, StaticOptions,
+    ExposedMember, InstanceMemberOrigin, PropsDefaults, PropsRequirement, PublicBinderParam,
+    PublicInstanceMember, PublicInstanceProjection, PublicModel, PublicSurface, StaticOptions,
     VuePublicConstructorContract, EXPOSE_PROVIDER, PUBLIC_COMPONENT, PUBLIC_INSTANCE, PUBLIC_PROPS,
 };
 use crate::ide::vue_projection::script_setup::{

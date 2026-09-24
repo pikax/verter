@@ -1241,7 +1241,8 @@ fn attribute_operations_reads_admitted_carrier_blocks() {
 #[test]
 fn public_constructor_reads_admitted_carrier_blocks() {
     use verter_compiler::framework_common::vue_projection_backend::{
-        ConstructorSource, PropsRequirement, PublicSurface, VuePublicConstructorContract,
+        ConstructorSource, PropsDefaults, PropsRequirement, PublicSurface,
+        VuePublicConstructorContract,
     };
     use verter_compiler::framework_common::SetupProjectionRefusal;
 
@@ -1278,6 +1279,9 @@ fn public_constructor_reads_admitted_carrier_blocks() {
     );
     assert_eq!(contract.source, ConstructorSource::ScriptSetup);
     assert_eq!(contract.props_requirement, PropsRequirement::Required);
+    // Every public field type of the contract is nameable outside the crate.
+    let defaults: Option<&PropsDefaults> = contract.props_defaults.as_ref();
+    assert!(defaults.is_none());
     assert!(!contract.instance.publishes("secret"));
     assert!(contract.instance.publishes("reset") && contract.instance.publishes("current"));
     let receipt = contract.receipt();

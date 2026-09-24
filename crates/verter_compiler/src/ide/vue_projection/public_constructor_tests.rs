@@ -394,16 +394,32 @@ fn with_defaults_makes_defaulted_props_omissible() {
         None,
     );
     assert_eq!(partial.props_requirement, PropsRequirement::Required);
-    // Defaults whose keys the syntax cannot read leave the decision to
-    // TypeScript over the hoisted defaults.
-    let open = project(
-        "import { base } from './base';\nwithDefaults(defineProps<{ a: string }>(), { ...base });\n",
-        None,
-    );
-    assert_eq!(open.props_requirement, PropsRequirement::Undetermined);
-    let rendered = declaration(&open);
-    assert!(rendered.starts_with("const __VerterPropsDefaults = ({ ...base });\n"));
-    assert!(rendered.contains("keyof typeof __VerterPropsDefaults>"));
+    // Defaults whose key set is open are merged at runtime: Vue keeps every
+    // authored `required`, so a prop the spread may not cover (`id`) stays
+    // required and no key is remapped through a widened `keyof`.
+    for defaults in ["{ ...base }", "{ ...base, a: 'x' }", "base"] {
+        let open = project(
+            &format!(
+                "import {{ base }} from './base';\nwithDefaults(defineProps<{{ a: string; id: number }}>(), {defaults});\n"
+            ),
+            None,
+        );
+        assert_eq!(
+            open.props_requirement,
+            PropsRequirement::Required,
+            "{defaults}"
+        );
+        assert_eq!(open.props_defaults.as_ref().map(|d| &d.keys), Some(&None));
+        let rendered = declaration(&open);
+        assert!(
+            !rendered.contains("__VerterPropsWithDefaults"),
+            "{rendered}"
+        );
+        assert!(rendered.starts_with(
+            "type __VerterPublicProps = import(\"vue\").PublicProps & ({ a: string; id: number });\n"
+        ));
+        assert!(rendered.contains("new (props: __VerterPublicProps): __VerterPublicInstance;"));
+    }
 }
 
 #[test]
@@ -435,11 +451,102 @@ fn required_flags_read_through_const_assertions() {
         "(typeof __VerterModelRequired0 extends true ? { \"modelValue\": string } : { \"modelValue\"?: string })"
     ));
     assert!(rendered.contains("new (...args: {} extends __VerterPublicProps ?"));
+    // The flag is read through the options object's own parentheses,
+    // `as const` and `satisfies`.
+    for options in [
+        "({ required: true as const })",
+        "{ required: true as const } as const",
+        "{ required: true } satisfies { required: true }",
+        "({ required: true })!",
+    ] {
+        let model = project(&format!("defineModel<string>({options});\n"), None);
+        assert_eq!(
+            model.models[0].required,
+            PropsRequirement::Required,
+            "{options}"
+        );
+    }
+    // A spread that may set `required`, or an options value that is not an
+    // object literal, leaves the decision to TypeScript over the hoisted
+    // options; a spread keeps only the members that decide `required`.
+    for (setup, hoisted) in [
+        (
+            "defineModel<string>({ ...{ required: true as const }, get(v) { return v; } });\n",
+            "const __VerterModelOptions0 = (({ ...{ required: true as const } }) satisfies { readonly required?: boolean; readonly [key: string]: unknown });\n",
+        ),
+        (
+            "import { flags } from './flags';\ndefineModel<string>({ required: false, ...flags });\n",
+            "const __VerterModelOptions0 = (({ required: false, ...flags }) satisfies { readonly required?: boolean; readonly [key: string]: unknown });\n",
+        ),
+        (
+            "import { opts } from './flags';\ndefineModel<string>(\"count\", opts);\n",
+            "const __VerterModelOptions0 = (opts);\n",
+        ),
+        (
+            "import { opts, Options } from './flags';\ndefineModel<string>(opts as Options);\n",
+            "const __VerterModelOptions0 = (opts as Options);\n",
+        ),
+    ] {
+        let model = project(setup, None);
+        assert_eq!(model.models[0].required, PropsRequirement::Undetermined, "{setup}");
+        let rendered = declaration(&model);
+        assert!(rendered.starts_with(hoisted), "{rendered}");
+        let key = if setup.contains("\"count\"") { "count" } else { "modelValue" };
+        assert!(
+            rendered.contains(&format!(
+                "(typeof __VerterModelOptions0 extends {{ required: true }} ? {{ \"{key}\": string }} : {{ \"{key}\"?: string }})"
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains("new (...args: {} extends __VerterPublicProps ?"));
+    }
+    // A later `required` overrides an earlier spread and is read directly.
+    let overridden = project(
+        "import { flags } from './flags';\ndefineModel<string>({ ...flags, required: true });\n",
+        None,
+    );
+    assert_eq!(overridden.models[0].required, PropsRequirement::Required);
     let runtime = project(
         "import { strict } from './flags';\ndefineProps({ id: { type: String, required: strict } });\n",
         None,
     );
     assert_eq!(runtime.props_requirement, PropsRequirement::Undetermined);
+    let spread = project(
+        "import { req } from './flags';\ndefineProps({ id: { type: String, ...req } });\n",
+        None,
+    );
+    assert_eq!(spread.props_requirement, PropsRequirement::Undetermined);
+}
+
+#[test]
+fn hoisted_values_carry_the_setup_literal_constants_they_reference() {
+    // Vue hoists a setup `const` with a static initializer to module scope,
+    // so a hoisted value may reference it; its declaration is hoisted too.
+    let model = project(
+        "const strict = true as const;\nconst label: string = `x`, count = 1;\nconst open = ref(0);\ndefineModel<string>({ required: strict });\ndefineProps({ n: { type: Number, default: count } });\n",
+        None,
+    );
+    assert_eq!(model.models[0].required, PropsRequirement::Undetermined);
+    let rendered = declaration(&model);
+    assert!(
+        rendered.starts_with(
+            "const strict = true as const;\nconst count = 1;\nconst __VerterModelRequired0 = (strict);\n"
+        ),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("const label"), "{rendered}");
+    assert!(!rendered.contains("const open"), "{rendered}");
+    // With a normal script Vue does not hoist setup constants, so nothing
+    // setup-local is rendered at module scope.
+    let split = project_public_constructor(
+        Some(block("export default {};\n")),
+        Some(block(
+            "const strict = true as const;\ndefineModel<string>({ required: strict });\n",
+        )),
+        None,
+    )
+    .expect("projects");
+    assert!(declaration(&split).starts_with("const __VerterModelRequired0 = (strict);\n"));
 }
 
 #[test]

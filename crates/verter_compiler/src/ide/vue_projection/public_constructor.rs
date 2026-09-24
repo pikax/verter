@@ -37,11 +37,17 @@
 //!   When the syntax cannot decide (a props type named from another module,
 //!   a non-literal `required`), the parameter is the conditional rest tuple
 //!   so TypeScript decides — never a blanket optional parameter.
+//! - `withDefaults` makes a prop omissible only through a statically named
+//!   default key. Defaults whose key set is open (a spread, a computed key,
+//!   a non-literal argument) are merged at runtime and leave every authored
+//!   `required` in place, as Vue's compiled props do.
 //! - Runtime values Vue hoists out of setup (runtime props / emits options,
-//!   non-literal `withDefaults` defaults, a non-literal model `required`)
-//!   are rendered as module-scope constants; one that names a binder
-//!   parameter is rendered as a function over the binder and read through
-//!   an instantiation expression, so the selected arguments reach it.
+//!   a model options value or `required` the syntax cannot read) are
+//!   rendered as module-scope constants; one that names a binder parameter
+//!   is rendered as a function over the binder and read through an
+//!   instantiation expression, so the selected arguments reach it. A setup
+//!   literal constant a hoisted value references is rendered ahead of it,
+//!   because Vue hoists that declaration to module scope too.
 //! - Exposed members come from the expose provider ([`EXPOSE_PROVIDER`]),
 //!   rendered in the same declaration as the one generic function over the
 //!   setup statements that returns the `defineExpose` argument, instantiated
@@ -58,17 +64,18 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpressionElement, ArrowFunctionExpression, AwaitExpression, CallExpression, Class,
-    Declaration, ExportDefaultDeclarationKind, Expression, ForOfStatement, Function,
-    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement, TSSignature, TSType,
-    TSTypeName,
+    ArrayExpressionElement, ArrowFunctionExpression, AwaitExpression, BindingPattern,
+    CallExpression, Class, Declaration, ExportDefaultDeclarationKind, Expression, ForOfStatement,
+    Function, IdentifierReference, ObjectExpression, ObjectPropertyKind, Program, PropertyKey,
+    Statement, TSSignature, TSType, TSTypeName, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
-use rustc_hash::FxHashSet;
+use oxc_syntax::symbol::SymbolId;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::script_setup::{
     binder_product_from, grammar_of, macro_positions, range, value_bindings,
@@ -91,11 +98,13 @@ pub const EXPOSE_PROVIDER: &str = "__VerterExpose";
 pub const RUNTIME_PROPS: &str = "__VerterRuntimeProps";
 /// Hoisted runtime emits options.
 pub const RUNTIME_EMITS: &str = "__VerterRuntimeEmits";
-/// Hoisted `withDefaults` defaults whose keys are not all statically named.
-pub const PROPS_DEFAULTS: &str = "__VerterPropsDefaults";
 /// Prefix of a hoisted non-literal `defineModel` `required` value; the model
 /// ordinal follows.
 pub const MODEL_REQUIRED: &str = "__VerterModelRequired";
+/// Prefix of a hoisted `defineModel` options value whose `required` the
+/// syntax cannot read (options that are not an object literal, or a spread
+/// that may set `required`); the model ordinal follows.
+pub const MODEL_OPTIONS: &str = "__VerterModelOptions";
 /// Props with defaulted keys made omissible for the external argument.
 pub const PROPS_WITH_DEFAULTS: &str = "__VerterPropsWithDefaults";
 
@@ -179,9 +188,9 @@ pub struct PublicModel {
     /// Authored value type text; `None` is Vue's open `any`.
     pub value_type: Option<String>,
     /// `required` option: `Required` for a literal `true` (also through
-    /// `as const` / `satisfies` / parentheses), `Optional` when absent or
-    /// literally false, `Undetermined` when TypeScript decides from the
-    /// hoisted value's type.
+    /// `as const` / `satisfies` / parentheses, on the value or the options
+    /// object), `Optional` when absent or literally false, `Undetermined`
+    /// when TypeScript decides from the hoisted value's or options' type.
     pub required: PropsRequirement,
     /// Call range in the carrier.
     pub call: SourceRange,
@@ -192,8 +201,10 @@ pub struct PublicModel {
 pub struct PropsDefaults {
     /// Defaults argument range in the carrier.
     pub expression: SourceRange,
-    /// Statically named default keys; `None` when a spread, a computed key or
-    /// a non-literal argument leaves the key set to TypeScript.
+    /// Statically named default keys, which become omissible; `None` when a
+    /// spread, a computed key or a non-literal argument leaves the key set
+    /// open, so Vue merges the defaults at runtime and every authored
+    /// `required` prop stays required.
     pub keys: Option<Vec<String>>,
 }
 
@@ -332,6 +343,9 @@ pub struct VuePublicConstructorContract {
     /// The public instance.
     pub instance: PublicInstanceProjection,
     binder_dependent: Vec<PublicSurface>,
+    /// Setup literal-constant declarations a hoisted value references, in
+    /// source order; rendered at module scope ahead of the hoisted values.
+    hoisted_consts: Vec<String>,
     hoisted: Vec<HoistedValue>,
     /// Setup statements (imports excluded, `export` modifiers dropped) in
     /// source order: the expose provider's body.
@@ -384,6 +398,10 @@ impl VuePublicConstructorContract {
         let construct_binder = self.binder_list(BinderSite::Construct);
         let args = self.binder_args();
         let mut out = String::new();
+        for declaration in &self.hoisted_consts {
+            out.push_str(declaration);
+            out.push('\n');
+        }
         for value in &self.hoisted {
             if value.generic {
                 out.push_str(&format!(
@@ -430,12 +448,20 @@ impl VuePublicConstructorContract {
                 match model.required {
                     PropsRequirement::Required => members.push(format!("{key}: {value}")),
                     PropsRequirement::Optional => members.push(format!("{key}?: {value}")),
-                    // Vue's `required` is read from the hoisted value's type,
-                    // exactly as the runtime props options are.
-                    PropsRequirement::Undetermined => undetermined.push(format!(
-                        "({} extends true ? {{ {key}: {value} }} : {{ {key}?: {value} }})",
-                        self.hoisted_type(&format!("{MODEL_REQUIRED}{ordinal}"))
-                    )),
+                    // Vue's `required` is read from the hoisted value's or
+                    // options' type, exactly as the runtime props options are.
+                    PropsRequirement::Undetermined => {
+                        let required = format!("{MODEL_REQUIRED}{ordinal}");
+                        let (hoisted, test) = if self.hoisted.iter().any(|h| h.name == required) {
+                            (required, "true")
+                        } else {
+                            (format!("{MODEL_OPTIONS}{ordinal}"), "{ required: true }")
+                        };
+                        undetermined.push(format!(
+                            "({} extends {test} ? {{ {key}: {value} }} : {{ {key}?: {value} }})",
+                            self.hoisted_type(&hoisted)
+                        ));
+                    }
                 }
                 members.push(format!(
                     "{}?: Partial<Record<string, true>>",
@@ -534,34 +560,34 @@ impl VuePublicConstructorContract {
         true
     }
 
+    /// The statically named `withDefaults` keys that make props of the
+    /// type-declared props omissible; empty when none apply.
+    fn defaulted_keys(&self) -> &[String] {
+        match (&self.props, &self.props_defaults) {
+            (
+                DeclaredSurface::TypeArgument { .. },
+                Some(PropsDefaults {
+                    keys: Some(keys), ..
+                }),
+            ) => keys,
+            _ => &[],
+        }
+    }
+
     /// Whether `withDefaults` makes any key of the type-declared props
     /// omissible.
     fn defaults_apply(&self) -> bool {
-        matches!(self.props, DeclaredSurface::TypeArgument { .. })
-            && self
-                .props_defaults
-                .as_ref()
-                .is_some_and(|defaults| defaults.keys.as_ref().is_none_or(|k| !k.is_empty()))
+        !self.defaulted_keys().is_empty()
     }
 
     /// The authored props type, with `withDefaults` keys made omissible.
     fn defaulted(&self, text: &str) -> String {
-        let Some(defaults) = self
-            .props_defaults
-            .as_ref()
-            .filter(|_| self.defaults_apply())
-        else {
+        let keys = self.defaulted_keys();
+        if keys.is_empty() {
             return format!("({text})");
-        };
-        let keys = match &defaults.keys {
-            Some(keys) => keys
-                .iter()
-                .map(|key| quote(key))
-                .collect::<Vec<_>>()
-                .join(" | "),
-            None => format!("keyof {}", self.hoisted_type(PROPS_DEFAULTS)),
-        };
-        format!("{PROPS_WITH_DEFAULTS}<({text}), {keys}>")
+        }
+        let keys: Vec<String> = keys.iter().map(|key| quote(key)).collect();
+        format!("{PROPS_WITH_DEFAULTS}<({text}), {}>", keys.join(" | "))
     }
 
     /// The type of one hoisted value, instantiated with the binder when it
@@ -711,6 +737,7 @@ pub fn project_public_constructor(
         props_requirement: PropsRequirement::Optional,
         instance: PublicInstanceProjection::default(),
         binder_dependent: Vec::new(),
+        hoisted_consts: Vec::new(),
         hoisted: Vec::new(),
         setup_statements: Vec::new(),
         setup_is_async: false,
@@ -732,6 +759,12 @@ pub fn project_public_constructor(
     let locals = LocalTypes {
         programs: [normal_program, Some(program)],
     };
+    // Vue hoists setup literal constants only when setup is the sole script.
+    let literal_consts = if normal_program.is_none() {
+        literal_consts(program, block.content)
+    } else {
+        FxHashMap::default()
+    };
     let mut collector = PublicCollector {
         macros: MacroContext {
             scoping: semantic.scoping(),
@@ -749,12 +782,21 @@ pub fn project_public_constructor(
         dependent: FxHashSet::default(),
         pending_defaults: None,
         top_level_await: false,
+        literal_consts: &literal_consts,
+        used_consts: FxHashSet::default(),
     };
     collector.visit_program(program);
     let requirement = collector.requirement;
     let top_level_await = collector.top_level_await;
+    let mut used_consts: Vec<&(u32, String)> = collector
+        .used_consts
+        .iter()
+        .filter_map(|symbol| literal_consts.get(symbol))
+        .collect();
     let mut dependent: Vec<PublicSurface> = collector.dependent.into_iter().collect();
     dependent.sort_unstable();
+    used_consts.sort_unstable();
+    contract.hoisted_consts = used_consts.into_iter().map(|(_, d)| d.clone()).collect();
     contract.props_requirement = requirement;
     contract.setup_is_async = top_level_await;
     // The expose provider is instantiated with the whole binder, so a
@@ -966,16 +1008,123 @@ fn runtime_props_requirement(object: &ObjectExpression<'_>) -> PropsRequirement 
     requirement
 }
 
-/// The `required` option of one prop or model options object.
+/// The `required` option of one prop options object. A spread that may set
+/// it leaves the decision to TypeScript.
 fn required_option(object: &ObjectExpression<'_>) -> PropsRequirement {
-    match literal_property(object, "required") {
+    match required_decider(object) {
         None => PropsRequirement::Optional,
-        Some(value) => match literal_boolean(value) {
-            Some(true) => PropsRequirement::Required,
-            Some(false) => PropsRequirement::Optional,
-            None => PropsRequirement::Undetermined,
-        },
+        Some(ObjectPropertyKind::ObjectProperty(property)) => {
+            match literal_boolean(&property.value) {
+                Some(true) => PropsRequirement::Required,
+                Some(false) => PropsRequirement::Optional,
+                None => PropsRequirement::Undetermined,
+            }
+        }
+        Some(ObjectPropertyKind::SpreadProperty(_)) => PropsRequirement::Undetermined,
     }
+}
+
+/// Whether an options member may set `required`: a spread or a `required`
+/// property.
+fn decides_required(property: &ObjectPropertyKind<'_>) -> bool {
+    match property {
+        ObjectPropertyKind::SpreadProperty(_) => true,
+        ObjectPropertyKind::ObjectProperty(property) => {
+            static_key(&property.key).as_deref() == Some("required")
+        }
+    }
+}
+
+/// The member whose value `required` takes: the last spread or `required`
+/// property.
+fn required_decider<'e, 'a>(
+    object: &'e ObjectExpression<'a>,
+) -> Option<&'e ObjectPropertyKind<'a>> {
+    object
+        .properties
+        .iter()
+        .rev()
+        .find(|property| decides_required(property))
+}
+
+/// An options object literal through the wrappers that keep its literal
+/// member types: parentheses, `as const` / `<const>`, `satisfies` and `!`.
+fn options_object<'e, 'a>(expression: &'e Expression<'a>) -> Option<&'e ObjectExpression<'a>> {
+    match expression {
+        Expression::ObjectExpression(object) => Some(object),
+        Expression::ParenthesizedExpression(inner) => options_object(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => options_object(&inner.expression),
+        Expression::TSNonNullExpression(inner) => options_object(&inner.expression),
+        Expression::TSAsExpression(inner) if inner.type_annotation.is_const_type_reference() => {
+            options_object(&inner.expression)
+        }
+        Expression::TSTypeAssertion(inner) if inner.type_annotation.is_const_type_reference() => {
+            options_object(&inner.expression)
+        }
+        _ => None,
+    }
+}
+
+/// Vue's static initializer (`isStaticNode`): literals and operators over
+/// them, through parentheses and TypeScript expression wrappers.
+fn is_static_node(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        Expression::ParenthesizedExpression(inner) => is_static_node(&inner.expression),
+        Expression::TSAsExpression(inner) => is_static_node(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => is_static_node(&inner.expression),
+        Expression::TSNonNullExpression(inner) => is_static_node(&inner.expression),
+        Expression::TSTypeAssertion(inner) => is_static_node(&inner.expression),
+        Expression::TSInstantiationExpression(inner) => is_static_node(&inner.expression),
+        Expression::UnaryExpression(inner) => is_static_node(&inner.argument),
+        Expression::BinaryExpression(inner) => {
+            is_static_node(&inner.left) && is_static_node(&inner.right)
+        }
+        Expression::LogicalExpression(inner) => {
+            is_static_node(&inner.left) && is_static_node(&inner.right)
+        }
+        Expression::ConditionalExpression(inner) => {
+            is_static_node(&inner.test)
+                && is_static_node(&inner.consequent)
+                && is_static_node(&inner.alternate)
+        }
+        Expression::SequenceExpression(inner) => inner.expressions.iter().all(is_static_node),
+        Expression::TemplateLiteral(inner) => inner.expressions.iter().all(is_static_node),
+        _ => false,
+    }
+}
+
+/// Setup literal constants: each top-level `const` identifier with a static
+/// initializer, which Vue hoists to module scope, keyed by symbol with its
+/// source offset and its rendered declaration.
+fn literal_consts(program: &Program<'_>, content: &str) -> FxHashMap<SymbolId, (u32, String)> {
+    let mut consts = FxHashMap::default();
+    for statement in &program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        if declaration.kind != VariableDeclarationKind::Const || declaration.declare {
+            continue;
+        }
+        for declarator in &declaration.declarations {
+            let (BindingPattern::BindingIdentifier(id), Some(init)) =
+                (&declarator.id, &declarator.init)
+            else {
+                continue;
+            };
+            let Some(symbol) = id.symbol_id.get().filter(|_| is_static_node(init)) else {
+                continue;
+            };
+            let span = declarator.span;
+            let text = &content[span.start as usize..span.end as usize];
+            consts.insert(symbol, (span.start, format!("const {text};")));
+        }
+    }
+    consts
 }
 
 /// A boolean literal whose TypeScript type stays that literal: parentheses,
@@ -1023,7 +1172,8 @@ fn literal_property<'e, 'a>(
 }
 
 /// Statically named keys of a defaults object; `None` when a spread, a
-/// computed key or a non-literal argument leaves the key set open.
+/// non-literal computed key or a non-literal argument leaves the key set
+/// open.
 fn static_default_keys(expression: &Expression<'_>) -> Option<Vec<String>> {
     let Expression::ObjectExpression(object) = expression.without_parentheses() else {
         return None;
@@ -1032,10 +1182,8 @@ fn static_default_keys(expression: &Expression<'_>) -> Option<Vec<String>> {
         .properties
         .iter()
         .map(|property| match property {
-            ObjectPropertyKind::ObjectProperty(property) if !property.computed => {
-                static_key(&property.key)
-            }
-            _ => None,
+            ObjectPropertyKind::ObjectProperty(property) => static_key(&property.key),
+            ObjectPropertyKind::SpreadProperty(_) => None,
         })
         .collect()
 }
@@ -1125,6 +1273,39 @@ impl<'a> Visit<'a> for BinderRefs<'_> {
     }
 }
 
+/// Binder-parameter and setup literal-constant references inside one hoisted
+/// value.
+struct ValueRefs<'n, 's> {
+    binder_names: &'n [&'n str],
+    scoping: &'s oxc_semantic::Scoping,
+    literal_consts: &'s FxHashMap<SymbolId, (u32, String)>,
+    /// Names a binder parameter.
+    generic: bool,
+    /// Referenced literal constants.
+    consts: Vec<SymbolId>,
+}
+
+impl<'a> Visit<'a> for ValueRefs<'_, '_> {
+    fn visit_ts_type_name(&mut self, it: &TSTypeName<'a>) {
+        if let TSTypeName::IdentifierReference(id) = it {
+            if self.binder_names.contains(&id.name.as_str()) {
+                self.generic = true;
+            }
+        }
+        walk::walk_ts_type_name(self, it);
+    }
+
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        let symbol = it
+            .reference_id
+            .get()
+            .and_then(|reference| self.scoping.get_reference(reference).symbol_id());
+        if let Some(symbol) = symbol.filter(|s| self.literal_consts.contains_key(s)) {
+            self.consts.push(symbol);
+        }
+    }
+}
+
 struct PublicCollector<'m, 'c> {
     macros: MacroContext<'m>,
     content: &'c str,
@@ -1140,6 +1321,10 @@ struct PublicCollector<'m, 'c> {
     pending_defaults: Option<(oxc_span::Span, PropsDefaults)>,
     /// Setup awaits at top level.
     top_level_await: bool,
+    /// Setup literal constants Vue hoists to module scope.
+    literal_consts: &'c FxHashMap<SymbolId, (u32, String)>,
+    /// Literal constants a hoisted value references.
+    used_consts: FxHashSet<SymbolId>,
 }
 
 impl PublicCollector<'_, '_> {
@@ -1153,15 +1338,6 @@ impl PublicCollector<'_, '_> {
             found: false,
         };
         refs.visit_ts_type(ty);
-        refs.found
-    }
-
-    fn names_binder_in_value(&self, expression: &Expression<'_>) -> bool {
-        let mut refs = BinderRefs {
-            names: self.binder_names,
-            found: false,
-        };
-        refs.visit_expression(expression);
         refs.found
     }
 
@@ -1183,11 +1359,35 @@ impl PublicCollector<'_, '_> {
         surface: PublicSurface,
         contextual: Option<&str>,
     ) {
-        let generic = self.names_binder_in_value(expression);
+        let text = self.text(expression.span());
+        self.hoist_scanned(name, text, surface, contextual, |refs| {
+            refs.visit_expression(expression);
+        });
+    }
+
+    /// Hoist `text`, whose binder and literal-constant references `scan`
+    /// visits.
+    fn hoist_scanned(
+        &mut self,
+        name: String,
+        text: String,
+        surface: PublicSurface,
+        contextual: Option<&str>,
+        scan: impl FnOnce(&mut ValueRefs<'_, '_>),
+    ) {
+        let mut refs = ValueRefs {
+            binder_names: self.binder_names,
+            scoping: self.macros.scoping,
+            literal_consts: self.literal_consts,
+            generic: false,
+            consts: Vec::new(),
+        };
+        scan(&mut refs);
+        let generic = refs.generic;
+        self.used_consts.extend(refs.consts);
         if generic {
             self.dependent.insert(surface);
         }
-        let text = self.text(expression.span());
         let text = match contextual {
             Some(contextual) => format!("({text}) satisfies {contextual}"),
             None => text,
@@ -1221,14 +1421,9 @@ impl PublicCollector<'_, '_> {
                     .as_ref()
                     .and_then(|d| d.keys.clone())
                     .unwrap_or_default();
-                let mut requirement = self.locals.requirement_of_type(ty, &defaulted);
-                // Defaults whose keys the syntax cannot read may cover any
-                // required prop: TypeScript decides over the rendered type.
-                if defaults.as_ref().is_some_and(|d| d.keys.is_none())
-                    && requirement == PropsRequirement::Required
-                {
-                    requirement = PropsRequirement::Undetermined;
-                }
+                // Open default keys make nothing omissible: Vue merges them
+                // at runtime and keeps every authored `required`.
+                let requirement = self.locals.requirement_of_type(ty, &defaulted);
                 self.requirement = self.requirement.join(requirement);
                 self.contract.props_defaults = defaults;
             }
@@ -1276,26 +1471,17 @@ impl PublicCollector<'_, '_> {
     }
 
     /// `withDefaults(defineProps<T>(), defaults)`: record the defaults for
-    /// the wrapped `defineProps`, hoisting them when their keys are open.
+    /// the wrapped `defineProps`.
     fn with_defaults(&mut self, call: &CallExpression<'_>) {
         let mut arguments = call.arguments.iter().filter_map(|a| a.as_expression());
         let (Some(props), Some(defaults)) = (arguments.next(), arguments.next()) else {
             return;
         };
-        let keys = static_default_keys(defaults);
-        if keys.is_none() {
-            self.hoist(
-                PROPS_DEFAULTS.to_string(),
-                defaults,
-                PublicSurface::Props,
-                None,
-            );
-        }
         self.pending_defaults = Some((
             props.span(),
             PropsDefaults {
                 expression: range(defaults.span(), self.base),
-                keys,
+                keys: static_default_keys(defaults),
             },
         ));
     }
@@ -1303,26 +1489,17 @@ impl PublicCollector<'_, '_> {
     fn model(&mut self, call: &CallExpression<'_>) {
         let ordinal = self.contract.models.len();
         let mut name = "modelValue".to_string();
-        let mut required = PropsRequirement::Optional;
-        for argument in call.arguments.iter().filter_map(|a| a.as_expression()) {
-            match argument {
-                Expression::StringLiteral(literal) => name = literal.value.to_string(),
-                Expression::ObjectExpression(object) => {
-                    required = required_option(object);
-                    if required == PropsRequirement::Undetermined {
-                        if let Some(value) = literal_property(object, "required") {
-                            self.hoist(
-                                format!("{MODEL_REQUIRED}{ordinal}"),
-                                value,
-                                PublicSurface::Models,
-                                None,
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
+        // Vue reads a leading string literal as the name; the next argument
+        // is the options.
+        let mut arguments = call.arguments.iter().filter_map(|a| a.as_expression());
+        let mut options = arguments.next();
+        if let Some(Expression::StringLiteral(literal)) = options {
+            name = literal.value.to_string();
+            options = arguments.next();
         }
+        let required = options.map_or(PropsRequirement::Optional, |options| {
+            self.model_required(ordinal, options)
+        });
         let value_type = call
             .type_arguments
             .as_ref()
@@ -1338,6 +1515,64 @@ impl PublicCollector<'_, '_> {
             required,
             call: range(call.span, self.base),
         });
+    }
+
+    /// The `required` option of one model's options. A literal flag is read
+    /// directly; otherwise the value, or the options members that decide it,
+    /// are hoisted so TypeScript reads `required` from their type.
+    fn model_required(&mut self, ordinal: usize, options: &Expression<'_>) -> PropsRequirement {
+        let Some(object) = options_object(options) else {
+            self.hoist(
+                format!("{MODEL_OPTIONS}{ordinal}"),
+                options,
+                PublicSurface::Models,
+                None,
+            );
+            return PropsRequirement::Undetermined;
+        };
+        match required_decider(object) {
+            None => PropsRequirement::Optional,
+            Some(ObjectPropertyKind::ObjectProperty(property)) => {
+                match literal_boolean(&property.value) {
+                    Some(true) => PropsRequirement::Required,
+                    Some(false) => PropsRequirement::Optional,
+                    None => {
+                        self.hoist(
+                            format!("{MODEL_REQUIRED}{ordinal}"),
+                            &property.value,
+                            PublicSurface::Models,
+                            None,
+                        );
+                        PropsRequirement::Undetermined
+                    }
+                }
+            }
+            Some(ObjectPropertyKind::SpreadProperty(_)) => {
+                // Only spreads and `required` members decide the flag; the
+                // rest (`get` / `set` may close over setup) stay in setup.
+                let deciding: Vec<&ObjectPropertyKind<'_>> = object
+                    .properties
+                    .iter()
+                    .filter(|property| decides_required(property))
+                    .collect();
+                let members: Vec<String> = deciding
+                    .iter()
+                    .map(|property| self.text(property.span()))
+                    .collect();
+                self.hoist_scanned(
+                    format!("{MODEL_OPTIONS}{ordinal}"),
+                    format!("{{ {} }}", members.join(", ")),
+                    PublicSurface::Models,
+                    Some("{ readonly required?: boolean; readonly [key: string]: unknown }"),
+                    |refs| {
+                        for property in deciding {
+                            refs.visit_object_property_kind(property);
+                        }
+                    },
+                );
+                PropsRequirement::Undetermined
+            }
+        }
     }
 
     fn expose(&mut self, call: &CallExpression<'_>) {
