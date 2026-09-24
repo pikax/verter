@@ -1172,7 +1172,17 @@ pub enum SliceExpr {
         context: Arc<NestedFlowContext>,
         has_declared_return: bool,
         gap: Option<crate::semantic_query::FlowGap>,
+        /// The captured bindings of THIS frame whose narrowing at the
+        /// function's creation reaches its body: a `const`, or a parameter
+        /// or `let` / `var` past its last assignment (no write after the
+        /// creation, none in any nested callable) — the checker's closure
+        /// extension of the control-flow container. Empty for a callable
+        /// in a class property initializer, whose container stops there.
+        extended_captures: Arc<[SkeletonBindingId]>,
     },
+    /// A `this` read inside a class declaration's member (or an arrow a
+    /// member body creates): the receiver the member runs against.
+    This(SliceThis),
     /// A class EXPRESSION's value — its constructor. The evaluator composes
     /// the constructor type and the instance surface from the lowered
     /// class body ([`SliceClass`]); a class form this half does not model
@@ -1335,6 +1345,9 @@ pub struct SliceClass {
     /// signatures, else its implementation's; `None` when the class
     /// declares no constructor (the base constructor's signatures apply).
     pub constructors: Option<Arc<[Arc<[SliceClassParam]>]>>,
+    /// The accessibility the class's first constructor declares; `None`
+    /// when it declares no constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
     /// The instance and static members in declaration order, including
     /// the constructor's parameter properties. An overloaded method is one
     /// member per visible overload signature, in order.
@@ -1625,6 +1638,15 @@ pub enum SliceCall {
     },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
+    /// A call of a member read off a lowered receiver (`this.m()`): the
+    /// evaluator projects `member` off the receiver's value and resolves
+    /// the call over the member's signatures.
+    Member {
+        /// The receiver whose member is called.
+        receiver: Box<SliceExpr>,
+        /// The authored static member path off the receiver.
+        member: Arc<[Arc<str>]>,
+    },
     /// A `new` expression. The constructor is lowered as a flow value (a
     /// parameter or local rides its binding carrier, a free name the
     /// shared leaf lowering), and the evaluator resolves the construction
@@ -1885,19 +1907,9 @@ pub enum SliceObjectKey {
     /// authored text is not its name.
     Computed {
         /// The key expression, lowered as an ordinary value position.
-        /// Its evaluated LITERAL names the property.
+        /// Its evaluated LITERAL (or `unique symbol` carrier) names the
+        /// property; any other property-key type is late-bound.
         value: Box<SliceExpr>,
-        /// The AUTHORED key, through the shared property-key lowering.
-        ///
-        /// The value channel cannot carry every nameable key: a `unique
-        /// symbol` key names exactly one nominal property, and the
-        /// evaluator flattens its value to the bare `symbol` primitive,
-        /// losing the identity the name IS. The authored channel keeps
-        /// it (`typeof ob12Key`), and is the same carrier the
-        /// whole-literal leaf answer used to produce — so a symbol key
-        /// names its property exactly as before, without the literal
-        /// having to abandon its structural lowering to get there.
-        authored: verter_type_expr::TypeAuthoredPropertyKey,
     },
 }
 
@@ -2381,6 +2393,47 @@ pub(crate) fn build_flow_slice_content(
             outer: captures.clone(),
             anchor,
         });
+    // A direct class-declaration member reads its receiver; a nested
+    // function reads the `this` its creating frame handed it.
+    let this = match context {
+        Some(context) => context.this.clone(),
+        None => resolved.enclosing_this.and_then(|this| {
+            let class = Arc::clone(&entry.key.declaration.name);
+            Some(match this {
+                verter_semantic::analysis::function_program::EnclosingThis::Instance => {
+                    SliceThis::Instance {
+                        class,
+                        type_parameters: enclosing_type_parameters
+                            .iter()
+                            .map(|param| Arc::clone(&param.name))
+                            .collect(),
+                    }
+                }
+                verter_semantic::analysis::function_program::EnclosingThis::Static => {
+                    SliceThis::Static {
+                        class,
+                        contributor: matches!(
+                            entry.locator.descent.as_ref(),
+                            [FunctionDescentStep::ClassMember { .. }]
+                        )
+                        .then_some(entry.locator.contributor.contributor_index),
+                    }
+                }
+                verter_semantic::analysis::function_program::EnclosingThis::ObjectLiteral => {
+                    match entry.locator.descent.as_ref() {
+                        [FunctionDescentStep::VariableInitializer { declarator_ordinal }, FunctionDescentStep::ObjectMember { .. }] => {
+                            SliceThis::Value {
+                                value: class,
+                                contributor: entry.locator.contributor.contributor_index,
+                                declarator: *declarator_ordinal,
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+            })
+        }),
+    };
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -2392,6 +2445,8 @@ pub(crate) fn build_flow_slice_content(
         type_param_names: &type_param_names,
         self_name: self_name.as_deref(),
         enclosing_heritage: resolved.enclosing_heritage,
+        this,
+        member_this: None,
         skeleton,
         captures,
         control: Arc::clone(&entry.control),
@@ -2415,8 +2470,8 @@ pub(crate) fn build_flow_slice_content(
         narrowing_alias_locals: FxHashSet::default(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
+        class_property_initializers: 0,
         active_guard_bindings: Vec::new(),
-        active_guard_subjects: Vec::new(),
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
         pending_loop_labels: Vec::new(),
@@ -3834,6 +3889,35 @@ fn rebase_span(anchor: u32, span: oxc_span::Span) -> FrameSpan {
     FrameSpan::rebase(anchor, span.into())
 }
 
+/// The static member path of a chain rooted at `this` (`this.a.b` is
+/// `[a, b]`); `None` for any other chain.
+/// One member an object literal's `this` names.
+enum ObjectThisMember<'p> {
+    /// A property, whose value its declaration initializes it with.
+    Property(&'p Expression<'p>),
+    /// A method, served as its own position.
+    Method(verter_semantic::analysis::function_program::FunctionProgramKey),
+    /// A getter, served as its own position.
+    Getter(verter_semantic::analysis::function_program::FunctionProgramKey),
+}
+
+fn this_member_path(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Option<Vec<Arc<str>>> {
+    let mut path = vec![Arc::from(member.property.name.as_str())];
+    let mut object = &member.object;
+    loop {
+        match object {
+            Expression::ThisExpression(_) => break,
+            Expression::StaticMemberExpression(parent) => {
+                path.push(Arc::from(parent.property.name.as_str()));
+                object = &parent.object;
+            }
+            _ => return None,
+        }
+    }
+    path.reverse();
+    Some(path)
+}
+
 /// The parameter names one signature answer references — the
 /// PARAMETER-LIST half of the frame gate.
 ///
@@ -4139,6 +4223,39 @@ struct CapturedFrame {
     region: verter_semantic::analysis::flow::SkeletonRegionId,
 }
 
+/// What `this` reads inside a class declaration's member: the checker's
+/// receiver for the member (`checkThisExpression`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SliceThis {
+    /// An instance member of the class `class` (its registered
+    /// declaration name) declaring `type_parameters`: the class's
+    /// polymorphic `this` type, whose constraint is the class instance.
+    Instance {
+        class: Arc<str>,
+        type_parameters: Arc<[Arc<str>]>,
+    },
+    /// A static member: the class constructor, `typeof class`. A top-level
+    /// class is statement `contributor`; a static member read off `this`
+    /// lowers from the static member it names there.
+    Static {
+        class: Arc<str>,
+        contributor: Option<u32>,
+    },
+    /// A method or accessor of the object literal a variable declares:
+    /// the variable's value, `typeof value`. The literal is the initializer
+    /// of declarator `declarator` of top-level statement `contributor`;
+    /// a member read off `this` lowers from the member it names there.
+    Value {
+        value: Arc<str>,
+        contributor: u32,
+        declarator: u32,
+    },
+    /// An instance member of a class EXPRESSION, or a method or accessor of
+    /// an object literal: the instance (or object) the evaluator binds
+    /// while it evaluates the class's members (or the literal's).
+    Receiver,
+}
+
 /// The exact lexical chain at a nested function's authored position.
 /// Shared frame handles avoid enumerating or copying visible declarations.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -4150,6 +4267,16 @@ struct CaptureScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedFlowContext {
     captures: CaptureScope,
+    /// The lexical `this` an ARROW created in a class member reads; `None`
+    /// for every other nested function, whose `this` is its own.
+    this: Option<SliceThis>,
+}
+
+impl NestedFlowContext {
+    /// What `this` reads inside the nested function.
+    pub(crate) fn this(&self) -> Option<&SliceThis> {
+        self.this.as_ref()
+    }
 }
 
 /// An exact source declaration eligible to provide a selected capture's type.
@@ -4773,6 +4900,14 @@ struct Lowerer<'a> {
     /// `None` for every other frame (nested callables included, mirroring
     /// the type-parameter clause rule).
     enclosing_heritage: Option<verter_semantic::analysis::function_program::EnclosingHeritage<'a>>,
+    /// What `this` reads in this frame: a class declaration's member
+    /// receiver, or the one an arrow inherits from the member creating it.
+    /// A class expression's instance initializers read the class's own
+    /// receiver while they lower.
+    this: Option<SliceThis>,
+    /// The `this` the NEXT nested function lowered takes in place of the
+    /// one its kind implies: a class expression's member function.
+    member_this: Option<Option<SliceThis>>,
     /// This frame's shared structural skeleton. Runtime references use the
     /// prepared map's exact occurrence records; type-position visibility
     /// queries use the skeleton's separate lexical meaning rules.
@@ -4870,8 +5005,11 @@ struct Lowerer<'a> {
     narrowing_alias_locals: FxHashSet<Arc<str>>,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
+    /// How many class property initializers enclose the lowering position:
+    /// a callable there is contained by the property, not this frame, so
+    /// no narrowing of this frame reaches it.
+    class_property_initializers: u32,
     active_guard_bindings: Vec<SkeletonBindingId>,
-    active_guard_subjects: Vec<FlowBindingRef>,
     /// The stack of breakable constructs whose bodies are currently being
     /// lowered (innermost last): `None` for a `switch`, `Some(label)` for
     /// a labeled statement. A `break` resolves against this stack — an
@@ -4910,7 +5048,7 @@ struct Lowerer<'a> {
     current_statement_followed_by_return: SuffixReturn,
 }
 
-impl Lowerer<'_> {
+impl<'a> Lowerer<'a> {
     /// Rebase a LIVE source span onto this frame's anchor.
     ///
     /// The two coordinate systems are different TYPES
@@ -5238,6 +5376,52 @@ impl Lowerer<'_> {
         })
     }
 
+    fn binding_has_write_before(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let creation = self.rebase(creation_span);
+        self.skeleton.writes.iter().any(|write| {
+            write.span < creation
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
+    fn binding_has_write_within(&self, binding: SkeletonBindingId, range: oxc_span::Span) -> bool {
+        let range = self.rebase(range);
+        self.skeleton.writes.iter().any(|write| {
+            range.contains(write.span)
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
+        })
+    }
+
+    /// Whether a capture outside its extended container reads exactly what
+    /// the evaluator supplies: a whole parameter or annotated `var` reads
+    /// its declared authority, and an unannotated `var` no write retypes
+    /// before the creation reads the reaching its declarator binds.
+    fn capture_reads_declared_type(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let fact = self.skeleton.binding(binding);
+        if fact.destructured {
+            return false;
+        }
+        match fact.kind {
+            SkeletonBindingKind::Param => true,
+            SkeletonBindingKind::Var => {
+                fact.annotation_span.is_some()
+                    || (!self.nested_free_writes.contains(&binding)
+                        && !self.binding_has_write_before(binding, creation_span))
+            }
+            _ => false,
+        }
+    }
+
     fn guard_bindings(&self, guard: &SliceGuard, _at: oxc_span::Span) -> Vec<SkeletonBindingId> {
         let mut bindings = Vec::new();
         collect_guard_subjects(guard, &mut |subject| {
@@ -5276,21 +5460,6 @@ impl Lowerer<'_> {
         if !bindings.contains(&local) {
             bindings.push(local);
         }
-    }
-
-    fn predicate_subject_binding(&self, test: &Expression<'_>) -> Option<FlowBindingRef> {
-        let Expression::CallExpression(call) = unwrap_parenthesized(test) else {
-            return None;
-        };
-        let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
-            return None;
-        };
-        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false, call.span)?;
-        let argument = call
-            .arguments
-            .get(ordinal)
-            .and_then(|argument| argument.as_expression())?;
-        chain_root_identifier(argument).and_then(|identifier| self.binding_at(identifier.span))
     }
 
     fn nested_function_transfers_downstream_slot(
@@ -5696,30 +5865,16 @@ impl Lowerer<'_> {
                     // demand through the typed guard-narrowing gap below.
                     let unprovable_control_call = self.record_control_position_calls(&if_stmt.test);
                     let active_guard_base = self.active_guard_bindings.len();
-                    let active_guard_subject_base = self.active_guard_subjects.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
-                    let guard_name = self.predicate_subject_binding(&if_stmt.test);
-                    let nested_predicate_gap = guard_name.as_ref().is_some_and(|name| {
-                        self.active_guard_subjects.contains(name)
-                            && matches!(name, FlowBindingRef::Captured(_))
-                    });
                     self.active_guard_bindings
                         .extend(guard_bindings.iter().copied());
-                    self.active_guard_subjects
-                        .extend(guard_name.iter().cloned());
                     let consequent = self.lower_arm(&if_stmt.consequent);
                     self.active_guard_bindings.truncate(active_guard_base);
-                    self.active_guard_subjects
-                        .truncate(active_guard_subject_base);
                     let alternate = if_stmt.alternate.as_ref().map(|alternate| {
                         self.active_guard_bindings
                             .extend(guard_bindings.iter().copied());
-                        self.active_guard_subjects
-                            .extend(guard_name.iter().cloned());
                         let lowered = self.lower_arm(alternate);
                         self.active_guard_bindings.truncate(active_guard_base);
-                        self.active_guard_subjects
-                            .truncate(active_guard_subject_base);
                         lowered
                     });
                     can_fall_through = consequent
@@ -5746,7 +5901,7 @@ impl Lowerer<'_> {
                     // arm — the test lowers to guard facts only, so the
                     // marker carries the point (ahead of the `if`, where
                     // the test evaluates).
-                    if nested_predicate_gap || unprovable_control_call || unprovable_guard {
+                    if unprovable_control_call || unprovable_guard {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
                         ));
@@ -5981,9 +6136,8 @@ impl Lowerer<'_> {
                         .push(SuffixReturn::NotGuaranteed);
                     // A clause body evaluates under the dispatch narrow
                     // of the discriminant, so a closure created there
-                    // captures a reading the evaluator cannot reproduce
-                    // at the capture's own evaluation — the same rail the
-                    // `if` arms and the ternary's arms take.
+                    // takes the closure-capture rail the `if` arms and
+                    // the ternary's arms take.
                     let active_guard_base = self.active_guard_bindings.len();
                     if let Some(subject) = discriminant.as_ref() {
                         let bindings = self.subject_bindings(subject, switch.discriminant.span());
@@ -6510,10 +6664,7 @@ impl Lowerer<'_> {
                 test_gap |= self.record_control_position_calls(test);
                 test_throws = verter_semantic::analysis::flow::expression_contains_call(test);
                 if !test_after {
-                    active_guard = Some((
-                        self.guard_bindings(&guard, test.span()),
-                        self.predicate_subject_binding(test),
-                    ));
+                    active_guard = Some(self.guard_bindings(&guard, test.span()));
                 }
                 if test_after {
                     SliceLoopTest::After { guard, constant }
@@ -6534,15 +6685,11 @@ impl Lowerer<'_> {
         let labels: Arc<[Arc<str>]> = Arc::from(labels.into_boxed_slice());
         self.continue_targets.push(Arc::clone(&labels));
         let active_guard_base = self.active_guard_bindings.len();
-        let active_guard_subject_base = self.active_guard_subjects.len();
-        if let Some((bindings, subject)) = &active_guard {
+        if let Some(bindings) = &active_guard {
             self.active_guard_bindings.extend(bindings.iter().copied());
-            self.active_guard_subjects.extend(subject.iter().cloned());
         }
         let lowered_body = self.lower_arm(body);
         self.active_guard_bindings.truncate(active_guard_base);
-        self.active_guard_subjects
-            .truncate(active_guard_subject_base);
         self.continue_targets.pop();
         self.break_target_followed_by_return.pop();
         self.break_targets.pop();
@@ -8116,14 +8263,11 @@ impl Lowerer<'_> {
                 root: self.narrow_root(name, identifier.span, Some(ordinal))?,
                 path,
             }),
-            NameBinding::Local(_) => Some(SliceNarrowSubject {
+            NameBinding::Local(_) | NameBinding::Captured => Some(SliceNarrowSubject {
                 root: self.narrow_root(name, identifier.span, None)?,
                 path,
             }),
-            NameBinding::Free
-            | NameBinding::Captured
-            | NameBinding::NestedFunction
-            | NameBinding::Unmodeled => None,
+            NameBinding::Free | NameBinding::NestedFunction | NameBinding::Unmodeled => None,
         }
     }
 
@@ -8498,20 +8642,14 @@ impl Lowerer<'_> {
                 // The arms are GUARDED exactly as an `if` statement's are:
                 // a closure created inside one captures the guarded reading.
                 let active_guard_base = self.active_guard_bindings.len();
-                let active_guard_subject_base = self.active_guard_subjects.len();
                 let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
-                let guard_name = self.predicate_subject_binding(&conditional.test);
                 self.active_guard_bindings
                     .extend(guard_bindings.iter().copied());
-                self.active_guard_subjects
-                    .extend(guard_name.iter().cloned());
                 let mut consequent = Vec::new();
                 self.lower_discarded_effects(&conditional.consequent, context, &mut consequent);
                 let mut alternate = Vec::new();
                 self.lower_discarded_effects(&conditional.alternate, context, &mut alternate);
                 self.active_guard_bindings.truncate(active_guard_base);
-                self.active_guard_subjects
-                    .truncate(active_guard_subject_base);
                 let region = |statements: Vec<SliceStatement>| {
                     Box::new(SliceRegion {
                         statements: Arc::from(statements.into_boxed_slice()),
@@ -8662,6 +8800,31 @@ impl Lowerer<'_> {
                     None => self.lower_leaf(expr, mode),
                 }
             }
+            Expression::ThisExpression(_) if self.this.is_some() => {
+                SliceExpr::This(self.this.clone().expect("guarded"))
+            }
+            // A member read off an object literal's `this` lowers from the
+            // member the literal declares.
+            Expression::StaticMemberExpression(member)
+                if matches!(
+                    self.this,
+                    Some(SliceThis::Value { .. } | SliceThis::Static { .. })
+                ) && this_member_path(member).is_some() =>
+            {
+                let path = this_member_path(member).expect("guarded");
+                self.lower_object_this_read(&path, member.span, mode)
+            }
+            // A member read off the receiver (`this.v`, `this.a.b`) projects
+            // through the same member-path walk an optional chain takes.
+            Expression::StaticMemberExpression(member)
+                if self.this.is_some() && this_member_path(member).is_some() =>
+            {
+                let path = this_member_path(member).expect("guarded");
+                SliceExpr::OptionalMember {
+                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    links: path.into_iter().map(|name| (name, false)).collect(),
+                }
+            }
             Expression::FunctionExpression(func) => {
                 self.lower_nested_function(&FunctionNode::Function(func))
             }
@@ -8690,10 +8853,10 @@ impl Lowerer<'_> {
                 // evaluated return.
                 let function = match unwrap_parenthesized(&call.callee) {
                     Expression::FunctionExpression(func) => {
-                        self.lower_nested_function(&FunctionNode::Function(func))
+                        self.lower_function_value(&FunctionNode::Function(func), Some(call))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
-                        self.lower_nested_function(&FunctionNode::Arrow(arrow))
+                        self.lower_function_value(&FunctionNode::Arrow(arrow), Some(call))
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
@@ -8791,6 +8954,33 @@ impl Lowerer<'_> {
                     {
                         return SliceExpr::Call(
                             SliceCall::Direct(direct.target.clone()),
+                            call_site(call),
+                        );
+                    }
+                }
+                // A `this.m()` callee: the member of the frame's receiver —
+                // an object literal's own method is a direct call of it.
+                if let (Some(this), Expression::StaticMemberExpression(member)) =
+                    (self.this.clone(), unwrap_parenthesized(&call.callee))
+                {
+                    if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
+                        (&this, this_member_path(member).as_deref())
+                    {
+                        return match self.object_this_member(name) {
+                            Some(ObjectThisMember::Method(target)) => {
+                                SliceExpr::Call(SliceCall::Direct(target), call_site(call))
+                            }
+                            _ => {
+                                SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
+                            }
+                        };
+                    }
+                    if let Some(path) = this_member_path(member) {
+                        return SliceExpr::Call(
+                            SliceCall::Member {
+                                receiver: Box::new(SliceExpr::This(this)),
+                                member: Arc::from(path.into_boxed_slice()),
+                            },
                             call_site(call),
                         );
                     }
@@ -9025,25 +9215,18 @@ impl Lowerer<'_> {
                         }
                         // The ternary's arms are GUARDED exactly as the `if`
                         // statement's are: a closure created inside one
-                        // captures the guarded reading of the guard's
-                        // subject, and a later write to that subject makes
-                        // the capture unsound. The two control spellings must
-                        // reach the closure-capture rail with the same active
-                        // guard set, or the same source degrades under `if`
-                        // and seals clean under `?:`.
+                        // reads a capture's guarded narrowing only when the
+                        // capture is extended into it. The two control
+                        // spellings must reach the closure-capture rail with
+                        // the same active guard set, or the same source
+                        // degrades under `if` and seals clean under `?:`.
                         let active_guard_base = self.active_guard_bindings.len();
-                        let active_guard_subject_base = self.active_guard_subjects.len();
                         let guard_bindings = self.guard_bindings(&guard, conditional.test.span());
-                        let guard_name = self.predicate_subject_binding(&conditional.test);
                         self.active_guard_bindings
                             .extend(guard_bindings.iter().copied());
-                        self.active_guard_subjects
-                            .extend(guard_name.iter().cloned());
                         let consequent = self.lower_expr(&conditional.consequent, mode);
                         let alternate = self.lower_expr(&conditional.alternate, mode);
                         self.active_guard_bindings.truncate(active_guard_base);
-                        self.active_guard_subjects
-                            .truncate(active_guard_subject_base);
                         SliceExpr::Union {
                             arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
                             guard,
@@ -9447,7 +9630,6 @@ impl Lowerer<'_> {
                 // NUMBER's, which only the value knows.
                 ObjectEntryKey::Computed(expression) => SliceObjectKey::Computed {
                     value: Box::new(self.lower_expr(expression, mode)),
-                    authored: verter_type_expr_oxc::lower_property_key(&p.key, self.source),
                 },
                 // A private name is a key form neither half models, and
                 // unlike a computed key it has no value to resolve.
@@ -9494,6 +9676,9 @@ impl Lowerer<'_> {
             if method_kind.is_some() {
                 let value = match value_expression {
                     Expression::FunctionExpression(func) => {
+                        // A method or accessor of the literal runs against
+                        // the object the literal builds.
+                        self.member_this = Some(Some(SliceThis::Receiver));
                         self.lower_nested_function(&FunctionNode::Function(func))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
@@ -9617,6 +9802,201 @@ impl Lowerer<'_> {
     /// exact captured identities and lexical signature facts. Its body lowers
     /// only when evaluated, through the child's own indexed graph and demand.
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
+        self.lower_function_value(node, None)
+    }
+
+    /// The member `name` of the object literal the frame's `this` is, as
+    /// the literal declares it; `None` when the literal does not declare
+    /// it (or a later spread may replace it).
+    fn object_this_member(&self, name: &str) -> Option<ObjectThisMember<'a>> {
+        let (contributor, declarator) = match &self.this {
+            Some(SliceThis::Value {
+                contributor,
+                declarator,
+                ..
+            }) => (contributor, declarator),
+            Some(SliceThis::Static {
+                contributor: Some(contributor),
+                ..
+            }) => return self.static_this_member(*contributor, name),
+            _ => return None,
+        };
+        let program: &'a Program<'a> = self.program;
+        let declaration = match program.body.get(*contributor as usize)? {
+            Statement::VariableDeclaration(declaration) => declaration,
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+                oxc_ast::ast::Declaration::VariableDeclaration(declaration) => declaration,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let Expression::ObjectExpression(object) = declaration
+            .declarations
+            .get(*declarator as usize)?
+            .init
+            .as_ref()?
+        else {
+            return None;
+        };
+        let mut found = None;
+        for (ordinal, property) in object.properties.iter().enumerate() {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                // A spread after the member may replace it.
+                found = None;
+                continue;
+            };
+            if property.computed
+                || verter_semantic::analysis::flow::static_property_key_text(&property.key)
+                    != Some(name)
+            {
+                continue;
+            }
+            let key = || verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: self.bindings.function().declaration.clone(),
+                part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                },
+                overload_ordinal: 0,
+            };
+            found = match (&property.value, property.kind, property.method) {
+                (Expression::FunctionExpression(_), oxc_ast::ast::PropertyKind::Get, _) => {
+                    Some(ObjectThisMember::Getter(key()))
+                }
+                (Expression::FunctionExpression(_), oxc_ast::ast::PropertyKind::Init, true) => {
+                    Some(ObjectThisMember::Method(key()))
+                }
+                (value, oxc_ast::ast::PropertyKind::Init, false) => {
+                    Some(ObjectThisMember::Property(value))
+                }
+                // A setter reads nothing.
+                _ => found,
+            };
+        }
+        found
+    }
+
+    /// The static member `name` the class of statement `contributor`
+    /// declares: a property is its annotation, else its initializer; a
+    /// method or getter its own served position.
+    fn static_this_member(&self, contributor: u32, name: &str) -> Option<ObjectThisMember<'a>> {
+        let program: &'a Program<'a> = self.program;
+        let class = match program.body.get(contributor as usize)? {
+            Statement::ClassDeclaration(class) => class,
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+                oxc_ast::ast::Declaration::ClassDeclaration(class) => class,
+                _ => return None,
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => class,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let key =
+            |ordinal: usize| verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: self.bindings.function().declaration.clone(),
+                part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                },
+                overload_ordinal: 0,
+            };
+        let mut found = None;
+        for (ordinal, element) in class.body.body.iter().enumerate() {
+            match element {
+                oxc_ast::ast::ClassElement::PropertyDefinition(property)
+                    if property.r#static
+                        && !property.computed
+                        && verter_semantic::analysis::flow::static_property_key_text(
+                            &property.key,
+                        ) == Some(name) =>
+                {
+                    found = match (&property.type_annotation, &property.value) {
+                        (None, Some(value)) => Some(ObjectThisMember::Property(value)),
+                        // An annotated or uninitialized static reads its
+                        // declaration, which this read does not lower.
+                        _ => None,
+                    };
+                }
+                oxc_ast::ast::ClassElement::MethodDefinition(method)
+                    if method.r#static
+                        && !method.computed
+                        && method.value.body.is_some()
+                        && verter_semantic::analysis::flow::static_property_key_text(
+                            &method.key,
+                        ) == Some(name) =>
+                {
+                    found = match method.kind {
+                        oxc_ast::ast::MethodDefinitionKind::Method => {
+                            Some(ObjectThisMember::Method(key(ordinal)))
+                        }
+                        oxc_ast::ast::MethodDefinitionKind::Get => {
+                            Some(ObjectThisMember::Getter(key(ordinal)))
+                        }
+                        _ => found,
+                    };
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// A member read off an object literal's (or a class's static) `this`:
+    /// a property is the value its declaration initializes it with, widened;
+    /// a getter is its served return.
+    fn lower_object_this_read(
+        &mut self,
+        path: &[Arc<str>],
+        span: oxc_span::Span,
+        _mode: ExprMode,
+    ) -> SliceExpr {
+        let gap = SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression);
+        let Some((first, rest)) = path.split_first() else {
+            return gap;
+        };
+        let root = match self.object_this_member(first) {
+            // The declared literal type widens where the read is used (a
+            // readonly literal is the checker's widening literal type).
+            Some(ObjectThisMember::Property(value)) => self.lower_leaf(
+                value,
+                ExprMode::BindingInit {
+                    preserve_literal: false,
+                },
+            ),
+            Some(ObjectThisMember::Getter(target)) => SliceExpr::Call(
+                SliceCall::Direct(target),
+                SliceCallSite::new(0, false, false, span.into()),
+            ),
+            _ => return gap,
+        };
+        if rest.is_empty() {
+            root
+        } else {
+            SliceExpr::OptionalMember {
+                root: Box::new(root),
+                links: rest.iter().map(|name| (Arc::clone(name), false)).collect(),
+            }
+        }
+    }
+
+    /// Lower a nested function value, `invocation` naming the call that
+    /// invokes it where it is created (an IIFE).
+    ///
+    /// A capture reads the narrowing reaching the function's creation when
+    /// the checker extends the capture's control-flow container to the
+    /// enclosing one: a `const`, or a parameter / `let` past its last
+    /// assignment (never a `var`, never inside a class property
+    /// initializer). An immediately invoked function — async and generator
+    /// ones included — is no control-flow container of its own, so every
+    /// capture reads the narrowing reaching the call, whatever is assigned
+    /// later or by another nested function, unless the call's own arguments
+    /// write it.
+    fn lower_function_value(
+        &mut self,
+        node: &FunctionNode<'_>,
+        invocation: Option<&oxc_ast::ast::CallExpression<'_>>,
+    ) -> SliceExpr {
+        let member_this = self.member_this.take();
         let Some(entry) = self
             .index
             .nested_at(self.bindings.function(), node_span(node).into())
@@ -9625,6 +10005,51 @@ impl Lowerer<'_> {
         };
         let entry = entry.entry();
         let captures = self.capture_scope_for(node_span(node));
+        let invoked_arguments =
+            invocation.map(|call| oxc_span::Span::new(call.callee.span().end, call.span.end));
+        let mut extended_captures: Vec<SkeletonBindingId> = Vec::new();
+        if self.class_property_initializers == 0 {
+            for read in entry.captured_reads.iter() {
+                let Some(binding) = self.bindings.local(&read.binding) else {
+                    continue;
+                };
+                if extended_captures.contains(&binding) {
+                    continue;
+                }
+                // A `var` is never a mutable local the checker extends
+                // (`isMutableLocalVariableDeclaration` is `let`-only), and a
+                // `let` declared after the creation is assigned after it.
+                // An invoked function's captures read the call's flow, so
+                // only a write among the call's arguments (which run before
+                // the body) moves them.
+                let fact = self.skeleton.binding(binding);
+                let past_last_assignment = || {
+                    !self.nested_free_writes.contains(&binding)
+                        && !self.binding_has_write_after(binding, node_span(node))
+                };
+                let declared_before = || fact.span < self.rebase(node_span(node));
+                let eligible = match (fact.kind, invoked_arguments) {
+                    (SkeletonBindingKind::Const, _) => true,
+                    (SkeletonBindingKind::Param, Some(arguments)) => {
+                        !self.binding_has_write_within(binding, arguments)
+                    }
+                    (
+                        SkeletonBindingKind::Let
+                        | SkeletonBindingKind::Var
+                        | SkeletonBindingKind::CatchParam,
+                        Some(arguments),
+                    ) => declared_before() && !self.binding_has_write_within(binding, arguments),
+                    (SkeletonBindingKind::Param, None) => past_last_assignment(),
+                    (SkeletonBindingKind::Let | SkeletonBindingKind::CatchParam, None) => {
+                        declared_before() && past_last_assignment()
+                    }
+                    _ => false,
+                };
+                if eligible {
+                    extended_captures.push(binding);
+                }
+            }
+        }
         let mut gap = None;
         // Mutability constrains captured values. A closure that only
         // forwards a write effect does not observe the entering value.
@@ -9648,9 +10073,24 @@ impl Lowerer<'_> {
                     gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 }
             }
-            if self.active_guard_bindings.contains(&binding)
+            // A guard's narrowing reaches an extended capture's body. Any
+            // other capture reads its declared type there, which the
+            // evaluator reproduces for a parameter or an annotated `var`
+            // (their declared authority) and for an unannotated `var` not
+            // reassigned before the creation (its reaching IS its declared type); every other
+            // capture created under an active guard, a `let` assigned after
+            // the creation and an unannotated `var` reassigned before it
+            // take the typed gap.
+            if extended_captures.contains(&binding) {
+                continue;
+            }
+            if (self.active_guard_bindings.contains(&binding)
+                && !self.capture_reads_declared_type(binding, node_span(node)))
                 || (fact.kind == SkeletonBindingKind::Let
                     && self.binding_has_write_after(binding, node_span(node)))
+                || (fact.kind == SkeletonBindingKind::Var
+                    && fact.annotation_span.is_none()
+                    && self.binding_has_write_before(binding, node_span(node)))
             {
                 gap = Some(crate::semantic_query::FlowGap::ClosureCapture);
                 break;
@@ -9658,9 +10098,23 @@ impl Lowerer<'_> {
         }
         SliceExpr::NestedFunctionValue {
             function: entry.key.clone(),
-            context: Arc::new(NestedFlowContext { captures }),
+            context: Arc::new(NestedFlowContext {
+                captures,
+                // An arrow has no `this` of its own: it reads its creating
+                // frame's (a class expression's instance initializer reads
+                // the class's own receiver). A class expression's member
+                // function reads the receiver the class binds.
+                this: match member_this {
+                    Some(this) => this,
+                    None => match node {
+                        FunctionNode::Arrow(_) => self.this.clone(),
+                        FunctionNode::Function(_) => None,
+                    },
+                },
+            }),
             has_declared_return: node.return_type().is_some(),
             gap,
+            extended_captures: Arc::from(extended_captures.into_boxed_slice()),
         }
     }
 

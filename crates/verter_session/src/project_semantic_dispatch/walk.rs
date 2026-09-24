@@ -960,6 +960,67 @@ pub(super) struct PathWalker<'a, 'b> {
 }
 
 impl<'a> super::ProjectSemanticDispatch<'a> {
+    /// The instance a constructor's `prototype` reads through one construct
+    /// signature: the class instantiated with `any` for every type
+    /// parameter it has (the checker's `getTypeOfPrototypeProperty`) — the
+    /// signature's own (a generic class's), and a class expression's outer
+    /// ones (`inside<T>`'s `C.prototype` is `inside.C`, measured on
+    /// 7.0.2). A class expression carries its prototype from where it is
+    /// authored, so an instantiated one (`ReturnType<typeof
+    /// make<string>>['prototype']`) still reads every parameter as `any`.
+    pub(super) fn constructor_prototype(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let any = self.graph().intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Any,
+        ));
+        let instance = match self.graph().node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                type_parameters,
+                return_type,
+                ..
+            }) if type_parameters.is_empty() => *return_type,
+            Some(SemanticNodeData::Signature {
+                type_parameters, ..
+            }) => {
+                let instantiated =
+                    self.instantiate_call_candidate(signature, &vec![any; type_parameters.len()])?;
+                match self.graph().node_data(instantiated).as_deref() {
+                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let Some(SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        }) = self.graph().node_data(instance).as_deref().cloned()
+        else {
+            return Some(instance);
+        };
+        if let Some(prototype) = identity.prototype {
+            return Some(prototype);
+        }
+        let parameters = identity
+            .outer_clauses
+            .iter()
+            .flat_map(|clause| clause.parameters.iter());
+        let mut prototype = instance;
+        for (name, argument) in parameters.zip(type_arguments.iter()) {
+            let at_parameter = matches!(
+                self.graph().node_data(*argument).as_deref(),
+                Some(SemanticNodeData::TypeParam { display_name, .. }) if display_name == name
+            );
+            if at_parameter {
+                prototype = self.substitute_semantic_type_param(prototype, *argument, any);
+            }
+        }
+        Some(prototype)
+    }
+
     /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
     /// `Object` node. Each contributor's surface is extracted (an interface
     /// body is an `Object`; an interface-with-`extends` body is an
@@ -1356,62 +1417,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
 
     fn opaque_miss(&self) -> SemanticNodeId {
         self.dispatch.opaque(QueryError::Miss)
-    }
-
-    /// The instance a constructor's `prototype` reads through one construct
-    /// signature: the class instantiated with `any` for every type
-    /// parameter it has (the checker's `getTypeOfPrototypeProperty`) — the
-    /// signature's own (a generic class's), and a class expression's outer
-    /// ones still at their own parameters (`inside<T>`'s `C.prototype` is
-    /// `inside.C`, measured on 7.0.2).
-    fn prototype_instance_of(&self, signature: SemanticNodeId) -> Option<SemanticNodeId> {
-        let any = self.graph().intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Any,
-        ));
-        let instance = match self.graph().node_data(signature).as_deref() {
-            Some(SemanticNodeData::Signature {
-                type_parameters,
-                return_type,
-                ..
-            }) if type_parameters.is_empty() => *return_type,
-            Some(SemanticNodeData::Signature {
-                type_parameters, ..
-            }) => {
-                let instantiated = self
-                    .dispatch
-                    .instantiate_call_candidate(signature, &vec![any; type_parameters.len()])?;
-                match self.graph().node_data(instantiated).as_deref() {
-                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        let Some(SemanticNodeData::ClassExpressionInstance {
-            identity,
-            type_arguments,
-            ..
-        }) = self.graph().node_data(instance).as_deref().cloned()
-        else {
-            return Some(instance);
-        };
-        let parameters = identity
-            .outer_clauses
-            .iter()
-            .flat_map(|clause| clause.parameters.iter());
-        let mut prototype = instance;
-        for (name, argument) in parameters.zip(type_arguments.iter()) {
-            let at_parameter = matches!(
-                self.graph().node_data(*argument).as_deref(),
-                Some(SemanticNodeData::TypeParam { display_name, .. }) if display_name == name
-            );
-            if at_parameter {
-                prototype = self
-                    .dispatch
-                    .substitute_semantic_type_param(prototype, *argument, any);
-            }
-        }
-        Some(prototype)
     }
 
     /// Dispatch a nested subquery and FOLD its A2 partiality flag into the
@@ -2182,7 +2187,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 if let Some(instance) = surface
                                     .construct_signatures
                                     .last()
-                                    .and_then(|sig| self.prototype_instance_of(*sig))
+                                    .and_then(|sig| self.dispatch.constructor_prototype(*sig))
                                 {
                                     self.graph().record_origin_edge(
                                         instance,

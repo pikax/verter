@@ -1142,6 +1142,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, true)
     }
 
+    /// A TYPE-LEVEL read of an indexed expression — a declaration's
+    /// initializer that `typeof` reads. Its value belongs to the reading
+    /// query, never to a flow frame that happens to be open around it, so a
+    /// call it resolves serves its value instead of a hold on that frame: a
+    /// module constant initialized by a call reads as the call's result
+    /// inside a body too. A call that leaves an obligation pending is
+    /// provisional and must not warm the reading query: a typed miss.
+    pub(crate) fn evaluate_indexed_value_expression_for_type(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        let pending = || {
+            self.dispatch_txn
+                .borrow()
+                .obligations
+                .pending()
+                .pending_len()
+        };
+        let before = pending();
+        let node =
+            self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, false);
+        if pending() != before {
+            crate::request_context::mark_request_result_partial();
+            return None;
+        }
+        node
+    }
+
     pub(crate) fn evaluate_indexed_value_expression_node_inner(
         &self,
         canonical: &str,
@@ -1289,7 +1319,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     verter_semantic::analysis::function_program::ProgramExpressionSource::Value
                     | verter_semantic::analysis::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = memo.indexed_program_expression_ir(record)?;
-                        self.evaluate_indexed_value_expression_node(
+                        self.evaluate_indexed_value_expression_for_type(
                             point.canonical_id.as_ref(),
                             owner,
                             expression.as_ref(),
@@ -5046,6 +5076,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             heritage_self_roots: Vec::new(),
             inferred_predicate: None,
             declared_reads: false,
+            receiver: None,
         };
         let holds;
         let yield_contributions;
@@ -5553,9 +5584,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Whether `node` may be a subtype of some primitive, literal or
     /// template literal type — false only when it provably has no
     /// primitive part: an object, array, tuple, signature or mapped type,
-    /// the lib `Function` global, a union of only such types, or an
-    /// intersection none of whose members has a primitive part.
-    /// Declaration carriers are read through what they name.
+    /// a lib global interface's terminal carrier (`Promise<T>` — an async
+    /// body's result — `Date`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Error`,
+    /// `Function`), a union of only such types, or an intersection none of
+    /// whose members has a primitive part. Other declaration carriers are
+    /// read through what they name.
     fn may_be_below_a_primitive(&self, node: SemanticNodeId, level: usize) -> bool {
         /// Nesting read before the question is left open.
         const LEVELS: usize = 8;
@@ -5589,9 +5622,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .any(|member| self.may_be_below_a_primitive(*member, level + 1))
             }
             Some(
-                carrier @ (SemanticNodeData::DeclRef { .. }
-                | SemanticNodeData::InstantiationRef { .. }),
-            ) => !self.is_global_function_carrier(carrier),
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. },
+            ) => self.runtime_nominal_identity(identity).is_none(),
             _ => true,
         }
     }
@@ -7002,6 +7035,10 @@ fn slice_statements_have_non_subject_return<'a>(
 struct PreparedFlowCaptureInput {
     subject: FlowProductSubject,
     value_demanded: bool,
+    /// The capture is past its last assignment where the function is
+    /// created: its reaching (narrowed) type there is what the body reads,
+    /// never replaced by its declared authority.
+    extended: bool,
     assignment: DefiniteAssignmentProduct,
     reaching: Option<ReachingTypeProduct>,
     declared: Option<SemanticNodeId>,
@@ -7022,12 +7059,13 @@ impl PreparedFlowCaptureInput {
         self.declared = Some(node);
         if self.deferred_write.is_none()
             && (self.reaching.is_none()
-                || matches!(
-                    source,
-                    crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
-                        crate::flow_slice_content::SliceBindingKind::Var
-                    ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
-                ))
+                || !self.extended
+                    && matches!(
+                        source,
+                        crate::flow_slice_content::SliceCaptureAuthoritySource::Local(
+                            crate::flow_slice_content::SliceBindingKind::Var
+                        ) | crate::flow_slice_content::SliceCaptureAuthoritySource::Parameter { .. }
+                    ))
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
         }
@@ -7309,6 +7347,9 @@ struct FlowEvaluator<'d, 'b> {
     /// declaration is its own flow container, so no narrowing of the
     /// enclosing frame reaches it (measured on 7.0.2).
     declared_reads: bool,
+    /// The class-expression instance `this` reads while the class's members
+    /// evaluate (see [`class_expression::ClassReceiver`]).
+    receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -8068,7 +8109,94 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut unwidened_differs = false;
         let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
         let mut spread_seen = false;
+        let mut late_bound = class_expression::ComputedIndexKinds::default();
+        // A literal's methods and accessors run against the object it
+        // builds: their bodies read its other members through `this`, so
+        // they evaluate after every other member (and once more after a
+        // read of a sibling not evaluated yet). A literal with a spread is
+        // a construction program whose members this rail does not order.
+        let receiver = entries
+            .iter()
+            .all(|entry| {
+                matches!(
+                    entry,
+                    crate::flow_slice_content::SliceObjectEntry::Member(_)
+                )
+            })
+            .then(|| {
+                std::rc::Rc::new(class_expression::ClassReceiver {
+                    binder: self.dispatch.this_binder(
+                        self.canonical,
+                        self.owner,
+                        &Arc::from("(object literal)"),
+                        None,
+                    ),
+                    members: std::cell::RefCell::new(Vec::new()),
+                    declared: entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            crate::flow_slice_content::SliceObjectEntry::Member(member) => {
+                                match &member.key {
+                                    crate::flow_slice_content::SliceObjectKey::Static(name) => {
+                                        Some(Arc::clone(name))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    base: None,
+                    forward_read: std::cell::Cell::new(false),
+                })
+            });
+        let enclosing_receiver = std::mem::replace(&mut self.receiver, receiver.clone());
+        let deferred_member = |entry: &crate::flow_slice_content::SliceObjectEntry| match entry {
+            crate::flow_slice_content::SliceObjectEntry::Member(member) => {
+                member.method_kind.is_some()
+                    && matches!(
+                        member.key,
+                        crate::flow_slice_content::SliceObjectKey::Static(_)
+                    )
+            }
+            _ => false,
+        };
+        let mut deferred: Vec<(usize, &crate::flow_slice_content::SliceObjectMember)> = Vec::new();
         for entry in entries.iter() {
+            if let (Some(_), crate::flow_slice_content::SliceObjectEntry::Member(member)) =
+                (receiver.as_ref(), entry)
+            {
+                if deferred_member(entry) {
+                    // Placeholder at the member's position, filled below.
+                    deferred.push((surface_members.len(), member));
+                    let key = match &member.key {
+                        crate::flow_slice_content::SliceObjectKey::Static(name) => {
+                            crate::semantic_query::AuthoredPropertyKey::string(name.as_ref())
+                        }
+                        _ => unreachable!("only a static key defers"),
+                    };
+                    let placeholder = crate::semantic_query::SurfaceMember {
+                        key,
+                        value: self
+                            .dispatch
+                            .opaque(crate::semantic_query::QueryError::Miss),
+                        optional: false,
+                        readonly: member.readonly,
+                        method_kind: member.method_kind,
+                        has_implementation_body: true,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+                        spans: member.spans,
+                        declaration_origin: Some(Arc::from(self.canonical)),
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::default(),
+                        merge_role: crate::semantic_query::MergeRoleStamp::default(),
+                    };
+                    unwidened_members.push(placeholder.clone());
+                    surface_members.push(placeholder);
+                    continue;
+                }
+            }
             let member = match entry {
                 crate::flow_slice_content::SliceObjectEntry::Spread { source } => {
                     // A spread SOURCE this frame cannot evaluate is not a
@@ -8090,6 +8218,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let outcome = self.eval_expr(source);
                     self.holds.truncate(holds_before);
                     let Positional::Value(operand) = outcome else {
+                        self.receiver = enclosing_receiver;
                         return Positional::Unmodeled;
                     };
                     spread_seen = true;
@@ -8142,13 +8271,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // lowering.
             let value = self.widen_value_position_read(member_value, value);
             // A non-static key is its own evaluated position. It names
-            // the member only if it settles to a LITERAL; anything else
-            // leaves the surface's key SET unknown, which an object
-            // surface cannot express — the same fail-closed verdict a
-            // spread source this frame cannot evaluate takes, and for the
-            // same reason.
-            let Some(key) = self.eval_object_member_key(&member.key) else {
-                return Positional::Unmodeled;
+            // the member when it settles to a LITERAL (or a unique
+            // symbol); a key of any other property-key type is
+            // LATE-BOUND: it names no member and contributes to the
+            // literal's implicit index signature of its kind
+            // (`getObjectLiteralIndexInfo`). A key that settles to
+            // nothing leaves the surface's key SET unknown — the same
+            // fail-closed verdict a spread source this frame cannot
+            // evaluate takes. With a spread the literal is a construction
+            // program, which carries no index signature: a late-bound key
+            // there fails closed too.
+            let key = match self.eval_object_member_key(&member.key) {
+                class_expression::MemberKey::Named(key) => key,
+                class_expression::MemberKey::Index(kind) if !spread_seen => {
+                    late_bound.record(kind, member.readonly, value);
+                    continue;
+                }
+                class_expression::MemberKey::None => continue,
+                class_expression::MemberKey::Index(_) | class_expression::MemberKey::Unmodeled => {
+                    self.receiver = enclosing_receiver;
+                    return Positional::Unmodeled;
+                }
             };
             let unwidened = match &member.unwidened {
                 Some(expr) => match self.eval_expr(expr) {
@@ -8176,9 +8319,62 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 value: unwidened,
                 ..surface_member.clone()
             });
+            if let Some(receiver) = receiver.as_ref() {
+                receiver.members.borrow_mut().push(surface_member.clone());
+            }
             surface_members.push(surface_member);
         }
+        if let Some(receiver) = receiver.as_ref() {
+            let mut again = Vec::new();
+            for (position, member) in deferred {
+                receiver.forward_read.set(false);
+                let degradation = self.degradation;
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(&member.value);
+                let value = self.settle_composite_part(outcome, holds_before);
+                if receiver.forward_read.get() {
+                    self.degradation = degradation;
+                    again.push((position, member));
+                    continue;
+                }
+                surface_members[position].value = value;
+                unwidened_members[position].value = value;
+                receiver
+                    .members
+                    .borrow_mut()
+                    .push(surface_members[position].clone());
+            }
+            for (position, member) in again {
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(&member.value);
+                let value = self.settle_composite_part(outcome, holds_before);
+                surface_members[position].value = value;
+                unwidened_members[position].value = value;
+                receiver
+                    .members
+                    .borrow_mut()
+                    .push(surface_members[position].clone());
+            }
+            // A member whose value holds the literal's own `this` (a method
+            // returning `this`) names the literal's type recursively,
+            // which this graph does not represent: that position is the
+            // typed marker.
+            for index in 0..surface_members.len() {
+                if self
+                    .dispatch
+                    .mentions_node(surface_members[index].value, receiver.binder)
+                {
+                    let marker = self.unmodeled_position();
+                    surface_members[index].value = marker;
+                    unwidened_members[index].value = marker;
+                }
+            }
+        }
+        self.receiver = enclosing_receiver;
         if spread_seen {
+            if late_bound.any() {
+                return Positional::Unmodeled;
+            }
             effects.extend(surface_members.drain(..).map(|member| {
                 super::object_spread_program_lowering::direct_effect_from_member(&member)
             }));
@@ -8189,15 +8385,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.binder_env.scope.clone(),
             ));
         }
+        // A late-bound member contributes to the literal's implicit index
+        // signature of its kind (`getObjectLiteralIndexInfo`), whose value
+        // also unions every named member that kind applies to. The
+        // signatures are the same on both views: only declared union
+        // selection reads the unwidened one.
+        let index_signatures: Arc<[crate::semantic_query::IndexSignature]> = if late_bound.any() {
+            let mut side = class_expression::MemberSide {
+                members: surface_members.clone(),
+                index_signatures: Vec::new(),
+                computed: late_bound,
+            };
+            self.add_computed_index_signatures(&mut side, None);
+            Arc::from(side.index_signatures.into_boxed_slice())
+        } else {
+            Arc::from(Vec::new().into_boxed_slice())
+        };
         let intern = |members: Vec<crate::semantic_query::SurfaceMember>| {
             self.dispatch.graph().intern_node(SemanticNodeData::Object(
                 crate::semantic_query::surface_view! {
                     members: Arc::from(members.into_boxed_slice()),
                     call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                     construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    index_signatures: Arc::clone(&index_signatures),
                     keyspace: None,
-                    has_index_signature: false,
+                    has_index_signature: !index_signatures.is_empty(),
                 },
             ))
         };
@@ -8960,16 +9172,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_object_member_key(
         &mut self,
         key: &crate::flow_slice_content::SliceObjectKey,
-    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
-        let (expression, authored) = match key {
+    ) -> class_expression::MemberKey {
+        let expression = match key {
             crate::flow_slice_content::SliceObjectKey::Static(name) => {
-                return Some(crate::semantic_query::AuthoredPropertyKey::string(
-                    name.as_ref(),
-                ))
+                return class_expression::MemberKey::Named(
+                    crate::semantic_query::AuthoredPropertyKey::string(name.as_ref()),
+                )
             }
-            crate::flow_slice_content::SliceObjectKey::Computed { value, authored } => {
-                (value.as_ref(), authored)
-            }
+            crate::flow_slice_content::SliceObjectKey::Computed { value } => value.as_ref(),
         };
         // A hold inside a KEY is not this object's value any more than a
         // hold inside a spread source is: drop it and read the outcome.
@@ -8977,9 +9187,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let outcome = self.eval_expr(expression);
         self.holds.truncate(holds_before);
         let Positional::Value(node) = outcome else {
-            return None;
+            return class_expression::MemberKey::Unmodeled;
         };
-        match self.dispatch.graph().node_data(node).as_deref() {
+        let named = match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
                 Some(crate::semantic_query::AuthoredPropertyKey::string(
                     value.as_str(),
@@ -9006,42 +9216,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .dispatch
                 .unique_symbol_identity_for_typeof_node(node)
                 .map(crate::semantic_query::AuthoredPropertyKey::UniqueSymbol),
-            // A NON-unique `symbol` key genuinely provisions an index
-            // signature rather than one property, and is over-named here.
-            // That is not a new divergence: it is exactly what the leaf
-            // answer this replaces already did, and telling the two apart
-            // needs the key's own uniqueness, which a bare `symbol` value
-            // does not have.
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => {
-                self.authored_symbol_key(authored)
-            }
-            // Anything else — an OPEN `string` / `number` key, an
-            // unresolved read — leaves the surface's key SET unknown.
-            _ => None,
-        }
-    }
-
-    /// Name a symbol-valued member from its AUTHORED key — the same carrier
-    /// the whole-literal leaf answer produced, resolved by the same
-    /// downstream reader. The fallback when the value channel carries no
-    /// nominal identity of its own.
-    fn authored_symbol_key(
-        &self,
-        authored: &verter_type_expr::AuthoredPropertyKey<
-            verter_type_expr::TypeExpr,
-            verter_type_expr::facts::ValueDeclIdentityPart,
-        >,
-    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
-        match authored.cloned_known() {
-            Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
-                known,
-            )),
-            None => match authored {
-                verter_type_expr::AuthoredPropertyKey::Computed(ty) => Some(
-                    crate::semantic_query::AuthoredPropertyKey::Computed(self.lower_key_type(ty)),
-                ),
-                _ => None,
-            },
+            // Anything else — an OPEN `string` / `number` / `symbol`
+            // key — is late-bound (a `unique symbol` keeps its carrier
+            // above, so a bare `symbol` is never one); an unresolved read
+            // leaves the key SET unknown.
+            _ => return self.late_bound_key(node),
+        };
+        match named {
+            Some(key) => class_expression::MemberKey::Named(key),
+            None => class_expression::MemberKey::Unmodeled,
         }
     }
 
@@ -14299,30 +14482,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// leaf or a declarator's authored annotation) under the function's
     /// OWN binder environment — a body type referencing a root binder
     /// keeps the binder, never an outer same-name resolution.
-    /// Lower an AUTHORED computed-key type CARRIER-PRESERVINGLY.
-    ///
-    /// A computed key's nominal identity lives in the carrier
-    /// (`typeof ob12Key`), and the structural-transit lowering
-    /// [`Self::lower_body_type`] uses reduces it to the bare `symbol`
-    /// primitive — which names no property. `Navigate` keeps the carrier
-    /// for the downstream key reader to resolve, which is exactly what
-    /// the whole-literal leaf answer handed it.
-    fn lower_key_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        self.dispatch.shallow_lower_type_expr_with_context(
-            ty,
-            &self.binder_env.env,
-            &self.binder_env.scope,
-            &self.binder_env.name_resolution,
-            self.binder_env.scope_payload.as_ref(),
-            &self.binder_env.shadowing,
-            &mut substitutions,
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        )
-    }
-
     fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         self.dispatch.shallow_lower_type_expr_with_context(
@@ -16238,6 +16397,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         has_declared_return: bool,
         outer_env: &FlowBinderEnv,
+        extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
     ) -> SemanticNodeId {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -16333,6 +16493,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             anchor,
             &key,
             outer_env,
+            extended_captures,
         )
     }
 
@@ -16428,6 +16589,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         anchor: u32,
         key: &FlowReturnKey,
         outer_env: &FlowBinderEnv,
+        extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
     ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
@@ -16597,11 +16759,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut capture_inputs: Vec<_> = inputs
             .selected_captures(planned.selection())
             .map(|(identity, value_demanded)| {
-                let parent = self
-                    .bindings
-                    .local(identity)
+                let local = self.bindings.local(identity);
+                // A capture past its last assignment enters the body at its
+                // narrowed type where the function is created.
+                let extended = local.is_some_and(|binding| extended_captures.contains(&binding));
+                let parent = local
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
+                let narrowed = extended
+                    .then(|| {
+                        self.products.narrowing(&parent).and_then(|narrowing| {
+                            narrowing
+                                .facts()
+                                .iter()
+                                .find(|fact| fact.path.is_empty())
+                                .map(|fact| fact.narrowed_to)
+                        })
+                    })
+                    .flatten();
                 if value_demanded
                     && self.products.contains_subject(&parent)
                     && self.products.reaching(&parent).is_none()
@@ -16611,6 +16786,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 PreparedFlowCaptureInput {
                     subject: FlowProductSubject::Captured(identity.clone()),
                     value_demanded,
+                    extended,
                     assignment: if value_demanded {
                         self.products.assignment(&parent).with_single_path(false)
                     } else {
@@ -16622,6 +16798,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // REPLACES the statement-entry reaching (the checker's
                     // own deferred-read rule). Direct reads are unaffected
                     // — they consume the live, evaluation-ordered reaching.
+                    //
+                    // An EXTENDED capture reads the reaching where the
+                    // function is created (or invoked, for an IIFE): no
+                    // write of the statement comes between, so the live
+                    // reaching and its narrowing are the answer.
                     deferred_write: value_demanded
                         .then(|| {
                             self.capture_write_lookahead
@@ -16631,10 +16812,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .flatten(),
                     reaching: value_demanded
                         .then(|| {
-                            self.capture_write_lookahead
-                                .get(&self.canonical_runtime_subject(&parent))
-                                .map(|node| ReachingTypeProduct::of(*node))
-                                .or_else(|| self.products.reaching_type(&parent).cloned())
+                            if extended {
+                                narrowed
+                                    .map(ReachingTypeProduct::of)
+                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                            } else {
+                                self.capture_write_lookahead
+                                    .get(&self.canonical_runtime_subject(&parent))
+                                    .map(|node| ReachingTypeProduct::of(*node))
+                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                            }
                         })
                         .flatten(),
                     declared: value_demanded
@@ -16841,6 +17028,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 heritage_self_roots: Vec::new(),
                 inferred_predicate: None,
                 declared_reads: false,
+                // A class expression member (or an arrow it creates) runs
+                // against the receiver the class binds.
+                receiver: matches!(
+                    capture_context.this(),
+                    Some(crate::flow_slice_content::SliceThis::Receiver)
+                )
+                .then(|| self.receiver.clone())
+                .flatten(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -17336,13 +17531,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                         }
                     }
+                    // A class's polymorphic `this` reads its class's member
+                    // where the member is declared, binding the member's own
+                    // `this` to the receiver.
+                    let this_source = self.this_member_source(current, name);
+                    let read_base = this_source.unwrap_or(current);
                     let Some(member) =
-                        self.project_path_navigate(current, std::slice::from_ref(name))
+                        self.project_path_navigate(read_base, std::slice::from_ref(name))
                     else {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
                             crate::semantic_query::FlowGap::UnmodeledExpression,
                         ));
                         return Positional::Unmodeled;
+                    };
+                    let member = match this_source {
+                        Some(_) => self.dispatch.bind_this_receiver(member, current),
+                        None => member,
                     };
                     // A declared-optional member (`b?: string`) folds its
                     // absent-key `undefined` into THIS link's read — the
@@ -17350,7 +17554,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // a plain member path — regardless of whether the hop
                     // itself used `?.` or `.`.
                     let declared_optional =
-                        self.member_read_optionality(current, name.as_ref()) == Some(true);
+                        self.member_read_optionality(read_base, name.as_ref()) == Some(true);
                     current = if declared_optional {
                         self.fold_optional_read_undefined(member)
                     } else {
@@ -17385,7 +17589,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if let Some(node) = self.declared_local_read(binding) {
                         return Positional::Value(node);
                     }
-                } else if !captured {
+                } else {
                     let subject = crate::flow_slice_content::SliceNarrowSubject {
                         root: crate::flow_slice_content::SliceNarrowRoot::Local {
                             name: Arc::clone(name),
@@ -17501,6 +17705,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 context,
                 has_declared_return,
                 gap,
+                extended_captures,
             } => {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
@@ -17511,9 +17716,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     context,
                     *has_declared_return,
                     outer_env,
+                    extended_captures,
                 ))
             }
             crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
+            crate::flow_slice_content::SliceExpr::This(this) => self.eval_this(this),
 
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own
@@ -18046,11 +18253,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // an empty-cycle outcome is a hold the SCC close discharges
                 // on the component's admitted returns; every other outcome
                 // contributes the callee's return or its typed failure.
-                let prepared = self.dispatch.ctx.prepared_value_decl_return_only(
-                    self.canonical,
-                    target.declaration.owner,
-                    target.declaration.name.as_ref(),
-                );
+                // A MEMBER position (a class member, an object literal's
+                // method) is not its declaration's value: only its own
+                // served return answers the call.
+                let prepared = match &target.part {
+                    verter_type_expr::facts::FunctionPartIdentity::Member { .. } => None,
+                    _ => self.dispatch.ctx.prepared_value_decl_return_only(
+                        self.canonical,
+                        target.declaration.owner,
+                        target.declaration.name.as_ref(),
+                    ),
+                };
                 // A value declaration carrying an AUTHORED annotation is
                 // typed by that annotation, full stop: the initializer
                 // only has to be assignable to it. `const f: () => 42 =
@@ -18543,6 +18756,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if overloaded {
                         return self.degraded_unrepresentable_callee();
                     }
+                }
+                self.call_return_of_callee_node(callee_node, site)
+            }
+            crate::flow_slice_content::SliceCall::Member { receiver, member } => {
+                // `this.m()`: the member of the receiver's value, called
+                // through the executor that reads its receiver-bound
+                // signatures, else the lone signature read.
+                let receiver = match self.eval_expr(receiver) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                let mut callee_node = receiver;
+                for name in member.iter() {
+                    let this_source = self.this_member_source(callee_node, name);
+                    let Some(read) = self.project_path_navigate(
+                        this_source.unwrap_or(callee_node),
+                        std::slice::from_ref(name),
+                    ) else {
+                        return self.degraded_unrepresentable_callee();
+                    };
+                    callee_node = match this_source {
+                        Some(_) => self.dispatch.bind_this_receiver(read, callee_node),
+                        None => read,
+                    };
+                }
+                if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                    return value;
                 }
                 self.call_return_of_callee_node(callee_node, site)
             }

@@ -240,6 +240,13 @@ pub struct DeclHeaderIndex {
     /// construct signatures. Empty in the `from_eval_env` mirror (the
     /// lowered env carries no class modifiers).
     pub abstract_classes: FxHashSet<DeclBindingKey>,
+    /// The accessibility each file-scope class declaration's FIRST
+    /// constructor is authored with — the declaration fact behind the
+    /// checker's `constructorVisibilitiesAreCompatible` over the class's
+    /// construct signatures. A class that declares no constructor is
+    /// absent (its construct signatures are its base's). Empty in the
+    /// `from_eval_env` mirror.
+    pub constructor_visibility: FxHashMap<DeclBindingKey, verter_type_expr::MemberVisibility>,
 }
 
 impl DeclHeaderIndex {
@@ -1036,6 +1043,29 @@ fn index_class(decl: &Class<'_>, ctx: HeaderStatementContext<'_>, index: &mut De
     index_named_class(decl, id.name.as_str(), ctx, index);
 }
 
+/// The accessibility a class's FIRST authored constructor declares (the
+/// checker reads the first construct signature's declaration); `None`
+/// when the class declares no constructor.
+fn constructor_visibility(decl: &Class<'_>) -> Option<verter_type_expr::MemberVisibility> {
+    let constructor = decl.body.body.iter().find_map(|element| match element {
+        ClassElement::MethodDefinition(method)
+            if method.kind == oxc_ast::ast::MethodDefinitionKind::Constructor =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    Some(match constructor.accessibility {
+        Some(oxc_ast::ast::TSAccessibility::Private) => verter_type_expr::MemberVisibility::Private,
+        Some(oxc_ast::ast::TSAccessibility::Protected) => {
+            verter_type_expr::MemberVisibility::Protected
+        }
+        Some(oxc_ast::ast::TSAccessibility::Public) | None => {
+            verter_type_expr::MemberVisibility::Public
+        }
+    })
+}
+
 fn index_named_class(
     decl: &Class<'_>,
     name: &str,
@@ -1047,6 +1077,29 @@ fn index_named_class(
     };
     if decl.r#abstract {
         index.abstract_classes.insert(ctx.key(name));
+    }
+    if let Some(visibility) = constructor_visibility(decl) {
+        index
+            .constructor_visibility
+            .insert(ctx.key(name), visibility);
+    }
+    // A heritage EXPRESSION's synthetic value (see
+    // `class_heritage_value_name`), mirroring `collect_named_class`.
+    if let Some(heritage) = decl.super_class.as_ref().filter(|heritage| {
+        crate::analysis::type_eval_build::heritage_expression_name(heritage).is_none()
+    }) {
+        let span: Span = heritage.span().into();
+        let entry = index
+            .value_headers
+            .entry(ctx.key(&crate::analysis::type_eval_build::class_heritage_value_name(name)))
+            .or_insert_with(|| ValueDeclHeader {
+                kind: ValueDeclKind::Const,
+                span,
+                name_span: span,
+                object_member_headers: Vec::new(),
+                contributors: Vec::new(),
+            });
+        push_contributor(&mut entry.contributors, ctx, span, span);
     }
 
     let params = type_param_headers(decl.type_parameters.as_deref());

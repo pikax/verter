@@ -7022,14 +7022,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let (
             SemanticNodeData::Signature {
                 kind: s_kind,
-                params: s_params,
                 return_type: s_ret,
                 predicate: s_predicate,
                 ..
             },
             SemanticNodeData::Signature {
                 kind: t_kind,
-                params: t_params,
                 return_type: t_ret,
                 predicate: t_predicate,
                 ..
@@ -7042,26 +7040,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(RelationResult::NotAssignable);
                 return;
             }
-            let s_params = Arc::clone(s_params);
-            let t_params = Arc::clone(t_params);
-            // The strict subtype relation's arity rule (the checker's
-            // `StrictArity` mode): below a target without a rest
-            // parameter, a source with a rest parameter or with more
-            // parameters than the target takes is never a subtype —
-            // `(s?: string) => number` is not below `() => number`.
-            if self.strict_subtype_mode() {
-                let (_, source_positional) = crate::semantic_query::split_this_receiver(&s_params);
-                let (_, target_positional) = crate::semantic_query::split_this_receiver(&t_params);
-                if !target_positional.iter().any(|param| param.rest)
-                    && (source_positional.iter().any(|param| param.rest)
-                        || source_positional.len() > target_positional.len())
-                {
-                    drop(source_data);
-                    drop(target_data);
-                    results.push(RelationResult::NotAssignable);
-                    return;
-                }
-            }
+            let kind = *s_kind;
             let source_result = FunctionResult {
                 return_type: *s_ret,
                 predicate: *s_predicate,
@@ -7073,10 +7052,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             results.push(self.relate_function(
-                &s_params,
+                source,
                 source_result,
-                &t_params,
+                target,
                 target_result,
+                kind,
                 bindings,
             ));
             return;
@@ -7976,7 +7956,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // assignable to `{ a: string }`, and `{ [k: string]: number
                 // }` is assignable to `{ a?: string }`).
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                    if t_prop.optional {
+                    if let Some(prototype_result) =
+                        self.relate_constructor_prototype(source, &target_key, t_prop, bindings)
+                    {
+                        prototype_result
+                    } else if t_prop.optional {
                         assignable(bindings)
                     } else {
                         RelationResult::NotAssignable
@@ -8002,6 +7986,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
+        }
+        if !self.construct_visibilities_compatible(
+            &source.construct_signatures,
+            &target.construct_signatures,
+        ) {
+            return RelationResult::NotAssignable;
         }
         for t_sig in target.construct_signatures.iter() {
             let signature_result =
@@ -8175,14 +8165,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn last_required_position(params: &[crate::semantic_query::FunctionParam]) -> usize {
-        let fixed: Vec<_> = params.iter().filter(|param| !param.rest).collect();
-        fixed
-            .iter()
-            .rposition(|param| !param.optional)
-            .map_or(0, |position| position + 1)
-    }
-
     fn current_relation_kind(&self) -> crate::semantic_query::RelationKind {
         self.dispatch_txn
             .borrow()
@@ -8209,11 +8191,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.current_relation_kind() == crate::semantic_query::RelationKind::StrictSubtype
     }
 
-    /// Relate two [`SemanticNodeData::Signature`] shells. Parameter
+    /// Relate two [`SemanticNodeData::Signature`] shells. The parameter
+    /// positions and the arity verdict are the checker's
+    /// `compareSignaturesRelated` read through the ONE positional model
+    /// ([`Self::signature_comparison_plan`]): a rest parameter supplies its
+    /// element at every position past the fixed ones, and a target with a
+    /// rest accepts any source arity. Under the strict subtype relation the
+    /// arity is the checker's `StrictArity`: below a target without a rest,
+    /// a source with a rest or with more parameters is never a subtype —
+    /// `(s?: string) => number` is not below `() => number`. Parameter
     /// variance follows the key's policy (RI-10 behavioral branch):
     /// strictly contravariant under `strictFunctionTypes`, bivariant
     /// otherwise (either direction suffices per parameter pair); the
-    /// return is covariant. Subtype never uses the bivariant shortcut.
+    /// return is covariant. Subtype never uses the bivariant shortcut. A
+    /// comparison whose positions do not settle is unknown, never a guess.
     ///
     /// A target carrying a TYPE predicate (`x is T` / `this is T`) relates
     /// predicates instead of returns, as TypeScript's
@@ -8227,18 +8218,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// parameter or an assertion source is false.
     pub(super) fn relate_function(
         &self,
-        source_params: &[crate::semantic_query::FunctionParam],
+        source: SemanticNodeId,
         source_result: FunctionResult,
-        target_params: &[crate::semantic_query::FunctionParam],
+        target: SemanticNodeId,
         target_result: FunctionResult,
+        kind: crate::semantic_query::SignatureKind,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let (source_this, source_pos) = crate::semantic_query::split_this_receiver(source_params);
-        let (target_this, target_pos) = crate::semantic_query::split_this_receiver(target_params);
-        if let (Some(src_this), Some(tgt_this)) = (source_this, target_this) {
+        let Ok(plan) =
+            self.signature_comparison_plan(source, target, kind, self.strict_subtype_mode())
+        else {
+            return RelationResult::Unknown;
+        };
+        if let (Some(src_this), Some(tgt_this)) = (plan.source_receiver, plan.target_receiver) {
             let this_rel = self.relate_member(
-                tgt_this.ty,
-                src_this.ty,
+                tgt_this,
+                src_this,
                 bindings,
                 InferPosition::ContravariantParam,
             );
@@ -8246,17 +8241,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::NotAssignable;
             }
         }
-        let source_required = Self::last_required_position(source_pos);
-        let target_required = Self::last_required_position(target_pos);
-        // A rest parameter absorbs extra supplied arguments; it never
-        // supplies the source's own missing required parameters, so a
-        // source uncallable at the target's last-required-position arity
-        // rejects unconditionally.
-        if source_required > target_required {
+        // A source that demands more arguments than a rest-less target can
+        // supply rejects unconditionally.
+        if plan.source_has_more_parameters {
             return RelationResult::NotAssignable;
         }
-        let source_params = source_pos;
-        let target_params = target_pos;
         let bivariant = {
             let txn = self.dispatch_txn.borrow();
             let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
@@ -8265,14 +8254,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
-        for (s_param, t_param) in source_params.iter().zip(target_params.iter()) {
+        for (s_param, t_param) in plan.positions {
             // Contravariant: target param ≤ source param. Under the
             // bivariant regime either direction discharges the pair.
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
             let contravariant = self.relate_member(
-                t_param.ty,
-                s_param.ty,
+                t_param,
+                s_param,
                 bindings,
                 InferPosition::ContravariantParam,
             );
@@ -8282,7 +8271,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let fallback_checkpoint = self.relation_session_checkpoint();
                 let fallback_bindings_len = bindings.len();
                 let fallback =
-                    self.relate_member(s_param.ty, t_param.ty, bindings, InferPosition::Covariant);
+                    self.relate_member(s_param, t_param, bindings, InferPosition::Covariant);
                 if !matches!(fallback, RelationResult::Assignable { .. }) {
                     self.relation_session_rollback(&fallback_checkpoint);
                     bindings.truncate(fallback_bindings_len);
@@ -8416,6 +8405,123 @@ impl<'a> ProjectSemanticDispatch<'a> {
         acc
     }
 
+    /// A constructor's `prototype` is a projection-time property, never a
+    /// stored member: a target that requires one relates the class instance
+    /// with `any` for its type parameters (`getTypeOfPrototypeProperty`),
+    /// read off the source's last construct signature exactly as the path
+    /// walker reads `C.prototype`. `None` for any other key or a source
+    /// with no construct signature.
+    fn relate_constructor_prototype(
+        &self,
+        source: &SurfaceView,
+        key: &crate::semantic_query::PropertyKey,
+        target: &crate::semantic_query::SurfaceMember,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if key.as_string() != Some("prototype") {
+            return None;
+        }
+        let prototype = source
+            .construct_signatures
+            .last()
+            .and_then(|signature| self.constructor_prototype(*signature))?;
+        Some(self.relate_member(prototype, target.value, bindings, InferPosition::Covariant))
+    }
+
+    /// The checker's `constructorVisibilitiesAreCompatible` over the FIRST
+    /// construct signature of each side: a private target accepts every
+    /// source, a protected target a public or protected one, and a public
+    /// target only a public one. A side with no signature, or whose first
+    /// signature has no declaration, is compatible.
+    fn construct_visibilities_compatible(
+        &self,
+        source: &[SemanticNodeId],
+        target: &[SemanticNodeId],
+    ) -> bool {
+        use verter_type_expr::MemberVisibility::{Private, Protected, Public};
+        let (Some(source), Some(target)) = (source.first(), target.first()) else {
+            return true;
+        };
+        match (
+            self.construct_signature_visibility(*source),
+            self.construct_signature_visibility(*target),
+        ) {
+            (Some(source), Some(target)) => match (source, target) {
+                (_, Private) | (Public | Protected, Protected) | (Public, Public) => true,
+                (Private, Protected) | (Protected | Private, Public) => false,
+            },
+            _ => true,
+        }
+    }
+
+    /// The accessibility of a construct signature's DECLARATION, `None`
+    /// when it has none. A class's own construct signature (no authored
+    /// return annotation, returning the class's instance) is its first
+    /// constructor's; a class that declares no constructor carries its
+    /// base's construct signatures, declaration included
+    /// (`getDefaultConstructSignatures`), and a class with neither has a
+    /// declaration-less default signature. Any other construct signature
+    /// is a public declaration.
+    pub(super) fn construct_signature_visibility(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<verter_type_expr::MemberVisibility> {
+        let graph = self.graph();
+        let instance = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                return_type_span: None,
+                return_type,
+                ..
+            }) => *return_type,
+            _ => return Some(verter_type_expr::MemberVisibility::Public),
+        };
+        let class = match graph.node_data(instance).as_deref() {
+            Some(SemanticNodeData::ClassExpressionInstance { identity, .. }) => {
+                return identity.constructor_visibility;
+            }
+            Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+            _ => return Some(verter_type_expr::MemberVisibility::Public),
+        };
+        let mut current = (
+            Arc::clone(&class.canonical_id),
+            class.owner,
+            Arc::clone(&class.decl_name),
+        );
+        let mut seen = rustc_hash::FxHashSet::default();
+        while seen.insert(current.clone()) {
+            let declared = self
+                .ctx
+                .ensure_indexed_ready_serve(current.0.as_ref())
+                .and_then(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .decl_bodies()
+                        .header_index()
+                        .constructor_visibility
+                        .get(&verter_type_expr::DeclBindingKey::new(
+                            current.1,
+                            current.2.as_ref(),
+                        ))
+                        .copied()
+                });
+            if declared.is_some() {
+                return declared;
+            }
+            match self
+                .class_heritage_bases(current.0.as_ref(), current.1, current.2.as_ref())
+                .into_iter()
+                .next()
+            {
+                Some((canonical, owner, name, _)) => current = (canonical, owner, name),
+                None => break,
+            }
+        }
+        None
+    }
+
     /// An Object source against a DIRECT signature target: some signature
     /// in the source's MATCHING-KIND group must satisfy the target
     /// signature.
@@ -8430,6 +8536,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::SignatureKind::Call => &source.call_signatures,
             crate::semantic_query::SignatureKind::Construct => &source.construct_signatures,
         };
+        if target_kind == crate::semantic_query::SignatureKind::Construct
+            && !self.construct_visibilities_compatible(group, &[target_sig])
+        {
+            return RelationResult::NotAssignable;
+        }
         let alternatives: Vec<_> = group
             .iter()
             .map(|source_signature| (*source_signature, target_sig))

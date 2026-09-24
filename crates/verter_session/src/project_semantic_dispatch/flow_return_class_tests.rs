@@ -1102,6 +1102,8 @@ fn printed_name_qualifies_exactly_the_instantiated_clauses() {
             },
         ]),
         own_arity: 0,
+        constructor_visibility: None,
+        prototype: None,
     };
     let (u, t, other) = (SemanticNodeId(1), SemanticNodeId(2), SemanticNodeId(3));
     let is_parameter = |argument: SemanticNodeId, name: &str| {
@@ -1119,4 +1121,43 @@ fn printed_name_qualifies_exactly_the_instantiated_clauses() {
         identity.printed_name(&[other, other], is_parameter),
         "outer3.inner.(Anonymous class)"
     );
+}
+
+const ERASED_PROTOTYPES: &str = "\
+export class GDecl<T> { t!: T; }
+export function make2<T>() { return class { w!: T }; }
+export class Outer<U> { inner() { return class { u!: U }; } }
+";
+
+/// A class's `prototype` is the class with `any` for every type parameter
+/// it has — a declared generic class's own, and a class expression's
+/// outer ones even once the enclosing clause is instantiated
+/// (`getTypeOfPrototypeProperty`).
+///
+/// Measured on TypeScript 7.0.2: `(typeof GDecl)['prototype']['t']`,
+/// `ReturnType<typeof make2<string>>['prototype']['w']`,
+/// `ReturnType<typeof make2>['prototype']['w']` and
+/// `ReturnType<Outer<string>['inner']>['prototype']['u']` are `any` (the
+/// TS2322 wrapper reports nothing; `X extends number ? 'n' : 'x'` over the
+/// second is `"n" | "x"`), and the instance itself,
+/// `InstanceType<ReturnType<typeof make2<string>>>['w']`, is `string`.
+#[test]
+fn a_class_prototype_erases_every_type_parameter() {
+    let failures = super::checker_probe_lane_tests::mismatches(
+        ERASED_PROTOTYPES,
+        &[
+            ("(typeof GDecl)['prototype']['t']", "any"),
+            ("ReturnType<typeof make2<string>>['prototype']['w']", "any"),
+            ("ReturnType<typeof make2>['prototype']['w']", "any"),
+            (
+                "ReturnType<Outer<string>['inner']>['prototype']['u']",
+                "any",
+            ),
+            (
+                "InstanceType<ReturnType<typeof make2<string>>>['w']",
+                "string",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

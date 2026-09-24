@@ -505,28 +505,15 @@ fn flow_return_symbolic_call_resolves_complete() {
     });
 }
 
-/// `return this.helper()` FAILS CLOSED — it does not publish `any`.
+/// `return this.helper()` reads `helper` off the class's receiver and
+/// resolves the call over its signature: the method's own class member,
+/// read where it is declared, so the reading member never re-enters its
+/// own return. Complete and warm.
 ///
-/// `this` is not a modeled receiver, so the call reaches none of the
-/// content half's structural call arms and the shared shallow pass
-/// answers the whole expression with a bare `any`. That `any` carries no
-/// `ReturnType<callee>` carrier, so the leaf carrier gate never saw it
-/// and it published clean and WARM — a fabricated value at a call
-/// position, under a promise that a call with no structural arm fails
-/// closed. The call-position verdict is taken on the expression FORM, so
-/// the promise holds here.
-///
-/// The DISPOSITION is positional: the whole return of this member IS the
-/// call, so the marker is the whole-return value and the result is a
-/// degraded success admitting nothing — not a fabricated `any`, and not
-/// a discarded composite (there is no sibling to keep at this position).
-/// The composite-position TWIN — the same unmodelled call as ONE member
-/// of an object literal — is in `flow_return_positional_tests`.
-///
-/// Oracle (TypeScript 7.0.2 `tsc`, for the record — the answer the
-/// fail-closed arm declines to produce): `number`.
+/// Oracle (TypeScript 7.0.2 `tsc`): `ReturnType<SubThisCall['run']>` is
+/// `number`.
 #[test]
-fn flow_return_this_call_fails_closed() {
+fn flow_return_this_call_reads_the_receiver_member() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
@@ -537,17 +524,17 @@ fn flow_return_this_call_fails_closed() {
             },
             0,
         );
-        super::flow_return_lexical_tests::assert_flow_fails_closed(
-            dispatch,
-            "SubThisCall",
-            dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
+        let (expr, _) = flow_result(dispatch, &host, key.clone());
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "SubThisCall must admit nothing"
+            1,
+            "SubThisCall is complete and warm"
         );
     });
 }

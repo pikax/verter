@@ -1364,6 +1364,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "dc9516ff00fb032afd1c7e4fc9844b95e3b18a681381bbcb015ab675cace97a3",
     ),
     (
+        "N25_impossible_predicate_statement_keeps_dead_contributor",
+        "8b1eb8c8776bcd451929a1f1f8a56d57499d83b65a67ac8bc6ffe9e8286254ba",
+    ),
+    (
         "N26_structurally_possible_predicate_intersection_survives",
         "ca413199ab0bff1dde03fc9e6c7a418890599f4325a608716909e5c50cac0c68",
     ),
@@ -1390,6 +1394,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "N46_typeof_over_any",
         "789109d5d44af0ccaca4dbb6d68a61b4743d596611a77da7de289567965c47ae",
+    ),
+    (
+        "N48_closure_narrows_captured_binding",
+        "3e1e77d7329f3b55c8cedf6f73489b4cd61555dd3cf23023fe561df74e483f56",
     ),
     (
         "N49_closure_narrows_own_parameter",
@@ -1770,6 +1778,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X104_void_arm_not_absorbed_in_union",
         "e845a45b10ce2a1e02d00459d845fcf3513277f16da200970e4d48a9a97f1555",
+    ),
+    (
+        "X105_closure_captures_narrowed_binding_in_guarded_arm",
+        "627c1dbeb620c46fda2511ceea2acc6b4119fba89b8e093eafeb824a49b6ad9c",
     ),
     (
         "X106_triple_nested_closure_return",
@@ -3129,6 +3141,7 @@ mod corpus_suite {
             "N122_membership_through_let_initializer_return",
             "X58_effectful_while_loop_joins",
             "X60_effectful_labeled_loop_joins",
+            "X105_closure_captures_narrowed_binding_in_guarded_arm",
         ];
         /// Deep-pinned rows whose `checker` text is NOT byte-comparable
         /// to the renderer, each with the PRESENTATION reason. Semantic
@@ -3241,10 +3254,9 @@ mod corpus_suite {
             ),
             (
                 "N25_impossible_predicate_statement_keeps_dead_contributor",
-                "the renderer spells the (KnownOwed-divergent) union \
-                 `{ v: Union(…) }` where the checker prints `{ v: \"no\" | \"ok\"; }` — \
-                 print syntax AND semantics differ; the semantic divergence is held by \
-                 the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"no\" | \"ok\"; }`; the renderer spells the same \
+                 surface `{ v: Union(\"no\" | \"ok\") }` — union spelling and member \
+                 terminators differ",
             ),
             (
                 "N31_discriminated_union_switch_positive_control",
@@ -3335,7 +3347,9 @@ mod corpus_suite {
             ),
             (
                 "N48_closure_narrows_captured_binding",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N26_structurally_possible_predicate_intersection_survives",
@@ -3471,10 +3485,6 @@ mod corpus_suite {
             (
                 "X104_void_arm_not_absorbed_in_union",
                 "checker prints `{ v: void | number; }`; the renderer spells the same node `{ v: Union(void | number) }`",
-            ),
-            (
-                "X105_closure_captures_narrowed_binding_in_guarded_arm",
-                "checker prints `() => string`; the renderer spells the (KnownOwed-divergent) node `Union(() => Union(string | undefined) | () => string)` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "X111_guard_clause_return_then_use",
@@ -5180,11 +5190,6 @@ const OPEN_DEBTS: &[&str] = &[
     // method and the walk authority has no lib/intrinsic member surface
     // for a primitive base (`UnrepresentableCallee`, ReturnOnly).
     "N09_narrow_then_write",
-    // The impossible-predicate STATEMENT spelling keeps the dead `x`
-    // contributor (`v: A | B | "ok" | "no"` where the checker computes
-    // `"no" | "ok"`), wrong-and-warm. Exposed by the recursive expect
-    // pin — the root `v: Union` member pin could not see it.
-    "N25_impossible_predicate_statement_keeps_dead_contributor",
     "N55_in_operator_nonliteral_key",
     // ── CALL RESOLUTION — context-sensitive callback inference ──────────
     // A callback argument's un-annotated parameter is never contextually
@@ -5228,7 +5233,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N42_comma_sequence_guard",
     "N43_boolean_wrapped_guard",
     "N47_correlated_tuple_discriminant",
-    "N48_closure_narrows_captured_binding",
     "N50_sequence_discriminant_test",
     // Predicate / assertion CALL TARGETS the guard rail does not accept: an
     // arrow-expression binding, an object-literal method, a class method, an
@@ -5261,7 +5265,6 @@ const OPEN_DEBTS: &[&str] = &[
     // inside a narrowed arm.
     "X91_assert_never_default_arm_contributes_nothing",
     "X101_optional_chain_nullish_coalesce",
-    "X105_closure_captures_narrowed_binding_in_guarded_arm",
     "X108_record_index_read_has_no_undefined",
     "X109_optional_index_read_through_optional_chain",
 ];
@@ -5312,8 +5315,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ValueInference, 93, 84, 6),
     // Loops iterate to the checker's fixed point: D05's return-bearing loop
     // is the substrate's, and the N52–N54 downstream narrows and X82's
-    // loop break crossing an abrupt finally match the checker.
-    (Owner::U6LoopClosure, 6, 5, 1),
+    // loop break crossing an abrupt finally match the checker. A capture
+    // past its last assignment keeps its narrowing inside the closure it
+    // enters, so X105 — a closure created in a guarded arm — matches too.
+    (Owner::U6LoopClosure, 6, 6, 0),
     (Owner::U6ContextualCore, 8, 8, 0),
     // B10's `as const` spread-modifier debt moved to the value-inference
     // owner with its B03/B04 class, so the substrate total drops by one
@@ -5329,9 +5334,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6FlowReturnSubstrate, 67, 59, 2),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
-    // `let`-aliased condition control (N84) publishes complete, and a loose
-    // `== null` selects both nullish members (N76): 33 match.
-    (Owner::U6NarrowTypeof, 48, 33, 15),
+    // `let`-aliased condition control (N84) publishes complete, a loose
+    // `== null` selects both nullish members (N76), and a nested body
+    // narrows a captured binding by its own guard (N48): 34 matching, 14
+    // parked.
+    (Owner::U6NarrowTypeof, 48, 34, 14),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish
@@ -5342,8 +5349,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block. D10
     // closed N88's unknown-key intersection (the Record mint), moving
-    // this owner to 25 matching.
-    (Owner::U6NarrowLattice, 38, 25, 13),
+    // this owner to 25 matching. A predicate over a captured binding
+    // narrows inside the invoked body, dropping N25's dead contributor:
+    // 26 matching, 12 parked.
+    (Owner::U6NarrowLattice, 38, 26, 12),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,
