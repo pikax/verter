@@ -5240,7 +5240,7 @@ async fn dotted_component_auto_import_edit_is_valid_end_to_end() {
     let server = service.inner();
 
     // 1. The REAL enumeration: derive the binding name + import path from disk.
-    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let ws_components = build_workspace_components(&server.documents.host(), &app_canonical);
     let model = ws_components
         .iter()
         .find(|c| c.import_path.ends_with("Model.Named.vue"))
@@ -5318,7 +5318,7 @@ async fn nested_dir_dotted_component_keeps_real_path_and_sanitized_binding() {
     let app_canonical = format!("{workspace_id}/src/App.vue");
     let server = service.inner();
 
-    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let ws_components = build_workspace_components(&server.documents.host(), &app_canonical);
     let nested = ws_components
         .iter()
         .find(|c| c.name == "DottedName")
@@ -5375,7 +5375,7 @@ async fn svelte_dotted_component_completion_is_sanitized_but_edit_placement_defe
 
     // (1) SHARED completion path: the dotted Svelte carrier sanitizes to a valid
     //     identifier with the real `.svelte` path preserved.
-    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let ws_components = build_workspace_components(&server.documents.host(), &app_canonical);
     let svelte = ws_components
         .iter()
         .find(|c| c.import_path.ends_with("Dotted.Svelte.Name.svelte"))
@@ -12386,7 +12386,7 @@ async fn resolve_barrel_locations_follows_reexport_to_terminal() {
 
     // Simulate a type provider returning a location in the barrel file
     // pointing to the `Counter` export signature (offset 20..27 in barrel source)
-    let barrel_source_stored = server.documents.host.get_source(&barrel_id).unwrap();
+    let barrel_source_stored = server.documents.host().get_source(&barrel_id).unwrap();
     let counter_offset = barrel_source_stored
         .find("Counter")
         .expect("Counter in barrel source") as u32;
@@ -19268,7 +19268,7 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        Arc::clone(&host),
+        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -19390,7 +19390,7 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        Arc::clone(&host),
+        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -19506,7 +19506,7 @@ defineProps<{ msg: string }>()
     sync_api_to_provider_background_task(
         sync,
         snapshot,
-        Arc::clone(&host),
+        crate::documents::SharedHost::new(Arc::clone(&host)),
         Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
@@ -30204,7 +30204,7 @@ async fn on_file_changed_resyncs_and_cleans_svelte() {
     let canonical = "/workspace/src/Box.svelte";
     open_test_svelte(server, canonical, "<script>let x = 1;</script>");
     assert!(
-        server.documents.host.get_source(canonical).is_some(),
+        server.documents.host().get_source(canonical).is_some(),
         "precondition: the opened .svelte carrier is in the host"
     );
 
@@ -30225,7 +30225,7 @@ async fn on_file_changed_resyncs_and_cleans_svelte() {
         })
         .await;
     assert!(
-        server.documents.host.get_source(canonical).is_none(),
+        server.documents.host().get_source(canonical).is_none(),
         "a watched .svelte delete must enter the carrier branch and remove the \
          carrier from the host (pre-change the .vue gate dropped this event)"
     );
@@ -30240,7 +30240,7 @@ async fn on_file_changed_resyncs_and_cleans_svelte() {
         })
         .await;
     assert!(
-        server.documents.host.get_source(ts_canonical).is_some(),
+        server.documents.host().get_source(ts_canonical).is_some(),
         "a non-carrier .ts file must not be removed by the carrier branch"
     );
 }

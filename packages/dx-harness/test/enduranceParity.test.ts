@@ -9,6 +9,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { LspClient } from "@verter/lsp-test-client";
 
 import {
+  CHURN_ACCEPTANCE_MIN_CYCLES,
+  CHURN_RETENTION_COUNTERS,
   ENDURANCE_LANES,
   EnduranceSession,
   FailureBag,
@@ -22,6 +24,14 @@ import {
   collectCorpusCarrierFiles,
   disposeWorkspace,
   deriveCorpusProbes,
+  churnCarrierContent,
+  DEFAULT_ENDURANCE_LANE,
+  decideChurnGrowth,
+  decideChurnRetention,
+  decideChurnSlope,
+  describeProcessTreeRss,
+  extractRetentionReading,
+  sampleProcessTreeRss,
   heavyUpdateFixture,
   loadEnduranceConfig,
   parseProviderRuntimeAttestation,
@@ -33,6 +43,9 @@ import {
   type EnduranceConfig,
   type EnduranceLane,
   type EnduranceProbe,
+  type ChurnCheckpoint,
+  type ProcessTreeRssDeps,
+  type RetentionReading,
   type ScenarioContext,
 } from "../src/endurance/index.js";
 
@@ -818,5 +831,898 @@ describe("scale corpus framework/mode parity", () => {
         (probe) => probe.kind === "completion" && probe.label.includes("component attr completion"),
       ),
     ).toHaveLength(0);
+  });
+});
+
+describe("process-tree RSS sampling", () => {
+  const SERVER = 4000;
+  const PROVIDER = 4001;
+  const table: readonly { pid: number; ppid: number; image: string }[] = [
+    { pid: 1, ppid: 0, image: "init" },
+    { pid: SERVER, ppid: 1, image: "verter-lsp" },
+    { pid: PROVIDER, ppid: SERVER, image: "tsgo" },
+  ];
+  const deps = (
+    rows: readonly { pid: number; ppid: number; image: string }[] | null,
+    rss: Record<number, number | null>,
+  ): ProcessTreeRssDeps => ({
+    snapshotProcessTable: async () => rows,
+    readProcessRssBytes: async (pid: number) => rss[pid] ?? null,
+  });
+
+  it("sums the server and its provider child when the whole tree is readable", async () => {
+    const sample = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: 300 }),
+    );
+    expect(sample.observable).toBe(true);
+    expect(sample.totalBytes).toBe(500);
+    expect(sample.unavailable).toBeNull();
+    expect(sample.members.map((member) => member.pid).sort()).toEqual([SERVER, PROVIDER]);
+  });
+
+  it("reports a missing process table as UNAVAILABLE, not a root-only reading", async () => {
+    // Without the table the tree's MEMBERSHIP is unknown: the provider child may
+    // be retaining every document version and nothing here can see it. A
+    // root-only figure would be flat and would bless exactly that session.
+    const sample = await sampleProcessTreeRss(SERVER, deps(null, { [SERVER]: 200 }));
+    expect(sample.observable).toBe(false);
+    expect(sample.totalBytes).toBeNull();
+    expect(sample.unavailable?.kind).toBe("topology-unavailable");
+  });
+
+  it("drops a member that exited before it was read, and only that member", async () => {
+    // A short-lived child (a probe) is enumerated, then exits before its read:
+    // it retains nothing, so a fresh table that no longer has it drops it and
+    // the rest of the tree is a whole observation. Without the re-check the
+    // sample was UNAVAILABLE and a 1000-cycle run lost its slope verdict.
+    const PROBE = 4002;
+    const withProbe = [...table, { pid: PROBE, ppid: SERVER, image: "tsc" }];
+    let snapshots = 0;
+    const sample = await sampleProcessTreeRss(SERVER, {
+      snapshotProcessTable: async () => (snapshots++ === 0 ? withProbe : table),
+      readProcessRssBytes: async (pid: number) =>
+        (({ [SERVER]: 200, [PROVIDER]: 300 }) as Record<number, number>)[pid] ?? null,
+    });
+    expect(sample.observable).toBe(true);
+    expect(sample.totalBytes).toBe(500);
+    expect(sample.exitedPids).toEqual([PROBE]);
+    expect(sample.members.map((member) => member.pid).sort()).toEqual([SERVER, PROVIDER]);
+  });
+
+  it("reports a discovered-but-unreadable provider child as UNAVAILABLE", async () => {
+    // The member is KNOWN to be in the tree, so omitting its bytes is not a
+    // narrower measurement — it is a wrong one.
+    const sample = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: null }),
+    );
+    expect(sample.observable).toBe(false);
+    expect(sample.totalBytes).toBeNull();
+    expect(sample.unavailable?.kind).toBe("member-unreadable");
+    expect(sample.unreadablePids).toEqual([PROVIDER]);
+    expect(describeProcessTreeRss(sample)).toContain("UNAVAILABLE");
+  });
+
+  it("cannot satisfy the growth bound from an incomplete tree", async () => {
+    // The end-to-end leg of the same defect: an incomplete sample must not be
+    // able to produce a passing growth verdict at either checkpoint.
+    const complete = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: 300 }),
+    );
+    const partial = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: null }),
+    );
+    for (const [baseline, final] of [
+      [complete, partial],
+      [partial, complete],
+    ] as const) {
+      const verdict = decideChurnGrowth(baseline, final, 1.25, 64 * 1024 ** 2);
+      expect(verdict.observable).toBe(false);
+      expect(verdict.pass).toBe(false);
+      expect(verdict.detail).toContain("NOT evaluated");
+    }
+  });
+
+  it("cannot satisfy the growth bound when a baseline member left the tree", async () => {
+    // A provider that respawned between the checkpoints takes its retained
+    // bytes with it, so the surviving figure understates the session. The
+    // comparison is refused rather than read as improvement.
+    const baseline = await sampleProcessTreeRss(
+      SERVER,
+      deps(table, { [SERVER]: 200, [PROVIDER]: 300 }),
+    );
+    const final = await sampleProcessTreeRss(SERVER, deps([table[0], table[1]], { [SERVER]: 210 }));
+    expect(final.observable).toBe(true);
+    const verdict = decideChurnGrowth(baseline, final, 1.25, 64 * 1024 ** 2);
+    expect(verdict.observable).toBe(false);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.detail).toContain(String(PROVIDER));
+  });
+});
+
+describe("churn growth verdict", () => {
+  const observable = (totalBytes: number) => ({
+    observable: true as const,
+    totalBytes,
+    members: [{ pid: 1, image: "verter-lsp", rssBytes: totalBytes }],
+    unreadablePids: [],
+    unavailable: null,
+    atMs: 0,
+  });
+  const unobservable = {
+    observable: false as const,
+    totalBytes: null,
+    members: [{ pid: 1, image: null, rssBytes: null }],
+    unreadablePids: [1],
+    unavailable: { kind: "member-unreadable" as const, detail: "pid 1 unreadable" },
+    atMs: 0,
+  };
+  const MIB = 1024 ** 2;
+
+  it("fails a session that kept every churned document version", () => {
+    // 1000 cycles retaining ~300KiB per synced version against a 400MiB
+    // baseline: the shape of an insert-only surface store, and the exact
+    // failure this lane exists to produce.
+    const verdict = decideChurnGrowth(observable(400 * MIB), observable(700 * MIB), 1.25, 64 * MIB);
+    expect(verdict.observable).toBe(true);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.growthBytes).toBe(300 * MIB);
+    expect(verdict.detail).toContain("700.0MiB");
+  });
+
+  it("passes a bounded session that only wobbles inside the floor", () => {
+    const verdict = decideChurnGrowth(observable(400 * MIB), observable(412 * MIB), 1.25, 64 * MIB);
+    expect(verdict.pass).toBe(true);
+    expect(verdict.ratio).toBeCloseTo(1.03, 2);
+  });
+
+  it("reports an unreadable platform as UNAVAILABLE, never as a measured pass", () => {
+    const verdict = decideChurnGrowth(observable(400 * MIB), unobservable, 1.25, 64 * MIB);
+    expect(verdict.observable).toBe(false);
+    expect(verdict.finalBytes).toBeNull();
+    expect(verdict.allowedBytes).toBeNull();
+    expect(verdict.detail).toContain("UNAVAILABLE");
+    // The bound was not evaluated, so it was not satisfied: the lane consuming
+    // this verdict must go red for a missing proof, never green.
+    expect(verdict.pass).toBe(false);
+  });
+
+  it("sizes the churn carrier so one retained version is measurable", () => {
+    // A leak is per synced version, so the fixture must be big enough that a
+    // thousand of them leave allocator noise behind. 140 blocks is ~32KiB of
+    // carrier source before the provider's generated surface.
+    const content = churnCarrierContent(140, DEFAULT_ENDURANCE_LANE);
+    expect(content.length).toBeGreaterThan(28 * 1024);
+    expect(content).toContain("interface ChurnProps {");
+    expect(content).toContain("churnField139?: string;");
+    expect(content).toContain("{{ churnHeadline }}");
+  });
+});
+
+describe("churn retained-byte plateau verdict", () => {
+  const MIB = 1024 ** 2;
+  const KIB = 1024;
+  const sample = (totalBytes: number, pids: readonly number[] = [1, 2]) => ({
+    observable: true as const,
+    totalBytes,
+    members: pids.map((pid) => ({
+      pid,
+      image: pid === 1 ? "verter-lsp" : "tsgo",
+      rssBytes: totalBytes / pids.length,
+    })),
+    unreadablePids: [] as number[],
+    unavailable: null,
+    atMs: 0,
+  });
+  const unobservable = {
+    observable: false as const,
+    totalBytes: null,
+    members: [{ pid: 1, image: null, rssBytes: null }],
+    unreadablePids: [1],
+    unavailable: { kind: "member-unreadable" as const, detail: "pid 1 unreadable" },
+    atMs: 0,
+  };
+  /** A flat retained-object set: the byte plateau is the only thing under test here. */
+  const flatRetention: RetentionReading = {
+    liveArtifacts: 4,
+    retainedRetiredVersions: 2,
+    liveRoots: 1,
+    snapshotLeases: 4,
+    carrierCandidates: 2,
+    publicationLanes: 3,
+    semanticNodes: 1,
+    semanticNodeSlots: 1,
+    semanticMemoEntries: 1,
+    unresolvedReach: 1,
+    relationProofs: 1,
+    relateKeys: 1,
+    unionViews: 1,
+    deferredReleases: 0,
+    resolvedImportFacts: 0,
+    componentMetaStates: 0,
+    registeredSources: 0,
+    signatureRecords: 0,
+    signatureRecordCap: 262144,
+    releasesApplied: 0,
+    releaseWaitMaxMicros: 0,
+    releaseElapsedMaxMicros: 0,
+    lastRelease: null,
+    shapeCacheEntries: 1,
+    flowGraphs: 1,
+    flowHashEntries: 1,
+    flowLoweredEntries: 1,
+    mapperFingerprints: 1,
+    frameworkSurfaceEntries: 1,
+    pinnedBytes: 1_000_000,
+    retainedBytes: 500_000,
+    refusalsPressure: 0,
+    heapInUseBytes: 40 * MIB,
+  };
+  interface Reading {
+    readonly server: number;
+    readonly provider: number;
+    /** The server's exact heap figure; flat at 40 MiB unless the trajectory says otherwise. */
+    readonly heap?: number | null;
+  }
+  /**
+   * Baseline plus `windows` quiesced readings of a two-member tree (server,
+   * provider) whose resident sets and the server's heap follow
+   * `at(cyclesSinceWarmup)`.
+   */
+  const trajectory = (
+    at: (cyclesSinceWarmup: number) => Reading,
+    { cycles = 1000, warmup = 100, windows = 18, quiesced = true } = {},
+  ): ChurnCheckpoint[] => {
+    const reading = (cyclesCompleted: number): ChurnCheckpoint => {
+      const { server, provider, heap } = at(cyclesCompleted - warmup);
+      return {
+        cyclesCompleted,
+        quiesced,
+        sample: {
+          observable: true as const,
+          totalBytes: server + provider,
+          members: [
+            { pid: 1, image: "verter-lsp", rssBytes: server },
+            { pid: 2, image: "tsgo", rssBytes: provider },
+          ],
+          unreadablePids: [] as number[],
+          unavailable: null,
+          atMs: 0,
+        },
+        retention: { ...flatRetention, heapInUseBytes: heap === undefined ? 40 * MIB : heap },
+      };
+    };
+    const measured = cycles - warmup;
+    const checkpoints = [reading(warmup)];
+    for (let window = 1; window <= windows; window += 1) {
+      checkpoints.push(reading(warmup + Math.round((measured * window) / windows)));
+    }
+    return checkpoints;
+  };
+  /** Baseline plus `windows` readings, the server's resident set AND heap growing by `bytesPerCycle`. */
+  const run = (
+    bytesPerCycle: number,
+    runOptions: { cycles?: number; warmup?: number; windows?: number; quiesced?: boolean } = {},
+  ): ChurnCheckpoint[] =>
+    trajectory(
+      (cycles) => ({
+        server: 40 * MIB + cycles * bytesPerCycle,
+        provider: 35 * MIB,
+        heap: 40 * MIB + cycles * bytesPerCycle,
+      }),
+      runOptions,
+    );
+  /** Reproducible measurement noise: ±`amplitude`, zero-mean, no trend. */
+  const wobble = (cycles: number, amplitude: number) =>
+    amplitude * Math.sin(cycles / 37) * Math.cos(cycles / 11);
+  const options = { minimumCycles: CHURN_ACCEPTANCE_MIN_CYCLES };
+  const member = (slope: ReturnType<typeof decideChurnSlope>, role: "root" | "child") =>
+    slope.members.find((candidate) => candidate.role === role);
+
+  it("rejects a strictly LINEAR leak that the two-endpoint envelope admits", () => {
+    // ~85 KiB retained on every post-warm-up cycle against a 75 MiB baseline is
+    // 75 MiB of growth over 900 cycles — inside `baseline * 1.25 + 64 MiB`, so
+    // the envelope blesses it. It is exactly the shape WSP6-AC1 forbids.
+    const checkpoints = run(85 * KIB);
+    const envelope = decideChurnGrowth(
+      checkpoints[0].sample,
+      checkpoints[checkpoints.length - 1].sample,
+      1.25,
+      64 * MIB,
+    );
+    expect(
+      envelope.pass,
+      "the two-endpoint envelope is the weaker oracle this plateau check exists to replace",
+    ).toBe(true);
+
+    const slope = decideChurnSlope(checkpoints, options);
+    expect(slope.observable).toBe(true);
+    expect(slope.pass).toBe(false);
+    expect(member(slope, "root")?.heap?.plateau).toBe(false);
+    expect(member(slope, "root")?.rss[0].plateau).toBe(false);
+    expect(slope.detail).toContain("BREACH");
+  });
+
+  it("dirty twin: an 8 KiB/cycle server heap drift fails, however small each window looks", () => {
+    // 8 KiB a cycle is 3.5 MiB over the late span — a leak with a low gradient,
+    // not a plateau. The exact heap figure has no allocator settling to hide
+    // it in, so its trend is one the noise cannot explain.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB + wobble(cycles, 1.5 * MIB),
+        provider: 35 * MIB,
+        heap: 40 * MIB + cycles * 8 * KIB + wobble(cycles, 0.5 * MIB),
+      })),
+      options,
+    );
+    const heap = member(slope, "root")?.heap;
+    expect(heap?.significantlyRising).toBe(true);
+    expect(heap?.withinBand).toBe(false);
+    expect(slope.pass).toBe(false);
+  });
+
+  it("dirty twin: a 40 KiB/cycle child drift fails", () => {
+    // 18 MiB over the late span, in even 2 MiB steps: no single window is a
+    // level shift, and the rise does not fit the child's band.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + cycles * 40 * KIB + wobble(cycles, 2 * MIB),
+      })),
+      options,
+    );
+    const child = member(slope, "child");
+    expect(child?.levelShift).toBeNull();
+    expect(child?.rss[0].withinBand).toBe(false);
+    expect(slope.pass).toBe(false);
+  });
+
+  it("passes a session that plateaus after the baseline", () => {
+    const slope = decideChurnSlope(run(0), options);
+    expect(slope.observable).toBe(true);
+    expect(slope.pass).toBe(true);
+    expect(slope.inconclusive).toBe(false);
+    expect(member(slope, "root")?.heap?.plateau).toBe(true);
+  });
+
+  it("passes allocator settling in the server's resident set when its heap is flat", () => {
+    // The measured shape with every retained-object counter and the exact heap
+    // figure flat: ~20 MiB of committed memory approached with a ~200-cycle
+    // time constant. The late-span rise fits the settling band; the heap
+    // figure, which has no settling in it, is what would show a retainer.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB + 20 * MIB * (1 - Math.exp(-cycles / 200)) + wobble(cycles, MIB),
+        provider: 35 * MIB,
+        heap: 40 * MIB + wobble(cycles, 0.5 * MIB),
+      })),
+      options,
+    );
+    expect(slope.segments[0].bytesPerCycle, "an early window climbs on its own").toBeGreaterThan(
+      16 * KIB,
+    );
+    expect(member(slope, "root")?.rss[0].withinBand).toBe(true);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("refuses a server that reports no exact heap figure, never reading its resident set alone", () => {
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB,
+        heap: cycles >= 800 ? null : 40 * MIB,
+      })),
+      options,
+    );
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("heapInUseBytes");
+  });
+
+  it("accepts one level shift in the child once its post-shift plateau is proven", () => {
+    // The provider child steps up once by ~26 MiB at cycle 700 and holds: seven
+    // readings after the shift prove the new plateau.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 600 ? 26 * MIB : 0) + wobble(cycles, 2 * MIB),
+      })),
+      options,
+    );
+    const child = member(slope, "child");
+    expect(child?.levelShift).toMatchObject({ fromCycle: 650, toCycle: 700 });
+    expect(child?.rss.map((check) => check.plateau)).toEqual([true, true]);
+    expect(child?.inconclusive).toBe(false);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("calls a level shift too close to the end INCONCLUSIVE, never a pass", () => {
+    // Three readings after the shift cannot prove a plateau; the scenario
+    // extends the run instead of blessing whatever the last window showed.
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 800 ? 26 * MIB : 0),
+      })),
+      options,
+    );
+    expect(member(slope, "child")?.inconclusive).toBe(true);
+    expect(slope.inconclusive).toBe(true);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("INCONCLUSIVE");
+  });
+
+  it("proves the plateau once the run is extended past a late level shift", () => {
+    // The same shift, read over a run extended by six windows: the late span
+    // keeps its planned start (cycle 550) and the post-shift segment is long
+    // enough to prove the plateau.
+    const slope = decideChurnSlope(
+      trajectory(
+        (cycles) => ({
+          server: 40 * MIB,
+          provider: 35 * MIB + (cycles >= 800 ? 26 * MIB : 0) + wobble(cycles, 2 * MIB),
+        }),
+        { cycles: 1300, windows: 24 },
+      ),
+      { ...options, lateFromCycle: 550 },
+    );
+    expect(slope.lateFromCycle).toBe(550);
+    expect(member(slope, "child")?.inconclusive).toBe(false);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("does not accept a second level shift", () => {
+    const slope = decideChurnSlope(
+      trajectory((cycles) => ({
+        server: 40 * MIB,
+        provider: 35 * MIB + (cycles >= 500 ? 26 * MIB : 0) + (cycles >= 700 ? 26 * MIB : 0),
+      })),
+      options,
+    );
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("BREACH");
+  });
+
+  it("passes the recorded run whose provider moved plateaus at the midpoint", () => {
+    // A real 1000-cycle run (Windows, chunked arena, exact heap figure): the
+    // server's resident set settles from 125 to 142 MiB while its heap holds
+    // ~55 MiB; the tsgo child steps from ~95 to ~130 MiB at cycle 500-550 and
+    // wanders ±5 MiB after it.
+    const recorded: readonly (readonly [number, number, number, number])[] = [
+      [100, 125.2, 92.8, 53.5],
+      [150, 127.4, 97.0, 53.0],
+      [200, 130.2, 99.3, 53.2],
+      [250, 133.6, 96.7, 55.4],
+      [300, 133.0, 97.4, 54.8],
+      [350, 133.1, 98.0, 54.1],
+      [400, 134.7, 98.1, 54.6],
+      [450, 135.5, 94.9, 54.8],
+      [500, 136.5, 95.0, 55.1],
+      [550, 136.8, 129.9, 54.6],
+      [600, 138.8, 122.3, 55.5],
+      [650, 139.0, 126.6, 55.1],
+      [700, 142.3, 129.2, 54.8],
+      [750, 139.7, 131.5, 54.6],
+      [800, 141.2, 135.4, 54.8],
+      [850, 140.1, 129.0, 54.7],
+      [900, 141.7, 132.3, 55.9],
+      [950, 143.1, 132.3, 56.2],
+      [1000, 142.2, 126.0, 55.6],
+    ];
+    const byCycle = new Map(
+      recorded.map(([cycle, server, provider, heap]) => [cycle, { server, provider, heap }]),
+    );
+    const slope = decideChurnSlope(
+      trajectory((cycles) => {
+        const reading = byCycle.get(cycles + 100);
+        if (!reading) throw new Error(`no recorded reading at cycle ${cycles + 100}`);
+        return {
+          server: reading.server * MIB,
+          provider: reading.provider * MIB,
+          heap: reading.heap * MIB,
+        };
+      }),
+      options,
+    );
+    expect(member(slope, "root")?.heap?.plateau).toBe(true);
+    expect(member(slope, "root")?.rss[0].withinBand).toBe(true);
+    expect(member(slope, "child")?.withinBound).toBe(true);
+    expect(slope.pass).toBe(true);
+  });
+
+  it("refuses to evaluate a run shorter than the criterion's 1000 cycles", () => {
+    // The lane may be configured down for a smoke run; what it may not do is
+    // report a PASS for a bound that run could not have exercised.
+    const slope = decideChurnSlope(run(0, { cycles: 200 }), options);
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.cyclesCompleted).toBe(200);
+    expect(slope.detail).toContain("NOT evaluated");
+    expect(slope.detail).toContain("1000");
+  });
+
+  it("refuses to evaluate fewer than two post-baseline windows", () => {
+    const checkpoints = run(0, { windows: 4 }).slice(0, 2);
+    const slope = decideChurnSlope(checkpoints, options);
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("at least two later quiesced readings");
+  });
+
+  it("refuses a late span too thin to fit a plateau", () => {
+    // Four windows leave three readings from the midpoint on.
+    const slope = decideChurnSlope(run(0, { windows: 4 }), options);
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("late span");
+    expect(slope.detail).toContain("NOT evaluated");
+  });
+
+  it("refuses a reading taken before the host quiesced", () => {
+    const checkpoints = run(0);
+    const slope = decideChurnSlope(
+      checkpoints.map((checkpoint, index) =>
+        index === 2 ? { ...checkpoint, quiesced: false } : checkpoint,
+      ),
+      options,
+    );
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("quiescence");
+  });
+
+  it("refuses an incomplete whole-tree reading rather than reading it as flat", () => {
+    const checkpoints = run(0);
+    const slope = decideChurnSlope(
+      checkpoints.map((checkpoint, index) =>
+        index === 3 ? { ...checkpoint, sample: unobservable } : checkpoint,
+      ),
+      options,
+    );
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("complete whole-tree observations");
+  });
+
+  it("refuses when a process left the tree between readings", () => {
+    // A respawned provider takes its retained bytes with it; the remaining
+    // figure understates the session and must not be read as a plateau.
+    const checkpoints = run(0).map((checkpoint, index) =>
+      index >= 3 ? { ...checkpoint, sample: sample(40 * MIB, [1]) } : checkpoint,
+    );
+    const slope = decideChurnSlope(checkpoints, options);
+    expect(slope.observable).toBe(false);
+    expect(slope.pass).toBe(false);
+    expect(slope.detail).toContain("left the tree");
+  });
+});
+
+describe("churn retained-object verdict", () => {
+  const MIB = 1024 ** 2;
+  const sample = (totalBytes: number) => ({
+    observable: true as const,
+    totalBytes,
+    members: [{ pid: 1, image: "verter-lsp", rssBytes: totalBytes }],
+    unreadablePids: [] as number[],
+    unavailable: null,
+    atMs: 0,
+  });
+  const baselineReading: RetentionReading = {
+    liveArtifacts: 4,
+    retainedRetiredVersions: 2,
+    liveRoots: 1,
+    snapshotLeases: 4,
+    carrierCandidates: 2,
+    publicationLanes: 3,
+    semanticNodes: 1,
+    semanticNodeSlots: 1,
+    semanticMemoEntries: 1,
+    unresolvedReach: 1,
+    relationProofs: 1,
+    relateKeys: 1,
+    unionViews: 1,
+    deferredReleases: 0,
+    resolvedImportFacts: 0,
+    componentMetaStates: 0,
+    registeredSources: 0,
+    signatureRecords: 0,
+    signatureRecordCap: 262144,
+    releasesApplied: 0,
+    releaseWaitMaxMicros: 0,
+    releaseElapsedMaxMicros: 0,
+    lastRelease: null,
+    shapeCacheEntries: 1,
+    flowGraphs: 1,
+    flowHashEntries: 1,
+    flowLoweredEntries: 1,
+    mapperFingerprints: 1,
+    frameworkSurfaceEntries: 1,
+    pinnedBytes: 1_000_000,
+    retainedBytes: 500_000,
+    refusalsPressure: 0,
+    heapInUseBytes: null,
+  };
+  /**
+   * Baseline plus `windows` quiesced readings over a 1000-cycle run (100 warm-up,
+   * 900 measured). `readingAt` shapes each checkpoint's retention from the cycles
+   * elapsed since the baseline and the checkpoint's index (0 = baseline).
+   */
+  const run = (
+    readingAt: (sinceBaseline: number, index: number) => RetentionReading | null,
+    { cycles = 1000, warmup = 100, windows = 18, quiesced = true } = {},
+  ): ChurnCheckpoint[] => {
+    const measured = cycles - warmup;
+    const checkpoints: ChurnCheckpoint[] = [
+      { cyclesCompleted: warmup, quiesced, sample: sample(75 * MIB), retention: readingAt(0, 0) },
+    ];
+    for (let window = 1; window <= windows; window += 1) {
+      const at = warmup + Math.round((measured * window) / windows);
+      checkpoints.push({
+        cyclesCompleted: at,
+        quiesced,
+        sample: sample(75 * MIB),
+        retention: readingAt(at - warmup, window),
+      });
+    }
+    return checkpoints;
+  };
+  // The lane's defaults: a trend counts past four objects over the late span.
+  const options = {};
+
+  it("passes flat readings and reports every counter's trend", () => {
+    const verdict = decideChurnRetention(
+      run(() => baselineReading),
+      options,
+    );
+    expect(verdict.observable).toBe(true);
+    expect(verdict.pass).toBe(true);
+    expect(verdict.cyclesCompleted).toBe(1000);
+    expect(verdict.pressureRefusals).toBe(0);
+    expect(verdict.trends.map((trend) => trend.counter)).toEqual([...CHURN_RETENTION_COUNTERS]);
+    expect(verdict.trends.every((trend) => trend.late.perCycle === 0 && trend.withinBound)).toBe(
+      true,
+    );
+    expect(verdict.detail).not.toContain("BREACH");
+  });
+
+  it("passes a counter that alternates between two flat levels", () => {
+    // The stacked tree's run: the memo holds the hover's classification
+    // entries only when the semantic path answered before the provider did.
+    // A linear fit reads this order as a rising trend (three standard errors);
+    // judged as the two plateaus it is, it passes.
+    const recorded = [
+      161, 161, 161, 157, 161, 0, 18, 18, 161, 18, 18, 20, 18, 18, 20, 161, 20, 157, 161,
+    ];
+    const verdict = decideChurnRetention(
+      run((_sinceBaseline, window) => ({
+        ...baselineReading,
+        semanticMemoEntries: recorded[window % recorded.length],
+      })),
+      options,
+    );
+    const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
+    expect(memo?.late.levels, "the series is judged as two levels").toBeDefined();
+    expect(memo?.withinBound).toBe(true);
+    expect(verdict.pass).toBe(true);
+    expect(verdict.detail).toContain("two levels");
+  });
+
+  it("fails a drift that rides on two alternating levels", () => {
+    // The same alternation with a tenth of an object retained per cycle on
+    // both levels: each level's own fit rises, so the split does not excuse it.
+    const recorded = [
+      161, 161, 161, 157, 161, 0, 18, 18, 161, 18, 18, 20, 18, 18, 20, 161, 20, 157, 161,
+    ];
+    const verdict = decideChurnRetention(
+      run((sinceBaseline, window) => ({
+        ...baselineReading,
+        semanticMemoEntries: recorded[window % recorded.length] + Math.round(0.1 * sinceBaseline),
+      })),
+      options,
+    );
+    const memo = verdict.trends.find((trend) => trend.counter === "semanticMemoEntries");
+    expect(memo?.withinBound).toBe(false);
+    expect(verdict.pass).toBe(false);
+  });
+
+  it("judges the kernel's record count by its cap, not by its trend", () => {
+    // Six records per cycle against a cap of 2^18: a sawtooth whose period
+    // is far longer than the lane. A trend test would call it a leak; the
+    // bound is the verdict, and a reading past the cap breaches.
+    const under = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        signatureRecords: 600 + 6 * sinceBaseline,
+      })),
+      options,
+    );
+    expect(under.pass).toBe(true);
+    expect(under.detail).toContain("signatureRecords peak");
+    const over = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        signatureRecords: 262_000 + 6 * sinceBaseline,
+      })),
+      options,
+    );
+    expect(over.pass).toBe(false);
+    expect(over.detail).toContain("of cap 262144 BREACH");
+  });
+
+  it("fails a retainer that keeps one object per document version", () => {
+    // One lease per synced version, never released on close: the counter grows
+    // by exactly the cycles run, a trend no noise could explain.
+    const verdict = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        snapshotLeases: baselineReading.snapshotLeases + sinceBaseline,
+      })),
+      options,
+    );
+    expect(verdict.observable).toBe(true);
+    expect(verdict.pass).toBe(false);
+    const leases = verdict.trends.find((trend) => trend.counter === "snapshotLeases");
+    expect(leases?.withinBound).toBe(false);
+    expect(leases?.late.perCycle).toBeCloseTo(1, 6);
+    expect(leases?.late.significantlyRising).toBe(true);
+    expect(leases?.final).toBe(904);
+    expect(verdict.detail).toContain("BREACH");
+    expect(verdict.detail).toContain("snapshotLeases");
+    // The other counters stayed flat and are named without a breach.
+    expect(verdict.trends.filter((trend) => !trend.withinBound)).toHaveLength(1);
+  });
+
+  it("passes a bounded sawtooth that returns near its baseline", () => {
+    // Superseded versions pile up between sweeps and are released by the next
+    // one: a high peak is not a leak as long as the readings keep returning to
+    // where they started — noise around a level, not a trend.
+    const retired = (index: number) => (index === 18 ? 4 : [2, 60, 12, 60][index % 4]);
+    const verdict = decideChurnRetention(
+      run((_since, index) => ({ ...baselineReading, retainedRetiredVersions: retired(index) })),
+      options,
+    );
+    expect(verdict.observable).toBe(true);
+    expect(verdict.pass).toBe(true);
+    const trend = verdict.trends.find((t) => t.counter === "retainedRetiredVersions");
+    expect(trend?.peak).toBe(60);
+    expect(trend?.baseline).toBe(2);
+    expect(trend?.final).toBe(4);
+    expect(trend?.late.significantlyRising).toBe(false);
+    expect(verdict.detail).toContain("peak 60");
+    expect(verdict.detail).not.toContain("BREACH");
+  });
+
+  it("dirty twin: a retainer of one object per ten versions fails", () => {
+    // 0.1 objects a cycle is 45 objects over the late span: a small gradient,
+    // still a trend the noise cannot explain, at any run length.
+    const verdict = decideChurnRetention(
+      run((sinceBaseline) => ({
+        ...baselineReading,
+        snapshotLeases: baselineReading.snapshotLeases + Math.round(sinceBaseline * 0.1),
+      })),
+      options,
+    );
+    const leases = verdict.trends.find((trend) => trend.counter === "snapshotLeases");
+    expect(leases?.late.significantlyRising).toBe(true);
+    expect(leases?.late.riseOverSpan).toBeGreaterThan(4);
+    expect(verdict.pass).toBe(false);
+  });
+
+  it("does not read a one-object blip at the last reading as a trend", () => {
+    const verdict = decideChurnRetention(
+      run((_since, index) => ({
+        ...baselineReading,
+        liveRoots: baselineReading.liveRoots + (index === 18 ? 1 : 0),
+      })),
+      options,
+    );
+    const roots = verdict.trends.find((trend) => trend.counter === "liveRoots");
+    expect(roots?.late.riseOverSpan).toBeLessThan(4);
+    expect(roots?.withinBound).toBe(true);
+    expect(verdict.pass).toBe(true);
+  });
+
+  it("refuses when any checkpoint carries no reading, never reading it as zero", () => {
+    const verdict = decideChurnRetention(
+      run((_since, index) => (index === 2 ? null : baselineReading)),
+      options,
+    );
+    expect(verdict.observable).toBe(false);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.trends).toEqual([]);
+    expect(verdict.pressureRefusals).toBeNull();
+    expect(verdict.detail).toContain("UNAVAILABLE");
+    expect(verdict.detail).toContain("NOT evaluated");
+  });
+
+  it("refuses a reading taken before the host quiesced", () => {
+    const checkpoints = run(() => baselineReading).map((checkpoint, index) =>
+      index === 3 ? { ...checkpoint, quiesced: false } : checkpoint,
+    );
+    const verdict = decideChurnRetention(checkpoints, options);
+    expect(verdict.observable).toBe(false);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.detail).toContain("quiescence");
+  });
+
+  it("fails when the aggregate account refused reservations for pressure", () => {
+    // WSP6.3: pressure outcomes stay explicit and must not occur on the admitted
+    // standard corpus. Flat counters do not excuse a refusal.
+    const verdict = decideChurnRetention(
+      run((_since, index) => ({ ...baselineReading, refusalsPressure: index === 18 ? 3 : 0 })),
+      options,
+    );
+    expect(verdict.observable).toBe(true);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.pressureRefusals).toBe(3);
+    expect(verdict.trends.every((trend) => trend.withinBound)).toBe(true);
+    expect(verdict.detail).toContain("pressure");
+    expect(verdict.detail).toContain("BREACH");
+  });
+});
+
+describe("retention reading extraction", () => {
+  const reading: RetentionReading = {
+    liveArtifacts: 4,
+    retainedRetiredVersions: 2,
+    liveRoots: 1,
+    snapshotLeases: 4,
+    carrierCandidates: 2,
+    publicationLanes: 3,
+    semanticNodes: 1,
+    semanticNodeSlots: 1,
+    semanticMemoEntries: 1,
+    unresolvedReach: 1,
+    relationProofs: 1,
+    relateKeys: 1,
+    unionViews: 1,
+    deferredReleases: 0,
+    resolvedImportFacts: 0,
+    componentMetaStates: 0,
+    registeredSources: 0,
+    signatureRecords: 0,
+    signatureRecordCap: 262144,
+    releasesApplied: 0,
+    releaseWaitMaxMicros: 0,
+    releaseElapsedMaxMicros: 0,
+    lastRelease: null,
+    shapeCacheEntries: 1,
+    flowGraphs: 1,
+    flowHashEntries: 1,
+    flowLoweredEntries: 1,
+    mapperFingerprints: 1,
+    frameworkSurfaceEntries: 1,
+    pinnedBytes: 1_000_000,
+    retainedBytes: 500_000,
+    refusalsPressure: 0,
+    heapInUseBytes: null,
+  };
+
+  it("projects a full retention object into a reading", () => {
+    expect(extractRetentionReading({ requests: 12, retention: { ...reading } })).toEqual(reading);
+  });
+
+  it("returns null when the snapshot reports no retention", () => {
+    expect(extractRetentionReading({ requests: 12 })).toBeNull();
+    expect(extractRetentionReading({ retention: null })).toBeNull();
+    expect(extractRetentionReading(null)).toBeNull();
+  });
+
+  it("returns null for a non-numeric field rather than reading it as zero", () => {
+    expect(extractRetentionReading({ retention: { ...reading, snapshotLeases: "4" } })).toBeNull();
+    expect(extractRetentionReading({ retention: { ...reading, liveRoots: NaN } })).toBeNull();
+    const { refusalsPressure: _dropped, ...missingOne } = reading;
+    expect(extractRetentionReading({ retention: missingOne })).toBeNull();
+  });
+
+  it("ignores fields the reading does not name", () => {
+    const projected = extractRetentionReading({
+      retention: { ...reading, sweepsRun: 17, lastSweepAtMs: 123 },
+    });
+    expect(projected).toEqual(reading);
+    expect(projected).not.toHaveProperty("sweepsRun");
   });
 });

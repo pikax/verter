@@ -72,6 +72,8 @@ export class LspClient {
   readonly name: string;
   readonly process: ChildProcess;
   readonly stderr: StderrBuffer;
+  private inboundBodyBytes = 0;
+  private outboundBodyBytes = 0;
 
   private stdoutBuf: Buffer = Buffer.alloc(0);
   private nextId = 1;
@@ -149,6 +151,17 @@ export class LspClient {
   }
 
   /** The negotiated position encoding (UTF-16 until `initialize` resolves). */
+  /**
+   * Cumulative JSON-RPC BODY bytes moved over this client's pipes since it was
+   * created: `outbound` is what this client wrote to the server, `inbound` is
+   * what the server wrote back (its outbound bytes). Headers are not counted.
+   * A resource measurement reads this at each checkpoint, so a session whose
+   * per-cycle wire traffic grows can be told apart from one whose memory grows.
+   */
+  get wireBytes(): { readonly inbound: number; readonly outbound: number } {
+    return { inbound: this.inboundBodyBytes, outbound: this.outboundBodyBytes };
+  }
+
   get positionEncoding(): PositionEncoding {
     return this.negotiatedEncoding;
   }
@@ -255,6 +268,7 @@ export class LspClient {
       this.stdoutBuf = this.stdoutBuf.subarray(bodyEnd);
       const decodedMs = performance.now();
       const byteLength = contentLength;
+      this.inboundBodyBytes += byteLength;
 
       let msg: any;
       try {
@@ -275,6 +289,7 @@ export class LspClient {
     const byteLength = Buffer.byteLength(body, "utf-8");
     const header = `Content-Length: ${byteLength}${HEADER_SEPARATOR}`;
     stdin.write(header + body);
+    this.outboundBodyBytes += byteLength;
     const encodeCompletedMs = performance.now();
     this.emitOutboundWire(payload, byteLength, encodeStartedMs, encodeCompletedMs);
     return true;

@@ -23,6 +23,11 @@
 //! the way the `(node_id, ctx) -> result_id` hash-cons memos do. Those are
 //! cleared on every edit; this one must not be, and clearing it would only
 //! cost recomputation.
+//!
+//! The one exception is a document CLOSE: `release_canonical` drops the
+//! bits of the nodes it tombstones (their payloads are gone, so the bits
+//! are pure retention). A released id asked again reads the `Opaque(Miss)`
+//! placeholder and memoizes `true` — the conservative answer.
 
 use super::*;
 

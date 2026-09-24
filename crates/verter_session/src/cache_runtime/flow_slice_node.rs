@@ -399,6 +399,11 @@ impl FunctionFlowGraphStore {
         self.entries.get(key).map(|hit| Arc::clone(hit.value()))
     }
 
+    /// Number of retained graph bundles (retention observability).
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Number of graph builds performed (observability; the
     /// once-per-content-version fixture asserts on it).
     #[cfg(test)]
@@ -516,8 +521,7 @@ impl FlowSliceHashNode {
             .retain(|key, _| key.function.canonical_id.as_ref() != canonical_id);
     }
 
-    /// Number of published entries (test observability).
-    #[cfg(test)]
+    /// Number of published entries (retention observability).
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -656,8 +660,7 @@ impl FlowSliceLoweredBodyNode {
             .retain(|key, _| key.hash_key.function.canonical_id.as_ref() != canonical_id);
     }
 
-    /// Number of published entries (test observability).
-    #[cfg(test)]
+    /// Number of published entries (retention observability).
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -851,6 +854,11 @@ impl FlowSliceStores {
     #[cfg(test)]
     pub(crate) fn graphs(&self) -> &Arc<FunctionFlowGraphStore> {
         &self.graphs
+    }
+
+    /// Number of retained graph bundles (retention observability).
+    pub(crate) fn graphs_entry_count(&self) -> usize {
+        self.graphs.entry_count()
     }
 
     /// Evict every flow-slice artifact of `canonical_id` (the standard

@@ -296,6 +296,9 @@ export async function spawnEnduranceLsp(
     if (client.isAlive()) {
       await client.sendRequest("shutdown", {}, 5_000).catch(() => undefined);
       client.sendNotification("exit", {});
+      // A graceful exit lets the server run its own teardown (a heap-profile
+      // build writes its profile on exit); the terminate below is the fallback.
+      await waitForExit(client.process, exitGraceMs());
     }
     await client.kill().catch(() => {});
     if (relay?.isAlive()) {
@@ -339,4 +342,31 @@ export async function spawnEnduranceLsp(
     await dispose();
     throw error;
   }
+}
+
+/**
+ * Milliseconds to wait for the server to exit on its own after `exit` before
+ * terminating it (VERTER_ENDURANCE_EXIT_GRACE_MS, default 0: terminate at once).
+ */
+function exitGraceMs(): number {
+  const raw = process.env.VERTER_ENDURANCE_EXIT_GRACE_MS;
+  const value = raw === undefined || raw === "" ? 0 : Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Resolve when `child` has exited, or after `ms`; never rejects. */
+function waitForExit(
+  child: { exitCode: number | null; once: (event: "exit" | "error", cb: () => void) => unknown },
+  ms: number,
+): Promise<void> {
+  if (ms <= 0 || child.exitCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    child.once("exit", done);
+    child.once("error", done);
+  });
 }

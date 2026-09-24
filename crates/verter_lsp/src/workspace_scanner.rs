@@ -32,10 +32,11 @@ use verter_session::FileLanguage;
 
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    close_stale_provider_paths, commit_sync_transition, genuinely_stale_after_sync,
+    close_stale_provider_paths_with, commit_sync_transition, genuinely_stale_after_sync,
     non_decl_close_targets, prepare_sync_transition, revert_unsynced_kinds, ProviderPathKind,
     ProviderSyncState,
 };
+use crate::sync_coordinator::ProjectSyncRedelivery;
 use crate::type_provider::project_sync::ProjectSync;
 
 /// Handle for communicating with the background workspace scanner.
@@ -73,7 +74,7 @@ pub struct WorkspaceScannerConfig {
     /// Workspace root directories (one per workspace folder).
     pub root_paths: Vec<PathBuf>,
     /// Shared host for upserting and compiling files.
-    pub host: Arc<VerterHost>,
+    pub host: crate::documents::SharedHost,
     /// The server's document registry (shared). `didOpen` prioritizes a
     /// newly-opened file for this scanner (`signal_priority`), so a scan pass
     /// CAN reach a carrier that is open in the editor despite the scanner
@@ -505,11 +506,11 @@ async fn scanner_loop(
 
         // Upsert + compile (blocking)
         let path_clone = path.clone();
-        let host = Arc::clone(&config.host);
+        let host = config.host.clone();
         let profile = config.tsx_profile.clone();
 
         let compile_ok = tokio::task::spawn_blocking(move || {
-            if !&host.ensure_loaded(&path_clone) {
+            if !&host.host().ensure_loaded(&path_clone) {
                 return false;
             }
             // IDE-sync: gate on the IDE/TSX surface, NOT the runtime `Main`
@@ -517,7 +518,8 @@ async fn scanner_loop(
             // `ensure_compiled` (which demands `Main`) would report failure and
             // the file would never reach the type provider. `ensure_ide_compiled`
             // gates on the IDE surface: `Ok(true)` ⇒ sync to the provider.
-            host.ensure_ide_compiled(&path_clone, &profile)
+            host.host()
+                .ensure_ide_compiled(&path_clone, &profile)
                 .unwrap_or(false)
         })
         .await
@@ -529,7 +531,7 @@ async fn scanner_loop(
         {
             sync_file_to_provider(
                 path,
-                &config.host,
+                &config.host.host(),
                 Some(&config.documents),
                 &config.tsx_profile,
                 config.project_sync.as_ref(),
@@ -720,17 +722,17 @@ fn drain_priority_signals(
 /// from disk, and re-syncs to the type provider.
 pub(crate) async fn resync_non_carrier_file(
     canonical_id: &str,
-    host: &Arc<VerterHost>,
+    host: &crate::documents::SharedHost,
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
     // Invalidate host cache so ensure_source_loaded_into_host re-reads from disk
-    let host_clone = Arc::clone(host);
+    let host_clone = host.clone();
     let id_clone = canonical_id.to_string();
     tokio::task::spawn_blocking(move || {
-        host_clone.remove(&id_clone);
+        host_clone.host().remove(&id_clone);
     })
     .await
     .ok();
@@ -752,7 +754,7 @@ pub(crate) async fn resync_non_carrier_file(
 /// Returns the resolved dependencies for node_modules follow-through.
 async fn sync_non_carrier_file_to_provider(
     canonical_id: &str,
-    host: &Arc<VerterHost>,
+    host: &crate::documents::SharedHost,
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
@@ -778,11 +780,11 @@ async fn sync_non_carrier_file_to_provider(
     };
 
     // Load source from disk into host
-    let host_clone = Arc::clone(host);
+    let host_clone = host.clone();
     let id_clone = canonical_id.to_string();
     let load_result = tokio::task::spawn_blocking(move || {
-        host_clone.ensure_loaded(&id_clone);
-        host_clone.get_source(&id_clone)
+        host_clone.host().ensure_loaded(&id_clone);
+        host_clone.host().get_source(&id_clone)
     })
     .await
     .unwrap_or(None);
@@ -792,18 +794,20 @@ async fn sync_non_carrier_file_to_provider(
     };
 
     // Framework carriers never sync to the provider as raw scripts.
-    let Some(file_language) = crate::provider_sync::provider_script_language(host, canonical_id)
+    let Some(file_language) =
+        crate::provider_sync::provider_script_language(&host.host(), canonical_id)
     else {
         return Vec::new();
     };
 
     // Upsert + prepare non-carrier sync (CPU-bound parsing + disk I/O for import resolution)
-    let host_clone = Arc::clone(host);
+    let host_clone = host.clone();
     let snap_clone = snapshot.clone();
     let id_clone = canonical_id.to_string();
     let source_clone = Arc::clone(&source);
     let prepared = tokio::task::spawn_blocking(move || {
         let module_references = host_clone
+            .host()
             .upsert(UpsertRequest {
                 canonical_id: Some(id_clone.clone()),
                 input_id: id_clone.clone(),
@@ -816,7 +820,7 @@ async fn sync_non_carrier_file_to_provider(
 
         // `prepare_non_carrier_provider_sync` is
         // a read-only consumer; route through `host.workspace_read()`.
-        let ws = host_clone.workspace_read();
+        let ws = host_clone.host().workspace_read();
         crate::server::prepare_non_carrier_provider_sync(
             Some(&snap_clone),
             ws.as_ref(),
@@ -837,11 +841,12 @@ async fn sync_non_carrier_file_to_provider(
         crate::provider_sync::non_carrier_sync_state_for_source(&snapshot.resolver, canonical_id);
     if let Some(next) = next_state {
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
-        close_stale_provider_paths(
+        close_stale_provider_paths_with(
             sync,
             provider_surfaces,
             &non_decl_close_targets(&transition.stale_paths),
             "workspace_scanner(non_carrier)",
+            Some(&ProjectSyncRedelivery::new(sync)),
         )
         .await;
         let mut committed = transition.next;
@@ -874,7 +879,7 @@ async fn sync_non_carrier_file_to_provider(
 
     // Store import dependencies in host for dependency tracking
     if !prepared.resolved_dependencies.is_empty() {
-        host.set_import_dependencies(
+        host.host().set_import_dependencies(
             canonical_id,
             prepared
                 .resolved_dependencies
@@ -902,7 +907,7 @@ async fn sync_non_carrier_file_to_provider(
 )]
 async fn follow_node_modules_deps(
     initial_deps: Vec<verter_semantic::resolver_core::ResolveResult>,
-    host: &Arc<VerterHost>,
+    host: &crate::documents::SharedHost,
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
@@ -1224,11 +1229,12 @@ pub(crate) async fn sync_file_to_provider(
                         requeue.insert(canonical_id.to_string());
                     }
                 } else {
-                    close_stale_provider_paths(
+                    close_stale_provider_paths_with(
                         sync,
                         provider_surfaces,
                         &non_decl_close_targets(&genuinely_stale),
                         "workspace_scanner(carrier)",
+                        Some(&ProjectSyncRedelivery::new(sync)),
                     )
                     .await;
                 }
@@ -1256,11 +1262,12 @@ pub(crate) async fn sync_file_to_provider(
                     // The declaration overlay (`Decl`), if any, is released by
                     // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
                     if let Some(sync) = sync {
-                        close_stale_provider_paths(
+                        close_stale_provider_paths_with(
                             sync,
                             provider_surfaces,
                             &state.active_non_decl_paths(),
                             "workspace_scanner(owner_loss)",
+                            Some(&ProjectSyncRedelivery::new(sync)),
                         )
                         .await;
                     }

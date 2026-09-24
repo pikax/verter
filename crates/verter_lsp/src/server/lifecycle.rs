@@ -1098,6 +1098,21 @@ pub(super) async fn handle_did_close(
     if let Some(ref canonical_id) = canonical_id {
         server.documents.host().evict(canonical_id);
         server.documents.host().scheduler().close_file(canonical_id);
+        // The close is the moment this document's edited artifact versions
+        // stop being reachable from anything but a captured root, so it is
+        // the moment to ask the store to free the ones no root still sees.
+        // The store's own sweep is amortised over retirements, which lets an
+        // open/edit/close lifecycle hold dozens of dead versions — each with
+        // its parse snapshot lease — between sweeps; a lifecycle-driven
+        // request keeps the retained set at what live roots actually pin.
+        let reclaimed = server.documents.host().reclaim_retired_artifacts();
+        if reclaimed > 0 {
+            tracing::debug!(
+                uri = uri.as_str(),
+                reclaimed,
+                "did_close reclaimed retired artifact versions"
+            );
+        }
     }
 
     // Mark this exact lane object retired while the close still owns it. The final

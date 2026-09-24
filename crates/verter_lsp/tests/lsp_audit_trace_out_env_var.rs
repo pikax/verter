@@ -29,7 +29,7 @@ async fn audited_lsp_run_appends_jsonline_to_trace_out_when_env_var_set() {
 
     let canonical = "/trace.vue".to_string();
     let _ = audit_harness::run_with_audit::<u8, _, _>(
-        &host,
+        &verter_lsp::documents::SharedHost::new(std::sync::Arc::clone(&host)),
         LspMethodTag::Hover,
         verter_audit::RequestTargetIdentity::registered(canonical),
         Some(tower_lsp_server::ls_types::Position {

@@ -1,0 +1,356 @@
+//! Document-close release for the semantic substrate.
+//!
+//! A per-canonical EDIT ([`SemanticGraphStore::invalidate_canonical`]) drains
+//! the memo entries whose carriers reference the canonical and drops the
+//! arena's dedup entries for it, but leaves every node payload, every
+//! per-node sidecar (`unresolved_reach`, the member-ordinal index, origin
+//! edges) and every relation proof in place: the edited document is still
+//! open, its next lowering re-interns fresh ids, and the retained payloads
+//! are what a warm re-read of an unchanged neighbour still reaches.
+//!
+//! A document CLOSE is different. The editor buffer is gone, the next
+//! reader reloads the file from disk and re-lowers it from scratch, and
+//! nothing that was interned for the closed content can be reached again
+//! except through a stale handle. [`SemanticGraphStore::release_canonical`]
+//! therefore performs the edit drain AND reclaims the payload side:
+//!
+//! 1. the edit-path drain ([`SemanticGraphStore::invalidate_canonical`]);
+//! 2. the arena tombstone ([`super::arena::NodeArena::release_canonical`])
+//!    — the canonical's nodes plus every node embedding one of them, ids
+//!    kept, payloads dropped, dedup entries removed;
+//! 3. under the `entries` lock: every remaining candidate whose family key
+//!    names a released (or any non-live) node, whose result names one, or
+//!    whose validity is bound to the canonical (self-root, full fact rail,
+//!    dispatch fence, compacted aggregate) is evicted, reverse index and
+//!    budget kept consistent. In-flight builds are NOT aborted beyond the
+//!    targeted abort the edit drain already performs: aborting every flight
+//!    made each aborted requester re-run cold and call `ensure_loaded` on
+//!    the freshly evicted document, which submits `close_file` + Load to
+//!    the scheduler per requester per close and overflowed the pool
+//!    transport in a long session. A build that read the closed content
+//!    and publishes afterwards is registered under the canonical, fails
+//!    validation once the reload lands a new hash, and is drained by the
+//!    next close; the admission fence below keeps it off released ids;
+//! 4. the per-node sidecars and the relation proof / relate-key tables drop
+//!    every entry naming a released node;
+//! 5. the hash-cons memos are cleared once more, after the tombstone.
+//!
+//! What is NOT released, and why: `Global`-scope nodes that embed no
+//! released id (primitives, shared literal unions minted for the closed
+//! content) — they are scope-less by design and may be shared by any file;
+//! the sealed `DeferredCallable` carriers of OTHER canonicals whose
+//! parameter types name a released node — their parts are unreadable
+//! outside the two sanctioned consumers; memo candidates whose only link to
+//! the closed canonical is an id behind an opaque interned handle (an
+//! intersection recipe, a signature descriptor) — the family budget
+//! reclaims those. None of these can serve a released node: the read-side
+//! [`SemanticGraphStore::result_is_live`] guard rejects any warm result
+//! naming a tombstoned id, and a tombstoned id reads as `Opaque(Miss)`.
+
+use std::sync::atomic::Ordering;
+
+use rustc_hash::FxHashSet;
+
+use super::*;
+
+/// What one [`SemanticGraphStore::release_canonical`] reclaimed. Counts
+/// are per call; `shape_entries_released` is filled by the owning
+/// [`crate::project_type_store::ProjectTypeStore`], which releases the
+/// shape cache alongside the graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SemanticReleaseReport {
+    /// Warm memo candidates evicted — by the reverse-index drain and by the
+    /// released-id key / result sweep together.
+    pub memo_entries_evicted: usize,
+    /// Arena slots tombstoned (the canonical's own nodes plus the cascade).
+    pub nodes_released: usize,
+    /// `unresolved_reach` bits dropped.
+    pub unresolved_reach_dropped: usize,
+    /// Member-ordinal sidecar indexes dropped.
+    pub member_indexes_dropped: usize,
+    /// Origin-edge buckets dropped from the derivation store.
+    pub derivation_buckets_dropped: usize,
+    /// Relation proofs whose witness named a released node.
+    pub relation_proofs_released: usize,
+    /// Co-discharged relate keys whose operands named a released node.
+    pub relate_keys_released: usize,
+    /// Union member views (V8's per-store `union_views`) whose union or a
+    /// member was released.
+    pub union_views_released: usize,
+    /// Live nodes the close-time scan walked: the whole live set, on every
+    /// pass of the scan (see `arena.rs`, **Cost**).
+    pub nodes_scanned: usize,
+    /// Physical arena slots before and after the release.
+    pub storage_slots_before: usize,
+    pub storage_slots_after: usize,
+    /// Wall time of the payload release, in microseconds.
+    pub elapsed_micros: u64,
+    /// Whether this release replaced the signature kernel's epoch (its
+    /// tables had outgrown their record cap).
+    pub signature_epoch_replaced: bool,
+    /// Shape-cache entries dropped by the owning store (see the type doc).
+    pub shape_entries_released: usize,
+}
+
+impl SemanticGraphStore {
+    /// Release everything this store retained for the closed
+    /// `canonical_id`. See the module docs for the exact sequence and for
+    /// what deliberately stays. Idempotent: a second call for the same
+    /// canonical finds nothing to release beyond the edit-path drain.
+    pub fn release_canonical(&self, canonical_id: &str) -> SemanticReleaseReport {
+        let drained = self.invalidate_canonical(canonical_id);
+        let mut report = self.release_canonical_payloads_below(canonical_id, u64::MAX);
+        report.memo_entries_evicted += drained;
+        report
+    }
+
+    /// The payload half of [`Self::release_canonical`]: everything after the
+    /// edit-path drain, releasing only the canonical's nodes with ids below
+    /// `below` (plus the cascade). The language server applies it through
+    /// [`crate::project_type_store::semantic_activity`] once no computation is in flight, with
+    /// `below` set to the arena size at the close, so nodes the reload
+    /// interned after the close stay.
+    pub fn release_canonical_payloads_below(
+        &self,
+        canonical_id: &str,
+        below: u64,
+    ) -> SemanticReleaseReport {
+        let mut report = SemanticReleaseReport::default();
+        let started = std::time::Instant::now();
+        report.nodes_scanned = self.arena.live_len();
+        report.storage_slots_before = self.arena.storage_slots();
+        // Arm the warm-read liveness guard BEFORE any payload is dropped so
+        // a warm hit racing the tombstone cannot serve a released node.
+        self.released_any.store(true, Ordering::Release);
+        let released_ids = self.arena.release_canonical(canonical_id, below);
+        report.nodes_released = released_ids.len();
+        // Possibly empty: a document that interned no node can still be
+        // what a consumer's candidate is bound to, so the memo sweep and
+        // the in-flight abort below run regardless.
+        let dead: FxHashSet<SemanticNodeId> = released_ids.into_iter().collect();
+
+        // Memo sweep in ONE `entries`-lock hold: the family memo's
+        // consistency cluster (`entries`, `memo_budget`,
+        // `canonical_to_entries`) mutates under this lock.
+        {
+            let mut entries = self.entries_lock_diagnosed();
+            let mut victims: Vec<(FamilyKey, ModeSlot, MemoEntry)> = Vec::new();
+            for (family, slots) in entries.iter_mut() {
+                // A key naming ANY non-live node — this call's tombstones or
+                // an earlier close's — can never be looked up again: a stale
+                // holder's re-dispatch of a released ordinal is the only way
+                // such a family gets minted, and its id is dead before this
+                // release runs, so this call's dead set alone would miss it.
+                let mut key_names_dead = family.binds_canonical(canonical_id);
+                family.for_each_node_id(|id| {
+                    key_names_dead |= dead.contains(&id) || !self.arena.is_live(id);
+                });
+                for slot in family::ALL_MODE_SLOTS {
+                    slots.retain_candidates_in_slot_mut(*slot, |entry| {
+                        let drop = key_names_dead
+                            || result_names_dead(&entry.result, &dead)
+                            || candidate_binds_canonical(entry, canonical_id);
+                        if drop {
+                            victims.push((family.clone(), *slot, entry.clone()));
+                        }
+                        !drop
+                    });
+                }
+            }
+            for (family, slot, entry) in &victims {
+                reverse_index::drain_candidate_reverse_index_registrations(
+                    &self.canonical_to_entries,
+                    family,
+                    *slot,
+                    entry,
+                );
+            }
+            report.memo_entries_evicted += victims.len();
+            // A family that lost its last candidate leaves the map and the
+            // budget ledger together — sound under the held `entries`
+            // lock, exactly as in `invalidate_canonical`.
+            entries.retain(|family, slots| {
+                if slots.populated_count() > 0 {
+                    true
+                } else {
+                    self.memo_budget.forget_key_under_exclusive_lock(family);
+                    false
+                }
+            });
+        }
+
+        {
+            let mut reach = self.unresolved_reach.lock();
+            let before = reach.len();
+            reach.retain(|id, _| !dead.contains(id));
+            report.unresolved_reach_dropped = before - reach.len();
+        }
+        {
+            let before = self.member_ordinal_index_memo.len();
+            self.member_ordinal_index_memo
+                .retain(|id, _| !dead.contains(id));
+            report.member_indexes_dropped = before - self.member_ordinal_index_memo.len();
+            self.member_ordinal_index_fifo
+                .lock()
+                .retain(|id| !dead.contains(id));
+        }
+        report.derivation_buckets_dropped = self
+            .derivation
+            .lock()
+            .release_nodes(&|id| dead.contains(&id));
+        let (relate_keys_released, relation_proofs_released) = self.release_relation_tables(&dead);
+        report.relate_keys_released = relate_keys_released;
+        report.relation_proofs_released = relation_proofs_released;
+        report.union_views_released = self.release_union_views(&dead);
+        // The edit-path drain already cleared these, but a publish that
+        // raced the tombstone could have landed a mapping whose value names
+        // a released node; clearing again after the tombstone closes it.
+        self.clear_hash_cons_memos();
+        // The signature kernel's tables are append-only within an epoch and
+        // their type tokens name node ids, so this release strands the
+        // records that named the released nodes. Once the tables outgrow
+        // their cap the epoch is replaced (V8's `signature_epoch`), here at
+        // the zero-reader instant the activity gate provides; the memo
+        // families a retired epoch leaves unreachable go with it.
+        report.signature_epoch_replaced = self.compact_signature_store_if_over_cap().is_some();
+        report.storage_slots_after = self.arena.storage_slots();
+        report.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        report
+    }
+
+    /// Drop every resident union member view whose union, or any member,
+    /// was released. A view is keyed by the union's own node id, so a view of
+    /// a closed document's union could never be looked up again (the reload
+    /// mints a fresh union id) yet stayed resident, one per distinct union
+    /// the churn built; and its members would read as the released
+    /// placeholder to any holder. Views of live unions are untouched, so
+    /// the union order those unions were built with stays resident.
+    fn release_union_views(&self, dead: &FxHashSet<SemanticNodeId>) -> usize {
+        let mut views = self.union_views.lock();
+        let before = views.len();
+        views.retain(|key, members| {
+            !dead.contains(&key.union()) && !members.iter().any(|member| dead.contains(member))
+        });
+        before - views.len()
+    }
+
+    /// Drop every relate key whose operands name a released node, then
+    /// every proof whose witness names a released node or a key released
+    /// here. Slots stay allocated (ids are never reused); the dedup maps
+    /// shrink to the live set. Returns `(keys released, proofs released)`.
+    fn release_relation_tables(&self, dead: &FxHashSet<SemanticNodeId>) -> (usize, usize) {
+        use crate::semantic_query::{RelateKeyId, RelationProof};
+
+        let released_keys: FxHashSet<RelateKeyId> = self
+            .relate_key_table
+            .lock()
+            .release_where(|key| dead.contains(&key.source) || dead.contains(&key.target))
+            .into_iter()
+            .map(RelateKeyId)
+            .collect();
+        let released_proofs = self
+            .relation_proof_table
+            .lock()
+            .release_where(|proof| match proof {
+                RelationProof::Assignable { witness } => witness
+                    .sub_derivations
+                    .iter()
+                    .any(|sub| dead.contains(&sub.source) || dead.contains(&sub.target)),
+                RelationProof::NotAssignable { failing_sub, .. } => {
+                    dead.contains(&failing_sub.source) || dead.contains(&failing_sub.target)
+                }
+                RelationProof::BudgetExceeded { .. } => false,
+                RelationProof::CoinductiveCycle { keys } => {
+                    keys.iter().any(|key| released_keys.contains(key))
+                }
+            })
+            .len();
+        (released_keys.len(), released_proofs)
+    }
+}
+
+/// Whether a warm candidate's VALIDITY is bound to `canonical_id` — by a
+/// self-root, by any fact on its rail (the exhaustive per-variant walk,
+/// which reaches the `ProgramAnalysis` / `FileSourceEnv` / `DerivedFactHash`
+/// facts too), by its dispatch fence, or by a compacted domain aggregate.
+///
+/// The reverse index registers a candidate only under the canonicals
+/// `ReadSetSignature::canonical_ids` reports, which is a documented
+/// UNDER-approximation: a `DomainAggregate` / `ProjectScalar` fact names no
+/// canonical, so a candidate whose dependency on the closed document was
+/// folded into an aggregate is never found by the edit-path drain. A close
+/// is the moment every candidate the document's content validated stops
+/// being reusable — the reload re-lowers it — so this sweep is exact where
+/// the index is not: the full rail is walked, and an aggregated carrier
+/// ("rejects on ANY movement in its domain", and the reload IS movement) is
+/// dropped rather than left for the budget.
+fn candidate_binds_canonical(entry: &MemoEntry, canonical_id: &str) -> bool {
+    entry
+        .self_root_canonicals
+        .iter()
+        .any(|root| root.as_ref() == canonical_id)
+        || carrier_facts_reference_canonical(&entry.read_set_signature.facts, canonical_id)
+        || entry
+            .dispatch_dep_signature
+            .iter()
+            .any(|(canonical, _)| canonical.as_ref() == canonical_id)
+        || !entry.read_set_signature.aggregated_domains().is_empty()
+}
+
+/// Whether a warm candidate's result names a released node at top level.
+/// Only the node-valued domains carry an arena id there; the other value
+/// domains are reclaimed through the reverse index and the family budget.
+fn result_names_dead(
+    result: &QueryResult<SemanticQueryValue>,
+    dead: &FxHashSet<SemanticNodeId>,
+) -> bool {
+    match result {
+        QueryResult::Value(SemanticQueryValue::TypeNode(id)) | QueryResult::Recursive(id) => {
+            dead.contains(id)
+        }
+        _ => false,
+    }
+}
+
+impl SemanticGraphStore {
+    /// Whether a warm candidate's result still names a live node.
+    ///
+    /// Until the first [`Self::release_canonical`] every id is live and
+    /// this is one relaxed load. Afterwards a `TypeNode` / `Recursive`
+    /// result naming a tombstoned node is reported dead so the warm read
+    /// treats the candidate as a miss: the release drains every entry the
+    /// reverse index and the key / result sweep can find, but this is the
+    /// read-side guarantee that a released node is never SERVED from the
+    /// warm memo whatever drained it. Non-node value domains are not
+    /// inspected here (they carry no arena id at top level).
+    #[inline]
+    pub(super) fn result_is_live(&self, result: &QueryResult<SemanticQueryValue>) -> bool {
+        if !self.released_any.load(Ordering::Relaxed) {
+            return true;
+        }
+        match result {
+            QueryResult::Value(SemanticQueryValue::TypeNode(id)) | QueryResult::Recursive(id) => {
+                self.arena.is_live(*id)
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether a family identity names a node whose payload a document
+    /// close released. Such a family can never be looked up by a live
+    /// producer (the id is never re-minted): the only way to present it is
+    /// a stale holder re-dispatching a released ordinal after the close,
+    /// and admitting its result would leave a candidate no later release
+    /// can find — keyed on an id that is dead BEFORE that release runs, it
+    /// is never in the release's dead set. The publish paths refuse it and
+    /// the close sweep drops it. One relaxed load until the first release.
+    #[inline]
+    pub(super) fn family_names_released_node(&self, family: &FamilyKey) -> bool {
+        if !self.released_any.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut released = false;
+        family.for_each_node_id(|id| released |= !self.arena.is_live(id));
+        released
+    }
+}

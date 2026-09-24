@@ -144,11 +144,11 @@ impl DocumentRegistry {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.invalidate_semantic_publications();
         let projection_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.clone();
-        self.host.set_workspace(projection_workspace);
+        self.host().set_workspace(projection_workspace);
         *self.semantic_workspace.write() = Some(Arc::clone(&workspace));
         if let Some(host) = self.semantic_host.read().clone() {
             let semantic_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
-            host.set_workspace(semantic_workspace);
+            host.host().set_workspace(semantic_workspace);
         }
         // A task may have been scheduled after the pre-install fence while a
         // host still held the old workspace. Advance once more after every host
@@ -159,26 +159,28 @@ impl DocumentRegistry {
         self.invalidate_semantic_publications();
     }
 
-    fn semantic_host(&self) -> Arc<VerterHost> {
+    fn semantic_host(&self) -> super::SharedHost {
         if let Some(host) = self.semantic_host.read().clone() {
             return host;
         }
         let mut slot = self.semantic_host.write();
         if let Some(host) = slot.as_ref() {
-            return Arc::clone(host);
+            return host.clone();
         }
-        let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
-            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
-            // Isolation is also a fairness boundary: native enrichment cannot
-            // occupy the projection scheduler or saturate all host CPU workers.
-            host_cpu_threads: Some(1),
-            ..verter_session::HostConfig::default()
-        }));
+        let host = super::SharedHost::new(Arc::new(VerterHost::new_standalone(
+            verter_session::HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
+                // Isolation is also a fairness boundary: native enrichment cannot
+                // occupy the projection scheduler or saturate all host CPU workers.
+                host_cpu_threads: Some(1),
+                ..verter_session::HostConfig::default()
+            },
+        )));
         if let Some(workspace) = self.semantic_workspace.read().clone() {
             let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
-            host.set_workspace(workspace);
+            host.host().set_workspace(workspace);
         }
-        *slot = Some(Arc::clone(&host));
+        *slot = Some(host.clone());
         host
     }
 
@@ -209,7 +211,7 @@ impl DocumentRegistry {
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
         let registered_structure = is_framework_carrier
-            .then(|| self.host.registered_file_structure(&canonical_id))
+            .then(|| self.host().registered_file_structure(&canonical_id))
             .flatten();
         if !self.semantic_generation_is_current(semantic_generation) {
             return None;
@@ -235,10 +237,14 @@ impl DocumentRegistry {
                 return;
             }
 
-            let host = registry.semantic_host();
+            let semantic_host = registry.semantic_host();
             let work_source = Arc::clone(&source);
             let work_canonical = canonical_id.clone();
             let analysis = tokio::task::spawn_blocking(move || {
+                // One guard for the whole blocking computation: the semantic
+                // host is never closed on today, and this keeps that a fact
+                // the gate enforces rather than one this call relies on.
+                let host = semantic_host.host();
                 let request = UpsertRequest {
                     canonical_id: Some(work_canonical.clone()),
                     input_id: work_canonical.clone(),
@@ -533,11 +539,11 @@ impl DocumentRegistry {
                 }
             }
         }
-        self.host
+        self.host()
             .config()
             .effective_scope()
             .contains(verter_semantic::analysis::AnalysisScope::BUILD)
-            .then(|| self.host.get_analysis(&canonical_id))
+            .then(|| self.host().get_analysis(&canonical_id))
             .flatten()
     }
 
@@ -585,12 +591,12 @@ impl DocumentRegistry {
     ) -> bool {
         match capture.expected_host_revision {
             Some(expected) => {
-                self.host
+                self.host()
                     .registered_source_revision_token(&capture.document.canonical_id)
                     == Some(expected)
             }
             None => self
-                .host
+                .host()
                 .get_source(&capture.document.canonical_id)
                 .is_some_and(|source| *source == *capture.document.source),
         }
@@ -615,12 +621,12 @@ impl DocumentRegistry {
                                         && feature.client_version == document.version
                                         && feature.projection_host_revision == expected
                                 }) && self
-                                    .host
+                                    .host()
                                     .registered_source_revision_token(&document.canonical_id)
                                     == Some(expected)
                             }
                             None => self
-                                .host
+                                .host()
                                 .get_source(&document.canonical_id)
                                 .is_some_and(|source| *source == *document.source),
                         }
@@ -653,11 +659,11 @@ impl DocumentRegistry {
                 }
             }
         }
-        self.host
+        self.host()
             .config()
             .effective_scope()
             .contains(verter_semantic::analysis::AnalysisScope::BUILD)
-            .then(|| self.host.get_analysis(&capture.document.canonical_id))
+            .then(|| self.host().get_analysis(&capture.document.canonical_id))
             .flatten()
     }
 
@@ -778,7 +784,7 @@ impl DocumentRegistry {
                 continue;
             }
             let evidence = self
-                .host
+                .host()
                 .resolve_svelte_script_facts(&capture.document.canonical_id);
             let analysis = self.source_feature_analysis_from_capture(&capture, &evidence);
             if self.source_feature_host_revision_is_current(&capture)

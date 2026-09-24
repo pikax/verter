@@ -62,6 +62,20 @@ pub struct IntrinsicSurfaceResult {
     pub members: Vec<crate::resolver_core::IntrinsicSurfaceMember>,
     pub attr_names: Vec<String>,
     pub event_names: Vec<String>,
+    /// The workspace content generation this surface was projected under.
+    ///
+    /// The version axis lives HERE, on the value, and not in
+    /// [`crate::resolver_core::FallthroughNodeKey::IntrinsicSurfaceLoad`]:
+    /// a superseded surface is REPLACED under its stable
+    /// `(project_anchor, tag)` key instead of accumulating one dead map
+    /// entry per edit. The reader compares it against the live generation
+    /// and retires the entry when the warm surface is strictly OLDER, so a
+    /// stale surface is never served — the node carries no validated fact
+    /// signature of its own. The comparison is ordered rather than a bare
+    /// mismatch because the reader's own live sample may itself have been
+    /// overtaken; see
+    /// [`FallthroughResolverState::retire_superseded_intrinsic_surface`].
+    pub cache_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +168,75 @@ impl FallthroughResolverState {
         self.cache.remove(key);
     }
 
+    /// Retire an intrinsic-surface node whose own value-carried generation is
+    /// strictly OLDER than the live one the reader observed.
+    ///
+    /// Used by the intrinsic-surface reader: that node carries an EMPTY
+    /// validated-fact signature, so the store view can never reject it and the
+    /// superseded candidate would otherwise stay warm under its stable key
+    /// forever, shadowing the fresh one on every later read.
+    ///
+    /// The retirement is ORDERED and decided inside the slot's own lock
+    /// ([`ValidatedFactCache::remove_if_all_candidates`]) against
+    /// `observed_generation`, not unconditional. The workspace content
+    /// generation only ever advances, so a candidate at or beyond the
+    /// generation this reader sampled is NEWER than anything this reader
+    /// knows and must survive: an unconditional remove would let a reader
+    /// that paused between observing staleness and retiring erase a value a
+    /// concurrent writer admitted meanwhile.
+    ///
+    /// Returns `true` when the entry was actually retired.
+    pub(crate) fn retire_superseded_intrinsic_surface(
+        &self,
+        key: &FallthroughNodeKey,
+        observed_generation: u64,
+    ) -> bool {
+        self.cache
+            .remove_if_all_candidates(key, |node| match &node.value {
+                FallthroughNodeValue::IntrinsicSurface(surface) => {
+                    surface.cache_generation < observed_generation
+                }
+                // A non-intrinsic value has no value-carried generation axis, so
+                // this reader cannot judge it superseded; leave it alone.
+                _ => false,
+            })
+    }
+
+    /// Admit a node through the same admission body the compute path uses,
+    /// without opening a cacheability scope. Lets a test stage the exact warm
+    /// slot contents a concurrent writer would have published.
+    #[cfg(test)]
+    pub(crate) fn admit_node_for_test(
+        &self,
+        key: FallthroughNodeKey,
+        result: FallthroughNodeResult,
+    ) {
+        self.insert_admissible_node(key, result);
+    }
+
+    /// The members and value-carried generation of the NEWEST warm intrinsic
+    /// surface under `key`, bypassing view validation — `None` when the slot
+    /// is empty or its newest candidate is not an intrinsic surface.
+    ///
+    /// Test-only: the intrinsic node carries an empty fact signature, so a
+    /// validated read cannot tell "retired" from "still warm but superseded",
+    /// and it returns the OLDEST valid candidate. Pair with
+    /// [`Self::cached_candidate_count`] to pin the exact slot contents.
+    #[cfg(test)]
+    pub(crate) fn warm_intrinsic_surface_for_test(
+        &self,
+        key: &FallthroughNodeKey,
+    ) -> Option<(Vec<crate::resolver_core::IntrinsicSurfaceMember>, u64)> {
+        self.cache
+            .peek_any_candidate(key)
+            .and_then(|node| match &node.value {
+                FallthroughNodeValue::IntrinsicSurface(surface) => {
+                    Some((surface.members.clone(), surface.cache_generation))
+                }
+                _ => None,
+            })
+    }
+
     /// Number of KEYS currently warm in the fallthrough node cache.
     ///
     /// The admission observable: a no-poison refusal is visible as a count that
@@ -243,8 +326,13 @@ impl FallthroughResolverState {
             return;
         }
         // An empty validated-fact signature is true for every future view.
-        // The intrinsic surface is the sole exception: its key carries the
-        // project cache generation that changes with its source registry.
+        // The intrinsic surface is the sole exception: its VALUE carries the
+        // project cache generation that changes with its source registry, and
+        // its reader retires the entry the moment that generation no longer
+        // matches the live one (`intrinsic_members_for_tag`). The version axis
+        // is deliberately NOT in the key: a generation-keyed entry is never
+        // superseded, so an editing session accumulates one whole dead
+        // intrinsic surface per tag per edit.
         // Consumed bindings have no such version axis and must recompute until
         // their producer supplies a real fact root.
         if !result.facts.is_empty()
@@ -302,14 +390,13 @@ pub fn root_follow_key(
     }
 }
 
-pub fn intrinsic_surface_key(
-    project_anchor: &str,
-    cache_generation: u64,
-    tag: &str,
-) -> FallthroughNodeKey {
+/// The STABLE identity of one project's intrinsic surface for one tag.
+///
+/// Deliberately carries no generation: see
+/// [`FallthroughNodeKey::IntrinsicSurfaceLoad`].
+pub fn intrinsic_surface_key(project_anchor: &str, tag: &str) -> FallthroughNodeKey {
     FallthroughNodeKey::IntrinsicSurfaceLoad {
         project_anchor: project_anchor.to_string(),
-        cache_generation,
         tag: tag.to_string(),
     }
 }
@@ -488,16 +575,82 @@ mod tests {
         );
     }
 
+    fn intrinsic_surface_node(generation: u64) -> FallthroughNodeResult {
+        FallthroughNodeResult {
+            value: FallthroughNodeValue::IntrinsicSurface(IntrinsicSurfaceResult {
+                cache_generation: generation,
+                ..IntrinsicSurfaceResult::default()
+            }),
+            facts: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn warm_intrinsic_generation(
+        state: &FallthroughResolverState,
+        key: &FallthroughNodeKey,
+    ) -> Option<u64> {
+        state
+            .cache
+            .peek_any_candidate(key)
+            .and_then(|node| match &node.value {
+                FallthroughNodeValue::IntrinsicSurface(surface) => Some(surface.cache_generation),
+                _ => None,
+            })
+    }
+
+    /// A reader that observed a stale intrinsic surface may retire ONLY what
+    /// it outranks. A newer surface admitted between that observation and the
+    /// retirement — the interleaving a paused reader produces — survives, so
+    /// the cache never loses the freshest completion; a genuinely older
+    /// surface is still retired rather than left shadowing it.
+    #[test]
+    fn stale_intrinsic_retirement_never_erases_a_newer_generation() {
+        let key = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "div");
+
+        // Reader A samples generation 7, observes the warm generation-6
+        // surface as stale, and is descheduled. Writer B advances the
+        // workspace and admits generation 8 under the same stable key.
+        let state = FallthroughResolverState::new(Arc::new(ResolverCounters::default()));
+        state.admit_node_for_test(key.clone(), intrinsic_surface_node(8));
+
+        // Reader A resumes and retires. It must not erase B's newer value.
+        let retired = state.retire_superseded_intrinsic_surface(&key, 7);
+        assert!(
+            !retired,
+            "a reader holding a generation-7 sample must not retire a generation-8 surface"
+        );
+        assert_eq!(
+            warm_intrinsic_generation(&state, &key),
+            Some(8),
+            "the newer surface admitted by the concurrent writer must stay warm"
+        );
+
+        // The uncontended case still retires: a surface strictly older than
+        // the reader's sample would otherwise shadow the fresh one forever.
+        let state = FallthroughResolverState::new(Arc::new(ResolverCounters::default()));
+        state.admit_node_for_test(key.clone(), intrinsic_surface_node(6));
+        assert!(
+            state.retire_superseded_intrinsic_surface(&key, 7),
+            "a generation-6 surface is superseded by a generation-7 sample and must retire"
+        );
+        assert_eq!(
+            warm_intrinsic_generation(&state, &key),
+            None,
+            "the superseded surface must not stay warm under the stable key"
+        );
+    }
+
     #[test]
     fn intrinsic_surface_key_keyed_by_tag() {
-        let key_div = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "div");
-        let key_span = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "span");
+        let key_div = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "div");
+        let key_span = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "span");
         assert_ne!(key_div, key_span);
 
-        let key_div2 = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", 7, "div");
+        let key_div2 = intrinsic_surface_key("/workspace|/workspace/tsconfig.json", "div");
         assert_eq!(key_div, key_div2);
 
-        let key_other_project = intrinsic_surface_key("/other|/other/tsconfig.json", 7, "div");
+        let key_other_project = intrinsic_surface_key("/other|/other/tsconfig.json", "div");
         assert_ne!(
             key_div, key_other_project,
             "project-owned intrinsic caches must not be shared across projects"

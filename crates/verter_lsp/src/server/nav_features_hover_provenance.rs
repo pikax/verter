@@ -57,7 +57,7 @@ pub(super) fn enrich_hover_with_provenance(
     // no blocking-pool slots are burned on a capture-disabled
     // host.
     let host = server.documents.host_arc();
-    if !host.config().audit_enabled || !host.config().footprint_capture {
+    if !host.host().config().audit_enabled || !host.host().config().footprint_capture {
         return hover;
     }
 
@@ -67,12 +67,13 @@ pub(super) fn enrich_hover_with_provenance(
     let cache = Arc::clone(&server.hover_provenance_cache);
     let canonical_for_task = canonical_id;
     tokio::task::spawn_blocking(move || {
-        let Some((_analysis, resolution)) =
-            host.get_component_meta_with_resolution(&canonical_for_task)
+        let Some((_analysis, resolution)) = host
+            .host()
+            .get_component_meta_with_resolution(&canonical_for_task)
         else {
             return;
         };
-        let Some(record) = host.take_audit_record(resolution.request_id) else {
+        let Some(record) = host.host().take_audit_record(resolution.request_id) else {
             return;
         };
         let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);

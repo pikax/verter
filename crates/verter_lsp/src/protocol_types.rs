@@ -382,12 +382,159 @@ pub struct StatisticsRequestParams {
     pub scope: Option<String>,
 }
 
+/// What the host RETAINS at the instant of a `$/verter/getStatistics`
+/// request: object counts and aggregate bytes, read live from the owning
+/// structures (never counters that need enabling).
+///
+/// This is the object-lifetime instrument of a long-session memory
+/// measurement. A resident-set figure says how much the process holds; these
+/// say WHICH retained set is growing, so a rising RSS can be attributed to
+/// superseded artifact versions, pinned parse snapshots or captured roots
+/// rather than guessed at. `refusalsPressure` is the explicit pressure
+/// outcome count: the admitted standard corpus must leave it at zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionStatistics {
+    pub live_artifacts: usize,
+    pub retained_retired_versions: usize,
+    pub live_roots: usize,
+    pub snapshot_leases: usize,
+    pub carrier_candidates: usize,
+    pub publication_lanes: usize,
+    pub semantic_nodes: usize,
+    pub semantic_node_slots: usize,
+    pub semantic_memo_entries: usize,
+    pub unresolved_reach: usize,
+    pub relation_proofs: usize,
+    pub relate_keys: usize,
+    pub union_views: usize,
+    /// Close-time semantic releases still queued behind in-flight
+    /// computations.
+    pub deferred_releases: usize,
+    pub resolved_import_facts: usize,
+    pub component_meta_states: usize,
+    pub registered_sources: usize,
+    /// Signature kernel records in the current epoch, and the cap the epoch
+    /// is replaced at: the count is bounded by the cap, not flat.
+    pub signature_records: usize,
+    pub signature_record_cap: usize,
+    /// Queued releases applied so far, the longest one waited for a
+    /// zero-reader instant, and the slowest / summed release wall time.
+    pub releases_applied: u64,
+    pub release_wait_max_micros: u64,
+    pub release_elapsed_max_micros: u64,
+    pub release_elapsed_total_micros: u64,
+    /// The last close-time release applied, or `None` before the first.
+    pub last_release: Option<LastReleaseStatistics>,
+    pub shape_cache_entries: usize,
+    pub flow_graphs: usize,
+    pub flow_hash_entries: usize,
+    pub flow_lowered_entries: usize,
+    pub mapper_fingerprints: usize,
+    pub framework_surface_entries: usize,
+    /// Populated semantic memo slots per family label.
+    pub semantic_memo_families: std::collections::BTreeMap<String, usize>,
+    pub active_bytes: usize,
+    pub retained_bytes: usize,
+    pub pinned_bytes: usize,
+    pub peak_total_bytes: usize,
+    pub refusals_pressure: u64,
+    pub refusals_oversized: u64,
+    pub refusals_active: u64,
+    /// Bytes the platform allocator reports as currently allocated from the
+    /// process heap (see [`crate::heap_in_use`]), or `None` where it cannot
+    /// say. Unlike a resident-set figure it excludes allocator settling, so a
+    /// long session's retained bytes can be read exactly.
+    pub heap_in_use_bytes: Option<u64>,
+}
+
+impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
+    fn from(snapshot: verter_session::HostRetentionSnapshot) -> Self {
+        Self {
+            live_artifacts: snapshot.live_artifacts,
+            retained_retired_versions: snapshot.retained_retired_versions,
+            live_roots: snapshot.live_roots,
+            snapshot_leases: snapshot.snapshot_leases,
+            carrier_candidates: snapshot.carrier_candidates,
+            publication_lanes: snapshot.publication_lanes,
+            semantic_nodes: snapshot.semantic_nodes,
+            semantic_node_slots: snapshot.semantic_node_slots,
+            semantic_memo_entries: snapshot.semantic_memo_entries,
+            unresolved_reach: snapshot.unresolved_reach,
+            relation_proofs: snapshot.relation_proofs,
+            relate_keys: snapshot.relate_keys,
+            union_views: snapshot.union_views,
+            deferred_releases: snapshot.deferred_releases,
+            resolved_import_facts: snapshot.resolved_import_facts,
+            component_meta_states: snapshot.component_meta_states,
+            registered_sources: snapshot.registered_sources,
+            signature_records: snapshot.signature_records,
+            signature_record_cap: snapshot.signature_record_cap,
+            releases_applied: snapshot.reclaim.releases_applied,
+            release_wait_max_micros: snapshot.reclaim.wait_max_micros,
+            release_elapsed_max_micros: snapshot.reclaim.elapsed_max_micros,
+            release_elapsed_total_micros: snapshot.reclaim.elapsed_total_micros,
+            last_release: snapshot.reclaim.last.map(LastReleaseStatistics::from),
+            shape_cache_entries: snapshot.shape_cache_entries,
+            flow_graphs: snapshot.flow_graphs,
+            flow_hash_entries: snapshot.flow_hash_entries,
+            flow_lowered_entries: snapshot.flow_lowered_entries,
+            mapper_fingerprints: snapshot.mapper_fingerprints,
+            framework_surface_entries: snapshot.framework_surface_entries,
+            semantic_memo_families: snapshot.semantic_memo_families.into_iter().collect(),
+            active_bytes: snapshot.active_bytes,
+            retained_bytes: snapshot.retained_bytes,
+            pinned_bytes: snapshot.pinned_bytes,
+            peak_total_bytes: snapshot.peak_total_bytes,
+            refusals_pressure: snapshot.refusals_pressure,
+            refusals_oversized: snapshot.refusals_oversized,
+            refusals_active: snapshot.refusals_active,
+            heap_in_use_bytes: crate::heap_in_use::heap_in_use_bytes(),
+        }
+    }
+}
+
+/// One applied close-time semantic release: how long it waited behind
+/// in-flight computations, what its O(live nodes) scan cost, and what it
+/// found (`retention.lastRelease`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastReleaseStatistics {
+    pub wait_micros: u64,
+    pub elapsed_micros: u64,
+    pub nodes_scanned: usize,
+    pub nodes_released: usize,
+    pub storage_slots_before: usize,
+    pub storage_slots_after: usize,
+    pub memo_entries_evicted: usize,
+}
+
+impl From<verter_session::project_type_store::semantic_activity::SemanticReleaseReceipt>
+    for LastReleaseStatistics
+{
+    fn from(
+        receipt: verter_session::project_type_store::semantic_activity::SemanticReleaseReceipt,
+    ) -> Self {
+        Self {
+            wait_micros: receipt.wait_micros,
+            elapsed_micros: receipt.elapsed_micros,
+            nodes_scanned: receipt.nodes_scanned,
+            nodes_released: receipt.nodes_released,
+            storage_slots_before: receipt.storage_slots_before,
+            storage_slots_after: receipt.storage_slots_after,
+            memo_entries_evicted: receipt.memo_entries_evicted,
+        }
+    }
+}
+
 /// Response for `$/verter/getStatistics` request.
 #[derive(Debug, Serialize)]
 pub struct StatisticsSnapshot {
     pub enabled: bool,
     pub diagnostics: serde_json::Map<String, serde_json::Value>,
     pub session: StatisticsSession,
+    /// The host's retained object set and aggregate bytes at this instant.
+    pub retention: RetentionStatistics,
     /// Present only when `interactionTrace.enabled` was set at initialize.
     #[serde(rename = "interactionTrace", skip_serializing_if = "Option::is_none")]
     pub interaction_trace: Option<crate::interaction_trace::InteractionTraceSnapshot>,

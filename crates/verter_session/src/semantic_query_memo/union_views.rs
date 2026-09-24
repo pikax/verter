@@ -35,12 +35,19 @@ impl SemanticGraphStore {
         self.union_views.lock().get(key).map(Arc::clone)
     }
 
-    /// Keep `view` as `key`'s union view; the first view built wins.
+    /// Keep `view` as `key`'s union view; the first view built wins. A view
+    /// of a union a document close already released is served but not kept:
+    /// a late reader of a released id builds the placeholder's one-element
+    /// view, and caching it would leave a residue no later release can find
+    /// (the id is never re-minted).
     pub(crate) fn keep_union_view(
         &self,
         key: SemanticUnionMembersKey,
         view: &Arc<[SemanticNodeId]>,
     ) -> Arc<[SemanticNodeId]> {
+        if !self.arena.is_live(key.union()) {
+            return Arc::clone(view);
+        }
         Arc::clone(
             self.union_views
                 .lock()

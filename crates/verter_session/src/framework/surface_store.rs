@@ -27,9 +27,11 @@
 //! use.
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use rustc_hash::FxHashMap;
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 use verter_semantic::analysis::types::Hash16;
 
@@ -90,6 +92,41 @@ pub struct StoredSurfaceDto<B> {
 pub trait ErasedFrameworkSurfaceStore: Send + Sync {
     /// Upcast to `&dyn Any` for the one store-acquisition downcast.
     fn as_any(&self) -> &dyn Any;
+    /// Number of cached surface entries (retention observability).
+    fn entry_count(&self) -> usize;
+}
+
+/// How many distinct CONTENT versions of one owner file the store keeps.
+///
+/// Entries are content-addressed by the owner's `whole_hash`, so every edited
+/// version of a component mints a fresh slot per surface kind, macro and query
+/// level — and before this window nothing ever removed one. A session typing in
+/// a component retained one complete normalized props/emits/slots surface per
+/// keystroke for its whole life (a 140-prop component: ~180 KiB each, ~250 KiB
+/// of heap per open/edit/close cycle in the WSP6 churn lane).
+///
+/// The versions worth keeping are the ones an editor comes back to: the
+/// on-disk content (reloaded after every close), the buffer being edited, and
+/// an overlay session's view beside the base one. Recency is refreshed on
+/// every warm read, so a version that keeps being asked for stays; an older
+/// version is recomputed on demand, which the content-addressed key makes
+/// exact. The window is per owner file, so editing one component never evicts
+/// another's surfaces.
+const CONTENT_VERSIONS_PER_OWNER: usize = 3;
+
+/// Recency of the content versions each owner file currently holds, oldest
+/// first, with the exact keys published for each version so eviction removes
+/// precisely that version's entries.
+struct OwnerVersions<K: Clone + PartialEq + Eq + std::hash::Hash> {
+    versions: VecDeque<(Hash16, Vec<FullKey<K>>)>,
+}
+
+impl<K: Clone + PartialEq + Eq + std::hash::Hash> Default for OwnerVersions<K> {
+    fn default() -> Self {
+        Self {
+            versions: VecDeque::new(),
+        }
+    }
 }
 
 /// The generic, content-addressed framework-surface DTO store.
@@ -114,6 +151,18 @@ where
     K: Clone + PartialEq + Eq + std::hash::Hash,
 {
     entries: DashMap<FullKey<K>, Arc<StoredSurfaceDto<B>>>,
+    /// Per owner file: the content versions it holds, oldest first (see
+    /// [`CONTENT_VERSIONS_PER_OWNER`]). Taken AFTER any `entries` shard
+    /// reference is released, never while one is held.
+    owners: parking_lot::Mutex<FxHashMap<Arc<str>, OwnerVersions<K>>>,
+}
+
+impl<K: Clone + PartialEq + Eq + std::hash::Hash> std::fmt::Debug for OwnerVersions<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerVersions")
+            .field("versions", &self.versions.len())
+            .finish()
+    }
 }
 
 impl<K, B> Default for FrameworkSurfaceStore<K, B>
@@ -123,6 +172,7 @@ where
     fn default() -> Self {
         Self {
             entries: DashMap::new(),
+            owners: parking_lot::Mutex::new(FxHashMap::default()),
         }
     }
 }
@@ -158,7 +208,53 @@ where
         if !view.validates_fact_signature(&candidate.read_set_signature.facts) {
             return None;
         }
+        self.touch(&key.canonical, key.owner_whole_hash);
         Some(candidate)
+    }
+
+    /// Mark `(canonical, whole_hash)` as the owner's most recently used
+    /// version, so a version that keeps being read is not the one evicted.
+    fn touch(&self, canonical: &Arc<str>, whole_hash: Hash16) {
+        let mut owners = self.owners.lock();
+        if let Some(owner) = owners.get_mut(canonical) {
+            if let Some(position) = owner
+                .versions
+                .iter()
+                .position(|(hash, _)| *hash == whole_hash)
+            {
+                if let Some(version) = owner.versions.remove(position) {
+                    owner.versions.push_back(version);
+                }
+            }
+        }
+    }
+
+    /// Record `key` under its owner's version list (making that version the
+    /// most recent) and return the keys of any version pushed out of the
+    /// window, for the caller to remove from `entries`.
+    fn record_version(&self, key: &FullKey<K>) -> Vec<FullKey<K>> {
+        let mut owners = self.owners.lock();
+        let owner = owners.entry(Arc::clone(&key.canonical)).or_default();
+        let version = match owner
+            .versions
+            .iter()
+            .position(|(hash, _)| *hash == key.owner_whole_hash)
+        {
+            Some(position) => owner.versions.remove(position).unwrap_or_default(),
+            None => (key.owner_whole_hash, Vec::new()),
+        };
+        let (hash, mut keys) = version;
+        if !keys.contains(key) {
+            keys.push(key.clone());
+        }
+        owner.versions.push_back((hash, keys));
+        let mut evicted = Vec::new();
+        while owner.versions.len() > CONTENT_VERSIONS_PER_OWNER {
+            if let Some((_, keys)) = owner.versions.pop_front() {
+                evicted.extend(keys);
+            }
+        }
+        evicted
     }
 
     /// Memoize `entry` under `key`, REPLACING any existing entry, and return
@@ -172,20 +268,22 @@ where
     /// compute the same fresh value, so last-writer-wins is value-equivalent.
     pub fn insert(&self, key: FullKey<K>, entry: StoredSurfaceDto<B>) -> Arc<StoredSurfaceDto<B>> {
         let arc = Arc::new(entry);
+        let evicted = self.record_version(&key);
         self.entries.insert(key, Arc::clone(&arc));
+        for stale in evicted {
+            self.entries.remove(&stale);
+        }
         arc
     }
 
-    /// Number of cached entries. Test-only — exercised by the cache-identity
-    /// discriminating tests.
-    #[cfg(test)]
+    /// Number of cached entries (retention observability and the
+    /// cache-identity discriminating tests).
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the store has no entries. Test-only.
-    #[cfg(test)]
+    /// Whether the store has no entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -199,6 +297,10 @@ where
 {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -336,6 +438,91 @@ mod tests {
     /// A `StoreView` that REJECTS every non-empty fact signature — used to
     /// discriminate the fact-rail gate (a view that rejects a tracked
     /// cross-file fact must miss the warm entry even at the right generation).
+    fn version_key(canonical: &str, version: u8, macro_index: usize) -> FullKey<FixtureKey> {
+        FullKey {
+            kind: FrameworkSurfaceKind::Props,
+            query_level: TypeInfoQueryLevel::FullMetadata,
+            canonical: Arc::from(canonical),
+            owner_whole_hash: [version; 16],
+            adapter_key: FixtureKey { macro_index },
+        }
+    }
+
+    fn publish(store: &FrameworkSurfaceStore<FixtureKey, u32>, key: &FullKey<FixtureKey>) {
+        store.insert(
+            key.clone(),
+            StoredSurfaceDto {
+                dto_bundle: Arc::new(1u32),
+                read_set_signature: ReadSetSignature::empty(),
+                validated_at_generation: 0,
+            },
+        );
+    }
+
+    /// An editing session keeps a bounded window of each owner file's content
+    /// versions instead of one surface per keystroke for the life of the host.
+    ///
+    /// Discriminating: before the window, entries were only ever inserted, so
+    /// eight edited versions of one component left eight props surfaces (and
+    /// eight emits surfaces) resident — the WSP6 churn lane's ~250 KiB of heap
+    /// per open/edit/close cycle. Here the owner keeps its newest
+    /// `CONTENT_VERSIONS_PER_OWNER` versions, every surface of an evicted
+    /// version goes with it, and another owner's entries are untouched.
+    #[test]
+    fn an_edit_loop_keeps_a_bounded_window_of_content_versions_per_owner() {
+        let store: FrameworkSurfaceStore<FixtureKey, u32> = FrameworkSurfaceStore::new();
+        let neighbour = version_key("/b.vue", 200, 0);
+        publish(&store, &neighbour);
+        for version in 1..=8u8 {
+            // Two surfaces per version (two macros), as a component with both
+            // defineProps and defineEmits publishes.
+            publish(&store, &version_key("/a.vue", version, 0));
+            publish(&store, &version_key("/a.vue", version, 1));
+            let owned = usize::from(version).min(CONTENT_VERSIONS_PER_OWNER);
+            assert_eq!(
+                store.len(),
+                1 + 2 * owned,
+                "after version {version}: the owner holds at most its newest \
+                 {CONTENT_VERSIONS_PER_OWNER} versions, never one per edit"
+            );
+        }
+        let live_view = crate::resolver_core::PermissiveStoreView;
+        assert!(
+            store.get_with_view(&neighbour, &live_view, 0).is_some(),
+            "editing one owner never evicts another owner's surfaces"
+        );
+        assert!(store
+            .get_with_view(&version_key("/a.vue", 8, 1), &live_view, 0)
+            .is_some());
+        assert!(store
+            .get_with_view(&version_key("/a.vue", 5, 0), &live_view, 0)
+            .is_none());
+    }
+
+    /// A version that keeps being READ stays in the window while newer
+    /// versions come and go — the on-disk content an editor reloads after every
+    /// close is exactly this shape.
+    ///
+    /// Discriminating: with insertion-order eviction only, the disk version
+    /// (published first and afterwards only read) is the oldest entry and is
+    /// evicted as soon as the window fills, so every reopen recomputes it.
+    #[test]
+    fn a_version_that_keeps_being_read_survives_newer_edits() {
+        let store: FrameworkSurfaceStore<FixtureKey, u32> = FrameworkSurfaceStore::new();
+        let live_view = crate::resolver_core::PermissiveStoreView;
+        let disk = version_key("/a.vue", 1, 0);
+        publish(&store, &disk);
+        for edit in 2..=10u8 {
+            assert!(
+                store.get_with_view(&disk, &live_view, 0).is_some(),
+                "the on-disk version is still warm before edit {edit}"
+            );
+            publish(&store, &version_key("/a.vue", edit, 0));
+        }
+        assert!(store.get_with_view(&disk, &live_view, 0).is_some());
+        assert_eq!(store.len(), CONTENT_VERSIONS_PER_OWNER);
+    }
+
     struct RejectingStoreView;
     impl crate::resolver_core::StoreView for RejectingStoreView {
         fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {

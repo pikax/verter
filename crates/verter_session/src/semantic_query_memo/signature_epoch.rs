@@ -82,6 +82,9 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext,
     ) -> bool {
         cached_satisfies(&entry.satisfied_projection, requested)
+            // A value naming a released node (a close's tombstone) is a miss
+            // too: the warm path must never serve the released placeholder.
+            && self.result_is_live(&entry.result)
             && !self.names_retired_kernel_epoch(&entry.result)
             && entry.validate(ctx)
     }

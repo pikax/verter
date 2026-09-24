@@ -1202,7 +1202,7 @@ pub(super) async fn handle_symbol(
     params: WorkspaceSymbolParams,
 ) -> Result<Option<WorkspaceSymbolResponse>> {
     let _hg = HandlerGuard::new("workspace_symbol");
-    let symbols = workspace_symbols(&server.documents.host, &params.query);
+    let symbols = workspace_symbols(&server.documents.host(), &params.query);
     Ok(if symbols.is_empty() {
         None
     } else {

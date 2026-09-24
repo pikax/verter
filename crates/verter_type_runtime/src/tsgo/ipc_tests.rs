@@ -5250,6 +5250,154 @@ async fn content_cached_by_load_file_never_counts_as_delivered_to_the_child() {
     assert_eq!(frames[0].1["textDocument"]["text"], source);
 }
 
+/// A retract for a document the child does not hold sends NOTHING.
+///
+/// The ledger decides a close exactly as it decides a publication. `versions` is
+/// the open set: no row means the child never received a `didOpen` for this path
+/// — because the publication that owed one was refused, or because the document
+/// was already retracted. tsgo answers a `didClose` for such a path by PANICKING
+/// ("overlay not found for closed file"), which kills the engine and takes every
+/// open project's warm state with it; the restart then re-parses the whole
+/// workspace. Repeated open/close editing makes that a recurring cost, so the
+/// frame must not be sent.
+///
+/// The local content cache is still retired: a retract means the caller is done
+/// with the path either way, and `load_file` content for a never-delivered
+/// document is exactly the kind of state a close exists to release.
+#[tokio::test]
+async fn closing_a_document_the_child_never_opened_sends_no_frame() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/NeverOpened.vue.tsx";
+
+    // `load_file` caches content locally and tells the child nothing, so the path
+    // has content but no `versions` row — the child does not hold it.
+    provider
+        .load_file(path, "export const x = 1;\n")
+        .await
+        .unwrap();
+    assert!(drained_notifications(&mut stdin_rx).is_empty());
+
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a didClose for a document the child never opened panics tsgo; it must not be sent"
+    );
+    assert!(
+        !provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(path)),
+        "the retract must still release the local content cache"
+    );
+
+    // Positive control: a document the child DOES hold still gets its didClose,
+    // so the absence above is a real suppression rather than a dead transport.
+    provider
+        .open_file(path, "export const x = 1;\n")
+        .await
+        .unwrap();
+    assert_eq!(drained_notifications(&mut stdin_rx).len(), 1);
+    provider.close_file(path).await.unwrap();
+    let closed = drained_notifications(&mut stdin_rx);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, "textDocument/didClose");
+
+    // And the suppressed retract leaves no ledger residue that would make the
+    // next open look like a change over a buffer the child does not have.
+    provider.close_file(path).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a duplicate close is a close of a document the child no longer holds"
+    );
+    provider
+        .open_file(path, "export const x = 2;\n")
+        .await
+        .unwrap();
+    let reopened = drained_notifications(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].0, "textDocument/didOpen");
+}
+
+/// DISCRIMINATING (ledger identity across equivalent path spellings): one
+/// document opened as `C:\\Ws\\Src\\A.ts` and retracted as the engine's own
+/// `root_files` spelling `c:/Ws/Src/A.ts` is ONE document, so the retract owes a
+/// `didClose` and must clear the open set.
+///
+/// The open set was keyed by the caller's raw string while the content map
+/// canonicalized. The close therefore found no row for the equivalent spelling,
+/// took the "the child never opened this" branch, sent NOTHING, and removed only
+/// the content entry — leaving the `versions` row and the child's overlay alive.
+/// Every later open/close pair under those two spellings added one more permanent
+/// row, and the next update under the original spelling was delivered as a
+/// `didChange` over a buffer the caller believed was closed.
+///
+/// RED before the fix: the close drains no frame and the `versions` row survives.
+/// GREEN after: both maps key by the one canonical document identity.
+#[tokio::test]
+async fn closing_an_equivalent_path_spelling_closes_the_open_document() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let open_form = r"C:\Ws\Src\A.ts";
+    let close_form = "c:/Ws/Src/A.ts";
+    assert_ne!(
+        open_form, close_form,
+        "the two spellings must be textually distinct for the miss to be exercised"
+    );
+
+    provider
+        .open_file(open_form, "export const x = 1;\n")
+        .await
+        .unwrap();
+    let opened = drained_notifications(&mut stdin_rx);
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].0, "textDocument/didOpen");
+
+    provider.close_file(close_form).await.unwrap();
+    let closed = drained_notifications(&mut stdin_rx);
+    assert_eq!(
+        closed.len(),
+        1,
+        "an equivalent spelling names the SAME open document, so the child is \
+         owed its didClose"
+    );
+    assert_eq!(closed[0].0, "textDocument/didClose");
+
+    assert!(
+        provider.versions.lock().await.is_empty(),
+        "the retract must clear the open set, not leave a row keyed by the \
+         spelling the open happened to use"
+    );
+    assert!(
+        provider.contents.lock().await.is_empty(),
+        "the retract must release the content the child no longer holds"
+    );
+
+    // The document really is closed: the next publication under the ORIGINAL
+    // spelling is a didOpen, never a didChange over a buffer that no longer exists.
+    provider
+        .open_file(open_form, "export const x = 2;\n")
+        .await
+        .unwrap();
+    let reopened = drained_notifications(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].0, "textDocument/didOpen");
+
+    // And an update under the CLOSE spelling addresses that same reopened
+    // document: one ledger row, delivered as a didChange.
+    provider
+        .open_file(close_form, "export const x = 3;\n")
+        .await
+        .unwrap();
+    let changed = drained_notifications(&mut stdin_rx);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].0, "textDocument/didChange");
+    assert_eq!(
+        provider.versions.lock().await.len(),
+        1,
+        "two spellings of one path are one ledger row"
+    );
+}
+
 /// tsgo must send NO `workspace/didChangeConfiguration`.
 ///
 /// Native tsgo treats that payload as user preferences: it cannot add compiler

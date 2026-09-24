@@ -675,16 +675,18 @@ fn next_ready_defers_when_cpu_class_saturated_and_resumes_on_complete() {
         "cpu_work saturated — next_ready must defer the second job",
     );
 
-    // Completing the first job releases the permit; the second
-    // job dispatches.
-    let _newly = dag.complete(&first.identity);
+    // Completing the first job and dropping it (the pool closure ends)
+    // releases the permit; the second job dispatches.
+    let first_identity = first.identity.clone();
+    let _newly = dag.complete(&first_identity);
+    drop(first);
     assert_eq!(
         dag.in_flight_cpu_permits(),
         0,
         "permit returned by complete()",
     );
     let second = dag.next_ready().expect("second cpu job after release");
-    assert_ne!(second.identity, first.identity);
+    assert_ne!(second.identity, first_identity);
 }
 
 /// CPU and IO budgets are independent: a saturated CPU pool does

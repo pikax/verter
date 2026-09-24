@@ -218,6 +218,10 @@ impl ResolvedImportFacts {
     }
 }
 
+/// Content hashes per document whose entries the store keeps: the current
+/// one and the one before it (see [`ResolvedImportFactsDb::admit`]).
+const RECENT_CONTENT_HASHES: usize = 2;
+
 /// Per-host resolved-import facts store.
 ///
 /// One [`ValidatedFactCache`] slot per key: the shared bounded
@@ -236,6 +240,11 @@ impl ResolvedImportFacts {
 #[derive(Debug, Default)]
 pub struct ResolvedImportFactsDb {
     entries: ValidatedFactCache<ResolvedImportFactsKey, ResolvedImportFacts>,
+    /// The content hashes admitted most recently per document, newest last;
+    /// [`RECENT_CONTENT_HASHES`] deep. A reader whose view still holds the
+    /// previous content (a projection that started before the edit landed)
+    /// keeps its entry; older contents can never be asked for again.
+    recent: parking_lot::Mutex<rustc_hash::FxHashMap<Arc<str>, std::collections::VecDeque<Hash16>>>,
     /// Membership generation of the `SemanticImports` compaction domain.
     ///
     /// This store is the domain's SOLE write chokepoint, so one counter
@@ -398,6 +407,29 @@ impl ResolvedImportFactsDb {
         facts: Vec<FactVersionRef>,
     ) -> bool {
         self.generation.mutate(|| {
+            // The store follows the document's content: it keeps the entries
+            // of the two most recent contents (the view a projection in
+            // flight still holds is at most one edit old) and drops the
+            // ones an older content keyed, which can never be asked for
+            // again. Without this the store gains a key per edit for the
+            // life of the host.
+            let superseded = {
+                let mut recent = self.recent.lock();
+                let hashes = recent.entry(Arc::clone(&key.canonical)).or_default();
+                if !hashes.contains(&key.content_hash) {
+                    hashes.push_back(key.content_hash);
+                }
+                if hashes.len() > RECENT_CONTENT_HASHES {
+                    hashes.pop_front()
+                } else {
+                    None
+                }
+            };
+            if let Some(superseded) = superseded {
+                self.entries.retain(|existing| {
+                    existing.canonical != key.canonical || existing.content_hash != superseded
+                });
+            }
             let admitted = self
                 .entries
                 .insert_arc_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
@@ -442,6 +474,18 @@ impl ResolvedImportFactsDb {
             self.entries.clear();
             ((), true)
         });
+    }
+
+    /// Drop every entry keyed by `canonical` (a close), and say how many.
+    pub fn release_canonical(&self, canonical: &str) -> usize {
+        self.recent.lock().remove(canonical);
+        self.generation.mutate(|| {
+            let before = self.entries.len();
+            self.entries
+                .retain(|key| key.canonical.as_ref() != canonical);
+            let removed = before - self.entries.len();
+            (removed, removed > 0)
+        })
     }
 
     /// Bump the positive-admission provenance counter. Called by the

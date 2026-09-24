@@ -2639,6 +2639,7 @@ impl VerterHost {
         // admission rather than caching a phantom-fact entry — the
         // cached state is still returned.
         let admission = if !cached.fact_versions.is_empty() {
+            self.resolver_runtime().note_component_meta_view(&cache_key);
             self.resolver_runtime().component_meta.insert_arc_with_kind(
                 cache_key,
                 cached.state.clone(),

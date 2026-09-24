@@ -3343,9 +3343,9 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
     // is what isolates the rail under test: the ONLY thing that can refuse this
     // admission is the typed cold-compute completeness.
     let (anchor, generation) = host.project_intrinsic_cache_anchor(canonical);
-    let key = intrinsic_surface_key(&anchor, generation, "div");
+    let key = intrinsic_surface_key(&anchor, "div");
     let members = host.intrinsic_members_for_tag("div");
-    let node = host.build_runtime_intrinsic_surface_node(&members);
+    let node = host.build_runtime_intrinsic_surface_node(&members, generation);
     host.resolver_runtime()
         .fallthrough
         .compute_and_maybe_admit(&host, || ((), Some((key.clone(), node))));
@@ -18678,5 +18678,1033 @@ fn overlay_structure_grammar_comes_from_registered_catalog_identity() {
         host.registered_overlay_structure(miss_canonical, vue_src, &unregistered, &view)
             .is_none(),
         "a carrier row without a registered frontend catalog row must fail closed",
+    );
+}
+
+/// An editing session must not retain one whole intrinsic-element surface per
+/// keystroke.
+///
+/// `intrinsic_members_for_tag` is reached once per native template element on
+/// every fallthrough resolve, and it caches the projected surface in the shared
+/// fallthrough-node cache. That cache is a MAP: a key that carries the
+/// workspace content generation is never superseded by a later one, so every
+/// edit anywhere in the workspace minted a brand-new entry holding a complete
+/// intrinsic surface (`div`'s whole attribute + listener member list) and
+/// retired none. Over a long editing session that is an unbounded retained-byte
+/// slope with no plateau — the exact shape the bounded-memory contract forbids.
+///
+/// Discriminating: the assertion is on the cache's KEY count across many edits,
+/// not on a byte figure, so it fails deterministically on a per-generation key
+/// and cannot pass by accident. With the generation in the key the count climbs
+/// by one per edit; with the version axis on the VALUE the count is flat
+/// because each edit REPLACES the superseded surface under its stable key.
+///
+/// The freshness leg is asserted alongside it: the surface served after the
+/// edits is still a resolved one, so the bound is not bought by serving nothing.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeated_edits_do_not_retain_one_intrinsic_surface_per_generation() {
+    const EDITS: usize = 24;
+
+    fn source(revision: usize) -> String {
+        format!(
+            r#"<script setup lang="ts">
+defineProps<{{ label?: string }}>()
+const revision = {revision}
+</script>
+<template><div :title="label">{{{{ revision }}}}</div></template>"#
+        )
+    }
+
+    let host = make_host();
+    let canonical = "/src/Churn.vue";
+    upsert_vue(&host, canonical, &source(0));
+    assert!(
+        host.resolve_fallthrough_surface(canonical).is_some(),
+        "the fixture must resolve a fallthrough surface for a single native root"
+    );
+    let after_first = host.resolver_runtime().fallthrough.cached_node_count();
+    assert!(
+        after_first > 0,
+        "the first resolve must have warmed at least one fallthrough node"
+    );
+
+    for revision in 1..=EDITS {
+        upsert_vue(&host, canonical, &source(revision));
+        assert!(
+            host.resolve_fallthrough_surface(canonical).is_some(),
+            "revision {revision} must still resolve a fallthrough surface"
+        );
+    }
+
+    let after_edits = host.resolver_runtime().fallthrough.cached_node_count();
+    assert!(
+        after_edits <= after_first,
+        "{EDITS} edits must not grow the fallthrough node cache — it held {after_first} keys \
+         after one resolve and {after_edits} after {EDITS} more, i.e. one retained intrinsic \
+         surface per content generation"
+    );
+}
+
+/// The surface reached INCREMENTALLY after a generation-advancing edit must be
+/// the one a FRESH execution produces on the same basis.
+///
+/// The generation that decides whether a cached intrinsic surface is still valid
+/// moved from the cache KEY onto the cached VALUE. A key-side version axis is
+/// self-validating — a differently-generationed entry is simply a different entry
+/// — while a value-side one has to be COMPARED, and a comparison that accepts an
+/// older stamp serves a superseded surface under a key that looks current.
+/// Counting cache keys proves the retention bound; it cannot see that.
+///
+/// So this pins the other half. The document is driven through repeated edits,
+/// each of which advances the workspace content generation AND changes the
+/// component's accepted surface, then the complete resolved surface is compared
+/// against a host that only ever saw the final revision. Same basis, two
+/// execution histories, one required answer.
+///
+/// The fingerprint is proved revision-sensitive in the test itself (it must name
+/// the final revision's prop and none of the superseded ones), so an equality
+/// that held because the comparison cannot see a stale answer is excluded.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn incremental_and_fresh_fallthrough_agree_on_the_same_basis() {
+    /// The complete resolved surface, order-normalized. `fact_versions` is
+    /// provenance about HOW the answer was reached rather than the answer itself,
+    /// and is the one field two execution histories may legitimately differ on.
+    fn surface_fingerprint(resolution: &crate::types::FallthroughResolution) -> String {
+        let mut props: Vec<String> = resolution
+            .accepted_props
+            .iter()
+            .map(|prop| format!("{prop:?}"))
+            .collect();
+        props.sort();
+        let mut events: Vec<String> = resolution
+            .accepted_events
+            .iter()
+            .map(|event| format!("{event:?}"))
+            .collect();
+        events.sort();
+        format!(
+            "completeness={:?}\nsurface={:?}\nprops=[{}]\nevents=[{}]",
+            resolution.accepted_surface_completeness,
+            resolution.fallthrough_surface,
+            props.join(", "),
+            events.join(", "),
+        )
+    }
+
+    const EDITS: usize = 8;
+    let canonical = "/src/Basis.vue";
+    // Every revision declares a DIFFERENT prop, so the accepted surface — and
+    // therefore the fingerprint — changes with the content generation.
+    let source = |revision: usize| {
+        format!(
+            r#"<script setup lang="ts">
+defineProps<{{ label?: string; rev{revision}?: number }}>()
+</script>
+<template><div :title="label"></div></template>"#
+        )
+    };
+
+    let incremental_host = make_host();
+    for revision in 0..=EDITS {
+        upsert_vue(&incremental_host, canonical, &source(revision));
+        assert!(
+            incremental_host
+                .resolve_fallthrough_surface(canonical)
+                .is_some(),
+            "revision {revision} must resolve a fallthrough surface"
+        );
+    }
+    let incremental = incremental_host
+        .resolve_fallthrough_surface(canonical)
+        .expect("the final revision resolves incrementally");
+
+    let fresh_host = make_host();
+    upsert_vue(&fresh_host, canonical, &source(EDITS));
+    let fresh = fresh_host
+        .resolve_fallthrough_surface(canonical)
+        .expect("the final revision resolves from cold");
+
+    let incremental_fingerprint = surface_fingerprint(&incremental);
+    assert_eq!(
+        incremental_fingerprint,
+        surface_fingerprint(&fresh),
+        "the incrementally reused surface must be the one a fresh execution \
+         produces on the same basis"
+    );
+
+    // The comparison is only worth anything if it can SEE a superseded answer.
+    assert!(
+        incremental_fingerprint.contains(&format!("rev{EDITS}")),
+        "the fingerprint must name the final revision's declared prop"
+    );
+    for superseded in 0..EDITS {
+        assert!(
+            !incremental_fingerprint.contains(&format!("rev{superseded}\"")),
+            "the fingerprint must not carry superseded revision {superseded}'s prop — \
+             a fingerprint blind to the revision could not discriminate a stale answer"
+        );
+    }
+    assert!(
+        !incremental.accepted_props.is_empty(),
+        "the comparison must be over a non-empty surface, not two empty results"
+    );
+}
+
+/// A reader that observed a superseded intrinsic surface must neither erase a
+/// NEWER surface a concurrent writer admits while the reader is paused, nor
+/// publish its own result — stamped with the generation it sampled BEFORE the
+/// writer's advance — over that newer completion.
+///
+/// The intrinsic surface lives under a stable `(project_anchor, tag)` key with
+/// the workspace content generation on the VALUE, so the reader — not the
+/// store view — decides staleness, and it decides from a generation sampled
+/// some time earlier. Two requests on the same key:
+///
+/// - Reader A samples the live generation G, reads the warm surface stamped
+///   G-1, observes the mismatch — and is paused right there, between that
+///   observation and its retirement, through the one-shot `#[cfg(test)]` seam
+///   in `intrinsic_members_for_tag` (`pause_before_intrinsic_retirement_for_test`).
+/// - Writer B, staged inside the pause, advances the workspace to G+1 with an
+///   edit to an unrelated file, retires the G-1 surface as any reader would,
+///   and admits a surface stamped G+1 under the same key, carrying a marker
+///   member no real projection produces.
+/// - A resumes: it retires, computes, and admits.
+///
+/// Discriminating, per half of the defect (each verified by reverting that
+/// half alone):
+/// - Unconditional retirement (the former `retire_node`): A's resumed
+///   retirement removes the whole slot, so B's G+1 surface is gone. A's own
+///   seed went non-current under B's edit, so the request recomputes on a
+///   fresh seed and repopulates the slot with a REAL projection stamped G+1 —
+///   the generation looks right, and it is the marker-member assertion that
+///   fails: the warm surface is a recomputation, not B's completion.
+/// - Admission that trusts the pre-compute sample: A's surface lands stamped G
+///   behind B's G+1 (the slot appends candidates), so the newest candidate's
+///   generation is G rather than G+1 and the candidate count is 2 rather
+///   than 1.
+///
+/// The sequential key count in
+/// `repeated_edits_do_not_retain_one_intrinsic_surface_per_generation` cannot
+/// see either: it never has two requests in flight on one key.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn paused_intrinsic_reader_never_erases_or_outranks_a_newer_admission() {
+    use crate::resolver_core::fallthrough_resolver::intrinsic_surface_key;
+
+    const MARKER: &str = "data-admitted-by-writer-b";
+    let canonical = "/src/Paused.vue";
+    let source = |revision: usize| {
+        format!(
+            r#"<script setup lang="ts">
+defineProps<{{ label?: string; rev{revision}?: number }}>()
+</script>
+<template><div :title="label"></div></template>"#
+        )
+    };
+
+    let host = make_host();
+    upsert_vue(&host, canonical, &source(0));
+    assert!(
+        host.resolve_fallthrough_surface(canonical).is_some(),
+        "the fixture must resolve a fallthrough surface for a single native root"
+    );
+    let (anchor, warm_generation) = host.project_intrinsic_cache_anchor(canonical);
+    let key = intrinsic_surface_key(&anchor, "div");
+    assert_eq!(
+        host.resolver_runtime()
+            .fallthrough
+            .warm_intrinsic_surface_for_test(&key)
+            .map(|(_, generation)| generation),
+        Some(warm_generation),
+        "the first resolve must warm the div surface at the live generation"
+    );
+
+    // One edit to the component: the live generation moves past the warm
+    // surface, so reader A will observe a superseded candidate.
+    upsert_vue(&host, canonical, &source(1));
+    let (_, generation_a) = host.project_intrinsic_cache_anchor(canonical);
+    assert!(
+        generation_a > warm_generation,
+        "the edit must advance the workspace content generation"
+    );
+
+    // Writer B's surface: a real member renamed to a marker, so a later read
+    // can tell B's completion from anything the projection would compute.
+    let mut marker_member = host
+        .intrinsic_members_for_tag("div")
+        .into_iter()
+        .next()
+        .expect("the static div surface has at least one member");
+    marker_member.name = MARKER.to_string();
+
+    let staged = Arc::new(std::sync::Mutex::new(None));
+    let staged_in_hook = Arc::clone(&staged);
+    pause_before_intrinsic_retirement_for_test(move |host, paused_key, observed_generation| {
+        // A is paused between observing the stale surface and retiring it.
+        // B: advance the workspace past A's sample, retire the surface B
+        // itself observes as stale (what any reader does), and admit the
+        // newer completion under the same stable key.
+        upsert_vue(
+            host,
+            "/src/Elsewhere.vue",
+            r#"<template><span>elsewhere</span></template>"#,
+        );
+        let (_, generation_b) = host.project_intrinsic_cache_anchor(canonical);
+        assert!(
+            generation_b > observed_generation,
+            "B's edit must advance the generation past A's sample"
+        );
+        host.resolver_runtime()
+            .fallthrough
+            .retire_superseded_intrinsic_surface(paused_key, generation_b);
+        let node = host.build_runtime_intrinsic_surface_node(
+            std::slice::from_ref(&marker_member),
+            generation_b,
+        );
+        host.resolver_runtime()
+            .fallthrough
+            .admit_node_for_test(paused_key.clone(), node);
+        *staged_in_hook.lock().unwrap() = Some((observed_generation, generation_b));
+    });
+
+    // Reader A: samples G, observes the G-1 surface, pauses (B runs), resumes.
+    assert!(
+        host.resolve_fallthrough_surface(canonical).is_some(),
+        "A must still be served its result after the overtaken retirement"
+    );
+    let (observed_generation, generation_b) = staged
+        .lock()
+        .unwrap()
+        .expect("the seam must fire: A observes the superseded warm surface before retiring");
+    assert_eq!(
+        observed_generation, generation_a,
+        "A must have sampled the generation live before B's advance"
+    );
+
+    let slot_names = |warm: &Option<(Vec<crate::resolver_core::IntrinsicSurfaceMember>, u64)>| {
+        warm.as_ref().map(|(members, _)| {
+            members
+                .iter()
+                .map(|member| member.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    let warm = host
+        .resolver_runtime()
+        .fallthrough
+        .warm_intrinsic_surface_for_test(&key);
+    assert_eq!(
+        warm.as_ref().map(|(_, generation)| *generation),
+        Some(generation_b),
+        "B's newer surface must remain current: A's resumed retirement held a generation-\
+         {generation_a} sample and may not erase a generation-{generation_b} completion"
+    );
+    assert_eq!(
+        slot_names(&warm),
+        Some(vec![MARKER.to_string()]),
+        "the warm surface must be the one B admitted, not a recomputation"
+    );
+    assert_eq!(
+        host.resolver_runtime()
+            .fallthrough
+            .cached_candidate_count(&key),
+        1,
+        "A's result, computed across B's advance and stamped with the pre-advance \
+         generation, must not be admitted beside B's newer surface"
+    );
+
+    // A later read through the production path treats B's completion as
+    // current: it is served and the slot is left exactly as B published it.
+    assert!(
+        host.resolve_fallthrough_surface(canonical).is_some(),
+        "a read after the interleaving must still resolve"
+    );
+    let warm_after = host
+        .resolver_runtime()
+        .fallthrough
+        .warm_intrinsic_surface_for_test(&key);
+    assert_eq!(
+        warm_after.as_ref().map(|(_, generation)| *generation),
+        Some(generation_b),
+        "a subsequent reader must keep B's surface as the current one"
+    );
+    assert_eq!(
+        slot_names(&warm_after),
+        Some(vec![MARKER.to_string()]),
+        "a subsequent reader must not retire or replace B's surface"
+    );
+    assert_eq!(
+        host.resolver_runtime()
+            .fallthrough
+            .cached_candidate_count(&key),
+        1,
+        "the slot must hold exactly B's candidate after the subsequent read"
+    );
+}
+
+/// `VerterHost::evict` (the `did_close` path) releases every semantic node
+/// scoped to the closed document, and the DISK reload path stays intact:
+/// `ensure_loaded` brings the file back from the workspace, and a consumer
+/// edit that forces re-resolution re-lowers it under fresh ids, yielding
+/// the same component meta as before the close. (The reopen-by-upsert
+/// variant lives in `component_meta_caches_tests`.)
+///
+/// On the old code `evict` never reached the semantic graph: every node
+/// scoped to `/src/types/icon.ts` stayed live after the close, so the
+/// `== 0` assertion failed and `node_count` did not drop.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn host_evict_releases_the_closed_documents_nodes_and_the_disk_reload_reinterns() {
+    use crate::semantic_query::SemanticNodeId;
+
+    const CONSUMER_V1: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+    const CONSUMER_V2: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+// edited after the dependency was closed
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/Consumer.vue", CONSUMER_V1);
+    ws.inject_file(
+        "/src/types/icon.ts",
+        "export interface IconProps { name: string; size: number }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let meta_before = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta before the close");
+    assert!(
+        meta_before.props.iter().any(|prop| prop.name == "name"),
+        "fixture: the consumer's props resolve through icon.ts, got {:?}",
+        meta_before.props
+    );
+
+    let graph = host.project_type_store().semantic_graph();
+    let live_scoped_to = |canonical: &str| {
+        (0..graph.node_slot_count() as u64)
+            .filter(|ordinal| {
+                graph
+                    .node_scope(SemanticNodeId(*ordinal))
+                    .and_then(|scope| scope.canonical_file())
+                    .is_some_and(|file| file.as_ref() == canonical)
+            })
+            .count()
+    };
+    assert!(
+        live_scoped_to("/src/types/icon.ts") > 0,
+        "fixture: resolving the consumer lowers declaration nodes scoped to icon.ts"
+    );
+    let live_before = graph.node_count();
+
+    host.evict("/src/types/icon.ts");
+
+    assert_eq!(
+        live_scoped_to("/src/types/icon.ts"),
+        0,
+        "the close releases every node scoped to the closed document"
+    );
+    assert!(
+        graph.node_count() < live_before,
+        "the live node count drops on close ({} -> {})",
+        live_before,
+        graph.node_count()
+    );
+
+    // The disk reload: the closed document comes back from the workspace.
+    assert!(
+        host.ensure_loaded("/src/types/icon.ts"),
+        "the closed document reloads from the workspace"
+    );
+    // A consumer edit forces re-resolution through the reloaded file.
+    upsert_vue(&host, "/src/Consumer.vue", CONSUMER_V2);
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let meta_after = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta after the close + reload");
+    // The stable semantic projection: prop identity plus the RESOLVED type
+    // source. The consumer's own provenance (content hash, source
+    // generation, artifact token) legitimately changes with its edit and
+    // is outside the comparison.
+    let published_sources =
+        |meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis| {
+            meta.props
+                .iter()
+                .map(|prop| {
+                    (
+                        prop.name.clone(),
+                        prop.required,
+                        format!("{:?}", prop.callable_role),
+                        format!("{:?}", prop.publication.authority().source()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+    assert_eq!(
+        published_sources(&meta_after),
+        published_sources(&meta_before),
+        "the re-lowered dependency yields the same resolved prop sources"
+    );
+    assert!(
+        live_scoped_to("/src/types/icon.ts") > 0,
+        "the reload re-interned the closed document's declarations under fresh ids"
+    );
+}
+
+/// One checkpoint of the in-process churn lanes: live nodes, memo entries,
+/// shape entries, the per-family memo breakdown and the node slot count.
+type ChurnCycleCounters = (usize, usize, usize, Vec<(&'static str, usize)>, usize);
+
+/// The LSP churn lane, in-process: the dependency `/src/types/icon.ts` is
+/// opened with UNIQUE content each cycle, the still-open consumer
+/// resolves its exported surface through the real component-meta query
+/// path (the shape a hover on the consumer drives), and the dependency is
+/// closed (`VerterHost::evict`). After the first cycle the live substrate
+/// at the "resolved" point — memo entries, live nodes, shape entries —
+/// must be exactly the first cycle's: every entry a cycle mints for the
+/// closed content must be released with it. On failure the message names
+/// the memo families that grew.
+///
+/// On the old code (release without the content-bound drain) the
+/// consumer-side entries produced against the dependency's content
+/// survived every close — `memo_entry_count` grew by a fixed amount per
+/// cycle — so the flat assertion failed on cycle 1 and named the family.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn host_evict_churn_keeps_memo_entries_flat_across_unique_content_cycles() {
+    const CONSUMER: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+    let icon_source = |cycle: usize| {
+        format!("export interface IconProps {{ name: string; size: number; v{cycle}: boolean }}\n")
+    };
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/Consumer.vue", CONSUMER);
+    ws.inject_file("/src/types/icon.ts", &icon_source(0));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let store = host.project_type_store();
+    let graph = store.semantic_graph();
+
+    let mut first: Option<ChurnCycleCounters> = None;
+    // The live nodes that exist before any cycle (the consumer's own
+    // substrate); every other live node at a later cycle's start was
+    // minted by an earlier cycle and survived that cycle's close.
+    let persistent: std::collections::HashSet<u64> = (0..graph.node_slot_count() as u64)
+        .filter(|ordinal| graph.node_is_live(crate::semantic_query::SemanticNodeId(*ordinal)))
+        .collect();
+    for cycle in 0..20usize {
+        let slots_at_cycle_start = graph.node_slot_count();
+        // Open the dependency with unique content (the editor buffer).
+        upsert_ts(&host, "/src/types/icon.ts", &icon_source(cycle));
+        // The consumer resolves the dependency's exported surface.
+        let meta = host
+            .get_component_meta("/src/Consumer.vue")
+            .expect("component meta resolves each cycle");
+        assert!(
+            meta.props
+                .iter()
+                .any(|prop| prop.name == format!("v{cycle}")),
+            "cycle {cycle}: the consumer sees THIS cycle's content, got {:?}",
+            meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        let resolved = (
+            graph.memo_entry_count(),
+            graph.node_count(),
+            store.shape_cache_db().live_count(),
+            graph.memo_entry_counts_by_family(),
+            graph.node_slot_count(),
+        );
+        // Cycle 0 runs against a world that never closed the dependency;
+        // from cycle 1 on every cycle resolves through the reload path a
+        // close leaves behind (the consumer's declaration placeholder for
+        // the reloaded file is minted once more). Steady state is cycle 1,
+        // and every later cycle must equal it exactly.
+        match &first {
+            None => {
+                if cycle >= 1 {
+                    first = Some(resolved);
+                }
+            }
+            Some(first) => {
+                assert_eq!(
+                    resolved.0, first.0,
+                    "cycle {cycle}: memo entries grew — by family, first {:?} vs now {:?}",
+                    first.3, resolved.3
+                );
+                // Name every live node minted after the first cycle's id space
+                // that survived a close: `(id, scope, payload)`.
+                let survivors: Vec<String> = (0..slots_at_cycle_start as u64)
+                    .filter(|ordinal| !persistent.contains(ordinal))
+                    .map(crate::semantic_query::SemanticNodeId)
+                    .filter(|id| graph.node_is_live(*id))
+                    .map(|id| {
+                        format!(
+                            "{id:?} scope={:?} payload={:?}",
+                            graph.node_scope(id).map(|scope| scope.canonical_file()),
+                            graph.node_data(id)
+                        )
+                    })
+                    .collect();
+                let minted_now: Vec<String> = (slots_at_cycle_start as u64
+                    ..graph.node_slot_count() as u64)
+                    .map(crate::semantic_query::SemanticNodeId)
+                    .filter(|id| graph.node_is_live(*id))
+                    .map(|id| {
+                        format!(
+                            "{id:?} scope={:?} payload={:?}",
+                            graph.node_scope(id).map(|scope| scope.canonical_file()),
+                            graph.node_data(id)
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    resolved.1,
+                    first.1,
+                    "cycle {cycle}: live nodes grew (slots {} -> {}); nodes minted in EARLIER \
+                     cycles that survived a close: {survivors:#?}; minted THIS cycle: \
+                     {minted_now:#?}",
+                    first.4,
+                    graph.node_slot_count()
+                );
+                assert_eq!(resolved.2, first.2, "cycle {cycle}: shape entries grew");
+            }
+        }
+        // Close the dependency; the consumer stays open.
+        host.evict("/src/types/icon.ts");
+    }
+}
+
+/// The dx-harness churn lane, in-process, on the lane's own carrier shape:
+/// the churned document is a Vue SFC (`defineProps<ChurnProps>()`, derived
+/// script bindings, a template using them) whose headline line is made
+/// UNIQUE each cycle; the still-open consumer imports it as a child
+/// component. Per cycle: open (upsert) the unique content, resolve the
+/// churned document's own component meta (what a change-triggered
+/// diagnostic / hover computes) and the consumer's, then close
+/// (`VerterHost::evict`). After the first cycle the live substrate at the
+/// resolved point must be exactly the first cycle's; on failure the
+/// message names the memo families that grew and the nodes that survived.
+///
+/// On the old code (release without the content-bound drain) the entries
+/// minted against the closed document's content survived every close and
+/// `memo_entry_count` grew by a fixed amount per cycle, so the flat
+/// assertion failed on cycle 1 and named the family.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn host_evict_churn_vue_carrier_keeps_memo_entries_flat_across_unique_content_cycles() {
+    const CONSUMER: &str = r#"<script setup lang="ts">
+import Churn from './Churn.vue'
+const consumerLabel = "consumer";
+const consumerLength = consumerLabel.length;
+</script>
+<template>
+  <main :data-len="consumerLength">
+    <Churn :churn-label="consumerLabel" />
+  </main>
+</template>"#;
+    let churn_source = |cycle: usize| {
+        format!(
+            r#"<script setup lang="ts">
+interface ChurnProps {{
+  churnLabel: string;
+  churnField0?: string;
+  churnField1?: string;
+}}
+const props = defineProps<ChurnProps>();
+const emit = defineEmits<{{ (e: "churn", value: string): void }}>();
+const churnLocal0 = `c0:${{props.churnLabel}}:${{props.churnField0 ?? ""}}`;
+const churnLength0 = churnLocal0.length;
+const churnHeadline = props.churnLabel.toUpperCase() + "{cycle}";
+function fireChurn() {{
+  emit("churn", churnHeadline);
+}}
+</script>
+
+<template>
+  <section>
+    <h1 :title="churnHeadline">{{{{ churnHeadline }}}}</h1>
+    <span :title="churnLocal0" :data-len="churnLength0">{{{{ churnLocal0 }}}}</span>
+    <button @click="fireChurn">go</button>
+  </section>
+</template>
+"#
+        )
+    };
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/ChurnConsumer.vue", CONSUMER);
+    ws.inject_file("/src/Churn.vue", &churn_source(0));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/ChurnConsumer.vue"));
+    host.set_import_dependencies(
+        "/src/ChurnConsumer.vue",
+        vec![exact_dependency("./Churn.vue", "/src/Churn.vue")],
+    );
+    let store = host.project_type_store();
+    let graph = store.semantic_graph();
+
+    let mut first: Option<ChurnCycleCounters> = None;
+    for cycle in 0..20usize {
+        let slots_at_cycle_start = graph.node_slot_count();
+        upsert_vue(&host, "/src/Churn.vue", &churn_source(cycle));
+        let churn_meta = host
+            .get_component_meta("/src/Churn.vue")
+            .expect("the churned document's meta resolves each cycle");
+        assert!(
+            churn_meta
+                .props
+                .iter()
+                .any(|prop| prop.name == "churnLabel"),
+            "cycle {cycle}: the churned document publishes its props"
+        );
+        // The other semantic entry points the language server drives for an
+        // open document on change / hover / diagnostics.
+        let _ = host.get_public_api("/src/Churn.vue");
+        let _ = host.get_script_ingress("/src/Churn.vue");
+        let _consumer_meta = host
+            .get_component_meta("/src/ChurnConsumer.vue")
+            .expect("the consumer's meta resolves each cycle");
+        let _ = host.get_public_api("/src/ChurnConsumer.vue");
+        let _ = host.get_script_ingress("/src/ChurnConsumer.vue");
+        let resolved = (
+            graph.memo_entry_count(),
+            graph.node_count(),
+            store.shape_cache_db().live_count(),
+            graph.memo_entry_counts_by_family(),
+            graph.node_slot_count(),
+        );
+        match &first {
+            None => first = Some(resolved),
+            Some(first) => {
+                assert_eq!(
+                    resolved.0, first.0,
+                    "cycle {cycle}: memo entries grew — by family, first {:?} vs now {:?}",
+                    first.3, resolved.3
+                );
+                let survivors: Vec<String> = (first.4 as u64..slots_at_cycle_start as u64)
+                    .map(crate::semantic_query::SemanticNodeId)
+                    .filter(|id| graph.node_is_live(*id))
+                    .map(|id| {
+                        format!(
+                            "{id:?} scope={:?} payload={:?}",
+                            graph.node_scope(id),
+                            graph.node_data(id)
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    resolved.1,
+                    first.1,
+                    "cycle {cycle}: live nodes grew (slots {} -> {}); nodes minted in EARLIER \
+                     cycles that survived a close: {survivors:#?}",
+                    first.4,
+                    graph.node_slot_count()
+                );
+                assert_eq!(resolved.2, first.2, "cycle {cycle}: shape entries grew");
+            }
+        }
+        host.evict("/src/Churn.vue");
+    }
+}
+
+/// Fixture for the activity-gate tests: a consumer whose props resolve
+/// through `/src/types/icon.ts`, resolved once so icon.ts has live nodes.
+#[cfg(not(target_arch = "wasm32"))]
+fn activity_gate_fixture() -> (Arc<CountingWorkspace>, VerterHost) {
+    const CONSUMER: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/Consumer.vue", CONSUMER);
+    ws.inject_file(
+        "/src/types/icon.ts",
+        "export interface IconProps { name: string; size: number }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta");
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "name"),
+        "fixture: the consumer's props resolve through icon.ts"
+    );
+    (ws, host)
+}
+
+/// Ids of the live nodes scoped to `canonical`.
+#[cfg(not(target_arch = "wasm32"))]
+fn live_node_ids_scoped_to(
+    host: &VerterHost,
+    canonical: &str,
+) -> Vec<crate::semantic_query::SemanticNodeId> {
+    use crate::semantic_query::SemanticNodeId;
+    let graph = host.project_type_store().semantic_graph();
+    (0..graph.node_slot_count() as u64)
+        .map(SemanticNodeId)
+        .filter(|id| {
+            graph.node_is_live(*id)
+                && graph
+                    .node_scope(*id)
+                    .and_then(|scope| scope.canonical_file())
+                    .is_some_and(|file| file.as_ref() == canonical)
+        })
+        .collect()
+}
+
+/// A close that lands while a computation is in flight must not change any
+/// node that computation can read: the release is queued, every node of the
+/// closed document keeps its payload (the SAME payload on every read), and
+/// the release is applied the moment the last computation ends.
+///
+/// Discriminating: with the release applied inline at `evict` (the previous
+/// design), the closed document's nodes read as the released placeholder
+/// while the guard is still held — the exact switch that made a carrier
+/// normaliser, midway through two reads of one node, panic on a worker
+/// thread and stall the scheduler in the WSP6 churn lane.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
+    let (_ws, host) = activity_gate_fixture();
+    let graph = host.project_type_store().semantic_graph();
+    let ids = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
+    assert!(!ids.is_empty(), "fixture: icon.ts has live nodes");
+    let before: Vec<_> = ids
+        .iter()
+        .map(|id| graph.node_data(*id).expect("live node"))
+        .collect();
+
+    let computation = host.semantic_activity();
+    host.evict("/src/types/icon.ts");
+
+    assert_eq!(
+        host.project_type_store().deferred_release_count(),
+        1,
+        "the close is queued while a computation is in flight"
+    );
+    for (id, payload) in ids.iter().zip(&before) {
+        assert!(
+            graph.node_is_live(*id),
+            "node {id:?} stays live until the computation ends"
+        );
+        let now = graph.node_data(*id).expect("still readable");
+        assert!(
+            Arc::ptr_eq(&now, payload),
+            "node {id:?} reads the same payload it read before the close"
+        );
+    }
+
+    drop(computation);
+
+    assert_eq!(
+        host.project_type_store().deferred_release_count(),
+        0,
+        "the last computation to end applies the queued release"
+    );
+    assert!(
+        live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty(),
+        "every node of the closed document is released once nothing is in flight"
+    );
+}
+
+/// With no computation in flight (a batch host, a test), the close applies
+/// the release inline, exactly as before.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_with_nothing_in_flight_releases_inline() {
+    let (_ws, host) = activity_gate_fixture();
+    assert!(!live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+    host.evict("/src/types/icon.ts");
+    assert_eq!(host.project_type_store().deferred_release_count(), 0);
+    assert!(live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+}
+
+/// The queued release takes only what the CLOSED content interned: nodes the
+/// reload interned for the same document while the release was waiting
+/// (ids at or past the watermark taken at the close) stay live, and the
+/// consumer still resolves through them.
+///
+/// Discriminating: a release that re-scanned by canonical at apply time (no
+/// watermark) would also take the reloaded document's fresh nodes, leaving
+/// the live consumer pointing at released ids.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_deferred_release_keeps_nodes_interned_after_the_close() {
+    const CONSUMER_V2: &str = r#"<script setup lang="ts">
+import type { IconProps } from './types/icon'
+// edited after the dependency was closed
+defineProps<IconProps>()
+</script>
+<template><div /></template>"#;
+    let (_ws, host) = activity_gate_fixture();
+    let closed = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
+    assert!(!closed.is_empty());
+
+    let computation = host.semantic_activity();
+    host.evict("/src/types/icon.ts");
+    // The reload and a consumer edit re-lower icon.ts while the release waits.
+    assert!(host.ensure_loaded("/src/types/icon.ts"));
+    upsert_vue(&host, "/src/Consumer.vue", CONSUMER_V2);
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+    );
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta after the reload");
+    assert!(meta.props.iter().any(|prop| prop.name == "name"));
+    let reloaded: Vec<_> = live_node_ids_scoped_to(&host, "/src/types/icon.ts")
+        .into_iter()
+        .filter(|id| !closed.contains(id))
+        .collect();
+    assert!(
+        !reloaded.is_empty(),
+        "fixture: the reload interned fresh icon.ts nodes while the release waited"
+    );
+
+    drop(computation);
+
+    let graph = host.project_type_store().semantic_graph();
+    for id in &closed {
+        assert!(
+            !graph.node_is_live(*id),
+            "closed-content node {id:?} is released"
+        );
+    }
+    for id in &reloaded {
+        assert!(
+            graph.node_is_live(*id),
+            "node {id:?} interned after the close survives the deferred release"
+        );
+    }
+}
+
+/// The caches a document's own content keys (resolved-import facts, the
+/// resolver's component-meta states, the overlay source registration) follow
+/// the current content across edits and are released by the close: the
+/// retention snapshot's counts hold flat over edits and drop at the close.
+/// Discriminating: each of the three gained one key per edit before (the
+/// WSP6 churn lane's heap profile attributed the residual per-cycle growth
+/// to them).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn edits_keep_the_content_keyed_caches_flat_and_a_close_releases_them() {
+    let (_ws, host) = activity_gate_fixture();
+    let edited = |edit: usize| {
+        format!(
+            "<script setup lang=\"ts\">
+import type {{ IconProps }} from './types/icon'
+             // edit {edit}
+defineProps<IconProps>()
+</script>
+<template><div /></template>"
+        )
+    };
+    let query = |host: &VerterHost| {
+        host.set_import_dependencies(
+            "/src/Consumer.vue",
+            vec![exact_dependency("./types/icon", "/src/types/icon.ts")],
+        );
+        let meta = host
+            .get_component_meta("/src/Consumer.vue")
+            .expect("component meta");
+        assert!(meta.props.iter().any(|prop| prop.name == "name"));
+    };
+    // Two edits fill the window of two contents each cache keeps; the
+    // counts must not move from there on.
+    upsert_vue(&host, "/src/Consumer.vue", &edited(0));
+    query(&host);
+    upsert_vue(&host, "/src/Consumer.vue", &edited(1));
+    query(&host);
+    let baseline = host.retention_snapshot();
+    for edit in 2..=5 {
+        upsert_vue(&host, "/src/Consumer.vue", &edited(edit));
+        query(&host);
+        let after = host.retention_snapshot();
+        assert_eq!(
+            after.resolved_import_facts, baseline.resolved_import_facts,
+            "edit {edit}: resolved-import facts follow the current content"
+        );
+        assert_eq!(
+            after.component_meta_states, baseline.component_meta_states,
+            "edit {edit}: component-meta states follow the current view"
+        );
+        assert_eq!(
+            after.registered_sources, baseline.registered_sources,
+            "edit {edit}: a superseded overlay registration is retracted"
+        );
+    }
+    host.evict("/src/Consumer.vue");
+    let closed = host.retention_snapshot();
+    assert!(
+        closed.resolved_import_facts < baseline.resolved_import_facts,
+        "the close releases the document's resolved-import facts ({} -> {})",
+        baseline.resolved_import_facts,
+        closed.resolved_import_facts
+    );
+    assert!(
+        closed.component_meta_states < baseline.component_meta_states,
+        "the close releases the document's component-meta states ({} -> {})",
+        baseline.component_meta_states,
+        closed.component_meta_states
+    );
+    assert!(
+        closed.registered_sources <= baseline.registered_sources,
+        "the close retracts the document's overlay registration ({} -> {})",
+        baseline.registered_sources,
+        closed.registered_sources
     );
 }

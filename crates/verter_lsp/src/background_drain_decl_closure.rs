@@ -794,7 +794,7 @@ impl DeclOverlayOwner {
                 }
                 closure_nodes.push(node.clone());
 
-                let dependencies = match carrier_dependency_ids(host, &node) {
+                let dependencies = match carrier_dependency_ids(&host, &node) {
                     Ok(dependencies) => dependencies,
                     Err(_) => {
                         resolution_refused = true;

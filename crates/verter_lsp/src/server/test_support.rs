@@ -39,7 +39,7 @@ impl VerterLanguageServer {
         for source in sources {
             crate::workspace_scanner::sync_file_to_provider(
                 &source,
-                self.documents.host(),
+                &self.documents.host(),
                 Some(&self.documents),
                 &profile,
                 self.project_sync.as_ref(),

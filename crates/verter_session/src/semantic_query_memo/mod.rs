@@ -25,6 +25,12 @@
 //! - Entries are immutable once stored. Node data never retains borrowed
 //!   OXC AST pointers — callers materialize semantic data before calling
 //!   [`SemanticGraphStore::intern_node`].
+//! - A document CLOSE releases what the closed canonical retained
+//!   ([`SemanticGraphStore::release_canonical`], see `release.rs`): its
+//!   memo entries, node PAYLOADS (ids stay unique and are never reused; a
+//!   released id reads as `Opaque(Miss)`), per-node sidecars and relation
+//!   proofs. An EDIT ([`SemanticGraphStore::invalidate_canonical`]) keeps
+//!   every payload.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -51,11 +57,15 @@ mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
 mod inflight;
+mod intern_table;
 mod interner;
 mod member_index;
+mod nodes;
+mod observability;
 mod origin_edges;
 mod prepared;
 mod relation_memo;
+mod release;
 mod resolve_call_memo;
 mod retention;
 mod reverse_index;
@@ -67,6 +77,7 @@ mod union_views;
 mod unresolved_reach;
 
 pub(crate) use inflight::InlineMemberFlight;
+pub use release::SemanticReleaseReport;
 pub(crate) use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };
@@ -292,18 +303,18 @@ pub struct SemanticGraphStore {
     /// append-only and deduplicated by value. The proof is a descriptive
     /// witness, NEVER a validity oracle — it rides OFF the type-values
     /// surface.
-    relation_proof_table: Mutex<(
-        Vec<crate::semantic_query::RelationProof>,
-        FxHashMap<crate::semantic_query::RelationProof, crate::semantic_query::RelationProofId>,
-    )>,
+    ///
+    /// The id space is append-only (an id is an ordinal that is never
+    /// reused); a proof [`Self::release_canonical`] dropped because it named
+    /// a released node leaves no entry behind. The dedup map holds exactly
+    /// the live proofs.
+    relation_proof_table: Mutex<intern_table::RelationProofTable>,
     /// The co-discharged full `Relate` keys a `CoinductiveCycle` proof
     /// references by opaque [`crate::semantic_query::RelateKeyId`],
     /// interned append-only (content-free — never a session-bearing
-    /// identity).
-    relate_key_table: Mutex<(
-        Vec<crate::semantic_query::RelateMemoKey>,
-        FxHashMap<crate::semantic_query::RelateMemoKey, crate::semantic_query::RelateKeyId>,
-    )>,
+    /// identity). Same discipline as `relation_proof_table`: a released
+    /// key leaves no entry and its id is never reused.
+    relate_key_table: Mutex<intern_table::RelateKeyTable>,
     /// In-flight admission keyed by the prepared query token
     /// ([`PreparedKeyHandle`]) whose equality IS full
     /// [`SemanticQueryKey`] equality (bijection pinned by the
@@ -392,6 +403,12 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
+    /// Set (and never cleared) by the first [`Self::release_canonical`]
+    /// that tombstones a node. Until then every id ever handed out is
+    /// live, so the warm-read liveness check ([`Self::result_is_live`])
+    /// is a single relaxed load; afterwards a warm candidate whose result
+    /// names a released node is skipped as a miss instead of being served.
+    released_any: std::sync::atomic::AtomicBool,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
@@ -812,7 +829,9 @@ type RegisteredFacts = Arc<[crate::resolver_core::FactVersionRef]>;
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SemanticGraphStore")
-            .field("nodes", &self.arena.len())
+            .field("nodes", &self.arena.live_len())
+            .field("node_ids", &self.arena.len())
+            .field("node_storage_slots", &self.arena.storage_slots())
             .field("memo_entries", &self.memo_entry_count())
             .finish_non_exhaustive()
     }
@@ -983,129 +1002,6 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn provenance(&self) -> Option<&Arc<crate::types::MetaProvenance>> {
         self.provenance.as_ref()
-    }
-
-    /// Intern a new immutable [`SemanticNodeData`] and return its stable id.
-    ///
-    /// The interned node records [`NodeScopeId::Global`] in the origin
-    /// sidecar (see [`Self::node_scope`]) — use
-    /// [`Self::intern_node_with_scope`] when the node's origin scope is
-    /// known (declaration anchors, instantiated shells, surface members
-    /// whose value carries a declaration identity, etc.).
-    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
-    pub fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.arena.push(data)
-    }
-
-    /// Intern `data` and record `scope` in the origin sidecar. Dispatch
-    /// builders that know the node's declaration origin (e.g.
-    /// `build_resolve_decl` / `build_typeof` / `build_instantiate`) use
-    /// this entry point so per-base-scope routing via [`Self::node_scope`]
-    /// returns the originating scope later.
-    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
-    pub fn intern_node_with_scope(
-        &self,
-        data: SemanticNodeData,
-        scope: NodeScopeId,
-    ) -> SemanticNodeId {
-        self.arena.push_with_scope(data, scope)
-    }
-
-    /// Intern a rebuilt shell `data` while preserving the scope of
-    /// an `origin` shell.
-    ///
-    /// **Invariant.** When a rebuilt SHELL `X'` is derived from `X`
-    /// with substituted sub-expressions,
-    /// `node_scope(X') == node_scope(X)`. Used by
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
-    /// and any other shell-rebuild site that would otherwise call
-    /// the scope-less `intern_node` and drop the origin scope under
-    /// the compound `(payload, scope)` interning.
-    ///
-    /// **Deliberate exception — derived composites.** A substituted
-    /// union (and a provably order-safe substituted intersection) is a
-    /// DERIVED composite: it routes through the canonical authority,
-    /// NOT through this helper, and a multi-arm canonical result
-    /// interns under [`NodeScopeId::Global`] — a derived composite has
-    /// no lexical scope, contributors retain their own scopes, and the
-    /// file dependence rides the canonical evidence / observed
-    /// self-roots rather than `NodeScopeId`. Overload-ordered
-    /// (possibly-callable) substituted intersections still preserve
-    /// scope through this helper. Copying the origin `File` scope onto
-    /// a canonical composite would re-split canonical identity by
-    /// scope, re-creating the cross-scope duplicate class the algebra
-    /// exists to collapse.
-    ///
-    /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
-    /// is empty (`origin` is out of bounds) — these cases are
-    /// already scope-less.
-    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
-    pub fn intern_preserving_scope(
-        &self,
-        origin: SemanticNodeId,
-        data: SemanticNodeData,
-    ) -> SemanticNodeId {
-        self.stats
-            .intern_preserving_scope_calls
-            .fetch_add(1, Ordering::Relaxed);
-        let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
-        self.arena.push_with_scope(data, scope)
-    }
-
-    /// Test/diagnostic — read the cumulative count of
-    /// `intern_preserving_scope` calls. Acts as the discriminating
-    /// signal for the substitute change-tracking optimisation: a
-    /// no-op substitution must not increment this counter at all,
-    /// because identical sub-results short-circuit the rebuild +
-    /// re-intern path entirely.
-    #[must_use]
-    pub fn intern_preserving_scope_call_count(&self) -> u64 {
-        self.stats
-            .intern_preserving_scope_calls
-            .load(Ordering::Relaxed)
-    }
-
-    /// Return the recorded origin scope for `id`.
-    ///
-    /// Returns:
-    /// - `None` — the id is out of bounds for the arena.
-    /// - `Some(NodeScopeId::Global)` — scope-less structural node
-    ///   (primitive, shared literal-union, helper intermediate).
-    /// - `Some(NodeScopeId::File { .. })` — declaration-bound node whose
-    ///   origin scope is the recorded `(canonical_id, whole_hash,
-    ///   local_scope)` triple.
-    ///
-    /// The sidecar records the scope at the moment of **first intern**; a
-    /// reader that calls `node_scope(id)` from a different scope observes
-    /// the origin scope, not their own.
-    #[must_use]
-    pub fn node_scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
-        self.arena.scope(id)
-    }
-
-    /// Read the resolved payload for a semantic node id. Returns `None` if
-    /// the id has not been interned.
-    #[must_use]
-    pub fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        self.arena.get(id)
-    }
-
-    /// Number of interned semantic nodes. Useful for tests and counters.
-    #[must_use]
-    pub fn node_count(&self) -> usize {
-        self.arena.len()
-    }
-
-    /// Number of warm memo entries — sums populated slots across every
-    /// family. Useful for tests and counters. Two distinct mode slots in
-    /// the same family count as two entries.
-    #[must_use]
-    pub fn memo_entry_count(&self) -> usize {
-        self.entries
-            .lock()
-            .values()
-            .map(FamilySlots::populated_count)
-            .sum()
     }
 
     /// Test-only accessor returning the memo's populated-slot count
@@ -3435,6 +3331,13 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
+        // A family keyed on a released node is a stale holder's re-dispatch:
+        // admitting it would strand a candidate no close can drain. The
+        // winner still returns its value; only the warm publish is refused
+        // (`Skipped`, not `Aborted` — the build's own id epoch is consistent).
+        if self.family_names_released_node(family) {
+            return WarmPublishOutcome::Skipped;
+        }
         // §3.4 soundness invariant (production publish ONLY): the recorded
         // terminal must be at-least the slot's mode — see
         // `family::slot_domain_siblings`. Test-only publishes bypass this.
@@ -3651,6 +3554,11 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
+        // Same admission fence as `warm_publish_one`: a backfill keyed on a
+        // released node is never admitted.
+        if self.family_names_released_node(family) {
+            return false;
+        }
         // §3.4 soundness invariant — same as `warm_publish_one` (a
         // prefix-backfill's `Navigate@prefix` hop is self-satisfying).
         verter_debug_assert!(

@@ -38,6 +38,11 @@ use crate::resolver_core::route_db::RouteDb;
 use crate::semantic_query::DepVersion;
 use crate::semantic_query_memo::SemanticGraphStore;
 
+pub mod semantic_activity;
+pub use semantic_activity::SemanticActivityGuard;
+pub mod guarded_host;
+pub use guarded_host::{GuardedHost, HostRef};
+
 // ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary
 // ──────────────────────────────────────────────────────────────────────────
@@ -1038,6 +1043,9 @@ pub struct ProjectTypeStore {
     /// three. A test may inject a private account to drive pressure
     /// deterministically without perturbing concurrent tests.
     retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    /// Gate that defers close-time payload releases until no computation is
+    /// in flight (see [`semantic_activity`]).
+    activity_gate: semantic_activity::SemanticActivityGate,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1177,6 +1185,7 @@ impl ProjectTypeStore {
             )),
             retention_account,
             counters,
+            activity_gate: semantic_activity::SemanticActivityGate::default(),
         }
     }
 
@@ -1446,6 +1455,56 @@ impl ProjectTypeStore {
         // assert against.
         let _ = self.project_generation();
         DepVersion::WholeHash(whole_hash)
+    }
+
+    /// Document-close release of the semantic substrate for `canonical_id`:
+    /// the semantic graph's memo entries, node payloads, per-node sidecars
+    /// and relation proofs the closed document retained
+    /// ([`SemanticGraphStore::release_canonical`]), plus the shape-cache
+    /// entries rooted in it, keyed by one of its released nodes, or
+    /// depending on it ([`ShapeCacheDb::release_canonical`]).
+    ///
+    /// Deliberately NOT [`Self::evict_canonical`]: that cascade also drops
+    /// the file's `FileArtifactStore` artifacts and the other engine caches
+    /// keyed on the canonical, which a close keeps for the disk reload.
+    /// Called from the host's `evict` (the `did_close` path).
+    pub fn release_canonical(
+        &self,
+        canonical_id: &str,
+    ) -> crate::semantic_query_memo::SemanticReleaseReport {
+        // Only the semantic graph and the shape cache: both are pure map
+        // work. The route-mutation cascade is deliberately NOT run here —
+        // a close must not change what the scheduler sees (the other
+        // per-canonical caches stay fact-validated and recompute on the
+        // reload, exactly as after an edit).
+        let mut report = self.semantic_graph.release_canonical(canonical_id);
+        report.shape_entries_released = self
+            .shape_cache_db
+            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report
+    }
+
+    /// The payload half of a close, applied by the activity gate once no
+    /// computation is in flight: release only nodes interned before the
+    /// close (ids below `below`), then the shape entries that named them.
+    /// The memo drain ran at the close itself.
+    pub(crate) fn release_canonical_below(
+        &self,
+        canonical_id: &str,
+        below: u64,
+    ) -> crate::semantic_query_memo::SemanticReleaseReport {
+        let mut report = self
+            .semantic_graph
+            .release_canonical_payloads_below(canonical_id, below);
+        report.shape_entries_released = self
+            .shape_cache_db
+            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report
+    }
+
+    /// The activity gate (see [`semantic_activity`]).
+    pub(crate) fn activity_gate(&self) -> &semantic_activity::SemanticActivityGate {
+        &self.activity_gate
     }
 
     /// Targeted invalidation on file content / routing change.

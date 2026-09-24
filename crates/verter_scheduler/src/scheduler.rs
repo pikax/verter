@@ -5418,6 +5418,7 @@ impl Scheduler {
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let job = job.started(&inbox_for_cache);
                 let cancellation = job.cancellation.clone();
                 dispatch_ready_job_to_executor(
                     &job,
@@ -5667,6 +5668,7 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let job = job.started(&inbox_sender);
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
@@ -5723,6 +5725,7 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let job = job.started(&inbox_sender);
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(

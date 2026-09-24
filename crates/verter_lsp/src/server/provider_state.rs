@@ -17,7 +17,7 @@ use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
 use crate::provider_sync::{
-    close_stale_provider_path, commit_sync_transition, prepare_sync_transition,
+    close_stale_provider_path_with, commit_sync_transition, prepare_sync_transition,
     NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::type_provider::merge;
@@ -143,7 +143,7 @@ impl VerterLanguageServer {
             Some(_) => crate::provider_surface_store::record_carrier_api_surface(
                 store,
                 Some(&self.documents),
-                host,
+                &host,
                 canonical_id,
                 dts_path,
                 api_code,
@@ -153,7 +153,7 @@ impl VerterLanguageServer {
             None => crate::provider_surface_store::record_carrier_api_surface_code_only(
                 store,
                 Some(&self.documents),
-                host,
+                &host,
                 canonical_id,
                 dts_path,
                 api_code,
@@ -311,7 +311,7 @@ impl VerterLanguageServer {
         crate::provider_surface_store::record_carrier_ide_surface_fenced(
             store,
             Some(&self.documents),
-            host,
+            &host,
             canonical_id,
             ide_path,
             &delivered,
@@ -805,7 +805,7 @@ impl VerterLanguageServer {
         let snapshot = self.published_resolver()?;
         let canonical_id = source_id_from_provider_carrier_path(
             &snapshot.resolver,
-            self.documents.host(),
+            &self.documents.host(),
             ide_path,
         )?;
         self.documents.canonical_id_to_uri(&canonical_id)
@@ -894,7 +894,7 @@ impl VerterLanguageServer {
         let publishes_editor_membership = membership.is_some();
         let decision =
             crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-                host: self.documents.host(),
+                host: &self.documents.host(),
                 vfs: vfs.as_deref(),
                 ownership_ready: snapshot.ownership_ready,
                 resolver: &snapshot.resolver,
@@ -969,7 +969,7 @@ impl VerterLanguageServer {
         receipt: &crate::external_ts::ProviderReadyReceipt,
     ) {
         if self.carrier_transaction_coordinator.admit_owned(
-            self.documents.host(),
+            &self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             state,
@@ -1177,7 +1177,7 @@ impl VerterLanguageServer {
         // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
         // buffers. Only an admitted commit closes them.
         if self.carrier_transaction_coordinator.admit_owned(
-            self.documents.host(),
+            &self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             committed_state,
@@ -1225,12 +1225,13 @@ impl VerterLanguageServer {
             let Some(non_decl) = NonDeclProviderPathKind::from_provider_path_kind(*kind) else {
                 unreachable!("Decl is delegated to the guarded close");
             };
-            close_stale_provider_path(
+            close_stale_provider_path_with(
                 sync,
                 self.documents.provider_surfaces(),
                 non_decl,
                 path,
                 "provider_state",
+                Some(&crate::sync_coordinator::ProjectSyncRedelivery::new(sync)),
             )
             .await;
         }

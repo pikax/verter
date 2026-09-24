@@ -52,6 +52,15 @@ export {
 export { RssSampler, readProcessRssBytes, type RssSample } from "./rss.js";
 
 export {
+  describeProcessTreeRss,
+  sampleProcessTreeRss,
+  type ProcessTreeRssDeps,
+  type ProcessTreeRssMember,
+  type ProcessTreeRssSample,
+  type ProcessTreeRssUnavailable,
+} from "./processTreeRss.js";
+
+export {
   ENDURANCE_TSCONFIG,
   buildCarrierSet,
   carrierPath,
@@ -139,6 +148,38 @@ export {
   type SoakParams,
   type SoakWorkspace,
 } from "./scenarios/soak.js";
+
+export {
+  CHURN_ACCEPTANCE_MIN_CYCLES,
+  CHURN_PLATEAU_BANDS,
+  CHURN_RETENTION_PLATEAU_OBJECTS,
+  CHURN_RETENTION_COUNTERS,
+  CHURN_SLOPE_MIN_LATE_READINGS,
+  churnCarrierContent,
+  churnFixture,
+  decideChurnGrowth,
+  decideChurnRetention,
+  decideChurnSlope,
+  describeRetentionReading,
+  describeWireBytes,
+  extractRetentionReading,
+  runChurnScenario,
+  type ChurnCheckpoint,
+  type ChurnFixture,
+  type ChurnGrowthCheck,
+  type ChurnLevelShift,
+  type ChurnMemberSlope,
+  type ChurnPlateauBands,
+  type PlateauCheck,
+  type ChurnRetentionCheck,
+  type ChurnRetentionCounter,
+  type ChurnRetentionTrend,
+  type ChurnScenarioOptions,
+  type ChurnScenarioResult,
+  type ChurnSlopeCheck,
+  type ChurnSlopeSegment,
+  type RetentionReading,
+} from "./scenarios/churn.js";
 
 export {
   collectCorpusCarrierFiles,
