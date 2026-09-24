@@ -779,6 +779,7 @@ mod query_error_raise_routing {
     fn recursive_ref_raises_as_a_carrier_not_absence() {
         let outcome = route(QueryError::RecursiveRef {
             name: Arc::from("TreeNode"),
+            args: std::sync::Arc::from([]),
         });
         let SourceRaiseOutcome::Raised(hot) = outcome else {
             panic!("RecursiveRef must RAISE as recursion, got {outcome:?}");
@@ -807,6 +808,7 @@ mod query_error_raise_routing {
         let outcome = SourceRaiseOutcome::from_error(
             QueryError::RecursiveRef {
                 name: Arc::from("TreeNode"),
+                args: std::sync::Arc::from([]),
             },
             |_| None,
         );

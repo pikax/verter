@@ -151,6 +151,7 @@ mod checker_diagnostic;
 pub use checker_diagnostic::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
 };
+pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1840,9 +1841,9 @@ pub enum FlowReturnDegradation {
     /// structure composed AROUND it.
     ///
     /// One reason for the whole class of "this position has no modelled
-    /// value": an unmodelled CALL form (`` tag`...` ``, `f?.()`,
-    /// `await f()`, `` (0, tag`...`) ``, `z = f()`, a leaf answer
-    /// embedding an unreduced `ReturnType<callee>` carrier), and a name
+    /// value": an unmodelled CALL form (`f?.()`, `(0, f?.())`,
+    /// `z = f()`, a leaf answer embedding an unreduced
+    /// `ReturnType<callee>` carrier), and a name
     /// the frame's lexical authority resolved to a FUNCTION-LOCAL binding
     /// the flow content does not model (a destructuring element, a local
     /// `class` / `enum` / `namespace` / `import =`, a `catch` parameter, a
@@ -2575,6 +2576,24 @@ impl MapperKind {
     }
 }
 
+/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+/// type parameter binder or an `infer` declaration or reference — so the
+/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+#[must_use]
+pub fn keyof_operand_is_type_variable(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    operand: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(operand).as_deref(),
+        Some(
+            SemanticNodeData::TypeParam { .. }
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
+        )
+    )
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2598,6 +2617,14 @@ pub struct MapperKey {
     /// Lowering-time classification of `value_expr`. See
     /// [`MapperKind`].
     pub kind: MapperKind,
+    /// Whether the mapping was declared over `keyof T` for a TYPE
+    /// PARAMETER `T` — TypeScript's homomorphic type variable — so `source`
+    /// is `T` or the type that instantiated it. Such a mapping maps each
+    /// union constituent of its source, passes a primitive through and
+    /// maps an array or tuple element-wise (`instantiateMappedType`); one
+    /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
+    /// that type's own keys.
+    pub over_type_variable: bool,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -4140,6 +4167,37 @@ pub enum SurfaceKeyProjection<'a> {
     AbsentProven,
 }
 
+/// The accessor members one key names on a surface
+/// ([`SurfaceView::project_known_key_accessor`]); at least one is present.
+pub(crate) struct KnownKeyAccessor<'a> {
+    getter: Option<&'a SurfaceMember>,
+    setter: Option<&'a SurfaceMember>,
+}
+
+impl KnownKeyAccessor<'_> {
+    /// The accessor's VALUE type as a read sees it: the getter's return,
+    /// else the setter's parameter. `None` when the accessor's signature
+    /// carries neither.
+    pub(crate) fn read_value(
+        &self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Option<SemanticNodeId> {
+        if let Some(getter) = self.getter {
+            return match graph.node_data(getter.value).as_deref() {
+                Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                _ => None,
+            };
+        }
+        let setter = self.setter?;
+        match graph.node_data(setter.value).as_deref() {
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                split_this_receiver(params).1.first().map(|param| param.ty)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl SurfaceView {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -4321,6 +4379,42 @@ impl SurfaceView {
                 .map(|ordinal| group[ordinal].value)
                 .collect(),
         )
+    }
+
+    /// The ACCESSOR a key names: the public `get` and / or `set` members
+    /// colliding with `key`, when every public member colliding with it is
+    /// an accessor. `None` for a key with no accessor member.
+    ///
+    /// An accessor is one PROPERTY to every reader: reading it reads its
+    /// value type — the getter's return, else the setter's parameter — never
+    /// the accessor function, and a get/set pair reads through the getter
+    /// whichever of the two was declared first.
+    pub(crate) fn project_known_key_accessor(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<KnownKeyAccessor<'_>> {
+        let mut accessor = KnownKeyAccessor {
+            getter: None,
+            setter: None,
+        };
+        for member in self.members.iter().filter(|member| {
+            member.visibility.is_public()
+                && member
+                    .key
+                    .as_known()
+                    .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }) {
+            match member.method_kind {
+                Some(verter_type_expr::ObjectMethodKind::Get) => {
+                    accessor.getter.get_or_insert(member);
+                }
+                Some(verter_type_expr::ObjectMethodKind::Set) => {
+                    accessor.setter.get_or_insert(member);
+                }
+                _ => return None,
+            }
+        }
+        (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -5246,9 +5340,15 @@ pub enum QueryError {
     /// declaration expanding into itself (e.g., `type TreeNode = {
     /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
     /// this to [`TypeExpr::RecursiveRef`] so the materialiser stops at
-    /// the back-edge instead of recursing indefinitely. /
-    /// recursion handling.
-    RecursiveRef { name: Arc<str> },
+    /// the back-edge instead of recursing indefinitely.
+    ///
+    /// `args` are the type arguments of the instantiation the back-edge
+    /// stands for (`G<[T]>` inside the body of `G<string>` records
+    /// `[[string]]`); empty for a reference without type arguments.
+    RecursiveRef {
+        name: Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+    },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
     /// Declaration resolved but not yet materialized. The node
@@ -5438,7 +5538,16 @@ impl PartialEq for QueryError {
                 Self::IncompleteSemanticOperand { reasons: b },
             ) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
-            (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
+            (
+                Self::RecursiveRef {
+                    name: a,
+                    args: a_args,
+                },
+                Self::RecursiveRef {
+                    name: b,
+                    args: b_args,
+                },
+            ) => a == b && a_args == b_args,
             (Self::Other(a), Self::Other(b)) => a == b,
             (
                 Self::DeclPlaceholder {
@@ -5527,8 +5636,9 @@ impl std::hash::Hash for QueryError {
             Self::AliasCycle { chain } => {
                 chain.hash(state);
             }
-            Self::RecursiveRef { name } => {
+            Self::RecursiveRef { name, args } => {
                 name.hash(state);
+                args.hash(state);
             }
             Self::Other(msg) => {
                 msg.hash(state);
@@ -8380,9 +8490,9 @@ pub enum SemanticQueryKey {
     ///   clause);
     /// - a `Promise<V>` carrier — recognised by RESOLVED declaration
     ///   identity through the intrinsic registry, never by spelling —
-    ///   RE-ENTERS this family on `V`, so nesting unwraps through the
-    ///   memo / singleflight / cycle machinery rather than a private
-    ///   recursion;
+    ///   continues this relation's RUN on `V` as a tail step, in one loop
+    ///   that costs no query depth however long the chain (every step
+    ///   charged to the connected-work budget);
     /// - a union DISTRIBUTES by re-entering this family per arm and
     ///   renormalising through the canonical union; any undecidable arm
     ///   defers the whole reduction (partial distribution would silently
@@ -8401,11 +8511,11 @@ pub enum SemanticQueryKey {
     ///   application is awaited again;
     /// - an object surface follows the checker's thenable protocol: no
     ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
-    ///   is callable RE-ENTERS this family on the promised value; a callable
+    ///   is callable continues the run on a single promised value; a callable
     ///   `then` that promises nothing, or an optional callable `then` ⇒
     ///   `any` (the checker reports the operand);
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands
-    ///   one level through `Instantiate` and re-enters this family on the
+    ///   one level through `Instantiate` and continues the run on the
     ///   body; an unchanged body answers with the CARRIER, so a
     ///   non-thenable alias keeps its identity;
     /// - a thenable whose promised value is a type this family is ALREADY
@@ -10051,6 +10161,24 @@ pub struct FunctionParam {
     /// include it) but never enters `parse_stable_hash`. `None` for a synthetic
     /// parameter with no source site.
     pub span: Option<verter_span::Span>,
+    /// The parameter's DECLARED type is a literal type — a string, number,
+    /// bigint or boolean literal, or `null` (TypeScript's
+    /// `HasLiteralTypes`). A declaration fact: an instantiation keeps it, so
+    /// `(x: T)` instantiated at `'a'` is not literal-declared.
+    pub declared_literal: bool,
+}
+
+/// Whether a declared parameter type is a literal type in TypeScript's
+/// syntax (`LiteralType`): a string, number, bigint or boolean literal, or
+/// `null`. A reference to a literal alias, a union of literals, a template
+/// literal type and `undefined` are not.
+#[must_use]
+pub fn declares_literal_type(ty: &verter_type_expr::TypeExpr) -> bool {
+    matches!(
+        ty,
+        verter_type_expr::TypeExpr::Literal(_)
+            | verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Null)
+    )
 }
 
 impl FunctionParam {
@@ -10069,6 +10197,7 @@ impl FunctionParam {
             optional,
             rest,
             span: None,
+            declared_literal: false,
         }
     }
 }
@@ -10407,6 +10536,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("R"),
+                args: std::sync::Arc::from([]),
             },
             QueryError::Other(Arc::from("x")),
             QueryError::DeclPlaceholder {

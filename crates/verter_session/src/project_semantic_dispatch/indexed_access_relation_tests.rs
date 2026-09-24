@@ -9,7 +9,7 @@
 //! read off the TS2322 message, and `tsc --declaration
 //! --emitDeclarationOnly --strict` for an inferred function return.
 
-use super::checker_probe_lane_tests::{holds_deferred_conditional, mismatches};
+use super::checker_probe_lane_tests::{mismatches, mismatches_in, ProbeProject};
 
 const FIXTURE: &str = "\
 interface Box { lit: 2; n: number; s: string; u: 1 | 2; o: { k: 'v' }; opt?: 3 }
@@ -107,19 +107,171 @@ fn a_parameter_typed_by_an_indexed_access_selects_its_overload() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An access that reads an OPTIONAL property is not decided. The checker
-/// reads `Box['opt']` as `3 | undefined` (measured on TypeScript 7.0.2, and
-/// `undefined extends Box['opt']` is `"y"`), while the type-level
-/// indexed-access read answers the declared `3`; deciding on that read
-/// would answer `"n"`. The relation stays undecided instead, and the
-/// conditional stays deferred.
+const OPTIONAL: &str = "\
+interface Box { opt?: 3; req: 4; u?: 1 | 2; un?: 3 | undefined }
+type Tup = [1, 2?];
+type G<T> = T['opt' & keyof T];
+type Get<T, K extends keyof T> = T[K];
+type K = keyof Box;
+";
+
+/// An access that reads an OPTIONAL property or tuple element reads its
+/// type plus `undefined` under `strictNullChecks` — through a key union,
+/// `keyof`, an alias of `keyof`, an intersection with `keyof`, a generic
+/// alias and the homomorphic utilities — and the relations decide on that
+/// read. With `strictNullChecks` off the read erases `undefined`;
+/// `exactOptionalPropertyTypes` does not change it.
+///
+/// Measured on TypeScript 7.0.2 over this fixture (`tsc --ignoreConfig
+/// --noEmit`, then with `--strictNullChecks false`, then with
+/// `--exactOptionalPropertyTypes`), strict / loose: `Box['opt']`,
+/// `Box['un']`, `G<Box>`, `Get<Box, 'opt'>`, `Pick<Box, 'opt'>['opt']`,
+/// `Readonly<Box>['opt']`, `Box['opt' & keyof Box]` and `{ o?: 3 }['o']`
+/// are `3 | undefined` / `3`; `Box['opt' | 'req']` is `3 | 4 |
+/// undefined` / `3 | 4`; `Box['u']` is `1 | 2 | undefined` / `1 | 2`;
+/// `Partial<Box>['req']` is `4 | undefined` / `4`; `Tup[1]` is `2 |
+/// undefined` / `2`; `Tup[number]` is `1 | 2 | undefined` / `1 | 2`;
+/// `Box[keyof Box]` and `Box[K]` are `1 | 2 | 3 | 4 | undefined` / `1 |
+/// 2 | 3 | 4`; `Required<Box>['opt']` is `3`; `undefined extends
+/// Box['opt']` and `3 extends Box['opt']` are `"y"`; `Box['opt'] extends
+/// 3` is `"n"` / `"y"`. The exact-optional answers equal the strict ones.
 #[test]
-fn an_access_reading_an_optional_property_stays_undecided() {
-    assert!(
-        holds_deferred_conditional(FIXTURE, "undefined extends Box['opt'] ? 'y' : 'n'"),
-        "a relation over an optional property's read must not be decided on a read without \
-         its `undefined`"
+fn an_access_reading_an_optional_property_reads_its_undefined() {
+    let strict = ProbeProject::default();
+    let loose = ProbeProject {
+        files: &[],
+        compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+    };
+    let exact = ProbeProject {
+        files: &[],
+        compiler_options: Some(r#"{ "strict": true, "exactOptionalPropertyTypes": true }"#),
+    };
+    for (project, strict_null_checks) in [(strict, true), (loose, false), (exact, true)] {
+        let read = |on: &'static str, off: &'static str| if strict_null_checks { on } else { off };
+        let failures = mismatches_in(
+            project,
+            OPTIONAL,
+            &[
+                ("Box['opt']", read("3 | undefined", "3")),
+                ("Box['un']", read("3 | undefined", "3")),
+                ("G<Box>", read("3 | undefined", "3")),
+                ("Get<Box, 'opt'>", read("3 | undefined", "3")),
+                ("Pick<Box, 'opt'>['opt']", read("3 | undefined", "3")),
+                ("Readonly<Box>['opt']", read("3 | undefined", "3")),
+                ("Box['opt' & keyof Box]", read("3 | undefined", "3")),
+                ("{ o?: 3 }['o']", read("3 | undefined", "3")),
+                ("Box['opt' | 'req']", read("3 | 4 | undefined", "3 | 4")),
+                ("Box['u']", read("1 | 2 | undefined", "1 | 2")),
+                ("Partial<Box>['req']", read("4 | undefined", "4")),
+                ("Tup[1]", read("2 | undefined", "2")),
+                ("Tup[number]", read("1 | 2 | undefined", "1 | 2")),
+                (
+                    "Box[keyof Box]",
+                    read("1 | 2 | 3 | 4 | undefined", "1 | 2 | 3 | 4"),
+                ),
+                ("Box[K]", read("1 | 2 | 3 | 4 | undefined", "1 | 2 | 3 | 4")),
+                ("Required<Box>['opt']", "3"),
+                ("undefined extends Box['opt'] ? 'y' : 'n'", "\"y\""),
+                ("3 extends Box['opt'] ? 'y' : 'n'", "\"y\""),
+                ("Box['opt'] extends 3 ? 'y' : 'n'", read("\"n\"", "\"y\"")),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+const INTERSECTED: &str = "\
+interface QA { qa: 1 }
+interface QB { qb: 2 }
+interface H { projectOnly?: number; onClick?: (payload: QA) => void; both?: { qa: 1 }; req: QA; gen?: string }
+type Div = H & { projectOnly?: string; onClick?: (payload: QB) => void; both?: { qb: 2 }; req?: QB };
+type NU = { a: { qa: 1 } | null } & { a: { qb: 2 } | null | undefined };
+type GT<T> = { a?: T } & { a?: { qa: 1 } };
+";
+
+/// A member read through an intersection is the intersection of its
+/// constituents' reads, distributed over their `null` / `undefined` arms:
+/// a nullish arm every constituent carries stays, any other one meets a
+/// disjoint arm and drops.
+///
+/// Measured on TypeScript 7.0.2 over this fixture, strict / with
+/// `--strictNullChecks false`: `Div['onClick']` is `(((payload: QA) =>
+/// void) & ((payload: QB) => void)) | undefined` / `((payload: QA) => void) &
+/// ((payload: QB) => void)`; `Div['projectOnly']` is `undefined` / `never`;
+/// `Div['both']` is `({ qa: 1; } & { qb: 2; }) | undefined` / `{ qa: 1; } &
+/// { qb: 2; }`; `NU['a']` is `({ qa: 1; } & { qb: 2; }) | null` / `{ qa:
+/// 1; } & { qb: 2; }`; `GT<string>['a']` is `(string & { qa: 1; }) |
+/// undefined` / `string & { qa: 1; }`; `Div['gen']` is `string |
+/// undefined` / `string`; `Div['both'] extends { qa: 1; qb: 2 }` is `"n"` /
+/// `"y"`.
+#[test]
+fn an_intersection_member_read_distributes_its_nullish_arms() {
+    let strict = ProbeProject::default();
+    let loose = ProbeProject {
+        files: &[],
+        compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+    };
+    for (project, strict_null_checks) in [(strict, true), (loose, false)] {
+        let read = |on: &'static str, off: &'static str| if strict_null_checks { on } else { off };
+        let failures = mismatches_in(
+            project,
+            INTERSECTED,
+            &[
+                (
+                    "Div['onClick']",
+                    read(
+                        "(((payload: QA) => void) & ((payload: QB) => void)) | undefined",
+                        "((payload: QA) => void) & ((payload: QB) => void)",
+                    ),
+                ),
+                ("Div['projectOnly']", read("undefined", "never")),
+                (
+                    "Div['both']",
+                    read(
+                        "({ qa: 1; } & { qb: 2; }) | undefined",
+                        "{ qa: 1; } & { qb: 2; }",
+                    ),
+                ),
+                (
+                    "NU['a']",
+                    read(
+                        "({ qa: 1; } & { qb: 2; }) | null",
+                        "{ qa: 1; } & { qb: 2; }",
+                    ),
+                ),
+                (
+                    "GT<string>['a']",
+                    read("(string & { qa: 1; }) | undefined", "string & { qa: 1; }"),
+                ),
+                ("Div['gen']", read("string | undefined", "string")),
+                (
+                    "Div['both'] extends { qa: 1; qb: 2 } ? 'y' : 'n'",
+                    read("\"n\"", "\"y\""),
+                ),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+/// An intersection source none of whose constituents is assignable to an
+/// object target on its own relates as the object its constituents
+/// compose.
+///
+/// Measured on TypeScript 7.0.2 over the fixture above: `QA & QB extends {
+/// qa: 1; qb: 2 }` and `Div['req'] extends { qa: 1; qb: 2 }` are `"y"`,
+/// `QA & QB extends { qa: 1; qb: 3 }` is `"n"`.
+#[test]
+fn an_intersection_source_relates_as_the_object_it_composes() {
+    let failures = mismatches(
+        INTERSECTED,
+        &[
+            ("QA & QB extends { qa: 1; qb: 2 } ? 'y' : 'n'", "\"y\""),
+            ("Div['req'] extends { qa: 1; qb: 2 } ? 'y' : 'n'", "\"y\""),
+            ("QA & QB extends { qa: 1; qb: 3 } ? 'y' : 'n'", "\"n\""),
+        ],
     );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 const NARROW: &str = "\
@@ -127,23 +279,90 @@ type Boxed = { k: 'a' };
 type Subject = { v: Boxed['k'] };
 function isOther(x: Subject): x is { v: 'b' } { return true as boolean as never }
 export function makeProps(x: Subject) { return { v: isOther(x) ? x : 'no' } }
+type OptionalBoxed = { k?: 'a' };
+type OptionalSubject = { v: OptionalBoxed['k'] };
+function isOptionalOther(x: OptionalSubject): x is { v: 'b' } { return true as boolean as never }
+export function makeOptionalProps(x: OptionalSubject) { return { v: isOptionalOther(x) ? x : 'no' } }
+type N1 = { v: number };
+function is1(x: N1): x is { v: 'b' } { return true as boolean as never }
+export function n1(x: N1) { return { v: is1(x) ? x : 'no' } }
+type N2 = { v: 'a' | 'c' };
+function is2(x: N2): x is { v: 'b' | 'd' } { return true as boolean as never }
+export function n2(x: N2) { return { v: is2(x) ? x : 'no' } }
+type N3 = { v: 'a' | 'b' };
+function is3(x: N3): x is { v: 'b' | 'd' } { return true as boolean as never }
+export function n3(x: N3) { return { v: is3(x) ? x : 'no' } }
+type N4 = { v: string };
+function is4(x: N4): x is { v: number } { return true as boolean as never }
+export function n4(x: N4) { return { v: is4(x) ? x : 'no' } }
+type N5 = { v?: 'a' };
+function is5(x: N5): x is { v: 'b' } { return true as boolean as never }
+export function n5(x: N5) { return { v: is5(x) ? x : 'no' } }
+type N6 = { v: boolean };
+function is6(x: N6): x is { v: 1 } { return true as boolean as never }
+export function n6(x: N6) { return { v: is6(x) ? x : 'no' } }
+type N7 = { v?: 'a' };
+function is7(x: N7): x is { v?: 'b' } { return true as boolean as never }
+export function n7(x: N7) { return { v: is7(x) ? x : 'no' } }
+type N8 = { v: 'a' | null };
+function is8(x: N8): x is { v: 'b' | undefined } { return true as boolean as never }
+export function n8(x: N8) { return { v: is8(x) ? x : 'no' } }
 ";
 
 /// A type-predicate narrow compares the subject with the predicate's type
-/// through the same reads: `Subject`'s member `v` reads `'a'` through
-/// `Boxed['k']`, which conflicts with the predicate's `v: 'b'` as two unit
-/// types, so the checker reduces `Subject & { v: 'b' }` to `never` and the
-/// narrowed arm vanishes.
+/// through the same reads, and the checker reduces `Subject & Predicate`
+/// to `never` on a shared member that is an EMPTY DISCRIMINANT — not
+/// optional on both sides, a literal type on at least one side (a unit
+/// type, `boolean`, or a union of those), and no value in common — so the
+/// narrowed arm vanishes: `Subject`'s member `v` reads `'a'` through
+/// `Boxed['k']` and `'a' | undefined` through `OptionalBoxed['k']`, both
+/// empty against the predicate's `v: 'b'`.
 ///
-/// Measured on TypeScript 7.0.2 (`tsc --declaration --emitDeclarationOnly
-/// --strict`): `makeProps` returns `{ v: string; }`.
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --noEmit`, and with
+/// `--strictNullChecks false`, the same answers): `makeProps`,
+/// `makeOptionalProps`, `n1` (`number` against `'b'`), `n2` (`'a' | 'c'`
+/// against `'b' | 'd'`), `n5` (optional `'a'` against required `'b'`),
+/// `n6` (`boolean` against `1`) and `n8` (`'a' | null` against `'b' |
+/// undefined`) return `{ v: string; }`; the intersection is kept by `n3`
+/// (a shared `'b'`) — `{ v: string | (N3 & { v: 'b' | 'd'; }); }` — by
+/// `n4` (no literal side) — `{ v: string | (N4 & { v: number; }); }` — and
+/// by `n7` (optional on both sides) — `{ v: string | (N7 & { v?: 'b';
+/// }); }` (the checker keeps the predicate's quote style; the prints below
+/// spell the same literals with double quotes).
 #[test]
 fn a_narrow_over_a_member_read_through_an_indexed_access_decides_as_the_checker() {
-    let failures = mismatches(
-        NARROW,
-        &[("ReturnType<typeof makeProps>", "{ v: string; }")],
-    );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let loose = ProbeProject {
+        files: &[],
+        compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+    };
+    for project in [ProbeProject::default(), loose] {
+        let failures = mismatches_in(
+            project,
+            NARROW,
+            &[
+                ("ReturnType<typeof makeProps>", "{ v: string; }"),
+                ("ReturnType<typeof makeOptionalProps>", "{ v: string; }"),
+                ("ReturnType<typeof n1>", "{ v: string; }"),
+                ("ReturnType<typeof n2>", "{ v: string; }"),
+                (
+                    "ReturnType<typeof n3>",
+                    "{ v: string | (N3 & { v: \"b\" | \"d\"; }); }",
+                ),
+                (
+                    "ReturnType<typeof n4>",
+                    "{ v: string | (N4 & { v: number; }); }",
+                ),
+                ("ReturnType<typeof n5>", "{ v: string; }"),
+                ("ReturnType<typeof n6>", "{ v: string; }"),
+                (
+                    "ReturnType<typeof n7>",
+                    "{ v: string | (N7 & { v?: \"b\"; }); }",
+                ),
+                ("ReturnType<typeof n8>", "{ v: string; }"),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }
 
 const MERGED_METHODS: &str = "\

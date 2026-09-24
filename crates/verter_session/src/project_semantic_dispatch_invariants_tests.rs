@@ -375,6 +375,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     });
     let value_expr = parameter_node;
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -488,6 +489,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -607,6 +609,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -888,6 +891,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -3398,6 +3402,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -3511,6 +3516,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         index: IndexKey::Computed(parameter_node),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         // Userland-style: key_space is a literal `'a'` union (one key).
         key_space: graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -5353,6 +5359,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: infer_u,
@@ -5449,6 +5456,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: k_param,
@@ -5727,6 +5735,7 @@ fn mapped_constructor_value_substitutes_per_key() {
     let surface = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source: lit_a,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: ctor,

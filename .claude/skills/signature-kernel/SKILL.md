@@ -31,7 +31,7 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `signatures_identical`, `DiscoveryError`. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -231,6 +231,28 @@ change; never weaken the test.
    after instantiation too. Because the category is part of node identity,
    the body never shares a node with the authored `Base & { … }` over the
    same arms.
+9. **Merged declarations list in order and resolve later-first.** One
+   declaration's own overloads are minted `CompositeList::overload_group`
+   and a merged declaration's groups `CompositeList::merged_overload_group`
+   (one arm per declaration; `CompositeOriginCategory::{OverloadGroup,
+   MergedOverloadGroup}`, kept by every order-preserving rebuild).
+   `SignaturesOfType` answers them with
+   `signature_kernel::discovery::merged_declaration_signatures` — every
+   declaration's signatures in declaration order, identical ones included —
+   which the signature utilities and conditional inference read (the LAST
+   signature). Call resolution alone reads
+   `shared_signature_nodes_in_resolution_order`, the kernel's
+   `resolution_order` (TypeScript's `reorderCandidates`): a later
+   declaration's group before an earlier one's, and a signature whose
+   parameter is WRITTEN as a literal type (`FunctionParam::declared_literal`,
+   carried through instantiation) before the rest. No call site orders
+   candidates itself. A function VALUE merged from several declarations is
+   minted the same way by `build_typeof` (`prepared_signature_groups`,
+   `merged_declaration_signatures_node`): a namespace member declared in
+   several blocks, a global function declared in several `declare global`
+   blocks, and a global function declared in several files (one arm per
+   file, in declaration precedence order). A file's own top-level overloads
+   are ONE declaration.
 
 ## Related skills
 
