@@ -1608,10 +1608,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn recursive_ref_sentinel(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::clone(&identity.decl_name),
+                args,
             }),
             NodeScopeId::File {
                 canonical_id: Arc::clone(&identity.canonical_id),
@@ -2563,6 +2565,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                         name: Arc::clone(&k.base().merged_symbol_name),
+                        args: Arc::clone(k.args()),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))

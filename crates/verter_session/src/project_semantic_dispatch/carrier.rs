@@ -370,6 +370,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             CarrierArgsContinuation::Instantiate { identity, context } => {
+                // The same back-edge rule as a 0-arg head: an application of
+                // a declaration an enclosing `build_instantiate` frame is
+                // still materialising is its recursive reference, recording
+                // the instantiation it stands for (`G<[T]>` inside the body
+                // of `G<string>` is the back-edge to `G<[string]>`), never an
+                // eager re-entry of the declaration being built.
+                if self.is_instantiate_active(
+                    identity.canonical_id.as_ref(),
+                    identity.owner,
+                    identity.decl_name.as_ref(),
+                ) {
+                    return self.recursive_ref_sentinel(&identity, type_args);
+                }
                 match self.execute_type_node(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
@@ -906,12 +919,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ctx
                 .shallow_file_state(resolved_root.canonical_id.as_ref())
                 .map_or(HashValue::default(), |s| s.whole_hash);
-            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(&DeclIdentity {
-                canonical_id: Arc::clone(&resolved_root.canonical_id),
-                owner: resolved_root.owner,
-                whole_hash,
-                decl_name: Arc::clone(&resolved_root.symbol_name),
-            }));
+            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(
+                &DeclIdentity {
+                    canonical_id: Arc::clone(&resolved_root.canonical_id),
+                    owner: resolved_root.owner,
+                    whole_hash,
+                    decl_name: Arc::clone(&resolved_root.symbol_name),
+                },
+                Arc::from([]),
+            ));
         }
 
         let whole_hash = self

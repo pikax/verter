@@ -5739,14 +5739,34 @@ export function libNumberThen() { const x: Awaited<NumberThen> = null as any; re
 export function libChain() { const x: Awaited<Chain> = null as any; return x; }
 export function libHolderBox() { const x: Awaited<Holder['box']> = null as any; return x; }
 export function libLinked() { const x: Awaited<Linked> = null as any; return x; }
-// The lib async-generator surface this standalone host has no `lib*.d.ts` for
+// The lib generator surfaces this standalone host has no `lib*.d.ts` for
 // (measured against the real lib).
+interface Generator<T, TReturn, TNext> {}
 interface AsyncGenerator<T, TReturn, TNext> {}
 export async function* yieldRec(r: Rec) { yield r; }
+export async function* yieldRecTwice(r: Rec) { yield r; yield r; }
+export async function* yieldRecAndPing(r: Rec, a: PingThen) { yield r; yield a; }
+export async function* yieldSelfOrText(a: SelfOrText) { yield a; }
+export async function* yieldRecOrNumber(a: Rec | number) { yield a; }
+export async function* yieldAwaitedRec(r: Rec) { yield await r; }
+export async function* returnRecFromGenerator(r: Rec) { return r; }
+export async function* yieldNumberReturnRec(r: Rec) { yield 1; return r; }
+export async function* yieldRecAndNumber(r: Rec, n: number) { yield r; yield n; }
 export async function* yieldNumberThen(a: NumberThen) { yield a; }
+export function* syncYieldRec(r: Rec) { yield r; }
 interface GenericRec<T> { then(onfulfilled: (v: GenericRec<T>) => void): void }
+interface GenericBox<T> { then(onfulfilled: (v: T) => void): void }
+interface GenericTree<T> { children: GenericTree<T>[]; value: T }
+interface GrowThen<T> { then(onfulfilled: (v: GrowThen<[T]>) => void): void }
 export async function awaitGenericRec(a: GenericRec<string>) { const value = await a; return value; }
 export async function returnGenericRec(a: GenericRec<string>) { return a; }
+export function libGenericRec() { const x: Awaited<GenericRec<string>> = null as any; return x; }
+export async function awaitGenericBox(a: GenericBox<number>) { const value = await a; return value; }
+export function libGenericBox() { const x: Awaited<GenericBox<number>> = null as any; return x; }
+export async function awaitGenericTree(a: GenericTree<string>) { const value = await a; return value; }
+export function libGenericTree() { const x: Awaited<GenericTree<string>> = null as any; return x; }
+export function libGrowThen() { const x: Awaited<GrowThen<string>> = null as any; return x; }
+export async function awaitGrowThen(a: GrowThen<string>) { const value = await a; return value; }
 "#;
 
 /// The checker diagnostic a recovery carrier names, if `node` is one.
@@ -5828,8 +5848,18 @@ fn any() -> TypeExpr {
 /// lane's structural-fact demand reduces it), and that node raised.
 #[track_caller]
 fn reduced_annotation(host: &Arc<VerterHost>, name: &str) -> (SemanticNodeData, TypeExpr) {
+    reduced_annotation_in(host, RECURSIVE_THENABLE, name)
+}
+
+/// [`reduced_annotation`] over a function of `canonical`.
+#[track_caller]
+fn reduced_annotation_in(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+    name: &str,
+) -> (SemanticNodeData, TypeExpr) {
     with_dispatch(host, |dispatch| {
-        let key = key_of(dispatch, RECURSIVE_THENABLE, name);
+        let key = key_of(dispatch, canonical, name);
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
             ..
@@ -6132,52 +6162,348 @@ fn recursive_thenable_answers_do_not_depend_on_demand_order() {
     assert_eq!(first, again, "repeated demand");
 }
 
-/// Where no recovery is modelled, a recursive thenable stays a TYPED GAP —
-/// never an `any` taken from the recursion itself.
+/// `AsyncGenerator<yield, return, unknown>` with no spans.
+fn async_generator_of(yielded: TypeExpr, returned: TypeExpr) -> TypeExpr {
+    TypeExpr::Ref {
+        name: Arc::from("AsyncGenerator"),
+        type_arguments: Arc::from(
+            vec![
+                yielded,
+                returned,
+                TypeExpr::Primitive(PrimitiveName::Unknown),
+            ]
+            .into_boxed_slice(),
+        ),
+    }
+}
+
+fn void() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Void)
+}
+
+fn never() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Never)
+}
+
+/// An async generator's YIELD of a recursive thenable contributes no yield
+/// type, and its RETURN is the checker's error type.
 ///
-/// tsc 7.0.2: `yieldRec` (an async generator yielding the recursive
-/// thenable) is `AsyncGenerator<never, void, unknown>` under TS1062 at the
-/// `yield`, and a second such yield crashes the checker, so the async
-/// iteration has no recovery to carry; the control `yieldNumberThen` is
-/// `AsyncGenerator<number, void, unknown>`. `awaitGenericRec` /
-/// `returnGenericRec` are `Promise<any>` under TS1062, but the generic
-/// declaration's self-reference inside its own body does not record which
-/// instantiation it stands for, so the relation cannot follow it.
+/// tsc 7.0.2, each with TS1062 ("Type is referenced directly or indirectly
+/// in the fulfillment callback of its own 'then' method.") at every failing
+/// `yield` operand, and at the name for a failing return:
+/// `yieldRec` (`yield r`), `yieldRecTwice` (`yield r; yield r`) and
+/// `yieldRecAndPing` (`yield r; yield a`, both recursive) are
+/// `AsyncGenerator<never, void, unknown>`; `yieldSelfOrText` is
+/// `AsyncGenerator<string, void, unknown>` and `yieldRecOrNumber` (`yield a`
+/// over `Rec | number`) `AsyncGenerator<number, void, unknown>`, the failing
+/// union arm dropped; `yieldAwaitedRec` (`yield await r`) is
+/// `AsyncGenerator<any, void, unknown>`, the yield of the await's recovery;
+/// `returnRecFromGenerator` (`return r`) is `AsyncGenerator<never, any,
+/// unknown>` and `yieldNumberReturnRec` (`yield 1; return r`)
+/// `AsyncGenerator<number, any, unknown>`. The controls: `yieldNumberThen`
+/// is `AsyncGenerator<number, void, unknown>`, and a SYNC generator awaits
+/// nothing — `syncYieldRec` is `Generator<Rec, void, unknown>`.
 #[test]
-fn recursive_thenable_positions_without_a_modelled_recovery_stay_typed_gaps() {
+fn async_generator_yields_of_a_recursive_thenable_follow_the_checker() {
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for (name, yielded, returned, warm) in [
+        ("yieldRec", never(), void(), false),
+        ("yieldRecTwice", never(), void(), false),
+        ("yieldRecAndPing", never(), void(), false),
+        ("yieldSelfOrText", string(), void(), false),
+        ("yieldRecOrNumber", number(), void(), false),
+        ("yieldAwaitedRec", any(), void(), false),
+        ("returnRecFromGenerator", never(), any(), false),
+        ("yieldNumberReturnRec", number(), any(), false),
+        ("yieldNumberThen", number(), void(), true),
+    ] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: async_generator_of(yielded, returned),
+                degradation: None,
+                candidates: usize::from(warm),
+            },
+            "{name}"
+        );
+    }
     assert_clean_warm(
         &host,
         RECURSIVE_THENABLE,
-        "yieldNumberThen",
+        "syncYieldRec",
         TypeExpr::Ref {
-            name: Arc::from("AsyncGenerator"),
+            name: Arc::from("Generator"),
             type_arguments: Arc::from(
                 vec![
-                    number(),
-                    TypeExpr::Primitive(PrimitiveName::Void),
+                    type_ref("Rec"),
+                    void(),
                     TypeExpr::Primitive(PrimitiveName::Unknown),
                 ]
                 .into_boxed_slice(),
             ),
         },
     );
-    for name in ["yieldRec", "awaitGenericRec", "returnGenericRec"] {
-        match eval(&host, RECURSIVE_THENABLE, name) {
-            Outcome::Value {
-                ty,
-                degradation,
-                candidates,
-            } => {
-                assert!(
-                    degradation.is_some(),
-                    "{name} must stay a typed gap, got {ty:?}"
-                );
-                assert_eq!(candidates, 0, "{name}: a gap never warms");
-            }
-            other => panic!("{name} must produce a degraded value, got {other:?}"),
+}
+
+/// Two DISTINCT yields of which one is a recursive thenable have no oracle:
+/// tsc 7.0.2 itself crashes on `async function* g(r: Rec, n: number) {
+/// yield r; yield n; }` (a nil-pointer panic in `getUnionTypeEx` under
+/// `getReturnTypeFromBody`, whichever order the two yields come in, and
+/// for `yield r; yield "s"` as well). This is an INTERNAL CONTRACT, not a
+/// measured answer: the yield join drops the failing yield exactly as it
+/// does in every program the checker does answer (a lone failing yield
+/// contributes `never`, a failing arm of a yielded union is dropped), so
+/// `yieldRecAndNumber` is `AsyncGenerator<number, void, unknown>`.
+#[test]
+fn a_failing_yield_beside_another_yield_drops_out_of_the_join() {
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    assert_eq!(
+        eval(&host, RECURSIVE_THENABLE, "yieldRecAndNumber"),
+        Outcome::Value {
+            ty: async_generator_of(number(), void()),
+            degradation: None,
+            candidates: 0,
         }
+    );
+}
+
+/// A GENERIC thenable whose fulfillment callback takes its own
+/// instantiation: the self-reference inside the generic body records the
+/// instantiation it stands for, so the relations see `GenericRec<string>`
+/// promise `GenericRec<string>` itself.
+///
+/// tsc 7.0.2: `awaitGenericRec` is `Promise<any>` under TS1062 at the
+/// `await`, `returnGenericRec` `Promise<any>` under TS1062 at its name, and
+/// `Awaited<GenericRec<string>>` is `any` under TS2589. The controls: a
+/// generic thenable promising its argument (`GenericBox<number>`) is
+/// `number` both ways, and a generic interface referencing itself without
+/// a `then` (`GenericTree<string>`) is itself — `Promise<GenericTree<string>>`
+/// awaited, `GenericTree<string>` through `Awaited`.
+#[test]
+fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    };
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    for (name, operation) in [
+        ("awaitGenericRec", CheckerDiagnosticOperation::AwaitOperand),
+        (
+            "returnGenericRec",
+            CheckerDiagnosticOperation::AsyncReturnPayload,
+        ),
+    ] {
+        assert_eq!(
+            eval(&host, RECURSIVE_THENABLE, name),
+            Outcome::Value {
+                ty: promise_of(any()),
+                degradation: None,
+                candidates: 0,
+            },
+            "{name}"
+        );
+        let recovery = async_payload(&host, name, false, checker_recovery_of);
+        assert_eq!(recovery, Some(recursive_fulfillment(operation)), "{name}");
     }
+    let (data, raised) = reduced_annotation(&host, "libGenericRec");
+    assert_eq!(
+        data,
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: CheckerDiagnosticOperation::LibAwaited,
+        }))
+    );
+    assert_eq!(raised, any());
+    assert_clean_warm(
+        &host,
+        RECURSIVE_THENABLE,
+        "awaitGenericBox",
+        promise_of(number()),
+    );
+    let (data, _) = reduced_annotation(&host, "libGenericBox");
+    assert_eq!(data, SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let tree = TypeExpr::Ref {
+        name: Arc::from("GenericTree"),
+        type_arguments: Arc::from(vec![string()].into_boxed_slice()),
+    };
+    assert_clean_warm(
+        &host,
+        RECURSIVE_THENABLE,
+        "awaitGenericTree",
+        promise_of(tree),
+    );
+    let (data, _) = reduced_annotation(&host, "libGenericTree");
+    assert!(
+        matches!(&data, SemanticNodeData::InstantiationRef { base, .. } if base.decl_name.as_ref() == "GenericTree"),
+        "`Awaited<GenericTree<string>>` is `GenericTree<string>`, got {data:?}"
+    );
+}
+
+/// A thenable that GROWS without ever repeating a type.
+///
+/// The lib conditional: tsc 7.0.2 answers `Awaited<GrowThen<string>>` with
+/// `any` under TS2589 in about a second — its tail run reaches the
+/// checker's 1000-step limit — and so does the relation here, through the
+/// same count.
+///
+/// The runtime relation has NO such rule in the checker: a 5000-deep chain
+/// of distinct thenables awaits to its value, and `await` of a
+/// `GrowThen<string>` did not terminate within 25 minutes (0.9 GB and
+/// climbing) on tsc 7.0.2 — no oracle answer exists for it. The relation
+/// here stops at its own operational budget instead, a typed partial that
+/// never warms, and never claims the checker's diagnostic.
+#[test]
+fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+    };
+    let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let (data, raised) = reduced_annotation(&host, "libGrowThen");
+    assert_eq!(
+        data,
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery(CheckerDiagnostic {
+            code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: CheckerDiagnosticOperation::LibAwaited,
+        }))
+    );
+    assert_eq!(raised, any());
+    assert_fails_closed(&host, RECURSIVE_THENABLE, "awaitGrowThen");
+}
+
+/// A chain of distinct thenables `C0 → C1 → … → number`, one step per
+/// character of `steps`, each step's `then` in the given shape:
+///
+/// - `t`: `then(onfulfilled: (v: Next) => void)` — a single callback into a
+///   non-union value, the checker's TAIL step;
+/// - `n`: `then(onfulfilled?: ((v: Next) => void) | null)` — a callback
+///   union, one NESTED step;
+/// - `u`: `then(onfulfilled: (v: Next | string) => void)` — a union value,
+///   one nested step;
+/// - `b`: `then(onfulfilled?: ((v: Next | string) => void) | null)` — both,
+///   two nested steps.
+///
+/// `probe` reads `Awaited<C0>`.
+fn thenable_chain(steps: &str) -> String {
+    let count = steps.len();
+    let mut source = String::new();
+    for (index, kind) in steps.chars().enumerate() {
+        let next = if index + 1 < count {
+            format!("C{}", index + 1)
+        } else {
+            "number".to_owned()
+        };
+        let callback = match kind {
+            't' => format!("onfulfilled: (v: {next}) => void"),
+            'n' => format!("onfulfilled?: ((v: {next}) => void) | null"),
+            'u' => format!("onfulfilled: (v: {next} | string) => void"),
+            _ => format!("onfulfilled?: ((v: {next} | string) => void) | null"),
+        };
+        source.push_str(&format!(
+            "interface C{index} {{ then({callback}): void }}\n"
+        ));
+    }
+    source.push_str("export function probe() { const x: Awaited<C0> = null as any; return x; }\n");
+    source
+}
+
+/// The lib conditional's reduction of `probe` in `source`.
+fn lib_awaited_probe(source: &str) -> SemanticNodeData {
+    const CHAIN: &str = "/ws/cov/thenable_chain.ts";
+    let host = host_with(&[(CHAIN, source)]);
+    reduced_annotation_in(&host, CHAIN, "probe").0
+}
+
+fn is_ts2589(data: &SemanticNodeData) -> bool {
+    matches!(
+        data,
+        SemanticNodeData::Opaque(QueryError::CheckerRecovery(diagnostic))
+            if diagnostic.code
+                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+    )
+}
+
+/// The lib conditional's TAIL runs stop where the checker's do.
+///
+/// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
+/// chains of distinct thenables: 999 tail steps are `number` and 1000 are
+/// `any` under TS2589 at the `Awaited` reference. A run entered through a
+/// callback union starts with one step counted: one nested step then 998
+/// tail steps are `number`, then 999 are `any` under TS2589.
+#[test]
+fn lib_awaited_tail_runs_stop_at_the_checker_limit() {
+    let tails = |count: usize| "t".repeat(count);
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&tails(999))),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(1000)))));
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(998)))),
+        SemanticNodeData::Primitive(PrimitiveKind::Number)
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
+        "n{}",
+        tails(999)
+    )))));
+}
+
+/// The lib conditional's NESTED steps stop where the checker's instantiation
+/// depth does.
+///
+/// tsc 7.0.2: 97 nested steps through callback unions are `number` (the
+/// checker reports TS2589 there while keeping the value) and 98 are `any`
+/// under TS2589; 97 steps into union values are `string | number` and 98
+/// `any`; a step that is both counts twice — 48 such steps then a tail
+/// step are `string | number`, 49 are `any`. `Awaited` over `Promise`
+/// nested 96 or 97 deep is `number`, 98 deep `any` under TS2589 (every
+/// `Promise`'s `onfulfilled` is optional and nullable).
+#[test]
+fn lib_awaited_nested_steps_stop_at_the_checker_limit() {
+    let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
+    let string_or_number = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Union(members) if members.len() == 2);
+    assert_eq!(
+        lib_awaited_probe(&thenable_chain(&"n".repeat(97))),
+        number()
+    );
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(
+        &"n".repeat(98)
+    ))));
+    assert!(string_or_number(&lib_awaited_probe(&thenable_chain(
+        &"u".repeat(97)
+    ))));
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(
+        &"u".repeat(98)
+    ))));
+    assert!(string_or_number(&lib_awaited_probe(&thenable_chain(
+        &format!("{}t", "b".repeat(48))
+    ))));
+    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
+        "{}t",
+        "b".repeat(49)
+    )))));
+    // Lowering a type argument nested this deep recurses per level, so the
+    // probes run on the serve thread's stack size, as production does.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let promise_chain = |depth: usize| {
+                let ty = (0..depth).fold("number".to_owned(), |ty, _| format!("Promise<{ty}>"));
+                format!(
+                    "export function probe() {{ const x: Awaited<{ty}> = null as any; return x; }}\n"
+                )
+            };
+            assert_eq!(
+                lib_awaited_probe(&promise_chain(96)),
+                SemanticNodeData::Primitive(PrimitiveKind::Number)
+            );
+            assert_eq!(
+                lib_awaited_probe(&promise_chain(97)),
+                SemanticNodeData::Primitive(PrimitiveKind::Number)
+            );
+            assert!(is_ts2589(&lib_awaited_probe(&promise_chain(98))));
+        })
+        .expect("spawn the probe thread")
+        .join()
+        .expect("the Promise-chain probes");
 }
 
 // ──────────────────────────────────────────────────────────────────────

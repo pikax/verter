@@ -261,4 +261,55 @@ impl SemanticGraphStore {
         }
         (children, unresolved)
     }
+
+    /// Whether `root` is an INERT STRUCTURE: a primitive or literal, or an
+    /// array or rest-free tuple whose elements are inert structures.
+    ///
+    /// Nothing in such a node names a declaration, a binder or a deferred
+    /// operator, so the declaration-body projection rebuilds it unchanged
+    /// under every context and need not walk into it. The same inductive,
+    /// per-id memo as [`Self::node_reaches_unresolved`] (`self_bit(n) &&
+    /// all(bit(child))` over the append-only arena), so an argument that a
+    /// generic instantiation grows by one level at every step costs one
+    /// step to classify, not its whole depth.
+    pub(crate) fn node_is_inert_structure(&self, root: SemanticNodeId) -> bool {
+        let mut stack: Vec<(SemanticNodeId, bool)> = vec![(root, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if self.inert_structure.lock().contains_key(&node) {
+                continue;
+            }
+            let children = match self.node_data(node).as_deref() {
+                Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_)) => {
+                    Some(Vec::new())
+                }
+                Some(SemanticNodeData::Array { element, .. }) => Some(vec![*element]),
+                Some(SemanticNodeData::Tuple { elements, .. })
+                    if elements.iter().all(|element| !element.rest) =>
+                {
+                    Some(elements.iter().map(|element| element.value).collect())
+                }
+                _ => None,
+            };
+            let Some(children) = children else {
+                self.inert_structure.lock().insert(node, false);
+                continue;
+            };
+            if expanded {
+                let memo = self.inert_structure.lock();
+                let bit = children
+                    .iter()
+                    .all(|child| memo.get(child).copied().unwrap_or(false));
+                drop(memo);
+                self.inert_structure.lock().insert(node, bit);
+                continue;
+            }
+            stack.push((node, true));
+            stack.extend(children.into_iter().map(|child| (child, false)));
+        }
+        self.inert_structure
+            .lock()
+            .get(&root)
+            .copied()
+            .unwrap_or(false)
+    }
 }

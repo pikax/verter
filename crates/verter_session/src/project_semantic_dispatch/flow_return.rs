@@ -2398,18 +2398,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `AsyncGenerator<Awaited<p>, Awaited<q>, unknown>`). A
                 // SYNC generator awaits neither — it publishes what the
                 // body yielded and returned verbatim.
-                // A join the relation FAILS on (TS1062) has no defined
-                // recovery here: tsc 7.0.2 publishes `never` for one such
-                // yield and crashes on two, so it stays the typed gap.
+                //
+                // A recursive thenable fails the relation (TS1062), and the
+                // two joins recover differently. The RETURN is the checker's
+                // error type, as an async function's return is (tsgo:
+                // `async function* g(r: Rec) { return r }` is
+                // `AsyncGenerator<never, any, unknown>`). A YIELD the relation
+                // fails on contributes NO yield type: tsgo publishes `never`
+                // when every yield fails (`{ yield r }` and `{ yield r; yield
+                // r }`), and drops a failing arm of a yielded union (`yield
+                // a` over `Rec | number` is `number`). Two distinct yields of
+                // which one fails crash tsgo 7.0.2 itself, so no oracle
+                // exists for that program; the yield join still drops the
+                // failing yield, the same rule every measured program follows.
                 let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
                     match (
                         self.awaited_normalize_for_flow(yield_join),
                         self.awaited_normalize_for_flow(body),
                     ) {
-                        (Some(yielded), Some(returned))
-                            if !self.awaited_normalize_failed_on(yield_join, yielded)
-                                && !self.awaited_normalize_failed_on(body, returned) =>
-                        {
+                        (Some(yielded), Some(returned)) => {
+                            let yielded = if self.awaited_normalize_failed_on(yield_join, yielded) {
+                                never
+                            } else {
+                                yielded
+                            };
                             (yielded, returned)
                         }
                         _ => return self.materialize_wrap_typed_gap(result),

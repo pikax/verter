@@ -391,6 +391,9 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
+    /// Memoized inert-structure bit of each node (`unresolved_reach.rs`);
+    /// no invalidation, for the same reason as [`Self::unresolved_reach`].
+    inert_structure: Mutex<FxHashMap<SemanticNodeId, bool>>,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.

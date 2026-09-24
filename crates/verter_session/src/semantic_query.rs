@@ -151,6 +151,7 @@ mod checker_diagnostic;
 pub use checker_diagnostic::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
 };
+pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -5169,9 +5170,15 @@ pub enum QueryError {
     /// declaration expanding into itself (e.g., `type TreeNode = {
     /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
     /// this to [`TypeExpr::RecursiveRef`] so the materialiser stops at
-    /// the back-edge instead of recursing indefinitely. /
-    /// recursion handling.
-    RecursiveRef { name: Arc<str> },
+    /// the back-edge instead of recursing indefinitely.
+    ///
+    /// `args` are the type arguments of the instantiation the back-edge
+    /// stands for (`G<[T]>` inside the body of `G<string>` records
+    /// `[[string]]`); empty for a reference without type arguments.
+    RecursiveRef {
+        name: Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+    },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
     /// Declaration resolved but not yet materialized. The node
@@ -5361,7 +5368,16 @@ impl PartialEq for QueryError {
                 Self::IncompleteSemanticOperand { reasons: b },
             ) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
-            (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
+            (
+                Self::RecursiveRef {
+                    name: a,
+                    args: a_args,
+                },
+                Self::RecursiveRef {
+                    name: b,
+                    args: b_args,
+                },
+            ) => a == b && a_args == b_args,
             (Self::Other(a), Self::Other(b)) => a == b,
             (
                 Self::DeclPlaceholder {
@@ -5450,8 +5466,9 @@ impl std::hash::Hash for QueryError {
             Self::AliasCycle { chain } => {
                 chain.hash(state);
             }
-            Self::RecursiveRef { name } => {
+            Self::RecursiveRef { name, args } => {
                 name.hash(state);
+                args.hash(state);
             }
             Self::Other(msg) => {
                 msg.hash(state);
@@ -10316,6 +10333,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("R"),
+                args: std::sync::Arc::from([]),
             },
             QueryError::Other(Arc::from("x")),
             QueryError::DeclPlaceholder {

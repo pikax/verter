@@ -508,7 +508,7 @@ fn cycle_gate_body_contains_recursive_ref(
             continue;
         };
         match data.as_ref() {
-            SemanticNodeData::Opaque(QueryError::RecursiveRef { name }) => {
+            SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. }) => {
                 if name == target_name {
                     return true;
                 }

@@ -12925,7 +12925,7 @@ fn strip_line_comments(src: &str) -> String {
 /// balanced matching from the `{` after the enum name to its matching close
 /// brace, over comment-stripped source. This scoping is load-bearing: in
 /// `semantic_query.rs`, `enum QueryError` legitimately has a
-/// `RecursiveRef { name: Arc<str> }` variant (the
+/// `RecursiveRef { name: Arc<str>, args: std::sync::Arc::from([]) }` variant (the
 /// `Opaque(QueryError::RecursiveRef)` home), and isolating the
 /// `SemanticNodeData` body excludes it so the §7.18 declaration scan never
 /// false-trips on the QueryError variant.
@@ -13150,7 +13150,7 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         "\n",
         "pub enum QueryError {\n",
         "    Miss,\n",
-        "    RecursiveRef { name: Arc<str> },\n",
+        "    RecursiveRef { name: Arc<str>, args: std::sync::Arc::from([]) },\n",
         "}\n",
     );
     assert!(
@@ -13167,7 +13167,7 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         "}\n",
         "\n",
         "pub enum QueryError {\n",
-        "    RecursiveRef { name: Arc<str> },\n",
+        "    RecursiveRef { name: Arc<str>, args: std::sync::Arc::from([]) },\n",
         "}\n",
     );
     assert_eq!(
@@ -14193,6 +14193,7 @@ fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
     let never = primitive(&graph, PrimitiveKind::Never);
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
+        args: std::sync::Arc::from([]),
     }));
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", recursive, false, false)]);
@@ -21969,6 +21970,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
     let graph = host.project_type_store().semantic_graph();
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("R"),
+        args: std::sync::Arc::from([]),
     }));
 
     let dispatch = ProjectSemanticDispatch::new(&host);

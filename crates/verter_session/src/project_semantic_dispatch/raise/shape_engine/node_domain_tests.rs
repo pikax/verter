@@ -469,6 +469,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     // raises to a materialized/expanded leaf (root `Other`).
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: StdArc::from("Rec"),
+        args: std::sync::Arc::from([]),
     }));
 
     let mapped_with = |value_expr| {
