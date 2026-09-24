@@ -3895,7 +3895,7 @@ fn direct_self_call_is_recursion_hold() {
     );
 }
 
-/// @ai-generated - an exact same-file served callee is a Flow obligation edge; unresolved / member calls ride the symbolic carrier or `any`
+/// @ai-generated - an exact same-file served callee is a Flow obligation edge; a `this` member call rides the receiver-member carrier; an unrepresentable callee fails closed
 #[test]
 fn symbolic_and_unrepresentable_calls() {
     let node = content_for(
@@ -3940,12 +3940,40 @@ fn symbolic_and_unrepresentable_calls() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
+            argument: Some(SliceExpr::Call(
+                SliceCall::Member {
+                    receiver: Box::new(SliceExpr::This(
+                        crate::flow_slice_content::SliceThis::Instance {
+                            class: Arc::from("Service"),
+                            type_parameters: Arc::from([]),
+                        }
+                    )),
+                    member: Arc::from([Arc::from("helper")]),
+                },
+                SliceCallSite::new(0, false, false, verter_span::Span::new(58, 71)),
+            )),
+            freshness: SliceFreshness::Pinned,
+            predicate_test: None,
+        }],
+        "a `this` member call reads the member off the class's receiver"
+    );
+
+    // A callee with no structural arm (a computed member of a module
+    // object) fails closed rather than fabricating `any`.
+    let node = content_for(
+        "const table = { h() { return 1; } };\n\
+         const key: string = \"h\";\n\
+         function run() { return table[key](); }\n",
+        "run",
+    );
+    assert_eq!(
+        node.body.statements.as_ref(),
+        &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
             freshness: SliceFreshness::Pinned,
             predicate_test: None,
         }],
-        "a `this` receiver is not modeled, so the call has no structural \
-         arm and fails closed rather than fabricating `any`"
+        "an unrepresentable callee fails closed"
     );
 }
 
@@ -3972,23 +4000,12 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
     // The discriminator: a sequence around a call with NO structural arm
     // keeps the positional fail-closed marker — the sequence context
     // invents no arm for the wrapped form.
-    let memo = memo_for(
-        "class Service {\n\
-         \x20 helper() { return 1; }\n\
-         \x20 run() { return (0, this.helper()); }\n\
-         }\n",
+    let node = content_for(
+        "const table = { h() { return 1; } };\n\
+         const key: string = \"h\";\n\
+         function run() { return (0, table[key]()); }\n",
+        "run",
     );
-    let index = memo.function_program_index();
-    let entry = member_entry_of(&index, "Service", 1);
-    let (selection, skeleton) = selection_for(&memo, entry, &[]);
-    let node = memo
-        .flow_slice_content(
-            entry,
-            selection,
-            &skeleton,
-            crate::semantic_query::NullabilityPolicy::Strict,
-        )
-        .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {

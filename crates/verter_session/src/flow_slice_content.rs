@@ -1047,6 +1047,9 @@ pub enum SliceExpr {
         /// in a class property initializer, whose container stops there.
         extended_captures: Arc<[SkeletonBindingId]>,
     },
+    /// A `this` read inside a class declaration's member (or an arrow a
+    /// member body creates): the receiver the member runs against.
+    This(SliceThis),
     /// A class EXPRESSION's value — its constructor. The evaluator composes
     /// the constructor type and the instance surface from the lowered
     /// class body ([`SliceClass`]); a class form this half does not model
@@ -1481,6 +1484,15 @@ pub enum SliceCall {
     },
     /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     Symbolic(TypeExpr, Option<FlowBindingRef>),
+    /// A call of a member read off a lowered receiver (`this.m()`): the
+    /// evaluator projects `member` off the receiver's value and resolves
+    /// the call over the member's signatures.
+    Member {
+        /// The receiver whose member is called.
+        receiver: Box<SliceExpr>,
+        /// The authored static member path off the receiver.
+        member: Arc<[Arc<str>]>,
+    },
     /// A `new` expression. The constructor is lowered as a flow value (a
     /// parameter or local rides its binding carrier, a free name the
     /// shared leaf lowering), and the evaluator resolves the construction
@@ -2227,6 +2239,47 @@ pub(crate) fn build_flow_slice_content(
             outer: captures.clone(),
             anchor,
         });
+    // A direct class-declaration member reads its receiver; a nested
+    // function reads the `this` its creating frame handed it.
+    let this = match context {
+        Some(context) => context.this.clone(),
+        None => resolved.enclosing_this.and_then(|this| {
+            let class = Arc::clone(&entry.key.declaration.name);
+            Some(match this {
+                verter_semantic::analysis::function_program::EnclosingThis::Instance => {
+                    SliceThis::Instance {
+                        class,
+                        type_parameters: enclosing_type_parameters
+                            .iter()
+                            .map(|param| Arc::clone(&param.name))
+                            .collect(),
+                    }
+                }
+                verter_semantic::analysis::function_program::EnclosingThis::Static => {
+                    SliceThis::Static {
+                        class,
+                        contributor: matches!(
+                            entry.locator.descent.as_ref(),
+                            [FunctionDescentStep::ClassMember { .. }]
+                        )
+                        .then_some(entry.locator.contributor.contributor_index),
+                    }
+                }
+                verter_semantic::analysis::function_program::EnclosingThis::ObjectLiteral => {
+                    match entry.locator.descent.as_ref() {
+                        [FunctionDescentStep::VariableInitializer { declarator_ordinal }, FunctionDescentStep::ObjectMember { .. }] => {
+                            SliceThis::Value {
+                                value: class,
+                                contributor: entry.locator.contributor.contributor_index,
+                                declarator: *declarator_ordinal,
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+            })
+        }),
+    };
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -2238,6 +2291,8 @@ pub(crate) fn build_flow_slice_content(
         type_param_names: &type_param_names,
         self_name: self_name.as_deref(),
         enclosing_heritage: resolved.enclosing_heritage,
+        this,
+        member_this: None,
         skeleton,
         captures,
         control: Arc::clone(&entry.control),
@@ -3596,6 +3651,35 @@ fn rebase_span(anchor: u32, span: oxc_span::Span) -> FrameSpan {
     FrameSpan::rebase(anchor, span.into())
 }
 
+/// The static member path of a chain rooted at `this` (`this.a.b` is
+/// `[a, b]`); `None` for any other chain.
+/// One member an object literal's `this` names.
+enum ObjectThisMember<'p> {
+    /// A property, whose value its declaration initializes it with.
+    Property(&'p Expression<'p>),
+    /// A method, served as its own position.
+    Method(verter_semantic::analysis::function_program::FunctionProgramKey),
+    /// A getter, served as its own position.
+    Getter(verter_semantic::analysis::function_program::FunctionProgramKey),
+}
+
+fn this_member_path(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Option<Vec<Arc<str>>> {
+    let mut path = vec![Arc::from(member.property.name.as_str())];
+    let mut object = &member.object;
+    loop {
+        match object {
+            Expression::ThisExpression(_) => break,
+            Expression::StaticMemberExpression(parent) => {
+                path.push(Arc::from(parent.property.name.as_str()));
+                object = &parent.object;
+            }
+            _ => return None,
+        }
+    }
+    path.reverse();
+    Some(path)
+}
+
 /// The parameter names one signature answer references — the
 /// PARAMETER-LIST half of the frame gate.
 ///
@@ -3890,6 +3974,39 @@ struct CapturedFrame {
     region: verter_semantic::analysis::flow::SkeletonRegionId,
 }
 
+/// What `this` reads inside a class declaration's member: the checker's
+/// receiver for the member (`checkThisExpression`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SliceThis {
+    /// An instance member of the class `class` (its registered
+    /// declaration name) declaring `type_parameters`: the class's
+    /// polymorphic `this` type, whose constraint is the class instance.
+    Instance {
+        class: Arc<str>,
+        type_parameters: Arc<[Arc<str>]>,
+    },
+    /// A static member: the class constructor, `typeof class`. A top-level
+    /// class is statement `contributor`; a static member read off `this`
+    /// lowers from the static member it names there.
+    Static {
+        class: Arc<str>,
+        contributor: Option<u32>,
+    },
+    /// A method or accessor of the object literal a variable declares:
+    /// the variable's value, `typeof value`. The literal is the initializer
+    /// of declarator `declarator` of top-level statement `contributor`;
+    /// a member read off `this` lowers from the member it names there.
+    Value {
+        value: Arc<str>,
+        contributor: u32,
+        declarator: u32,
+    },
+    /// An instance member of a class EXPRESSION, or a method or accessor of
+    /// an object literal: the instance (or object) the evaluator binds
+    /// while it evaluates the class's members (or the literal's).
+    Receiver,
+}
+
 /// The exact lexical chain at a nested function's authored position.
 /// Shared frame handles avoid enumerating or copying visible declarations.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3901,6 +4018,16 @@ struct CaptureScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedFlowContext {
     captures: CaptureScope,
+    /// The lexical `this` an ARROW created in a class member reads; `None`
+    /// for every other nested function, whose `this` is its own.
+    this: Option<SliceThis>,
+}
+
+impl NestedFlowContext {
+    /// What `this` reads inside the nested function.
+    pub(crate) fn this(&self) -> Option<&SliceThis> {
+        self.this.as_ref()
+    }
 }
 
 /// An exact source declaration eligible to provide a selected capture's type.
@@ -4524,6 +4651,14 @@ struct Lowerer<'a> {
     /// `None` for every other frame (nested callables included, mirroring
     /// the type-parameter clause rule).
     enclosing_heritage: Option<verter_semantic::analysis::function_program::EnclosingHeritage<'a>>,
+    /// What `this` reads in this frame: a class declaration's member
+    /// receiver, or the one an arrow inherits from the member creating it.
+    /// A class expression's instance initializers read the class's own
+    /// receiver while they lower.
+    this: Option<SliceThis>,
+    /// The `this` the NEXT nested function lowered takes in place of the
+    /// one its kind implies: a class expression's member function.
+    member_this: Option<Option<SliceThis>>,
     /// This frame's shared structural skeleton. Runtime references use the
     /// prepared map's exact occurrence records; type-position visibility
     /// queries use the skeleton's separate lexical meaning rules.
@@ -4656,7 +4791,7 @@ struct Lowerer<'a> {
     current_statement_followed_by_return: SuffixReturn,
 }
 
-impl Lowerer<'_> {
+impl<'a> Lowerer<'a> {
     /// Rebase a LIVE source span onto this frame's anchor.
     ///
     /// The two coordinate systems are different TYPES
@@ -7823,6 +7958,31 @@ impl Lowerer<'_> {
                     None => self.lower_leaf(expr, mode),
                 }
             }
+            Expression::ThisExpression(_) if self.this.is_some() => {
+                SliceExpr::This(self.this.clone().expect("guarded"))
+            }
+            // A member read off an object literal's `this` lowers from the
+            // member the literal declares.
+            Expression::StaticMemberExpression(member)
+                if matches!(
+                    self.this,
+                    Some(SliceThis::Value { .. } | SliceThis::Static { .. })
+                ) && this_member_path(member).is_some() =>
+            {
+                let path = this_member_path(member).expect("guarded");
+                self.lower_object_this_read(&path, member.span, mode)
+            }
+            // A member read off the receiver (`this.v`, `this.a.b`) projects
+            // through the same member-path walk an optional chain takes.
+            Expression::StaticMemberExpression(member)
+                if self.this.is_some() && this_member_path(member).is_some() =>
+            {
+                let path = this_member_path(member).expect("guarded");
+                SliceExpr::OptionalMember {
+                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    links: path.into_iter().map(|name| (name, false)).collect(),
+                }
+            }
             Expression::FunctionExpression(func) => {
                 self.lower_nested_function(&FunctionNode::Function(func))
             }
@@ -7952,6 +8112,33 @@ impl Lowerer<'_> {
                     {
                         return SliceExpr::Call(
                             SliceCall::Direct(direct.target.clone()),
+                            call_site(call),
+                        );
+                    }
+                }
+                // A `this.m()` callee: the member of the frame's receiver —
+                // an object literal's own method is a direct call of it.
+                if let (Some(this), Expression::StaticMemberExpression(member)) =
+                    (self.this.clone(), unwrap_parenthesized(&call.callee))
+                {
+                    if let (SliceThis::Value { .. } | SliceThis::Static { .. }, Some([name])) =
+                        (&this, this_member_path(member).as_deref())
+                    {
+                        return match self.object_this_member(name) {
+                            Some(ObjectThisMember::Method(target)) => {
+                                SliceExpr::Call(SliceCall::Direct(target), call_site(call))
+                            }
+                            _ => {
+                                SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
+                            }
+                        };
+                    }
+                    if let Some(path) = this_member_path(member) {
+                        return SliceExpr::Call(
+                            SliceCall::Member {
+                                receiver: Box::new(SliceExpr::This(this)),
+                                member: Arc::from(path.into_boxed_slice()),
+                            },
                             call_site(call),
                         );
                     }
@@ -8604,6 +8791,9 @@ impl Lowerer<'_> {
             if method_kind.is_some() {
                 let value = match value_expression {
                     Expression::FunctionExpression(func) => {
+                        // A method or accessor of the literal runs against
+                        // the object the literal builds.
+                        self.member_this = Some(Some(SliceThis::Receiver));
                         self.lower_nested_function(&FunctionNode::Function(func))
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
@@ -8715,6 +8905,180 @@ impl Lowerer<'_> {
         self.lower_function_value(node, None)
     }
 
+    /// The member `name` of the object literal the frame's `this` is, as
+    /// the literal declares it; `None` when the literal does not declare
+    /// it (or a later spread may replace it).
+    fn object_this_member(&self, name: &str) -> Option<ObjectThisMember<'a>> {
+        let (contributor, declarator) = match &self.this {
+            Some(SliceThis::Value {
+                contributor,
+                declarator,
+                ..
+            }) => (contributor, declarator),
+            Some(SliceThis::Static {
+                contributor: Some(contributor),
+                ..
+            }) => return self.static_this_member(*contributor, name),
+            _ => return None,
+        };
+        let program: &'a Program<'a> = self.program;
+        let declaration = match program.body.get(*contributor as usize)? {
+            Statement::VariableDeclaration(declaration) => declaration,
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+                oxc_ast::ast::Declaration::VariableDeclaration(declaration) => declaration,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let Expression::ObjectExpression(object) = declaration
+            .declarations
+            .get(*declarator as usize)?
+            .init
+            .as_ref()?
+        else {
+            return None;
+        };
+        let mut found = None;
+        for (ordinal, property) in object.properties.iter().enumerate() {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                // A spread after the member may replace it.
+                found = None;
+                continue;
+            };
+            if property.computed
+                || verter_semantic::analysis::flow::static_property_key_text(&property.key)
+                    != Some(name)
+            {
+                continue;
+            }
+            let key = || verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: self.bindings.function().declaration.clone(),
+                part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                },
+                overload_ordinal: 0,
+            };
+            found = match (&property.value, property.kind, property.method) {
+                (Expression::FunctionExpression(_), oxc_ast::ast::PropertyKind::Get, _) => {
+                    Some(ObjectThisMember::Getter(key()))
+                }
+                (Expression::FunctionExpression(_), oxc_ast::ast::PropertyKind::Init, true) => {
+                    Some(ObjectThisMember::Method(key()))
+                }
+                (value, oxc_ast::ast::PropertyKind::Init, false) => {
+                    Some(ObjectThisMember::Property(value))
+                }
+                // A setter reads nothing.
+                _ => found,
+            };
+        }
+        found
+    }
+
+    /// The static member `name` the class of statement `contributor`
+    /// declares: a property is its annotation, else its initializer; a
+    /// method or getter its own served position.
+    fn static_this_member(&self, contributor: u32, name: &str) -> Option<ObjectThisMember<'a>> {
+        let program: &'a Program<'a> = self.program;
+        let class = match program.body.get(contributor as usize)? {
+            Statement::ClassDeclaration(class) => class,
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+                oxc_ast::ast::Declaration::ClassDeclaration(class) => class,
+                _ => return None,
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => class,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let key =
+            |ordinal: usize| verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: self.bindings.function().declaration.clone(),
+                part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                },
+                overload_ordinal: 0,
+            };
+        let mut found = None;
+        for (ordinal, element) in class.body.body.iter().enumerate() {
+            match element {
+                oxc_ast::ast::ClassElement::PropertyDefinition(property)
+                    if property.r#static
+                        && !property.computed
+                        && verter_semantic::analysis::flow::static_property_key_text(
+                            &property.key,
+                        ) == Some(name) =>
+                {
+                    found = match (&property.type_annotation, &property.value) {
+                        (None, Some(value)) => Some(ObjectThisMember::Property(value)),
+                        // An annotated or uninitialized static reads its
+                        // declaration, which this read does not lower.
+                        _ => None,
+                    };
+                }
+                oxc_ast::ast::ClassElement::MethodDefinition(method)
+                    if method.r#static
+                        && !method.computed
+                        && method.value.body.is_some()
+                        && verter_semantic::analysis::flow::static_property_key_text(
+                            &method.key,
+                        ) == Some(name) =>
+                {
+                    found = match method.kind {
+                        oxc_ast::ast::MethodDefinitionKind::Method => {
+                            Some(ObjectThisMember::Method(key(ordinal)))
+                        }
+                        oxc_ast::ast::MethodDefinitionKind::Get => {
+                            Some(ObjectThisMember::Getter(key(ordinal)))
+                        }
+                        _ => found,
+                    };
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// A member read off an object literal's (or a class's static) `this`:
+    /// a property is the value its declaration initializes it with, widened;
+    /// a getter is its served return.
+    fn lower_object_this_read(
+        &mut self,
+        path: &[Arc<str>],
+        span: oxc_span::Span,
+        _mode: ExprMode,
+    ) -> SliceExpr {
+        let gap = SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression);
+        let Some((first, rest)) = path.split_first() else {
+            return gap;
+        };
+        let root = match self.object_this_member(first) {
+            // The declared literal type widens where the read is used (a
+            // readonly literal is the checker's widening literal type).
+            Some(ObjectThisMember::Property(value)) => self.lower_leaf(
+                value,
+                ExprMode::BindingInit {
+                    preserve_literal: false,
+                },
+            ),
+            Some(ObjectThisMember::Getter(target)) => SliceExpr::Call(
+                SliceCall::Direct(target),
+                SliceCallSite::new(0, false, false, span.into()),
+            ),
+            _ => return gap,
+        };
+        if rest.is_empty() {
+            root
+        } else {
+            SliceExpr::OptionalMember {
+                root: Box::new(root),
+                links: rest.iter().map(|name| (Arc::clone(name), false)).collect(),
+            }
+        }
+    }
+
     /// Lower a nested function value, `invocation` naming the call that
     /// invokes it where it is created (an IIFE).
     ///
@@ -8732,6 +9096,7 @@ impl Lowerer<'_> {
         node: &FunctionNode<'_>,
         invocation: Option<&oxc_ast::ast::CallExpression<'_>>,
     ) -> SliceExpr {
+        let member_this = self.member_this.take();
         let Some(entry) = self
             .index
             .nested_at(self.bindings.function(), node_span(node).into())
@@ -8833,7 +9198,20 @@ impl Lowerer<'_> {
         }
         SliceExpr::NestedFunctionValue {
             function: entry.key.clone(),
-            context: Arc::new(NestedFlowContext { captures }),
+            context: Arc::new(NestedFlowContext {
+                captures,
+                // An arrow has no `this` of its own: it reads its creating
+                // frame's (a class expression's instance initializer reads
+                // the class's own receiver). A class expression's member
+                // function reads the receiver the class binds.
+                this: match member_this {
+                    Some(this) => this,
+                    None => match node {
+                        FunctionNode::Arrow(_) => self.this.clone(),
+                        FunctionNode::Function(_) => None,
+                    },
+                },
+            }),
             has_declared_return: node.return_type().is_some(),
             gap,
             extended_captures: Arc::from(extended_captures.into_boxed_slice()),

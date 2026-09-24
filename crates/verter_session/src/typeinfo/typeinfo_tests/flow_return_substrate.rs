@@ -69,20 +69,6 @@ fn assert_semantic_miss(expr: &TypeExpr) {
     }
 }
 
-/// The POSITIONAL degraded surface: a position the substrate has no model
-/// for carries its OWN marker carrier, deliberately distinct from the
-/// cache-miss spelling — a marker that reads as a `Miss` fed itself back
-/// into the frame-level failure it exists to avoid.
-fn assert_unmodeled_position(expr: &TypeExpr) {
-    match expr {
-        TypeExpr::Unknown(unknown) => assert_eq!(
-            unknown.raw(),
-            crate::semantic_query::compat_spelling::UNMODELED_POSITION
-        ),
-        other => panic!("expected the positional-marker surface, got {other:?}"),
-    }
-}
-
 fn expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown(unknown) => {
@@ -153,21 +139,15 @@ fn flow_surface_return_free_loop_stays_fallthrough_transparent() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
-/// A `this.helper()` call FAILS CLOSED at the flow surface.
-///
-/// `this` is not modeled (the receiver capability is separate work), so
-/// the call has no structural arm: the shared shallow pass answers it
-/// with a bare `any` that carries no call-return carrier. Publishing
-/// that `any` was a fabricated value at a call position — clean, warm,
-/// and wrong (TypeScript 7.0.2 `tsc` types `SubThisCall#run` as
-/// `number`). The classifier now decides the call position on the FORM,
-/// so this joins the return-bearing-loop / `switch` rows above.
+/// A `this.helper()` call reads `helper` off the class's receiver at the
+/// flow surface (TypeScript 7.0.2 `tsc` types `SubThisCall#run` as
+/// `number`).
 #[test]
-fn flow_surface_this_call_return_fails_closed() {
+fn flow_surface_this_call_returns_the_member_return() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
-    assert_unmodeled_position(&expr);
+    assert_primitive(&expr, PrimitiveName::Number);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -276,23 +256,15 @@ fn flow_return_substrate_serves_symbolic_call_return_complete() {
 
 /// The `FlowReturn` family owns the class-method demand even when the
 /// receiver is the in-flight class surface: the family is dispatched and
-/// the undecidable receiver surfaces as a typed miss, never admitted.
-///
-/// The class-surface-reentrant `this` call fails closed with the typed
-/// `unmodeledPosition` marker: `this` is not modeled as a receiver (the
-/// receiver capability is separate work — see the fail-closed contract on
-/// `flow_surface_this_call_return_fails_closed`), so the member call has
-/// no structural arm. tsgo types the same fixture `number`; until the
-/// receiver capability lands, the substrate's fail-closed marker is the
-/// honest answer, and it is ONE answer — the merge's duplicate
-/// `semantic_miss` twin of this row was removed in favour of the
-/// HEAD-established pin.
+/// the `this` member it calls is read where it is declared, never through
+/// the in-flight surface, so the call resolves (tsgo types the same
+/// fixture `number`).
 #[test]
-fn flow_return_substrate_fails_closed_on_a_this_call() {
+fn flow_return_substrate_serves_a_this_call() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
-    assert_unmodeled_position(&expr);
+    assert_primitive(&expr, PrimitiveName::Number);
     assert_flow_return_dispatched(&record, "SubThisCallRun");
 }
 

@@ -4194,6 +4194,8 @@ mod relation_operand_tests;
 #[cfg(test)]
 mod signature_relation_tests;
 #[cfg(test)]
+mod this_receiver_tests;
+#[cfg(test)]
 mod truthiness_domain_tests;
 #[cfg(test)]
 mod tuple_length_and_apparent_member_tests;

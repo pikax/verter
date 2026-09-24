@@ -5069,6 +5069,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             heritage_self_roots: Vec::new(),
             inferred_predicate: None,
             declared_reads: false,
+            receiver: None,
         };
         let holds;
         let yield_contributions;
@@ -7017,6 +7018,9 @@ struct FlowEvaluator<'d, 'b> {
     /// declaration is its own flow container, so no narrowing of the
     /// enclosing frame reaches it (measured on 7.0.2).
     declared_reads: bool,
+    /// The class-expression instance `this` reads while the class's members
+    /// evaluate (see [`class_expression::ClassReceiver`]).
+    receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -7724,7 +7728,93 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
         let mut spread_seen = false;
         let mut late_bound = class_expression::ComputedIndexKinds::default();
+        // A literal's methods and accessors run against the object it
+        // builds: their bodies read its other members through `this`, so
+        // they evaluate after every other member (and once more after a
+        // read of a sibling not evaluated yet). A literal with a spread is
+        // a construction program whose members this rail does not order.
+        let receiver = entries
+            .iter()
+            .all(|entry| {
+                matches!(
+                    entry,
+                    crate::flow_slice_content::SliceObjectEntry::Member(_)
+                )
+            })
+            .then(|| {
+                std::rc::Rc::new(class_expression::ClassReceiver {
+                    binder: self.dispatch.this_binder(
+                        self.canonical,
+                        self.owner,
+                        &Arc::from("(object literal)"),
+                        None,
+                    ),
+                    members: std::cell::RefCell::new(Vec::new()),
+                    declared: entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            crate::flow_slice_content::SliceObjectEntry::Member(member) => {
+                                match &member.key {
+                                    crate::flow_slice_content::SliceObjectKey::Static(name) => {
+                                        Some(Arc::clone(name))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    base: None,
+                    forward_read: std::cell::Cell::new(false),
+                })
+            });
+        let enclosing_receiver = std::mem::replace(&mut self.receiver, receiver.clone());
+        let deferred_member = |entry: &crate::flow_slice_content::SliceObjectEntry| match entry {
+            crate::flow_slice_content::SliceObjectEntry::Member(member) => {
+                member.method_kind.is_some()
+                    && matches!(
+                        member.key,
+                        crate::flow_slice_content::SliceObjectKey::Static(_)
+                    )
+            }
+            _ => false,
+        };
+        let mut deferred: Vec<(usize, &crate::flow_slice_content::SliceObjectMember)> = Vec::new();
         for entry in entries.iter() {
+            if let (Some(_), crate::flow_slice_content::SliceObjectEntry::Member(member)) =
+                (receiver.as_ref(), entry)
+            {
+                if deferred_member(entry) {
+                    // Placeholder at the member's position, filled below.
+                    deferred.push((surface_members.len(), member));
+                    let key = match &member.key {
+                        crate::flow_slice_content::SliceObjectKey::Static(name) => {
+                            crate::semantic_query::AuthoredPropertyKey::string(name.as_ref())
+                        }
+                        _ => unreachable!("only a static key defers"),
+                    };
+                    let placeholder = crate::semantic_query::SurfaceMember {
+                        key,
+                        value: self
+                            .dispatch
+                            .opaque(crate::semantic_query::QueryError::Miss),
+                        optional: false,
+                        readonly: member.readonly,
+                        method_kind: member.method_kind,
+                        has_implementation_body: true,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+                        spans: member.spans,
+                        declaration_origin: Some(Arc::from(self.canonical)),
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::default(),
+                        merge_role: crate::semantic_query::MergeRoleStamp::default(),
+                    };
+                    unwidened_members.push(placeholder.clone());
+                    surface_members.push(placeholder);
+                    continue;
+                }
+            }
             let member = match entry {
                 crate::flow_slice_content::SliceObjectEntry::Spread { source } => {
                     // A spread SOURCE this frame cannot evaluate is not a
@@ -7746,6 +7836,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let outcome = self.eval_expr(source);
                     self.holds.truncate(holds_before);
                     let Positional::Value(operand) = outcome else {
+                        self.receiver = enclosing_receiver;
                         return Positional::Unmodeled;
                     };
                     spread_seen = true;
@@ -7803,7 +7894,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 class_expression::MemberKey::None => continue,
                 class_expression::MemberKey::Index(_) | class_expression::MemberKey::Unmodeled => {
-                    return Positional::Unmodeled
+                    self.receiver = enclosing_receiver;
+                    return Positional::Unmodeled;
                 }
             };
             let unwidened = match &member.unwidened {
@@ -7832,8 +7924,58 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 value: unwidened,
                 ..surface_member.clone()
             });
+            if let Some(receiver) = receiver.as_ref() {
+                receiver.members.borrow_mut().push(surface_member.clone());
+            }
             surface_members.push(surface_member);
         }
+        if let Some(receiver) = receiver.as_ref() {
+            let mut again = Vec::new();
+            for (position, member) in deferred {
+                receiver.forward_read.set(false);
+                let degradation = self.degradation;
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(&member.value);
+                let value = self.settle_composite_part(outcome, holds_before);
+                if receiver.forward_read.get() {
+                    self.degradation = degradation;
+                    again.push((position, member));
+                    continue;
+                }
+                surface_members[position].value = value;
+                unwidened_members[position].value = value;
+                receiver
+                    .members
+                    .borrow_mut()
+                    .push(surface_members[position].clone());
+            }
+            for (position, member) in again {
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(&member.value);
+                let value = self.settle_composite_part(outcome, holds_before);
+                surface_members[position].value = value;
+                unwidened_members[position].value = value;
+                receiver
+                    .members
+                    .borrow_mut()
+                    .push(surface_members[position].clone());
+            }
+            // A member whose value holds the literal's own `this` (a method
+            // returning `this`) names the literal's type recursively,
+            // which this graph does not represent: that position is the
+            // typed marker.
+            for index in 0..surface_members.len() {
+                if self
+                    .dispatch
+                    .mentions_node(surface_members[index].value, receiver.binder)
+                {
+                    let marker = self.unmodeled_position();
+                    surface_members[index].value = marker;
+                    unwidened_members[index].value = marker;
+                }
+            }
+        }
+        self.receiver = enclosing_receiver;
         if spread_seen {
             if late_bound.any() {
                 return Positional::Unmodeled;
@@ -15022,6 +15164,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 heritage_self_roots: Vec::new(),
                 inferred_predicate: None,
                 declared_reads: false,
+                // A class expression member (or an arrow it creates) runs
+                // against the receiver the class binds.
+                receiver: matches!(
+                    capture_context.this(),
+                    Some(crate::flow_slice_content::SliceThis::Receiver)
+                )
+                .then(|| self.receiver.clone())
+                .flatten(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -15517,13 +15667,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                         }
                     }
+                    // A class's polymorphic `this` reads its class's member
+                    // where the member is declared, binding the member's own
+                    // `this` to the receiver.
+                    let this_source = self.this_member_source(current, name);
+                    let read_base = this_source.unwrap_or(current);
                     let Some(member) =
-                        self.project_path_navigate(current, std::slice::from_ref(name))
+                        self.project_path_navigate(read_base, std::slice::from_ref(name))
                     else {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
                             crate::semantic_query::FlowGap::UnmodeledExpression,
                         ));
                         return Positional::Unmodeled;
+                    };
+                    let member = match this_source {
+                        Some(_) => self.dispatch.bind_this_receiver(member, current),
+                        None => member,
                     };
                     // A declared-optional member (`b?: string`) folds its
                     // absent-key `undefined` into THIS link's read — the
@@ -15531,7 +15690,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // a plain member path — regardless of whether the hop
                     // itself used `?.` or `.`.
                     let declared_optional =
-                        self.member_read_optionality(current, name.as_ref()) == Some(true);
+                        self.member_read_optionality(read_base, name.as_ref()) == Some(true);
                     current = if declared_optional {
                         self.fold_optional_read_undefined(member)
                     } else {
@@ -15679,6 +15838,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ))
             }
             crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
+            crate::flow_slice_content::SliceExpr::This(this) => self.eval_this(this),
 
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own
@@ -16191,11 +16351,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // an empty-cycle outcome is a hold the SCC close discharges
                 // on the component's admitted returns; every other outcome
                 // contributes the callee's return or its typed failure.
-                let prepared = self.dispatch.ctx.prepared_value_decl_return_only(
-                    self.canonical,
-                    target.declaration.owner,
-                    target.declaration.name.as_ref(),
-                );
+                // A MEMBER position (a class member, an object literal's
+                // method) is not its declaration's value: only its own
+                // served return answers the call.
+                let prepared = match &target.part {
+                    verter_type_expr::facts::FunctionPartIdentity::Member { .. } => None,
+                    _ => self.dispatch.ctx.prepared_value_decl_return_only(
+                        self.canonical,
+                        target.declaration.owner,
+                        target.declaration.name.as_ref(),
+                    ),
+                };
                 // A value declaration carrying an AUTHORED annotation is
                 // typed by that annotation, full stop: the initializer
                 // only has to be assignable to it. `const f: () => 42 =
@@ -16688,6 +16854,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if overloaded {
                         return self.degraded_unrepresentable_callee();
                     }
+                }
+                self.call_return_of_callee_node(callee_node, site)
+            }
+            crate::flow_slice_content::SliceCall::Member { receiver, member } => {
+                // `this.m()`: the member of the receiver's value, called
+                // through the executor that reads its receiver-bound
+                // signatures, else the lone signature read.
+                let receiver = match self.eval_expr(receiver) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                let mut callee_node = receiver;
+                for name in member.iter() {
+                    let this_source = self.this_member_source(callee_node, name);
+                    let Some(read) = self.project_path_navigate(
+                        this_source.unwrap_or(callee_node),
+                        std::slice::from_ref(name),
+                    ) else {
+                        return self.degraded_unrepresentable_callee();
+                    };
+                    callee_node = match this_source {
+                        Some(_) => self.dispatch.bind_this_receiver(read, callee_node),
+                        None => read,
+                    };
+                }
+                if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                    return value;
                 }
                 self.call_return_of_callee_node(callee_node, site)
             }

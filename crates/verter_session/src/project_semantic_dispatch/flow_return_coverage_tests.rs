@@ -3926,28 +3926,15 @@ fn a_derived_constructor_with_a_super_call_is_not_served() {
     );
 }
 
-/// CANARY — a `this.<field>` read inside an instance method resolves to
-/// the field's declared type.
+/// A `this.<field>` read inside an instance method resolves to the
+/// field's declared type, complete and warm: `this` is the class's
+/// receiver, and the inherited field is read off the base where it is
+/// declared.
 ///
 /// Oracle: `ReturnType<typeof SuperCtorDerived.prototype.read>` is
 /// `number` — the parameter-property `public v: number` inherited from
 /// the base constructor.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the flow evaluator's member arm again, this time with a
-/// `this` root rather than a parameter root. Note the answer differs from
-/// the parameter-root family: `this.v` lands on a WARM `any` rather than
-/// the warm `Opaque(Miss)` a parameter root produces, so the two roots
-/// take different paths to the same missing capability.
 #[test]
-#[ignore = "a `this.<field>` read has no member arm: it evaluates to `any` and is admitted warm"]
 fn this_field_read_inside_an_instance_method_resolves_to_the_field_type() {
     let host = host_with(&[(EXTRA, EXTRA_SRC)]);
     assert_eq!(

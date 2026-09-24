@@ -898,6 +898,7 @@ struct DiscoveryCtx<'source, 'ast> {
     nodes: Option<FunctionProgramNodes<'ast>>,
     enclosing_type_parameters: Option<&'ast oxc_ast::ast::TSTypeParameterDeclaration<'ast>>,
     enclosing_heritage: Option<EnclosingHeritage<'ast>>,
+    enclosing_this: Option<EnclosingThis>,
     entries: Vec<FunctionProgramEntry>,
     expressions: Vec<ProgramExpressionRecord>,
     /// Source-order ordinal counter for nested served positions (hoisted
@@ -948,6 +949,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                     self_name,
                     enclosing_type_parameters: self.enclosing_type_parameters,
                     enclosing_heritage: self.enclosing_heritage,
+                    enclosing_this: self.enclosing_this,
                 });
         }
         self.entries.push(entry);
@@ -997,6 +999,7 @@ fn build_function_program_index_impl<'ast>(
         nodes,
         enclosing_type_parameters: None,
         enclosing_heritage: None,
+        enclosing_this: None,
         entries: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
@@ -2467,6 +2470,8 @@ fn discover_variable_declaration<'ast>(
                     );
                     match &p.value {
                         Expression::FunctionExpression(func) => {
+                            let previous_this =
+                                ctx.enclosing_this.replace(EnclosingThis::ObjectLiteral);
                             discover_function_inner(
                                 func,
                                 &name,
@@ -2479,6 +2484,7 @@ fn discover_variable_declaration<'ast>(
                                 0,
                                 ctx,
                             );
+                            ctx.enclosing_this = previous_this;
                         }
                         Expression::ArrowFunctionExpression(arrow) => {
                             discover_arrow_inner(
@@ -2843,6 +2849,7 @@ fn discover_class_members<'ast>(
     let previous_type_parameters = ctx.enclosing_type_parameters;
     ctx.enclosing_type_parameters = class.type_parameters.as_deref();
     let previous_heritage = ctx.enclosing_heritage;
+    let previous_this = ctx.enclosing_this;
     let mut member_overloads: rustc_hash::FxHashMap<(String, bool), u32> =
         rustc_hash::FxHashMap::default();
     for (member_ordinal, element) in class.body.body.iter().enumerate() {
@@ -2878,6 +2885,7 @@ fn discover_class_members<'ast>(
                             super_type_arguments: class.super_type_arguments.as_deref(),
                             static_side: method.r#static,
                         });
+                ctx.enclosing_this = Some(EnclosingThis::of_member(method.r#static));
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
                 let mut descent = base_descent.clone();
                 descent.push(FunctionDescentStep::ClassMember { member_ordinal });
@@ -2891,6 +2899,7 @@ fn discover_class_members<'ast>(
                     ctx,
                 );
                 ctx.enclosing_heritage = previous_heritage;
+                ctx.enclosing_this = previous_this;
             }
             oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
                 let Some(_member_name) = static_property_key_name(&prop.key) else {
@@ -2908,6 +2917,7 @@ fn discover_class_members<'ast>(
                             super_type_arguments: class.super_type_arguments.as_deref(),
                             static_side: prop.r#static,
                         });
+                ctx.enclosing_this = Some(EnclosingThis::of_member(prop.r#static));
                 match prop.value.as_ref() {
                     Some(Expression::ArrowFunctionExpression(arrow)) => {
                         discover_arrow_inner(
@@ -2933,12 +2943,14 @@ fn discover_class_members<'ast>(
                     _ => {}
                 }
                 ctx.enclosing_heritage = previous_heritage;
+                ctx.enclosing_this = previous_this;
             }
             _ => {}
         }
     }
     ctx.enclosing_type_parameters = previous_type_parameters;
     ctx.enclosing_heritage = previous_heritage;
+    ctx.enclosing_this = previous_this;
 }
 
 pub(crate) fn static_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
@@ -3091,6 +3103,7 @@ fn discover_nested_positions<'ast>(
 ) {
     let previous_type_parameters = ctx.enclosing_type_parameters.take();
     let previous_heritage = ctx.enclosing_heritage.take();
+    let previous_this = ctx.enclosing_this.take();
     let mut local_ordinal = 0;
     for_each_nested_callable(statements, |node, class_member| {
         let ordinal = ctx.next_nested_ordinal;
@@ -3112,6 +3125,7 @@ fn discover_nested_positions<'ast>(
     });
     ctx.enclosing_type_parameters = previous_type_parameters;
     ctx.enclosing_heritage = previous_heritage;
+    ctx.enclosing_this = previous_this;
 }
 /// One function / arrow expression in call-argument position, discovered
 /// under its lexical parent's key.
@@ -4274,6 +4288,37 @@ pub struct ResolvedFunctionNode<'a> {
     /// classes; nested callables clear it, mirroring the type-parameter
     /// clause rule above.
     pub enclosing_heritage: Option<EnclosingHeritage<'a>>,
+    /// The receiver `this` reads inside a DIRECT member of a class
+    /// declaration: the class's instance for an instance member, its
+    /// constructor for a static one. `None` everywhere else; nested
+    /// callables clear it (a nested arrow's lexical `this` reaches it
+    /// through the flow lane's nested context instead).
+    pub enclosing_this: Option<EnclosingThis>,
+}
+
+/// What `this` is inside a direct member of a class declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnclosingThis {
+    /// An instance member (method, accessor or property initializer):
+    /// the class's polymorphic `this` type.
+    Instance,
+    /// A static member: the class constructor, `typeof C`.
+    Static,
+    /// A method or accessor of a variable's object literal: the variable's
+    /// value.
+    ObjectLiteral,
+}
+
+impl EnclosingThis {
+    /// The receiver of a member whose `static` flag is `static_side`.
+    #[must_use]
+    pub fn of_member(static_side: bool) -> Self {
+        if static_side {
+            Self::Static
+        } else {
+            Self::Instance
+        }
+    }
 }
 
 /// The heritage (`extends`) access context one direct class member's body
@@ -4316,6 +4361,7 @@ pub fn resolve_function_node<'a>(
     // — mirroring discovery, which binds the heritage only to the member's
     // own program.
     let mut enclosing_heritage: Option<EnclosingHeritage<'a>> = None;
+    let mut enclosing_this: Option<EnclosingThis> = None;
     let mut steps = locator.descent.iter().peekable();
     loop {
         match steps.next()? {
@@ -4344,6 +4390,7 @@ pub fn resolve_function_node<'a>(
                         self_name,
                         enclosing_type_parameters: None,
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 // Non-terminal: a nested position inside this function's body.
@@ -4366,6 +4413,7 @@ pub fn resolve_function_node<'a>(
                             self_name,
                             enclosing_type_parameters: None,
                             enclosing_heritage,
+                            enclosing_this,
                         });
                     }
                     Some(FunctionDescentStep::ObjectMember { member_ordinal }) => {
@@ -4387,6 +4435,8 @@ pub fn resolve_function_node<'a>(
                                 self_name: None,
                                 enclosing_type_parameters: None,
                                 enclosing_heritage,
+                                enclosing_this: matches!(node, FunctionNode::Function(_))
+                                    .then_some(EnclosingThis::ObjectLiteral),
                             });
                         }
                         // Non-terminal: a nested position inside the member body.
@@ -4423,6 +4473,7 @@ pub fn resolve_function_node<'a>(
                             super_type_arguments: class.super_type_arguments.as_deref(),
                             static_side: member_is_static,
                         });
+                enclosing_this = Some(EnclosingThis::of_member(member_is_static));
                 if steps.len() == 0 {
                     // Terminal step: the class member at `member_ordinal`.
                     // Class members have no bare-identifier self name. The
@@ -4434,6 +4485,7 @@ pub fn resolve_function_node<'a>(
                         self_name: None,
                         enclosing_type_parameters: class.type_parameters.as_deref(),
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 // Non-terminal: a nested position inside the member body.
@@ -4458,6 +4510,7 @@ pub fn resolve_function_node<'a>(
                         self_name: None,
                         enclosing_type_parameters: None,
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 // Non-terminal: a nested position inside the member body.
@@ -4470,6 +4523,7 @@ pub fn resolve_function_node<'a>(
             }
             FunctionDescentStep::NestedCallable { ordinal } => {
                 enclosing_heritage = None;
+                enclosing_this = None;
                 let body = current_body?;
                 let mut position = 0;
                 let mut selected = None;
@@ -4492,12 +4546,14 @@ pub fn resolve_function_node<'a>(
                         self_name,
                         enclosing_type_parameters: None,
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 current_body = node.body();
             }
             FunctionDescentStep::BodyStatement { statement_ordinal } => {
                 enclosing_heritage = None;
+                enclosing_this = None;
                 // The statement at `statement_ordinal` inside the enclosing
                 // function's body — a hoisted nested function declaration.
                 let body = current_body?;
@@ -4513,6 +4569,7 @@ pub fn resolve_function_node<'a>(
                         self_name,
                         enclosing_type_parameters: None,
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 // Non-terminal: a nested position inside this declaration's body.
@@ -4523,6 +4580,7 @@ pub fn resolve_function_node<'a>(
                 arg_ordinal,
             } => {
                 enclosing_heritage = None;
+                enclosing_this = None;
                 // The argument at `arg_ordinal` of the enclosing body's
                 // `call_ordinal`-th call site — a callback position.
                 let body = current_body?;
@@ -4542,6 +4600,7 @@ pub fn resolve_function_node<'a>(
                         self_name,
                         enclosing_type_parameters: None,
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 // Non-terminal: a nested position inside the callback's body.
@@ -4549,6 +4608,7 @@ pub fn resolve_function_node<'a>(
             }
             FunctionDescentStep::CallCallee { call_ordinal } => {
                 enclosing_heritage = None;
+                enclosing_this = None;
                 // The CALLEE of the enclosing body's `call_ordinal`-th call
                 // site — an immediately-invoked function expression.
                 let body = current_body?;
@@ -4566,6 +4626,7 @@ pub fn resolve_function_node<'a>(
                         self_name,
                         enclosing_type_parameters: None,
                         enclosing_heritage,
+                        enclosing_this,
                     });
                 }
                 // Non-terminal: a nested position inside the callee's body.

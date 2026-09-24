@@ -15,6 +15,22 @@ use crate::semantic_query::{
     AuthoredPropertyKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
 };
 
+/// The instance a class expression's members run against while the class
+/// evaluates them: its polymorphic `this` binder, and the instance members
+/// evaluated so far, which a member body reads through `this`.
+pub(super) struct ClassReceiver {
+    /// The class's polymorphic `this`.
+    pub(super) binder: SemanticNodeId,
+    /// The instance members evaluated so far, in evaluation order.
+    pub(super) members: std::cell::RefCell<Vec<SurfaceMember>>,
+    /// Every statically named instance member the class declares.
+    pub(super) declared: rustc_hash::FxHashSet<Arc<str>>,
+    /// The base instance, when the class extends one.
+    pub(super) base: Option<SemanticNodeId>,
+    /// Set when a member body read a declared member not evaluated yet.
+    pub(super) forward_read: std::cell::Cell<bool>,
+}
+
 /// What a class expression's `extends` value provides to the class.
 struct ClassBase {
     /// The parameters of each accepted base construct signature, in order —
@@ -156,10 +172,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
         };
+        let values = self.eval_class_member_values(class, env, base.as_ref());
         let mut instance_side = MemberSide::default();
         let mut static_side = MemberSide::default();
-        for member in class.members.iter() {
-            let value = self.eval_class_member_value(&member.value, env);
+        for (member, value) in class.members.iter().zip(values) {
             let side = if member.is_static {
                 &mut static_side
             } else {
@@ -370,6 +386,105 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// One class member's type.
+    /// Every member's value, in declaration order. Instance members run
+    /// against the class's receiver: the non-function members first, then
+    /// the functions, so a member body reads a sibling through `this`; a
+    /// function that read a declared sibling not evaluated yet is evaluated
+    /// again once every other member has been.
+    fn eval_class_member_values(
+        &mut self,
+        class: &SliceClass,
+        env: &FlowBinderEnv,
+        base: Option<&ClassBase>,
+    ) -> Vec<SemanticNodeId> {
+        let receiver = std::rc::Rc::new(ClassReceiver {
+            binder: self
+                .dispatch
+                .this_binder(self.canonical, self.owner, &class.name, None),
+            members: std::cell::RefCell::new(Vec::new()),
+            declared: class
+                .members
+                .iter()
+                .filter(|member| !member.is_static)
+                .filter_map(|member| match &member.key {
+                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                    SliceObjectKey::Computed { .. } => None,
+                })
+                .collect(),
+            base: base.and_then(|base| base.instance),
+            forward_read: std::cell::Cell::new(false),
+        });
+        let enclosing = self.receiver.replace(receiver.clone());
+        let is_function = |value: &SliceClassMemberValue| {
+            matches!(
+                value,
+                SliceClassMemberValue::Method(_) | SliceClassMemberValue::Getter(_)
+            )
+        };
+        let order: Vec<usize> = (0..class.members.len())
+            .filter(|index| !is_function(&class.members[*index].value))
+            .chain(
+                (0..class.members.len()).filter(|index| is_function(&class.members[*index].value)),
+            )
+            .collect();
+        let mut values: Vec<Option<SemanticNodeId>> = vec![None; class.members.len()];
+        let mut again = Vec::new();
+        for index in order {
+            let member = &class.members[index];
+            receiver.forward_read.set(false);
+            let degradation = self.degradation;
+            let value = self.eval_class_member_value(&member.value, env);
+            if receiver.forward_read.get() && is_function(&member.value) {
+                self.degradation = degradation;
+                again.push(index);
+                continue;
+            }
+            self.record_receiver_member(&receiver, member, value);
+            values[index] = Some(value);
+        }
+        for index in again {
+            let member = &class.members[index];
+            let value = self.eval_class_member_value(&member.value, env);
+            self.record_receiver_member(&receiver, member, value);
+            values[index] = Some(value);
+        }
+        self.receiver = enclosing;
+        values
+            .into_iter()
+            .map(|value| value.expect("every member evaluated"))
+            .collect()
+    }
+
+    /// Record an evaluated, statically named instance member on the
+    /// class's receiver.
+    fn record_receiver_member(
+        &self,
+        receiver: &ClassReceiver,
+        member: &crate::flow_slice_content::SliceClassMember,
+        value: SemanticNodeId,
+    ) {
+        let SliceObjectKey::Static(name) = &member.key else {
+            return;
+        };
+        if member.is_static {
+            return;
+        }
+        receiver.members.borrow_mut().push(SurfaceMember {
+            key: AuthoredPropertyKey::string(name.as_ref()),
+            value,
+            optional: member.optional,
+            readonly: member.readonly,
+            method_kind: member.method_kind,
+            has_implementation_body: member.method_kind.is_some(),
+            visibility: member.visibility,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            spans: member.spans,
+            declaration_origin: Some(Arc::from(self.canonical)),
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+            merge_role: crate::semantic_query::MergeRoleStamp::default(),
+        });
+    }
+
     fn eval_class_member_value(
         &mut self,
         value: &SliceClassMemberValue,
@@ -452,6 +567,136 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// Lower one body-position `TypeExpr` under `env`.
+    /// `this` in a class declaration's member: the class's polymorphic
+    /// `this` (a binder over the class instance `C<T…>`) in an instance
+    /// member, the constructor `typeof C` in a static one.
+    pub(super) fn eval_this(
+        &mut self,
+        this: &crate::flow_slice_content::SliceThis,
+    ) -> Positional<SemanticNodeId> {
+        match this {
+            crate::flow_slice_content::SliceThis::Instance {
+                class,
+                type_parameters,
+            } => {
+                let reference = verter_type_expr::TypeExpr::Ref {
+                    name: Arc::clone(class),
+                    type_arguments: type_parameters
+                        .iter()
+                        .map(|name| verter_type_expr::TypeExpr::named(name.as_ref()))
+                        .collect(),
+                };
+                let instance = self.lower_type_in(self.binder_env, &reference);
+                Positional::Value(self.dispatch.this_binder(
+                    self.canonical,
+                    self.owner,
+                    class,
+                    Some(instance),
+                ))
+            }
+            crate::flow_slice_content::SliceThis::Receiver => match &self.receiver {
+                Some(receiver) => Positional::Value(receiver.binder),
+                None => {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
+                    );
+                    Positional::Unmodeled
+                }
+            },
+            crate::flow_slice_content::SliceThis::Static { class: value, .. }
+            | crate::flow_slice_content::SliceThis::Value { value, .. } => {
+                // The deferred `typeof C` / `typeof value` carrier: the
+                // value is read where a consumer demands it, never while its
+                // own member's return is still being evaluated.
+                let mut path = value.split('.');
+                let Some(root) = path.next() else {
+                    return Positional::Unmodeled;
+                };
+                let value_root = crate::semantic_query::ValueRootKey {
+                    scope: crate::semantic_query::ScopeId {
+                        canonical_id: Arc::from(self.canonical),
+                        owner: self.owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            self.owner,
+                        ),
+                    },
+                    name: Arc::from(root),
+                };
+                let path: Arc<[Arc<str>]> = path.map(Arc::from).collect();
+                Positional::Value(self.dispatch.graph().intern_node_with_scope(
+                    SemanticNodeData::new_typeof(value_root, path, Arc::from([])),
+                    self.binder_env.scope.clone(),
+                ))
+            }
+        }
+    }
+
+    /// Where member `name` of `receiver` reads from when `receiver` is a
+    /// class's polymorphic `this`: the class's own member position (or the
+    /// base's), never the whole class body — whose lowering would re-enter
+    /// the member body this read is part of.
+    pub(super) fn this_member_source(
+        &self,
+        receiver: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.dispatch.graph();
+        if let Some(bound) = self
+            .receiver
+            .as_ref()
+            .filter(|bound| bound.binder == receiver)
+        {
+            // A class expression's own member reads the value its class
+            // evaluated for it; one not evaluated yet is a forward read the
+            // class retries; an inherited one reads off the base instance,
+            // keeping the polymorphic `this` the reading receiver binds.
+            let key = AuthoredPropertyKey::string(name);
+            let own: Vec<crate::semantic_query::SurfaceEntry> = bound
+                .members
+                .borrow()
+                .iter()
+                .filter(|member| member.key == key)
+                .cloned()
+                .map(crate::semantic_query::SurfaceEntry::Member)
+                .collect();
+            if !own.is_empty() {
+                return Some(graph.intern_node(SemanticNodeData::Object(
+                    crate::semantic_query::SurfaceView::from_entries(own, None, false),
+                )));
+            }
+            if bound.declared.contains(name) {
+                bound.forward_read.set(true);
+                return None;
+            }
+            return bound.base;
+        }
+        let data = graph.node_data(receiver)?;
+        let SemanticNodeData::TypeParam {
+            decl,
+            param_index,
+            constraint: Some(instance),
+            ..
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        if *param_index != crate::project_semantic_dispatch::substitute::THIS_BINDER_INDEX {
+            return None;
+        }
+        let args: Vec<SemanticNodeId> = match graph.node_data(*instance).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { args, .. }) => args.to_vec(),
+            _ => Vec::new(),
+        };
+        self.dispatch.class_member_source(
+            &decl.canonical_id,
+            decl.owner,
+            &decl.decl_name,
+            &args,
+            name,
+        )
+    }
+
     fn lower_type_in(
         &self,
         env: &FlowBinderEnv,
