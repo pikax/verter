@@ -6825,14 +6825,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let (
             SemanticNodeData::Signature {
                 kind: s_kind,
-                params: s_params,
                 return_type: s_ret,
                 predicate: s_predicate,
                 ..
             },
             SemanticNodeData::Signature {
                 kind: t_kind,
-                params: t_params,
                 return_type: t_ret,
                 predicate: t_predicate,
                 ..
@@ -6845,8 +6843,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(RelationResult::NotAssignable);
                 return;
             }
-            let s_params = Arc::clone(s_params);
-            let t_params = Arc::clone(t_params);
+            let kind = *s_kind;
             let source_result = FunctionResult {
                 return_type: *s_ret,
                 predicate: *s_predicate,
@@ -6858,10 +6855,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             drop(source_data);
             drop(target_data);
             results.push(self.relate_function(
-                &s_params,
+                source,
                 source_result,
-                &t_params,
+                target,
                 target_result,
+                kind,
                 bindings,
             ));
             return;
@@ -7755,14 +7753,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn last_required_position(params: &[crate::semantic_query::FunctionParam]) -> usize {
-        let fixed: Vec<_> = params.iter().filter(|param| !param.rest).collect();
-        fixed
-            .iter()
-            .rposition(|param| !param.optional)
-            .map_or(0, |position| position + 1)
-    }
-
     fn current_relation_kind(&self) -> crate::semantic_query::RelationKind {
         self.dispatch_txn
             .borrow()
@@ -7780,11 +7770,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Relate two [`SemanticNodeData::Signature`] shells. Parameter
-    /// variance follows the key's policy (RI-10 behavioral branch):
-    /// strictly contravariant under `strictFunctionTypes`, bivariant
-    /// otherwise (either direction suffices per parameter pair); the
-    /// return is covariant. Subtype never uses the bivariant shortcut.
+    /// Relate two [`SemanticNodeData::Signature`] shells. The parameter
+    /// positions and the arity verdict are the checker's
+    /// `compareSignaturesRelated` read through the ONE positional model
+    /// ([`Self::signature_comparison_plan`]): a rest parameter supplies its
+    /// element at every position past the fixed ones, and a target with a
+    /// rest accepts any source arity. Parameter variance follows the key's
+    /// policy (RI-10 behavioral branch): strictly contravariant under
+    /// `strictFunctionTypes`, bivariant otherwise (either direction
+    /// suffices per parameter pair); the return is covariant. Subtype never
+    /// uses the bivariant shortcut. A comparison whose positions do not
+    /// settle is unknown, never a guess.
     ///
     /// A target carrying a TYPE predicate (`x is T` / `this is T`) relates
     /// predicates instead of returns, as TypeScript's
@@ -7798,18 +7794,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// parameter or an assertion source is false.
     pub(super) fn relate_function(
         &self,
-        source_params: &[crate::semantic_query::FunctionParam],
+        source: SemanticNodeId,
         source_result: FunctionResult,
-        target_params: &[crate::semantic_query::FunctionParam],
+        target: SemanticNodeId,
         target_result: FunctionResult,
+        kind: crate::semantic_query::SignatureKind,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let (source_this, source_pos) = crate::semantic_query::split_this_receiver(source_params);
-        let (target_this, target_pos) = crate::semantic_query::split_this_receiver(target_params);
-        if let (Some(src_this), Some(tgt_this)) = (source_this, target_this) {
+        let Ok(plan) = self.signature_comparison_plan(source, target, kind) else {
+            return RelationResult::Unknown;
+        };
+        if let (Some(src_this), Some(tgt_this)) = (plan.source_receiver, plan.target_receiver) {
             let this_rel = self.relate_member(
-                tgt_this.ty,
-                src_this.ty,
+                tgt_this,
+                src_this,
                 bindings,
                 InferPosition::ContravariantParam,
             );
@@ -7817,17 +7815,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return RelationResult::NotAssignable;
             }
         }
-        let source_required = Self::last_required_position(source_pos);
-        let target_required = Self::last_required_position(target_pos);
-        // A rest parameter absorbs extra supplied arguments; it never
-        // supplies the source's own missing required parameters, so a
-        // source uncallable at the target's last-required-position arity
-        // rejects unconditionally.
-        if source_required > target_required {
+        // A source that demands more arguments than a rest-less target can
+        // supply rejects unconditionally.
+        if plan.source_has_more_parameters {
             return RelationResult::NotAssignable;
         }
-        let source_params = source_pos;
-        let target_params = target_pos;
         let bivariant = {
             let txn = self.dispatch_txn.borrow();
             let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
@@ -7836,14 +7828,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
-        for (s_param, t_param) in source_params.iter().zip(target_params.iter()) {
+        for (s_param, t_param) in plan.positions {
             // Contravariant: target param ≤ source param. Under the
             // bivariant regime either direction discharges the pair.
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
             let contravariant = self.relate_member(
-                t_param.ty,
-                s_param.ty,
+                t_param,
+                s_param,
                 bindings,
                 InferPosition::ContravariantParam,
             );
@@ -7853,7 +7845,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let fallback_checkpoint = self.relation_session_checkpoint();
                 let fallback_bindings_len = bindings.len();
                 let fallback =
-                    self.relate_member(s_param.ty, t_param.ty, bindings, InferPosition::Covariant);
+                    self.relate_member(s_param, t_param, bindings, InferPosition::Covariant);
                 if !matches!(fallback, RelationResult::Assignable { .. }) {
                     self.relation_session_rollback(&fallback_checkpoint);
                     bindings.truncate(fallback_bindings_len);

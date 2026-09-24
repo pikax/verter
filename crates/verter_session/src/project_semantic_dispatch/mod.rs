@@ -4157,4 +4157,6 @@ mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
+mod signature_relation_tests;
+#[cfg(test)]
 mod truthiness_domain_tests;
