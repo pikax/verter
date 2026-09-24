@@ -184,6 +184,64 @@ pub struct OrderedAttributeOp {
     pub modifiers: Vec<String>,
     /// Whether this bound/value-bearing channel participates in inference.
     pub inference_participation: bool,
+    /// Shape of a `v-on` value, read from the admitted parse; `None` for
+    /// other operations and for a listener without an admitted value.
+    pub handler: Option<HandlerShape>,
+}
+
+/// Shape of a `v-on` value, decided from the same parse facts every backend
+/// wraps handlers from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerShape {
+    /// Identifier or member expression, optional chains included: the value
+    /// is the handler.
+    Reference,
+    /// Arrow or `function` expression: the value is the handler.
+    Function,
+    /// Any other single expression: it is the body of a synthesized
+    /// `$event` handler, whose return is the expression's value.
+    Inline,
+    /// A statement list: it is the block body of a synthesized `$event`
+    /// handler.
+    Statements,
+}
+
+impl HandlerShape {
+    fn of(parsed: &OxcParsedExpression<'_>) -> Self {
+        use oxc_ast::ast::{ChainElement, Expression};
+        if parsed.multi_statement {
+            return Self::Statements;
+        }
+        let Some(expr) = parsed
+            .expression
+            .as_ref()
+            .map(Expression::get_inner_expression)
+        else {
+            return Self::Statements;
+        };
+        match expr {
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+                Self::Function
+            }
+            Expression::Identifier(ident) if ident.name != "undefined" => Self::Reference,
+            _ if expr.is_member_expression() => Self::Reference,
+            // `a?.b` (and `a?.b!`) is an optional member expression, which
+            // the runtime compiler passes through as the handler.
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::TSNonNullExpression(non_null)
+                    if non_null
+                        .expression
+                        .get_inner_expression()
+                        .is_member_expression() =>
+                {
+                    Self::Reference
+                }
+                element if element.is_member_expression() => Self::Reference,
+                _ => Self::Inline,
+            },
+            _ => Self::Inline,
+        }
+    }
 }
 
 /// Outcome of one template branch member. Not a concatenated condition
@@ -1421,6 +1479,10 @@ impl<'a> PlanBuilder<'a> {
                 arg_end: arg_inner.map(|(_, _, e)| e).unwrap_or(0),
                 modifiers: modifier_names(prop, self.source),
                 unadmitted: arg_unadmitted || exp_unadmitted,
+                handler: parsed
+                    .and_then(|p| p.exp.as_ref())
+                    .filter(|_| kind == AttributeOpKind::VOn)
+                    .map(HandlerShape::of),
             });
             dense += 1;
         }
@@ -1472,12 +1534,14 @@ impl<'a> PlanBuilder<'a> {
                 None
             };
             let participates = op_participates(draft.kind, expression.is_some());
+            let handler = draft.handler.filter(|_| expression.is_some());
             ops.push(OrderedAttributeOp {
                 index: draft.index,
                 kind: draft.kind,
                 name: draft.name,
                 expression,
                 argument,
+                handler,
                 modifiers: draft.modifiers,
                 inference_participation: participates,
             });
@@ -1939,6 +2003,7 @@ struct OpDraft {
     arg_end: u32,
     modifiers: Vec<String>,
     unadmitted: bool,
+    handler: Option<HandlerShape>,
 }
 
 struct SlotDraft {

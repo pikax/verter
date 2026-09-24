@@ -36,6 +36,7 @@ use crate::framework_common::FrameworkParseArtifact;
 use crate::ide::vue_projection::attribute_operations::project_attribute_operations;
 use crate::ide::vue_projection::binder_capture::{capture_binder_plan, BinderCapturePlan};
 use crate::ide::vue_projection::binding_views::{project_binding_views, BindingViewsProjection};
+use crate::ide::vue_projection::component_use::project_component_uses;
 use crate::ide::vue_projection::options_api::project_options_pair;
 
 /// STP13 named products: the acceptance surface of
@@ -56,6 +57,18 @@ pub use crate::ide::vue_projection::attribute_operations::{
     ConsumerChannel, Contribution, EffectiveProperty, MergeRule, OpaqueSpread, RuntimeKey,
     RuntimePropertyKeyPlan, RuntimePropertyWrite, SpreadKind, ValidationObligation, VueAttributeOp,
     VueAttributeSequence, WriteValue,
+};
+
+/// Component-use products: the acceptance surface of
+/// [`VueProjectionBackend::component_uses`]. Re-exported here (rather than
+/// through `ide`, which is crate-internal) so qualification harnesses and
+/// the slot, event, model and ref consumers name the same types as this
+/// backend.
+pub use crate::ide::vue_projection::component_use::{
+    CheckContract, ComponentUseProjection, ComponentUseWitness, ExcludedOperation, ExclusionReason,
+    InferenceTransaction, MemberValue, ObservationKind, SpecializationKey,
+    SpecializedUseObservation, TransactionMember, ValidationCheck, USE_CONSTRUCTOR, USE_LISTENER,
+    USE_MODEL, USE_PRELUDE, USE_PROP, USE_SLOT_PROPS, WITNESS_PREFIX,
 };
 
 /// STP15 named products: the acceptance surface of
@@ -228,6 +241,32 @@ impl VueProjectionBackend {
         }
         let plan = self.projection_plan(source, artifact, canonical_id);
         Ok(project_attribute_operations(&plan, parsed, source))
+    }
+
+    /// One inference transaction per component use of the admitted parse:
+    /// a single construction of the used component carrying every
+    /// authorized contributor in the runtime's merge order, validation-only
+    /// checks that reuse its specialized instance, and slot / event / model /
+    /// ref observations read from that instance. Derived from the same
+    /// [`ProjectionPlan`] and attribute products; an incomplete plan or an
+    /// unnamed component yields an incomplete product. Dormant relative to
+    /// [`Self::project_ide`] until Vue atomic activation switches the live
+    /// route.
+    pub fn component_uses(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        canonical_id: &str,
+    ) -> Result<ComponentUseProjection, SetupProjectionRefusal> {
+        let parsed = VueCarrierCompiler
+            .parsed_sfc(artifact)
+            .ok_or(SetupProjectionRefusal::MissingParse)?;
+        if artifact.carrier_source().as_ref() != source {
+            return Err(SetupProjectionRefusal::MissingParse);
+        }
+        let plan = self.projection_plan(source, artifact, canonical_id);
+        let attributes = project_attribute_operations(&plan, parsed, source);
+        Ok(project_component_uses(&plan, &attributes))
     }
 
     /// Live template read/write views for the admitted parse: unwrapped

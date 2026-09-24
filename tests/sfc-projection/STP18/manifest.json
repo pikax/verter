@@ -1,0 +1,71 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STP18",
+  "kind": "implementation",
+  "products": ["ComponentUseWitness", "SpecializedUseObservation", "InferenceTransaction"],
+  "mandatoryCases": [
+    "STP18-single-witness",
+    "STP18-uncoupled",
+    "STP18-contextual",
+    "STP18-literal",
+    "STP18-handler-check",
+    "STP18-fresh-id",
+    "STP18-script-template-parity"
+  ],
+  "probes": {
+    "positive": "tests/sfc-projection/STP18/probes/positive.ts",
+    "negative": "tests/sfc-projection/STP18/probes/negative.ts",
+    "cleanTwin": "tests/sfc-projection/STP18/probes/positive.ts",
+    "tsconfig": "tests/sfc-projection/STP18/probes/tsconfig.json",
+    "hoverNeedle": "stp18HoverTarget",
+    "definitionNeedle": "stp18DefinitionTarget",
+    "expectedNegativeCode": 2322,
+    "expectedHoverType": "number",
+    "expectedInstanceType": "__VerterPublicInstance<Row, string>"
+  },
+  "cases": [
+    {
+      "id": "STP18-single-witness",
+      "disposition": "accept",
+      "twins": ["one-construction-carries-every-channel", "model-value-inside-construction"]
+    },
+    {
+      "id": "STP18-uncoupled",
+      "disposition": "reject",
+      "twins": ["observations-read-uninstantiated-component"]
+    },
+    {
+      "id": "STP18-contextual",
+      "disposition": "accept",
+      "twins": [
+        "bound-callback-contextually-typed",
+        "inline-statement-typed-by-specialized-listener"
+      ]
+    },
+    {
+      "id": "STP18-literal",
+      "disposition": "reject",
+      "twins": ["static-discriminant-widened-to-string"]
+    },
+    {
+      "id": "STP18-handler-check",
+      "disposition": "reject",
+      "twins": ["collected-listener-escapes-specialized-contract"]
+    },
+    {
+      "id": "STP18-fresh-id",
+      "disposition": "reject",
+      "twins": ["offset-keyed-specialization-invalidates-sibling"]
+    },
+    {
+      "id": "STP18-script-template-parity",
+      "disposition": "accept",
+      "twins": ["explicit-and-inferred-script-construction-agree", "sibling-uses-stay-independent"]
+    }
+  ],
+  "verify": "node scripts/sfc-projection/verify-node.mjs --node STP18 --engine all --require-all --json",
+  "test": "cargo test -p verter_compiler --lib ide::vue_projection::component_use",
+  "runtimeCorrectness": true,
+  "notes": "One component-use inference transaction and specialized observations. Each use renders one construction of the used component through a helper that returns the component's own construct signature with an unknown attribute index, so TypeScript infers the binder once from every contributing channel (bound and static props, model values, spreads in merge order, and the first handler of each listener key after every spread); collected listeners, repeated class/style writes and inline statements are validation-only checks against the specialized instance; slot, event, model and instance observations read the use's witness binding. Specialization keys are per use and offset-free. Vue IDE routing stays on project_ide; this node exposes a dormant VueProjectionBackend::component_uses. STP58 owns atomic Vue activation and the retirement of instantiateComponent."
+}

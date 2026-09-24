@@ -1310,3 +1310,85 @@ fn public_constructor_reads_admitted_carrier_blocks() {
         SetupProjectionRefusal::MissingParse
     );
 }
+
+/// The production component-use path runs on real Vue SFC carrier bytes:
+/// each use renders one construction carrying its callback, discriminant,
+/// model value and first listener; a collected listener is a check against
+/// the specialized contract; observations read the use's own witness; and
+/// sibling uses never share a witness.
+#[test]
+fn component_uses_reads_admitted_carrier_blocks() {
+    use verter_compiler::framework_common::vue_projection_backend::{
+        ObservationKind, TransactionMember, USE_LISTENER, USE_PRELUDE,
+    };
+    use verter_compiler::framework_common::SetupProjectionRefusal;
+
+    const SFC: &str = concat!(
+        "<script setup lang=\"ts\">\n",
+        "import Table from './Table.vue';\n",
+        "const rows = [{ id: 1, name: 'a' }];\n",
+        "const selected = 'a';\n",
+        "function log(value: string) {}\n",
+        "function count(value: number) {}\n",
+        "</script>\n",
+        "<template>\n",
+        "<Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" v-model=\"selected\" @change=\"log\" v-on:change=\"count\">\n",
+        "  <template #default=\"{ row }\">{{ row.id }}</template>\n",
+        "</Table>\n",
+        "<Table :rows=\"[1]\" :project=\"(n) => n\" kind=\"grid\" :columns=\"2\" />\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///uses.vue", SFC);
+    let projection = VueProjectionBackend
+        .component_uses(SFC, &artifact, "file:///uses.vue")
+        .expect("projects");
+    assert!(projection.complete);
+    assert_eq!(projection.witnesses.len(), 2);
+    let (first, second) = (&projection.witnesses[0], &projection.witnesses[1]);
+    assert_ne!(first.binding, second.binding);
+
+    let keys: Vec<Option<&str>> = first
+        .transaction
+        .members
+        .iter()
+        .map(TransactionMember::key)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            Some("rows"),
+            Some("project"),
+            Some("kind"),
+            Some("modelValue"),
+            Some("onChange"),
+        ]
+    );
+    let rendered = first.render();
+    assert_eq!(rendered.matches("= new (").count(), 1);
+    assert!(rendered.contains("\"project\": ((row) => row.name), \"kind\": \"list\""));
+    assert!(rendered.contains(&format!(
+        "const {b}_check0: {USE_LISTENER}<typeof {b}, \"onChange\"> = (count);",
+        b = first.binding
+    )));
+    let owner = format!("typeof {}", first.binding);
+    assert!(first.observations.iter().any(|o| o.kind
+        == ObservationKind::Slot {
+            name: "default".to_string()
+        }
+        && o.type_text.contains(&owner)));
+    assert!(first
+        .observations
+        .iter()
+        .all(|o| o.type_text == owner || o.type_text.contains(&format!("<{owner}, "))));
+    assert!(!second.render().contains(&first.binding));
+    let whole = projection.render();
+    assert!(whole.starts_with(USE_PRELUDE));
+    assert_eq!(whole.matches("= new (").count(), 2);
+
+    assert_eq!(
+        VueProjectionBackend
+            .component_uses("<template></template>", &artifact, "file:///uses.vue")
+            .unwrap_err(),
+        SetupProjectionRefusal::MissingParse
+    );
+}
