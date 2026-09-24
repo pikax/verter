@@ -474,6 +474,14 @@ pub enum FunctionWriteTarget {
         reference: FunctionReferenceRecord,
         kind: FunctionWriteKind,
     },
+    /// A target a type assertion wraps (`(x as T) = v`, `(<T>x)++`,
+    /// `[(x satisfies T)] = v`): the checker neither assigns the binding
+    /// through it (`getAssignmentTargetKind` stops at an assertion) nor
+    /// narrows it (`isNarrowableReference` rejects one), so it writes no
+    /// binding.
+    Asserted {
+        span: verter_span::Span,
+    },
     Unsupported {
         span: verter_span::Span,
     },
@@ -624,6 +632,12 @@ pub struct FunctionProgramEntry {
     /// never a member write. With this frame's own whole writes it is
     /// every assignment the checker's `isSymbolAssigned` reads.
     pub descendant_assignments: Arc<[FlowBindingIdentity]>,
+    /// The whole-binding assignments code no entry serves makes to names it
+    /// does not itself declare: a class's members and initializers, and a
+    /// callable in the parameter list. Each resolves in this frame's
+    /// lexical scope and joins the defining frame's
+    /// [`Self::descendant_assignments`] (this frame's own included).
+    pub(crate) unserved_assignments: Arc<[FunctionReferenceRecord]>,
     /// Own and transitively nested captured reads, excluding this frame's locals.
     pub captured_reads: Arc<[FunctionCapturedRead]>,
     /// Immediate child creation sites and their retained read-path dependencies.
@@ -1215,6 +1229,18 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
                             descendant_assignments[defining].push(identity.clone());
                         }
                     }
+                }
+            }
+        }
+        // Code no entry serves (a class, a parameter-list callable) is a
+        // callable nested here too: its escaping assignments reach the
+        // defining frame, this one included.
+        for reference in Arc::make_mut(&mut entries[index].unserved_assignments) {
+            reference.binding = resolve(&reference.name, reference.span);
+            if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
+                let defining = position_of[&identity.defining_function];
+                if assignment_seen[defining].insert(identity.binding_slot) {
+                    descendant_assignments[defining].push(identity.clone());
                 }
             }
         }
@@ -3307,6 +3333,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             in_parameter_list: _,
             creates_unserved_callable,
             class_local_scope: _,
+            unserved_assignments,
             references,
             source_type_queries,
             return_sites,
@@ -3379,6 +3406,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             return_sites: Arc::from(return_sites.into_boxed_slice()),
             writes: Arc::from(writes.into_boxed_slice()),
             descendant_writes: Arc::from([]),
+            unserved_assignments: unserved_assignments.into(),
             descendant_assignments: Arc::from([]),
             captured_reads: Arc::from([]),
             nested_captures: Arc::from([]),
@@ -3455,6 +3483,10 @@ struct InventoryVisitor<'sink, 'ast> {
     /// callable in the parameter list.
     creates_unserved_callable: bool,
     class_local_scope: Option<verter_span::Span>,
+    /// The whole-binding assignments code no entry serves (a class, a
+    /// parameter-list callable) makes to names it does not declare
+    /// ([`access::EscapingAssignments`]).
+    unserved_assignments: Vec<FunctionReferenceRecord>,
     references: Vec<FunctionReferenceRecord>,
     source_type_queries: Vec<FunctionSourceTypeQuery>,
     return_sites: Vec<FunctionReturnSite>,
@@ -3601,16 +3633,26 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         self.read_role = previous;
     }
 
-    fn visit_function(&mut self, _it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {
+    fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         // Nested function body: not this frame. (visit_function is only
         // reached for nested positions — the entry's own body is driven
         // statement-by-statement.) Only body callables are indexed as
         // children; a parameter-list callable has no entry.
         self.creates_unserved_callable |= self.in_parameter_list;
+        if self.in_parameter_list {
+            let mut escaping = access::EscapingAssignments::default();
+            escaping.visit_function(it, flags);
+            self.unserved_assignments.extend(escaping.into_escaping());
+        }
     }
 
-    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.creates_unserved_callable |= self.in_parameter_list;
+        if self.in_parameter_list {
+            let mut escaping = access::EscapingAssignments::default();
+            escaping.visit_arrow_function_expression(it);
+            self.unserved_assignments.extend(escaping.into_escaping());
+        }
     }
 
     fn visit_class(&mut self, class: &Class<'a>) {
@@ -3618,6 +3660,13 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         // class EXPRESSION's methods and accessors are served as nested
         // callables, a local class declaration's are not).
         self.creates_unserved_callable = true;
+        // Every assignment the class makes to a name it does not declare —
+        // in a member body, an initializer, a static block or its heritage
+        // — assigns that binding for the checker, whether or not an entry
+        // serves the member.
+        let mut escaping = access::EscapingAssignments::default();
+        escaping.visit_class(class);
+        self.unserved_assignments.extend(escaping.into_escaping());
         // Class evaluation has occurrence authority, but remains outside the
         // function's supported flow topology. Keep only lexical references,
         // write roots and unsupported local declarations from this traversal.

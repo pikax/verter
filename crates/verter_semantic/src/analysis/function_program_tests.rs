@@ -206,7 +206,9 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
                 FunctionWriteTarget::Binding { reference, .. } => {
                     reference.binding.resolved().cloned()
                 }
-                FunctionWriteTarget::Unsupported { .. } => None,
+                FunctionWriteTarget::Asserted { .. } | FunctionWriteTarget::Unsupported { .. } => {
+                    None
+                }
             })
             .collect::<Vec<_>>()
     };

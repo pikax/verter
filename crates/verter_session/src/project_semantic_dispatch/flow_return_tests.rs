@@ -8598,13 +8598,14 @@ function f(x: string | number) {
     });
 }
 
-/// A parser-legal TS wrapper does not launder a write: `((x) as any) =
-/// "s"` and `(x as any)++` retype the frame binding exactly as the bare
-/// forms do. The wrapped target takes the same typed gap — the later
-/// read keeps the unnarrowed join and the family slot holds zero
-/// candidates.
+/// A write through a type assertion assigns nothing: the checker's
+/// assignment-target walk and narrowable reference both stop at an
+/// assertion, so `((x) as any) = "s"` in a static block leaves `x` as
+/// declared. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `string | number`. The read is that
+/// declared type, complete — no unapplied write stands behind it.
 #[test]
-fn class_declaration_wrapped_write_never_seals_unnarrowed() {
+fn class_declaration_asserted_write_keeps_the_declared_type() {
     const CANONICAL: &str = "/ws/class-decl-wrapped-write/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8617,10 +8618,32 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key);
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("f: the read is the declared union, got {expr:?}");
+        };
+        assert_eq!(arms.len(), 2, "f: exactly the declared arms, got {expr:?}");
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the {primitive:?} arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            None,
+            "f: an asserted write retypes nothing, so the read is complete"
+        );
     });
 }
-
 /// An UNSELECTED binding's initializer never lowers — but it still runs at
 /// the statement: the discarded assertion of `const unused =
 /// (assertString(x), 0)` narrows `x` to `string` in the checker for every

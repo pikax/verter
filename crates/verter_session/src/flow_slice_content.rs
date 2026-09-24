@@ -8286,11 +8286,7 @@ impl Lowerer<'_> {
         verter_semantic::analysis::flow::SkeletonExprSiteId,
         FrameSpan,
     )> {
-        let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
-            &assignment.left
-        else {
-            return None;
-        };
+        let identifier = assigned_identifier(&assignment.left)?;
         let name = identifier.name.as_str();
         let root = match self.classify_occurrence(identifier.span) {
             NameBinding::Param(ordinal) => {
@@ -10252,6 +10248,31 @@ fn expression_root_identifier(expression: &Expression<'_>) -> Option<(String, ox
     }
 }
 
+/// The binding a whole assignment writes: an identifier target, also
+/// through parentheses and non-null assertions (`x! = v` assigns `x`, as
+/// the checker's `getAssignmentTargetKind` walks through both). A type
+/// assertion is not walked through (`(x as T) = v` assigns nothing), and
+/// a member or destructuring target writes no single binding.
+fn assigned_identifier<'b, 'a>(
+    target: &'b oxc_ast::ast::AssignmentTarget<'a>,
+) -> Option<&'b oxc_ast::ast::IdentifierReference<'a>> {
+    match target {
+        oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier),
+        oxc_ast::ast::AssignmentTarget::TSNonNullExpression(non_null) => {
+            let mut inner = &non_null.expression;
+            loop {
+                inner = match inner {
+                    Expression::ParenthesizedExpression(paren) => &paren.expression,
+                    Expression::TSNonNullExpression(non_null) => &non_null.expression,
+                    Expression::Identifier(identifier) => return Some(identifier),
+                    _ => return None,
+                };
+            }
+        }
+        _ => None,
+    }
+}
+
 impl ControlCall {
     fn of_call(call: &oxc_ast::ast::CallExpression<'_>) -> Self {
         let callee_expression = unwrap_parenthesized(&call.callee);
@@ -10361,6 +10382,11 @@ struct LeafCallScanner<'a> {
     /// for the class-evaluation-time positions (a static block runs here,
     /// but the skeleton still never saw it).
     class_nesting: usize,
+    /// Class-member container nesting: the checker binds a member's
+    /// computed key and a property or accessor initializer inside the
+    /// member's own control-flow container, so a write there, static or
+    /// not, never retypes a binding the enclosing flow reads.
+    member_container_nesting: usize,
 }
 
 impl<'a> LeafCallScanner<'a> {
@@ -10373,11 +10399,24 @@ impl<'a> LeafCallScanner<'a> {
         self.control_nesting -= 1;
     }
 
+    /// Visit a class member's key. A computed key evaluates at class
+    /// definition, but inside the member's own control-flow container: its
+    /// calls keep the class-definition discipline, its writes never retype
+    /// a binding the enclosing flow reads.
+    fn visit_member_key(&mut self, key: &oxc_ast::ast::PropertyKey<'a>) {
+        self.member_container_nesting += 1;
+        self.visit_property_key(key);
+        self.member_container_nesting -= 1;
+    }
+
     /// Record one same-frame whole-binding write target, marking whether
     /// the flow skeleton can see it (it never records a write inside a
     /// class subtree, so a write under `class_nesting` is invisible to the
     /// slice's effect ledger).
     fn push_write(&mut self, name: &'a str, span: oxc_span::Span) {
+        if self.member_container_nesting > 0 {
+            return;
+        }
         if self.void_nesting > 0 && self.class_nesting == 0 {
             return;
         }
@@ -10396,16 +10435,16 @@ impl<'a> LeafCallScanner<'a> {
                 self.push_write(identifier.name.as_str(), identifier.span);
             }
             AssignmentTarget::TSAsExpression(as_expression) => {
-                self.collect_expression_write_target(&as_expression.expression);
+                self.collect_expression_write_target(&as_expression.expression, true);
             }
             AssignmentTarget::TSSatisfiesExpression(satisfies) => {
-                self.collect_expression_write_target(&satisfies.expression);
+                self.collect_expression_write_target(&satisfies.expression, true);
             }
             AssignmentTarget::TSNonNullExpression(non_null) => {
-                self.collect_expression_write_target(&non_null.expression);
+                self.collect_expression_write_target(&non_null.expression, false);
             }
             AssignmentTarget::TSTypeAssertion(assertion) => {
-                self.collect_expression_write_target(&assertion.expression);
+                self.collect_expression_write_target(&assertion.expression, true);
             }
             AssignmentTarget::ArrayAssignmentTarget(array) => {
                 for element in array.elements.iter().flatten() {
@@ -10456,27 +10495,32 @@ impl<'a> LeafCallScanner<'a> {
         }
     }
 
-    /// Peel parser-legal wrappers recursively: a write through
-    /// `((x) as any) = v` still retypes `x`.
-    fn collect_expression_write_target(&mut self, expression: &Expression<'a>) {
+    /// Peel parser-legal wrappers recursively. Parentheses and a non-null
+    /// assertion keep the write an assignment of the binding (`(x!) = v`
+    /// retypes `x`); a type assertion anywhere between them (`asserted`)
+    /// does not (`((x) as any) = v` neither assigns nor narrows `x` in the
+    /// checker), so nothing is collected.
+    fn collect_expression_write_target(&mut self, expression: &Expression<'a>, asserted: bool) {
         match expression {
             Expression::Identifier(identifier) => {
-                self.push_write(identifier.name.as_str(), identifier.span);
+                if !asserted {
+                    self.push_write(identifier.name.as_str(), identifier.span);
+                }
             }
             Expression::ParenthesizedExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
+                self.collect_expression_write_target(&inner.expression, asserted);
             }
             Expression::TSAsExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
+                self.collect_expression_write_target(&inner.expression, true);
             }
             Expression::TSSatisfiesExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
+                self.collect_expression_write_target(&inner.expression, true);
             }
             Expression::TSNonNullExpression(inner) => {
-                self.collect_expression_write_target(&inner.expression);
+                self.collect_expression_write_target(&inner.expression, asserted);
             }
             Expression::TSTypeAssertion(inner) => {
-                self.collect_expression_write_target(&inner.expression);
+                self.collect_expression_write_target(&inner.expression, true);
             }
             _ => {}
         }
@@ -10511,24 +10555,25 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
     }
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         if self.nested_frame_nesting == 0 {
-            // A parser-legal TS wrapper still writes its inner binding:
-            // `(x as any)++` retypes `x` exactly as `x++` does.
+            // A non-null assertion still writes its inner binding (`x!++`
+            // retypes `x` exactly as `x++` does); a type assertion does
+            // not (`(x as any)++` leaves `x` as it was).
             use oxc_ast::ast::SimpleAssignmentTarget as T;
             match &it.argument {
                 T::AssignmentTargetIdentifier(identifier) => {
                     self.push_write(identifier.name.as_str(), identifier.span);
                 }
                 T::TSAsExpression(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
+                    self.collect_expression_write_target(&inner.expression, true);
                 }
                 T::TSSatisfiesExpression(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
+                    self.collect_expression_write_target(&inner.expression, true);
                 }
                 T::TSNonNullExpression(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
+                    self.collect_expression_write_target(&inner.expression, false);
                 }
                 T::TSTypeAssertion(inner) => {
-                    self.collect_expression_write_target(&inner.expression);
+                    self.collect_expression_write_target(&inner.expression, true);
                 }
                 _ => {}
             }
@@ -10729,9 +10774,24 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // DEFINITION — enclosing-frame immediate, exactly as the class's
         // own decorators do. The method's VALUE is a function whose body
         // runs when CALLED: `visit_function` re-arms the nested-frame
-        // guard for exactly the deferred body.
+        // guard for exactly the deferred body. The key belongs to the
+        // member's own control-flow container.
         self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
-        walk::walk_method_definition(self, it);
+        self.visit_decorators(&it.decorators);
+        self.visit_member_key(&it.key);
+        let flags = match it.kind {
+            oxc_ast::ast::MethodDefinitionKind::Get => {
+                oxc_syntax::scope::ScopeFlags::Function | oxc_syntax::scope::ScopeFlags::GetAccessor
+            }
+            oxc_ast::ast::MethodDefinitionKind::Set => {
+                oxc_syntax::scope::ScopeFlags::Function | oxc_syntax::scope::ScopeFlags::SetAccessor
+            }
+            oxc_ast::ast::MethodDefinitionKind::Constructor => {
+                oxc_syntax::scope::ScopeFlags::Function | oxc_syntax::scope::ScopeFlags::Constructor
+            }
+            oxc_ast::ast::MethodDefinitionKind::Method => oxc_syntax::scope::ScopeFlags::Function,
+        };
+        self.visit_function(&it.value, flags);
         self.nested_frame_nesting += 1;
     }
     fn visit_property_definition(&mut self, it: &oxc_ast::ast::PropertyDefinition<'a>) {
@@ -10742,7 +10802,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // keeps the body guard.
         self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
         self.visit_decorators(&it.decorators);
-        self.visit_property_key(&it.key);
+        self.visit_member_key(&it.key);
         self.nested_frame_nesting += 1;
         if let Some(type_annotation) = &it.type_annotation {
             self.visit_ts_type_annotation(type_annotation);
@@ -10750,7 +10810,9 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         if let Some(value) = &it.value {
             if it.r#static {
                 self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+                self.member_container_nesting += 1;
                 self.visit_expression(value);
+                self.member_container_nesting -= 1;
                 self.nested_frame_nesting += 1;
             } else {
                 self.visit_expression(value);
@@ -10764,7 +10826,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // one is deferred to construction and keeps the body guard.
         self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
         self.visit_decorators(&it.decorators);
-        self.visit_property_key(&it.key);
+        self.visit_member_key(&it.key);
         self.nested_frame_nesting += 1;
         if let Some(type_annotation) = &it.type_annotation {
             self.visit_ts_type_annotation(type_annotation);
@@ -10772,7 +10834,9 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         if let Some(value) = &it.value {
             if it.r#static {
                 self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+                self.member_container_nesting += 1;
                 self.visit_expression(value);
+                self.member_container_nesting -= 1;
                 self.nested_frame_nesting += 1;
             } else {
                 self.visit_expression(value);

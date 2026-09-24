@@ -2437,8 +2437,10 @@ fn discarded_operand_calls_stop_at_nested_frames() {
 /// the enclosing statement's typed gap: a degraded success, never a
 /// silently certified superset. Deferred bodies (a method runs when
 /// called, an instance property initializer at construction) keep the
-/// nested-frame blanket treatment, and a write to a binding the frame
-/// does NOT own stays silent.
+/// nested-frame blanket treatment; a write the checker never applies to
+/// the enclosing flow (in a member's computed key or a property
+/// initializer, or through a type assertion) and a write to a binding the
+/// frame does NOT own stay silent.
 #[test]
 fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
     let gapped = [
@@ -2451,14 +2453,6 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { class B {} class C extends (x = \"s\", B) {} return x }",
         ),
         (
-            "a static property initializer assignment",
-            "export {};\nfunction f(x: string | number) { class C { static p = (x = \"s\"); } return x }",
-        ),
-        (
-            "a computed key assignment",
-            "export {};\nfunction f(x: string | number) { class C { [(x = \"s\")]() {} } return x }",
-        ),
-        (
             "a static block compound write",
             "export {};\nfunction f(x: string | number) { class C { static { x += 1; } } return x }",
         ),
@@ -2469,14 +2463,6 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
         (
             "a class-expression static block assignment",
             "export {};\nfunction f(x: string | number) { return (class { static { x = \"s\"; } } as object) }",
-        ),
-        (
-            "a TS-wrapped assignment target",
-            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
-        ),
-        (
-            "a TS-wrapped update target",
-            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
         ),
         (
             "a static block destructuring assignment",
@@ -2512,6 +2498,39 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             guard_gap_count(&node),
             0,
             "{case}: a deferred body mints no gap: {node:?}"
+        );
+    }
+
+    // Measured on 7.0.2 (`--strict`, and without `strictNullChecks`):
+    // each of these returns the unnarrowed `x` (`string | number`; the
+    // update `number | undefined` under strict null checks) — a member's
+    // computed key and a property initializer sit in the member's own
+    // control-flow container, and a write through a type assertion
+    // assigns nothing.
+    let not_retyping = [
+        (
+            "a static property initializer assignment",
+            "export {};\nfunction f(x: string | number) { class C { static p = (x = \"s\"); } return x }",
+        ),
+        (
+            "a computed method key assignment",
+            "export {};\nfunction f(x: string | number) { class C { [(x = \"s\")]() {} } return x }",
+        ),
+        (
+            "a type-asserted assignment target",
+            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
+        ),
+        (
+            "a type-asserted update target",
+            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
+        ),
+    ];
+    for (case, source) in not_retyping {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a write that retypes nothing mints no gap: {node:?}"
         );
     }
 

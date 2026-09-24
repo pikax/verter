@@ -114,6 +114,12 @@ declare var Number: NumberConstructor;
 /// [`host_with`] whose two projects each register [`LIB_VALUES`] as their
 /// lib environment.
 pub(super) fn host_with_lib(source: &str) -> VerterHost {
+    host_with_lib_source(source, LIB_VALUES)
+}
+
+/// [`host_with`] whose two projects each register `lib` as their lib
+/// environment.
+pub(super) fn host_with_lib_source(source: &str, lib: &str) -> VerterHost {
     let host = host_with(source);
     let workspace = host.workspace();
     for root in [STRICT_ROOT, LOOSE_ROOT] {
@@ -125,7 +131,7 @@ pub(super) fn host_with_lib(source: &str) -> VerterHost {
             verter_workspace::AmbientLibSpec {
                 project_id: Some(project),
                 canonical_id: Arc::from(LIB_FILE),
-                source: Arc::from(LIB_VALUES),
+                source: Arc::from(lib),
             },
         )
         .expect("the lib registers against its project");
@@ -136,7 +142,7 @@ pub(super) fn host_with_lib(source: &str) -> VerterHost {
             .upsert(crate::types::UpsertRequest {
                 canonical_id: None,
                 input_id: virtual_id.to_string(),
-                source: Arc::from(LIB_VALUES),
+                source: Arc::from(lib),
                 file_language: crate::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
@@ -357,6 +363,29 @@ export function nestedFn() { return function (x: Foo | Bar) { return x.kind === 
 export function nestedMulti() { return (x: unknown) => { if (x) return true; return typeof x === "string"; }; }
 export const obj = { isS(x: unknown) { return typeof x === "string"; } };
 export function sigObjMethod() { return obj.isS; }
+export function paramListAssigns(x: string | number, cb: () => void = () => { x = 1; }) { return typeof x === "string"; }
+export function paramListShadows(x: string | number, cb: (x: number) => void = (x: number) => { x = 1; }) { return typeof x === "string"; }
+export function classMethodAssigns(x: string | number) { class C { m() { x = 1; } } return typeof x === "string"; }
+export function classCtorAssigns(x: string | number) { class C { constructor() { x = 1; } } return typeof x === "string"; }
+export function classGetterAssigns(x: string | number) { class C { get g() { x = 1; return 1; } } return typeof x === "string"; }
+export function classFieldAssigns(x: string | number) { const C = class { v = (x = 1); }; return typeof x === "string"; }
+export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
+export function classStaticFieldAssigns(x: string | number) { class C { static s = (x = 1); } return typeof x === "string"; }
+export function classHeritageAssigns(x: string | number) { class C extends (x = 1, Cls) { } return typeof x === "string"; }
+export function classMethodArrowAssigns(x: string | number) { class C { m() { const f = () => { x = 1; }; } } return typeof x === "string"; }
+export function classMethodReads(x: string | number) { class C { m() { return x; } } return typeof x === "string"; }
+export function classMethodParamShadows(x: string | number) { class C { m(x: number) { x = 1; } } return typeof x === "string"; }
+export function classMethodVarShadows(x: string | number) { class C { m() { if (x) { var x = 2; } x = 1; } } return typeof x === "string"; }
+export function classMethodCatchShadows(x: string | number) { class C { m() { try { } catch (x) { x = 1; } } } return typeof x === "string"; }
+export function asAssign(x: string | number) { (x as any) = 1; return typeof x === "string"; }
+export function closureAsAssign(x: string | number) { const f = () => { (<any>x) = 1; }; return typeof x === "string"; }
+export function closureSatisfiesAssign(x: string | number) { const f = () => { (x satisfies any) = 1; }; return typeof x === "string"; }
+export function closureDestructureAsAssign(x: string | number) { const f = () => { [(x as any)] = [1]; }; return typeof x === "string"; }
+export function closureAsIncrement(x: number | string) { const f = () => { (x as number)++; }; return typeof x === "string"; }
+export function closureNonNullAsIncrement(x: number | string) { const f = () => { (x as number)!++; }; return typeof x === "string"; }
+export function closureAsCompound(x: number | string) { const f = () => { (x as any) += 1; }; return typeof x === "string"; }
+export function closureNonNullAssign(x: string | number) { const f = () => { x! = 1; }; return typeof x === "string"; }
+export function closureParenAssign(x: string | number) { const f = () => { (x) = 1; }; return typeof x === "string"; }
 "#;
 
 /// The source with a `sig_NAME` wrapper appended for every function.
@@ -576,6 +605,73 @@ const INFERS: &[(&str, &str, &str)] = &[
         "(x: { a: number; } | string) => x is string",
         "(x: { a: number; } | string) => x is string",
     ),
+    // A class or a parameter-list callable that only reads the parameter,
+    // or assigns its OWN binding of the name (a parameter, a hoisted
+    // `var`, a catch parameter), does not assign it.
+    (
+        "classMethodReads",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "classMethodParamShadows",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "classMethodVarShadows",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "classMethodCatchShadows",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "paramListShadows",
+        "(x: string | number, cb?: (x: number) => void) => x is string",
+        "(x: string | number, cb?: (x: number) => void) => x is string",
+    ),
+    // A write through a type assertion (`(x as T) = v`, `(<T>x) = v`,
+    // `(x satisfies T) = v`, a destructuring element, an update or a
+    // compound assignment) assigns nothing: the checker's assignment
+    // target walk stops at the assertion.
+    (
+        "asAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureAsAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureSatisfiesAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureDestructureAsAssign",
+        "(x: string | number) => x is string",
+        "(x: string | number) => x is string",
+    ),
+    (
+        "closureAsIncrement",
+        "(x: number | string) => x is string",
+        "(x: number | string) => x is string",
+    ),
+    (
+        "closureNonNullAsIncrement",
+        "(x: number | string) => x is string",
+        "(x: number | string) => x is string",
+    ),
+    (
+        "closureAsCompound",
+        "(x: number | string) => x is string",
+        "(x: number | string) => x is string",
+    ),
 ];
 
 /// Every measured inference, in both null policies.
@@ -622,6 +718,22 @@ const DECLINES: &[(&str, &str)] = &[
     ("annotated", "(x: unknown) => boolean"),
     ("noParams", "() => boolean"),
     ("eqParams", "(x: string, y: string) => boolean"),
+    // An assignment anywhere in the function assigns the parameter: in a
+    // class's method, constructor, accessor or initializer (a callable
+    // nested in one included), or in a parameter-list callable. A
+    // non-null assertion or parentheses around the target still assign.
+    (
+        "paramListAssigns",
+        "(x: string | number, cb?: () => void) => boolean",
+    ),
+    ("classMethodAssigns", "(x: string | number) => boolean"),
+    ("classCtorAssigns", "(x: string | number) => boolean"),
+    ("classGetterAssigns", "(x: string | number) => boolean"),
+    ("classFieldAssigns", "(x: string | number) => boolean"),
+    ("classStaticFieldAssigns", "(x: string | number) => boolean"),
+    ("classMethodArrowAssigns", "(x: string | number) => boolean"),
+    ("closureNonNullAssign", "(x: string | number) => boolean"),
+    ("closureParenAssign", "(x: string | number) => boolean"),
 ];
 
 #[test]
@@ -649,6 +761,25 @@ fn inference_declines_wherever_the_checker_declines() {
         "sig_implicitEnd",
         "(x: unknown) => boolean",
     );
+}
+
+/// An assignment a class makes while it is EVALUATED — in a static block
+/// or its heritage expression — assigns the parameter too, so no
+/// predicate is inferred (measured on 7.0.2 under both null policies:
+/// `(x: string | number) => boolean`). The function's own answer stays
+/// behind the typed gap the enclosing flow keeps for a write it does not
+/// apply.
+#[test]
+fn a_class_evaluation_assignment_declines_the_predicate() {
+    let names = ["classStaticBlockAssigns", "classHeritageAssigns"];
+    let host = host_with(&source_with_wrappers(&names));
+    for name in names {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            let printed = "(x: string | number) => boolean";
+            assert_predicate(&host, root, &format!("sig_{name}"), printed);
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
+        }
+    }
 }
 
 /// A function VALUE returned from a body infers its own predicate. Measured

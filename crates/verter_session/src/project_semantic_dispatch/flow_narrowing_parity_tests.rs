@@ -1198,3 +1198,62 @@ fn a_lib_global_value_without_a_lib_stays_the_typed_gap() {
         }
     }
 }
+
+const ASSERTED_WRITES: &str = r#"
+export class Base { b = 1 }
+export function w01(x: string | number) { (x as any) = 1; return x; }
+export function w02(x: number | string) { (x as any)++; return x; }
+export function w03(x: string | number) { (<any>x) = 1; return x; }
+export function w04(x: string | number) { (x satisfies any) = 1; return x; }
+export function w05(x: string | number) { [(x as any)] = [1]; return x; }
+export function w06(x: string | number) { ({ a: (x as any) } = { a: 1 }); return x; }
+export function w07(x: string | number) { x! = 1; return x; }
+export function w08(x: string | number) { (x) = 1; return x; }
+export function w10(x: string | number | undefined) { (x as any) ??= 1; return x; }
+export function w11(x: string | number) { for ((x as any) of [1]) { } return x; }
+export function w12() { let x: string | number = "a"; (x as any) = 1; return x; }
+export function w14() { let x = "a"; (x as any) = 1; return x; }
+export function w15(x: number | string) { (x as number) += 1; return x; }
+export function w16(x: string | number) { ((x as any)) = 1; return x; }
+export function w17(x: string | number) { (x! as any) = 1; return x; }
+export function w18(x: string | number) { ((x as any)!) = 1; return x; }
+export function w19(x: string | number) { if (typeof x === "string") { (x as any) = 1; return x; } throw 0; }
+export function s2(x: string | number) { if (typeof x === "string") { class C { static s = (x = 1); } return x; } throw 0; }
+export function s6(x: string | number) { if (typeof x === "string") { class C { v = (x = 1); } return x; } throw 0; }
+"#;
+
+/// A write through a type assertion (`(x as T) = v`, `(<T>x) = v`,
+/// `(x satisfies T) = v`, a destructuring element, an update, a compound
+/// or logical assignment, a loop head) neither assigns nor narrows the
+/// binding: the checker's narrowable reference and assignment target both
+/// stop at an assertion, so the read after it keeps its type. A non-null
+/// assertion or parentheses around the target still assign (`x! = 1` and
+/// `(x) = 1` read `number`). A class's property initializer is its own
+/// control-flow container, so its write does not retype the enclosing
+/// read. Measured on 7.0.2, identically without `strictNullChecks` except
+/// `w10`, whose `undefined` the loose parameter type never had.
+#[test]
+fn a_write_through_a_type_assertion_neither_assigns_nor_narrows() {
+    let rows = [
+        ("w01", "string | number", "string | number"),
+        ("w02", "string | number", "string | number"),
+        ("w03", "string | number", "string | number"),
+        ("w04", "string | number", "string | number"),
+        ("w05", "string | number", "string | number"),
+        ("w06", "string | number", "string | number"),
+        ("w07", "number", "number"),
+        ("w08", "number", "number"),
+        ("w10", "string | number | undefined", "string | number"),
+        ("w11", "string | number", "string | number"),
+        ("w12", "string", "string"),
+        ("w14", "string", "string"),
+        ("w15", "string | number", "string | number"),
+        ("w16", "string | number", "string | number"),
+        ("w17", "string | number", "string | number"),
+        ("w18", "string | number", "string | number"),
+        ("w19", "string", "string"),
+        ("s2", "string", "string"),
+        ("s6", "string", "string"),
+    ];
+    check_rows(ASSERTED_WRITES, &rows);
+}
