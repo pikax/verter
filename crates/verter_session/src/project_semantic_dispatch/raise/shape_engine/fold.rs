@@ -311,7 +311,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.infer(Arc::clone(name))
         }
         SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { name } => alg.recursive_ref(Arc::clone(name)),
+            QueryError::RecursiveRef { name, .. } => alg.recursive_ref(Arc::clone(name)),
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
             QueryError::CheckerRecovery(diagnostic) => match diagnostic.recovery() {
@@ -616,6 +616,7 @@ fn fold_object_spread_program<A: RaisedShapeAlgebra>(
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
             name: Arc::from("object-spread-projection"),
+            args: Arc::from([]),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),
     }

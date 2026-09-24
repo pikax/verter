@@ -390,8 +390,9 @@ pub struct SemanticGraphStore {
     /// stamping it unresolved propagates a factually false permanent warm
     /// refusal into every enclosing result. Memoizing removes the reason
     /// the bound existed (re-walking the same structure per SCC fixpoint
-    /// iteration) instead of trading correctness for it.
-    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
+    /// iteration) instead of trading correctness for it. ONE per-node sidecar:
+    /// the entry holds every bit memoized for the id, released together.
+    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.

@@ -697,10 +697,29 @@ fn prepare_local_value_decl_outcome_with_base(
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
+    // A name absent from a MODULE's file surface but present in its own
+    // `declare global { ... }` value inventory is that module's global
+    // value declaration, prepared under the same `(canonical, name)`
+    // identity the type space's global fallback uses. A script's
+    // `declare global` binds nothing.
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome_in(owner, symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
-        DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
         DemandOutcome::Ready(Some(lowered)) => lowered,
+        DemandOutcome::Ready(None)
+            if crate::global_contributors::classify_shallow_module_kind(state)
+                == crate::global_contributors::FileModuleKind::Module =>
+        {
+            match state.augmentation_value_decl_outcome_in(
+                &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                owner,
+                symbol_name,
+            ) {
+                DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+                DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+                DemandOutcome::Ready(Some(lowered)) => lowered,
+            }
+        }
+        DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
     };
     if state.is_import_local_in(owner, symbol_name) {
         return PreparedDeclOutcome::Ready(None);
@@ -1572,7 +1591,7 @@ pub fn build_prepared_value_decl_cache(
     import_canonicalization: Arc<ImportCanonicalization>,
     interner: &Arc<IdentityInterner>,
 ) -> PreparedValueDeclCache {
-    let slots: FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot> = state
+    let mut slots: FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot> = state
         .decl_bodies()
         .header_index()
         .value_headers
@@ -1582,6 +1601,28 @@ pub fn build_prepared_value_decl_cache(
         .chain(state.synthesised_value_bodies().map(|(key, _)| key.clone()))
         .map(|key| (key, Arc::new(PreparedDeclSlot::new())))
         .collect();
+    // A module's global-augmentation values (`declare global { var x }`)
+    // prepare through `prepare_local_value_decl`'s global fallback, so they
+    // need a slot although they never enter the file surface; a file symbol
+    // of the same name keeps its own slot and takes precedence.
+    if crate::global_contributors::classify_shallow_module_kind(state.as_ref())
+        == crate::global_contributors::FileModuleKind::Module
+    {
+        if let Some(global_values) = state
+            .decl_bodies()
+            .header_index()
+            .augmentation_value_headers
+            .get(&verter_semantic::analysis::type_eval::AugmentationScopeKind::Global)
+        {
+            for key in global_values.keys() {
+                if !slots.contains_key(key)
+                    && !state.is_import_local_in(key.owner, key.name.as_ref())
+                {
+                    slots.insert(key.clone(), Arc::new(PreparedDeclSlot::new()));
+                }
+            }
+        }
+    }
     let name_resolution_bases = slots
         .keys()
         .map(|key| key.owner)

@@ -2151,6 +2151,58 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "G03_emits_new_spread",
         "91947af5d9430228abb3f409c16a917195753c624b392120f5ee11856437531c",
     ),
+    (
+        "X12_class_getter_member",
+        "234f0284ed82bf1e3c8ec892b13a9731b9dd11440b5b0bfe135f728841eba44d",
+    ),
+    (
+        "C18_intersection_degraded_tagged",
+        "b6ca6f4bd7fa0c6983798089bc93c456d1df2ec39fdf88ee4bb88f35731debff",
+    ),
+    (
+        "C19_emits_intersection_unmodelled_tagged",
+        "b164b23a15b4634b7fb7cce72986b12aac5af847838a5e6bb016506a2f20e3aa",
+    ),
+    (
+        "C20_withdefaults_intersection_degraded_tagged",
+        "03c5c3279f4381a7414bc88791a737b7b70cbecc67aa5453bd8066e828b6ff88",
+    ),
+    (
+        "C21_heritage_extends_degraded_tagged",
+        "881d53878ce35ba404742f21e706becd291221a7b998d7f21f005c10f9d72f57",
+    ),
+    (
+        "C22_heritage_members_degraded_tagged",
+        "60bafdacd738dbe0f5a1aeda53a25e2ff6ac458f32ddc0e8db9633ce3a28b57a",
+    ),
+    (
+        "C23_props_intersection_unmodelled_arm_tagged",
+        "52abf9b88174f2e38827a88488d09c619c3d536e711b8f8669d8a4f2813e57a6",
+    ),
+    (
+        "C24_heritage_unmodelled_clause_tagged",
+        "4bbdb66fc3131e7d1ba1986dbb25da40d0397a4fa73599d79ba6aa083cba7884",
+    ),
+    (
+        "D12_helper_tagged",
+        "6a8a855523bd747b2d9eb1b5fcc36f3eda19cf14baeb809160e2c6635069aa76",
+    ),
+    (
+        "D13_tagged_spread",
+        "ecf155961a244a95050503ad689ab026918bfce7f6ba0b3b996dc40773feca68",
+    ),
+    (
+        "D14_callee_tagged_spread_only",
+        "7b9d67d609051069a4a27a70744312bd7fcd8a27cd3f83d016d00661fe71bc65",
+    ),
+    (
+        "D15_callee_tagged_spread_key",
+        "41baf142492e8d5ee16af8ede53eed028fb9d2ce07c0f8851d42a9fa82a17699",
+    ),
+    (
+        "G07_emits_tagged_spread",
+        "e211bc306e0c4ddd199f847077c17ce96a250b23c1ca729e889d38ac629ee6a9",
+    ),
 ];
 
 // The suite
@@ -3328,15 +3380,20 @@ mod corpus_suite {
             ),
             (
                 "D12_helper_tagged",
-                "checker prints `{ label: string; made: Box; }`; the renderer spells \
+                "checker prints `{ label: string; made: Box; }`; the renderer spells the \
+                 same node `{ label: string, made: DeclRef(Box) }` — a declaration \
+                 reference and member terminators differ",
+            ),
+            (
+                "D16_helper_undeclared_callee",
+                "checker prints `{ label: string; made: any; }`; the renderer spells \
                  `{ label: string, made: Opaque(UnmodeledPosition) }` — print syntax AND \
                  semantics differ; the Degraded divergence is held by the semantic test",
             ),
             (
                 "X12_class_getter_member",
-                "checker prints `{ label: string; n: number; }`; the renderer spells \
-                 `{ label: () => string, n: number }` — print syntax AND semantics \
-                 differ; the KnownOwed divergence is held by the semantic test",
+                "checker prints `{ label: string; n: number; }`; the renderer spells the \
+                 same node `{ label: string, n: number }` — member terminators differ",
             ),
             (
                 "N09_narrow_then_write",
@@ -4369,11 +4426,17 @@ mod verdict_consistency {
                     // A recursive expectation is a full-depth pin of the
                     // CURRENT (wrong) value: the owner's fix flips it.
                     let pins_expect = matches!(row.expect, Expect::Node(_));
+                    // A row the checker types `any` is fail-closed by
+                    // construction: its runtime lane owes a REFUSAL, so a
+                    // pinned emission is the tripwire the fix flips.
+                    let owes_refusal =
+                        row.checker_is_any && matches!(row.runtime, Runtime::Emitted { .. });
                     let observable = matches!(row.runtime, Runtime::Refused)
                         || matches!(row.tsx, Tsx::Faults(_))
                         || !owed_absent.is_empty()
                         || pins_members
-                        || pins_expect;
+                        || pins_expect
+                        || owes_refusal;
                     if !observable {
                         failures.push(format!(
                             "{}: labelled KnownOwed but the row pins nothing that would change \
@@ -4678,6 +4741,7 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
     "C16_pick_keyof_closed_interface_publishes_every_key",
     "C17_pick_aliased_keyof_closed_interface_publishes_every_key",
     "C20_withdefaults_intersection_degraded_tagged",
+    "C27_withdefaults_intersection_undeclared_member",
 ];
 
 /// Value-indistinct rows (the `checker` names a value [`NodeShape`]
@@ -4749,6 +4813,48 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "C13_emits_heritage_clean",
         Owner::SharedTypeResolution,
         "member `evA` Other — a function value; deepening pins the signature (params + return)",
+    ),
+    (
+        "C18_intersection_degraded_tagged",
+        Owner::SharedTypeResolution,
+        "member `made` Other — the tag's `Box` instance (`DeclRef`); the checker column is the \
+         macro's COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C19_emits_intersection_unmodelled_tagged",
+        Owner::SharedTypeResolution,
+        "root Other — the tag's `Box` instance (`DeclRef`); the checker column is the macro's \
+         COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C20_withdefaults_intersection_degraded_tagged",
+        Owner::FrameworkOnly,
+        "member `made` Other — the tag's `Box` instance (`DeclRef`); the checker column is the \
+         macro's COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C21_heritage_extends_degraded_tagged",
+        Owner::SharedTypeResolution,
+        "member `made` Other — the tag's `Box` instance (`DeclRef`); the checker column names \
+         the heritage interface, not the flow return a deep pin compares",
+    ),
+    (
+        "C22_heritage_members_degraded_tagged",
+        Owner::U2MappedTemplate,
+        "member `made` Other — the tag's `Box` instance (`DeclRef`); the checker column is the \
+         mapped heritage probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C23_props_intersection_unmodelled_arm_tagged",
+        Owner::SharedTypeResolution,
+        "root Other — the tag's `Box` instance (`DeclRef`); the checker column is the macro's \
+         COMPOSED probe, not the flow return a deep pin compares",
+    ),
+    (
+        "C24_heritage_unmodelled_clause_tagged",
+        Owner::SharedTypeResolution,
+        "root Other — the tag's `Box` instance (`DeclRef`); the checker column names the \
+         heritage interface, not the flow return a deep pin compares",
     ),
     (
         "CC02_annotated_return_literal_union",
@@ -5035,15 +5141,17 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// rejects), or a recorded CHECKER text the deep-pin comparer cannot yet
 /// parse. Each ledger entry records which class it is in.
 ///
-/// Seven entries are the intersection / heritage / `withDefaults` rows
-/// (C02, C04, C06, C08, C10, C11, C12) whose `new Box()` resolves to the
-/// instance: their checker column is the MACRO's composed probe, while a
-/// deep pin compares the flow function's own return against it, so a
-/// recursive pin would assert a divergence the rows do not have. The
+/// Fourteen entries are the intersection / heritage / `withDefaults` rows
+/// whose flow return is a `Box` instance — constructed (C02, C04, C06, C08,
+/// C10, C11, C12) or returned by a tag (their tagged-template twins C18 to
+/// C24): their checker column is the MACRO's composed probe, while a deep
+/// pin compares the flow function's own return against it, so a recursive
+/// pin would assert a divergence the rows do not have. The
 /// unmodelled-position dispositions of those shapes are carried by their
-/// tagged-template twins.
+/// undeclared-call rows, whose members spell the typed marker and so need no
+/// shallow entry.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 65;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 70;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -5052,19 +5160,24 @@ const SHALLOW_PINNED_ROWS_CEILING: usize = 65;
 /// re-pinning its row AND removing its id here, in the same change.
 #[cfg(test)]
 const OPEN_DEBTS: &[&str] = &[
-    // ── TypeScript semantics: flow-return substrate ──────────────────────
-    // An intersection / heritage arm whose flow return is WHOLLY unmodelled is
-    // silently DROPPED instead of failing closed. This is the family the 15
-    // existing `ReturnType<typeof …>` tests structurally could not reach:
-    // none of them uses `&` or `extends`.
-    "C19_emits_intersection_unmodelled_tagged",
-    "C23_props_intersection_unmodelled_arm_tagged",
-    "C24_heritage_unmodelled_clause_tagged",
+    // ── Shared type resolution: the intersection reducer ────────────────
+    // An intersection arm whose flow return is WHOLLY the unmodelled marker
+    // is silently DROPPED instead of failing closed: the member-set reader
+    // takes a root-position marker for a complete member-less contribution.
+    // The flow lane reports the marker and its typed degradation; the drop
+    // is the consumer's. Witnessed over a call of an undeclared name, whose
+    // composed type the checker types `any` (a heritage clause over the same
+    // call matches the checker, which drops the erroneous clause too).
+    "C26_emits_intersection_undeclared_arm",
+    "C30_props_intersection_undeclared_arm",
     // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
-    // The file loses its whole type-check surface for programs the checker
-    // types without difficulty.
-    "D14_callee_tagged_spread_only",
-    "D15_callee_tagged_spread_key",
+    // The file loses its whole type-check surface: the names-only compile
+    // faults on a spread's partial member evidence, for a checker-typed
+    // program and for a spread of an undeclared call's error type alike.
+    "D17_undeclared_spread",
+    "D18_callee_undeclared_spread_only",
+    "D19_callee_undeclared_spread_key",
+    "G08_emits_undeclared_spread",
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
@@ -5104,9 +5217,6 @@ const OPEN_DEBTS: &[&str] = &[
     // computes the contextual union.
     "CC06_contextual_arrow_param",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
-    // A class getter read through an instance publishes the getter's
-    // function type instead of the property type, clean and warm.
-    "X12_class_getter_member",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // A generator return: the generator wrap has no lib `Generator` head to
@@ -5192,9 +5302,10 @@ const OPEN_DEBTS: &[&str] = &[
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 3, 1, 2),
-    // A `new` resolves to the instance: C10's constructed member matches the
-    // checker, and its tagged-template twin C22 keeps the degraded member.
-    (Owner::U2MappedTemplate, 5, 3, 1),
+    // A `new` and a tagged template resolve to the instance: C10's
+    // constructed member and C22's tag-returned one match the checker, and
+    // C29 keeps the degraded member over an undeclared call.
+    (Owner::U2MappedTemplate, 6, 4, 1),
     (Owner::U6CallResolve, 33, 32, 1),
     // Nine switch-, try/catch- and reunion-family rows are parked as the
     // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
@@ -5222,11 +5333,12 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // owner with its B03/B04 class, so the substrate total drops by one
     // from D13's 64 to 63. The async return wrap greens X18 (the
     // `Promise<…>` carrier matches the checker).
-    // A `new` resolves to the instance: D01, D09 and G03 match the checker;
-    // their tagged-template twins D12, D13 and G07 keep the unmodelled
-    // position, and X12's class getter read through the constructed
-    // instance is parked (the getter publishes its function type).
-    (Owner::U6FlowReturnSubstrate, 66, 51, 3),
+    // A `new` and a tagged template resolve to the instance: D01, D09 and
+    // G03 and their tagged-template twins D12, D13 and G07 match the
+    // checker; D16 keeps the reference degraded success over an undeclared
+    // call. An accessor reads as its value type, so X12's class getter read
+    // through the constructed instance matches too.
+    (Owner::U6FlowReturnSubstrate, 67, 55, 2),
     // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
     // implied type (N44, N46), and a comparison value is `boolean`, so the
     // `let`-aliased condition control (N84) publishes complete. A `const`
@@ -5252,20 +5364,25 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // instantiated at the call (N56, N57, N59): 9 match.
     (Owner::U6NarrowSubstitution, 12, 9, 3),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
-    // A `new` resolves to the instance: C02, C04, C08, C11 and C12 match the
-    // checker; the dropped-arm debt rides their tagged-template twins C19,
-    // C23 and C24, with C18 and C21 keeping the degraded member.
-    (Owner::SharedTypeResolution, 19, 14, 3),
+    // A `new` and a tagged template resolve to the instance: C02, C04, C08,
+    // C11 and C12 and their tagged-template twins C18, C19, C21, C23 and C24
+    // match the checker. Over an undeclared call, C25 and C28 keep the
+    // degraded member, C31's heritage clause matches the checker (which
+    // drops the erroneous clause too), and the dropped-arm debt rides C26
+    // and C30.
+    (Owner::SharedTypeResolution, 24, 20, 2),
     // H02's D14 deep pin re-labelled the row KnownOwed: the checker's
     // union normal form carries `?: undefined` cross members the composed
     // spread alternatives omit (extensionally equal), so matching drops
     // to zero and every row here is parked.
-    // D10 and D11 construct their spread source and match the checker; the
-    // TSX-fault debt rides their tagged-template twins D14 and D15.
-    (Owner::SharedCompilePipeline, 10, 2, 8),
-    // C06 constructs its member and matches; its twin C20 keeps the degraded
-    // member.
-    (Owner::FrameworkOnly, 8, 6, 0),
+    // D10 and D11 construct their spread source, and their tagged-template
+    // twins D14 and D15 call a tag for it: all four match the checker. The
+    // TSX-fault debt rides the undeclared-call spreads D17, D18, D19 and G08
+    // beside E01-E03.
+    (Owner::SharedCompilePipeline, 14, 4, 10),
+    // C06 constructs its member and its twin C20 calls a tag for it: both
+    // match. C27 keeps the degraded member over an undeclared call.
+    (Owner::FrameworkOnly, 9, 7, 0),
 ];
 
 #[cfg(test)]
@@ -5374,19 +5491,21 @@ mod conformance {
 /// Parked rows that belong to NO `U*` block. Nobody is scheduled to fix these.
 #[cfg(test)]
 const UNASSIGNED_PARKED_ROWS: &[&str] = &[
-    // SHARED.TYPE_RESOLUTION — the intersection / heritage surface reducer
-    // drops an arm whose flow return is wholly unmodelled.
-    "C19_emits_intersection_unmodelled_tagged",
-    "C23_props_intersection_unmodelled_arm_tagged",
-    "C24_heritage_unmodelled_clause_tagged",
+    // SHARED.TYPE_RESOLUTION — the intersection surface reducer drops an arm
+    // whose flow return is wholly the unmodelled marker.
+    "C26_emits_intersection_undeclared_arm",
+    "C30_props_intersection_undeclared_arm",
     // SHARED.COMPILE_PIPELINE — the TSX (IDE) lane deletes the file's whole
-    // type-check surface for programs the checker types without difficulty.
-    "D14_callee_tagged_spread_only",
-    "D15_callee_tagged_spread_key",
+    // type-check surface on a spread's partial member evidence (D17-D19 and
+    // G08 spread an undeclared call's error type).
+    "D17_undeclared_spread",
+    "D18_callee_undeclared_spread_only",
+    "D19_callee_undeclared_spread_key",
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
     "E05_scalar_flow_answer_keeps_tsx_surface",
+    "G08_emits_undeclared_spread",
     // H02's D14 deep pin re-labelled the row KnownOwed under this owner:
     // the checker's union normal form carries `?: undefined` cross
     // members the composed spread alternatives omit.

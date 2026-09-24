@@ -219,9 +219,9 @@ impl ComponentMetaQueryEngine<'_> {
             IndexedValueExpression::Value(lowered) => {
                 collect_dynamic_root_candidates_from_type(lowered, imports)
             }
-            IndexedValueExpression::Call(_) | IndexedValueExpression::UnsupportedCall { .. } => {
-                Vec::new()
-            }
+            IndexedValueExpression::Call(_)
+            | IndexedValueExpression::UnsupportedCall { .. }
+            | IndexedValueExpression::TemplateStrings { .. } => Vec::new(),
         };
         if let Some(node) = self.evaluate_fallthrough_value_node(
             scope_canonical_id,

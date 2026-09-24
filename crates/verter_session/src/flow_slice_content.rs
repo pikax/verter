@@ -57,7 +57,8 @@
 //! [`SliceCall::Direct`] — and any other call rides the symbolic
 //! `ReturnType<typeof …>` carrier (or `any` for an unrepresentable
 //! callee) as [`SliceCall::Symbolic`]. A `new` expression is
-//! [`SliceCall::Construct`] over its lowered constructor value.
+//! [`SliceCall::Construct`] over its lowered constructor value, and a
+//! tagged template is [`SliceCall::TaggedTemplate`] over its lowered tag.
 
 use std::sync::Arc;
 
@@ -525,6 +526,11 @@ pub enum SliceStatement {
         /// variable's type follows its assignments; without it the
         /// variable is declared as its initializer's widened type.
         auto_typed_form: bool,
+        /// The checker's EVOLVING array form (`autoArrayType`): an
+        /// unannotated declaration whose initializer is an empty array
+        /// literal — not a parenthesized one (tsc 7.0.2: `const a = ([])`
+        /// is `never[]`). `None` for every other declaration.
+        evolving_array: Option<SliceEvolvingArray>,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -1467,6 +1473,17 @@ fn construct_site(new: &oxc_ast::ast::NewExpression<'_>) -> SliceCallSite {
     )
 }
 
+/// The [`SliceCallSite`] of one authored tagged template: the template
+/// strings are its first argument and every substitution one more.
+fn tagged_template_site(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) -> SliceCallSite {
+    SliceCallSite::new(
+        u32::try_from(tagged.quasi.expressions.len() + 1).unwrap_or(u32::MAX),
+        false,
+        tagged.type_arguments.is_some(),
+        tagged.span.into(),
+    )
+}
+
 fn authored_call_site(
     arguments: &[oxc_ast::ast::Argument<'_>],
     has_explicit_type_arguments: bool,
@@ -1542,6 +1559,10 @@ pub enum SliceCall {
     /// through the call executor over the constructor's construct
     /// signatures — the checker's `resolveNewExpression`.
     Construct(Box<SliceExpr>),
+    /// A tagged template: a call of its tag, lowered as a flow value like
+    /// a constructor, whose arguments are the template strings and then
+    /// each substitution — the checker's `resolveTaggedTemplateExpression`.
+    TaggedTemplate(Box<SliceExpr>),
 }
 
 /// One name an answer references that the frame's LEXICAL AUTHORITY
@@ -1718,6 +1739,22 @@ pub enum SliceObjectEntry {
         /// The spread source's lowered value.
         source: Box<SliceExpr>,
     },
+}
+
+/// What the frame does with an EVOLVING array binding
+/// ([`SliceStatement::Binding::evolving_array`]). Under `noImplicitAny`
+/// the checker types such a binding by the operations that reach each read
+/// (`push`, `unshift`, element writes, reassignments); a binding the frame
+/// only reads whole — never through a member, a call, a write, or a
+/// closure — reads `any[]` everywhere (tsc 7.0.2: `const a = []; return
+/// a` is `any[]`, and so are `[a]`'s element and `{ a }`'s member).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceEvolvingArray {
+    /// Only whole reads of the binding in this frame.
+    Settled,
+    /// Some position may evolve the binding's element type: this frame
+    /// does not follow those operations, so its reads are the typed gap.
+    MayEvolve,
 }
 
 /// One element of a structurally lowered array literal.
@@ -5713,22 +5750,36 @@ impl Lowerer<'_> {
                                 .init
                                 .as_ref()
                                 .is_none_or(|init| self.is_null_or_undefined_keyword(init));
+                        let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span))
+                        else {
+                            out.push(SliceStatement::Gap(
+                                crate::semantic_query::FlowGap::UnmodeledExpression,
+                            ));
+                            continue;
+                        };
+                        let evolving_array = (declared.is_none()
+                            && declarator.init.as_ref().is_some_and(|init| {
+                                matches!(
+                                    init,
+                                    Expression::ArrayExpression(array) if array.elements.is_empty()
+                                )
+                            }))
+                        .then(|| {
+                            if self.binding_only_read_whole(binding) {
+                                SliceEvolvingArray::Settled
+                            } else {
+                                SliceEvolvingArray::MayEvolve
+                            }
+                        });
                         out.push(SliceStatement::Binding {
-                            binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
-                                Some(binding) => binding,
-                                None => {
-                                    out.push(SliceStatement::Gap(
-                                        crate::semantic_query::FlowGap::UnmodeledExpression,
-                                    ));
-                                    continue;
-                                }
-                            },
+                            binding,
                             name: Arc::from(id.name.as_str()),
                             kind,
                             init,
                             declared,
                             freshness,
                             auto_typed_form,
+                            evolving_array,
                         });
                     }
                 }
@@ -6398,7 +6449,7 @@ impl Lowerer<'_> {
         };
         scanner.visit_expression(argument);
         scanner.control.iter().any(|call| match call {
-            ControlCall::Construct(_) => false,
+            ControlCall::Construct(_) | ControlCall::TaggedTemplate(_) => false,
             ControlCall::Call {
                 span,
                 callee,
@@ -8441,6 +8492,13 @@ impl Lowerer<'_> {
                 SliceCall::Construct(Box::new(self.lower_expr(&new.callee, mode))),
                 construct_site(new),
             ),
+            // A tagged template calls its tag: the tag is a flow value of
+            // this frame, and the call resolves at the same sink, with the
+            // template strings as its first argument.
+            Expression::TaggedTemplateExpression(tagged) => SliceExpr::Call(
+                SliceCall::TaggedTemplate(Box::new(self.lower_expr(&tagged.tag, mode))),
+                tagged_template_site(tagged),
+            ),
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
                     let name = callee.name.as_str();
@@ -8737,8 +8795,8 @@ impl Lowerer<'_> {
                             guard,
                         }
                     }
-                    // A CALL POSITION with no structural arm (`` tag`…` ``,
-                    // `f?.()`, `` (0, tag`…`) ``). The
+                    // A CALL POSITION with no structural arm (`f?.()`,
+                    // `(0, f?.())`, `z = f()`). The
                     // fail-closed verdict is the CLASSIFIER's, taken on the
                     // expression FORM — not on whether the shallow pass
                     // happened to mint a `ReturnType<callee>` carrier the
@@ -8767,6 +8825,42 @@ impl Lowerer<'_> {
                 }
             }
         }
+    }
+
+    /// Whether this frame only ever reads `binding` WHOLE: no read of a
+    /// member of it, no call through it, no write to it or into it after
+    /// its declaration, and no closure capturing it. Over-approximate by
+    /// construction — any of those positions may evolve an empty array's
+    /// element type in the checker.
+    fn binding_only_read_whole(&self, binding: SkeletonBindingId) -> bool {
+        let runtime = self.bindings.canonical_local(binding);
+        let is_binding = |candidate: &Option<FlowBindingRef>| {
+            matches!(
+                candidate,
+                Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(*local) == runtime
+            )
+        };
+        let sites_ok = self.skeleton.expr_sites.iter().all(|site| {
+            site.reads
+                .iter()
+                .all(|read| read.path.is_empty() || !is_binding(&read.binding))
+                && site.calls.iter().all(|call| !is_binding(&call.binding))
+                && site.capture_bindings.iter().all(|capture| {
+                    !matches!(
+                        capture,
+                        FlowBindingRef::Local(local)
+                            if self.bindings.canonical_local(*local) == runtime
+                    )
+                })
+        });
+        // The declarator's own initializer is not a skeleton write.
+        sites_ok
+            && !self
+                .skeleton
+                .writes
+                .iter()
+                .any(|write| is_binding(&write.binding))
     }
 
     fn lower_identifier_read(
@@ -9580,6 +9674,8 @@ impl Lowerer<'_> {
     /// when the callee provably establishes no narrowing:
     /// - a `new` construct (a construct signature cannot be a type
     ///   predicate, and the checker derives no narrowing from one);
+    /// - a tagged template (the checker derives no narrowing from one,
+    ///   whatever its tag's signature);
     /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
     ///   same-file declaration ([`Self::closed_callee_declaration`]: a
     ///   module-scoped file, a call site outside every namespace block,
@@ -9611,6 +9707,7 @@ impl Lowerer<'_> {
     /// follows it. A discarded call is decided above ONLY when the
     /// callee provably establishes no narrowing:
     /// - a `new` construct (a construct signature is never an assertion);
+    /// - a tagged template (the checker binds no assertion for one);
     /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
     ///   same-file declaration ([`Self::closed_callee_declaration`])
     ///   whose return annotation is absent or is not an `asserts`
@@ -9687,7 +9784,7 @@ impl Lowerer<'_> {
         let mut unprovable = false;
         for call in calls {
             let span = match call {
-                ControlCall::Construct(span) => span,
+                ControlCall::Construct(span) | ControlCall::TaggedTemplate(span) => span,
                 ControlCall::Call {
                     span,
                     callee,
@@ -10126,6 +10223,10 @@ enum WritePolicy {
 /// callee's receiver root — `asserts this`).
 enum ControlCall {
     Construct(verter_span::Span),
+    /// A tagged template: the checker binds no call flow node for one, so
+    /// its tag narrows nothing even when it is a type predicate or an
+    /// `asserts` signature.
+    TaggedTemplate(verter_span::Span),
     Call {
         span: verter_span::Span,
         callee: Option<(String, oxc_span::Span)>,
@@ -10563,6 +10664,23 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.discarded.push(ControlCall::Construct(new.span.into()));
         }
         walk::walk_new_expression(self, new);
+    }
+    fn visit_tagged_template_expression(
+        &mut self,
+        tagged: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+    ) {
+        if self.nested_frame_nesting > 0 {
+            self.decided.push(tagged.span.into());
+        } else if self.control_nesting > 0 {
+            self.control
+                .push(ControlCall::TaggedTemplate(tagged.span.into()));
+        } else if self.void_nesting > 0 {
+            self.unentered.push(tagged.span.into());
+        } else {
+            self.discarded
+                .push(ControlCall::TaggedTemplate(tagged.span.into()));
+        }
+        walk::walk_tagged_template_expression(self, tagged);
     }
     fn visit_unary_expression(&mut self, it: &oxc_ast::ast::UnaryExpression<'a>) {
         let void = it.operator == UnaryOperator::Void;

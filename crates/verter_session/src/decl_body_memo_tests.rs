@@ -2046,6 +2046,150 @@ fn aug_misplaced_non_leading_bound_fails_closed() {
 }
 
 // ===========================================================================
+// Augmentation-scoped values — the global object's declarations.
+// ===========================================================================
+
+/// Build an augmentation-scoped locator in an explicit symbol space.
+fn aug_locator_in(
+    space: LocatorSymbolSpace,
+    symbol: &str,
+    scope: AuthoredAugmentationScope,
+    path: Vec<TypeBodyPathStep>,
+) -> AuthoredBodyLocator {
+    AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(symbol),
+            space,
+        },
+        scope,
+        path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+const GLOBAL_VALUES: &str = "declare global {\n  var gv: boolean;\n  \
+     var shaped: { a: string };\n  function gf(n: number): string;\n}\n\
+     declare module \"vue\" {\n  const mv: number;\n}\nexport {};\n";
+
+/// An augmentation-scoped value derefs its authored annotation, and the path
+/// navigates into it like a file-scope value's.
+#[test]
+fn aug_value_body_is_its_annotation() {
+    let (memo, _) = memo_for(GLOBAL_VALUES);
+    let global = memo
+        .deref_locator_body(&aug_locator_in(
+            LocatorSymbolSpace::Value,
+            "gv",
+            AuthoredAugmentationScope::Global,
+            Vec::new(),
+        ))
+        .expect("the global value's annotation derefs");
+    assert_eq!(
+        single(&global),
+        &TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    let member = memo
+        .deref_locator_body(&aug_locator_in(
+            LocatorSymbolSpace::Value,
+            "shaped",
+            AuthoredAugmentationScope::Global,
+            vec![
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        ))
+        .expect("the global value's member value derefs");
+    assert_eq!(
+        single(&member),
+        &TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    let module = memo
+        .deref_locator_body(&aug_locator_in(
+            LocatorSymbolSpace::Value,
+            "mv",
+            module_scope("vue"),
+            Vec::new(),
+        ))
+        .expect("a module augmentation's value derefs over its own scope");
+    assert_eq!(
+        single(&module),
+        &TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    // Scopes are disjoint: the module's value is not a global one.
+    let err = memo
+        .deref_locator_body(&aug_locator_in(
+            LocatorSymbolSpace::Value,
+            "mv",
+            AuthoredAugmentationScope::Global,
+            Vec::new(),
+        ))
+        .expect_err("a module augmentation's value is absent from the global scope");
+    assert_eq!(err, LocatorBodyDerefError::UnknownSymbol);
+}
+
+/// A file-scope VALUE locator in a module falls through to the global
+/// augmentation when the module binds no such value, and the module's own
+/// binding wins over a same-name global one.
+#[test]
+fn value_decl_body_falls_through_to_the_global_augmentation() {
+    let (memo, _) = memo_for(GLOBAL_VALUES);
+    let derefed = memo
+        .deref_locator_body(&value_body_locator("gv", Vec::new()))
+        .expect("a module read of a global value derefs its declaration");
+    assert_eq!(
+        single(&derefed),
+        &TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+
+    let (shadowed, _) = memo_for(
+        "declare global {\n  var gv: boolean;\n}\ndeclare const gv: string;\nexport {};\n",
+    );
+    let own = shadowed
+        .deref_locator_body(&value_body_locator("gv", Vec::new()))
+        .expect("the module's own binding derefs");
+    assert_eq!(
+        single(&own),
+        &TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+/// Overloads declared together in one `declare global` block read as one
+/// signature each, never once per declaration sharing the statement.
+#[test]
+fn aug_value_overloads_in_one_block_are_read_once() {
+    let (memo, _) = memo_for(
+        "declare global {\n  function gf(n: number): string;\n  \
+         function gf(s: string): number;\n}\nexport {};\n",
+    );
+    let parts = memo
+        .transient_augmentation_value_parts_in(
+            &AugmentationScopeKind::Global,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "gf",
+        )
+        .into_option()
+        .expect("the global function's parts are ready");
+    assert_eq!(parts.signatures.len(), 2, "one signature per overload");
+}
+
+/// A namespace has no memo-backed body in an augmentation scope either.
+#[test]
+fn aug_namespace_body_is_unrouted() {
+    let (memo, _) =
+        memo_for("declare global {\n  namespace gn { const x: number; }\n}\nexport {};\n");
+    let err = memo
+        .deref_locator_body(&aug_locator_in(
+            LocatorSymbolSpace::Namespace,
+            "gn",
+            AuthoredAugmentationScope::Global,
+            Vec::new(),
+        ))
+        .expect_err("an augmentation namespace body stays unrouted");
+    assert_eq!(err, LocatorBodyDerefError::NamespaceBodyUnrouted);
+}
+
+// ===========================================================================
 // Symmetric bound-slot coverage.
 // ===========================================================================
 

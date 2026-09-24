@@ -3378,7 +3378,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                         .snapshot
                         .roots
                         .global_contributor_fingerprint(target, decl_name, overlay)
-                        == fact.expected_hash;
+                        == Some(fact.expected_hash);
                 }
                 // CONTENT-ADDRESSED population: a session view validates
                 // against the `Session(overlay-set fingerprint)` augmenter
