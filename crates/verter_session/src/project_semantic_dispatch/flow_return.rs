@@ -1639,6 +1639,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(ctx) = crate::request_context::current_request_context() {
             ctx.record_dispatched_query_tag(crate::semantic_query::SemanticQueryKeyTag::FlowReturn);
         }
+        // The callee schedule learns what each frame's call resolution
+        // demanded, for the frame's own instantiations.
+        self.note_flow_return_demand(&key);
         // (1) Reentry intercept.
         {
             let identity = ObligationIdentity::FlowReturn(key.clone());
@@ -4693,6 +4696,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             };
+        // The callee returns this body demands are evaluated first,
+        // bottom-up, so the body reuses them instead of recursing.
+        let _schedule = self.schedule_flow_return_callees(key, &index, entry, &lowered);
         // The member-projection demand evaluates ONLY the demanded member
         // of a structural object return; the slice's VALUE selection
         // below already keeps every unselected sibling cold.
@@ -6741,6 +6747,9 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 
 #[path = "flow_return_class.rs"]
 mod class_expression;
+
+#[path = "flow_return_schedule.rs"]
+pub(super) mod schedule;
 
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {

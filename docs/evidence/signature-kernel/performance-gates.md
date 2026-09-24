@@ -18,7 +18,7 @@ the strength of a number nobody can recompute from this checkout.
 |---|---|---|
 | Complete direct Empty/One read | No result heap allocation or candidate-table access; common evidence protocol retained | `tests/allocator_canaries.rs` → `signature_kernel_warm_positional::warm_positional_read_does_not_allocate_or_lock`. A counting `#[global_allocator]` asserts **zero** allocations over repeated warm `One` and `Many` reads, and `SemanticReadView::shard_lock_acquires()` asserts the read took **no** intern-shard lock. Runs in its own test binary (allowlisted in `scripts/integration-test-layout-allowlist.json`) because the allocator is process-global. |
 | Repeated complete signature/intersection query | No producer rebuild or new semantic records | `signature_kernel/substitution_tests.rs` → `repeated_warm_read_walks_no_descriptor_chain` (`descriptor_chain_walks() == 0` on the repeated read); `cache_runtime/node_tests.rs` → `lookup_dedups_cold_compute_under_same_view`; `project_global_cache_tests.rs` → `semantic_subqueries_dedup_across_request_boundaries`. |
-| Shared body-obligation consumers | Reuse completed return/effect work under the same full demand | `lazy_decl_body_tests.rs` → `lazy_decl_body_singleflight_lowers_once`; the `ReduceUnion` / `ReduceIntersection` rows of `semantic_query/query_key_spec_table.txt` register both families as `Singleflight`, and the spec table is enumerated against the live key enum. Within one transaction, a proven inline flow-return member is reused rather than re-evaluated: `flow_return_coverage_tests.rs` → `a_generic_call_chain_reuses_each_completed_callee` asserts every added level of a generic call chain costs the same connected work (it doubled per level before: 20504 units at eleven levels, 306 now), `flow_return_tests.rs` → `a_reused_flow_member_replays_its_reads_into_the_live_scopes` holds that a reuse replays the member's facts, self-roots and canonical evidence into the demanding build, and `a_reused_callee_still_invalidates_its_consumers_on_edit` holds that an edit to the reused callee still reaches the chain. |
+| Shared body-obligation consumers | Reuse completed return/effect work under the same full demand | `lazy_decl_body_tests.rs` → `lazy_decl_body_singleflight_lowers_once`; the `ReduceUnion` / `ReduceIntersection` rows of `semantic_query/query_key_spec_table.txt` register both families as `Singleflight`, and the spec table is enumerated against the live key enum. Within one transaction, a proven inline flow-return member is reused rather than re-evaluated: `flow_return_coverage_tests.rs` → `a_generic_call_chain_reuses_each_completed_callee` asserts every added level of a generic call chain costs the same connected work, at 9 / 10 / 11 levels and at 32 / 64 / 128 (it doubled per level before: 20504 units at eleven levels, 306 now), `flow_return_tests.rs` → `a_reused_flow_member_replays_its_reads_into_the_live_scopes` holds that a reuse replays the member's facts, self-roots and canonical evidence into the demanding build, and `a_reused_callee_still_invalidates_its_consumers_on_edit` holds that an edit to the reused callee still reaches the chain. |
 | Augmented type lookup | No whole-program scan; no unrelated contributor invalidation | `FileArtifactStore::ensure_augmentation_index_populated` is an inverse index, not a scan; `g_misc3/module_augmentation_stitching.rs` → `session_overlay_augmenter_isolated_from_base_index` holds the no-unrelated-invalidation half across the base/session overlay boundary. |
 | Composite construction | No eager overload Cartesian product; no quadratic prefix provenance copying | **Held.** `signature_kernel::discovery::union_signatures` is two phases: phase 1 takes signatures matched in every arm; phase 2 (restricted synthesis) fires only when phase 1 found nothing AND at most one arm has several signatures, so the product can never open. Held by `signature_kernel::discovery_tests::a_union_of_overloaded_arms_without_a_common_signature_synthesizes_nothing`: two overloaded arms with no common signature synthesize nothing (7.0.2: TS2349, not callable), while one overloaded arm still reaches the restricted synthesis; removing the phase-2 precondition fails it. No prefix of the fold copies provenance: `union_synthesis_interns_one_provenance_per_candidate_whatever_the_arm_count` counts one constituent sequence and one provenance per synthesized candidate for three arms and for six, and fails if the fold interns a sequence per prefix. |
 | Concurrent repeated demand | Coalesced computation without recursion deadlock or partial publication | `g_block/semantic_determinism_matrix.rs` → `signature_kernel_interned_identities_are_schedule_independent` (duplicate publishers and opposite intern orders at 1/2/4/8 workers converge on one logical identity) and `det_04_worker_counts_1_2_4_8`; `signature_kernel/lifetime_tests.rs` → `concurrent_replace_epoch_publishes_in_order`; `project_semantic_dispatch/signature_epoch_tests.rs` → `a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined`. |
@@ -33,6 +33,15 @@ the strength of a number nobody can recompute from this checkout.
 | A resident valid previously built semantic union view is not sorted again | Held by the memo: a warm `ReduceUnion` hit returns the interned node; `intern_ordered_union` is not re-entered. No counter assertion. |
 | Rendering preference changes rebuild no semantic query | Held by the key composition: rendering/presentation is not a `SemanticQueryKey` dimension (R21 scoping — see `/type-cache-architecture`). |
 | Diagnostic materialization at a second call site uses that site's location | Not separately guarded here. |
+
+## Candidate gates
+
+Correctness and stack-safety gates proposed for registration, each held by a
+guard that fails on regression.
+
+| Gate | Evidence |
+|---|---|
+| A finite linear call chain consumes connected work, not native stack or connected-query depth per level | The flow-return callee schedule (`project_semantic_dispatch/flow_return_schedule.rs`) evaluates the callee returns a frame's body will demand bottom-up from an explicit stack before the body runs, and records each as a reusable completed member exactly as the inline path does, so the body reuses it instead of recursing. `flow_return_coverage_tests.rs` → `schedule::a_128_level_generic_chain_needs_no_more_query_depth_than_a_short_one` (the 128-level chain answers like the three-level one under the smallest depth cap the three-level one needs), `schedule::a_128_level_generic_chain_runs_on_the_short_chains_native_stack` (the 128-level chain on a 512 KiB thread), `schedule::chains_through_other_call_shapes_consume_no_depth_per_level` (non-generic, `const`-arrow and local-arrow chains), `schedule::a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail` (a reduced work budget ends the 128-level chain on `PROJECTION_WORK_LIMIT`, never the depth rail), and `schedule::recursive_components_evaluate_exactly_as_the_recursive_path` (self-recursive and mutually recursive components answer from the same connected work as with the schedule off: a cycle is never evaluated out of order). |
 
 ## Regression policy
 
@@ -107,9 +116,32 @@ Recorded plainly so no reader mistakes absence for a pass:
 
 ## Known limits
 
-* **Connected-query depth.** Each level of a generic call chain nests two
-  connected queries, and the dispatch's depth guard (24) is a stack-safety
-  bound, so a chain longer than eleven levels ends in a typed budget refusal
-  rather than a stack overflow. The work per level is constant (see *Shared
-  body-obligation consumers*); raising the bound is a stack-budget decision,
-  not a performance one.
+* **Connected-query depth is a backstop.** A call chain the callee schedule
+  discovers — a same-file direct call, including one made through a local
+  arrow function, and an instantiation of a frame whose uninstantiated
+  frame's call resolution ran in the same demand — consumes connected work
+  and no native stack or connected-query depth per level (see *Candidate
+  gates*): the 128-level generic chain needs the depth (3) and stack of a
+  three-level one. The dispatch's depth guard (24) stays the emergency bound
+  for query nesting the schedule does not flatten, ending it in the typed
+  `CONNECTED_QUERY_DEPTH_LIMIT` incompleteness rather than a stack overflow:
+  `projection_stack_safety_tests.rs` →
+  `connected_query_depth_limit_allows_boundary_and_trips_at_plus_one` and
+  `connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached`.
+  What the schedule still leaves to the recursive path, measured:
+  * a chain whose edges are `typeof f` reads in TYPE positions
+    (`let r: ReturnType<typeof f>`) is demanded through type lowering, which
+    the schedule does not predict: it nests two queries per level and trips
+    the guard past twelve levels, exactly as before;
+  * an instantiation of a chain whose uninstantiated frames were answered
+    warm by an earlier demand is not predicted (the call resolution's
+    answers are recorded only as it makes them): it nests one native frame
+    per level, but no connected-query depth;
+  * a call nested inside another call's arguments, a call the function
+    index does not resolve (an import, a member call), and a callee whose
+    evaluation is not reusable (a degraded or unproven return) are left to
+    their demand; the first unreusable callee of a branch costs one extra
+    evaluation before the schedule leaves that branch;
+  * a `this.m()` method chain nests nothing, because the flow lane answers
+    its first hop with the typed `UnresolvedValue` degradation (tsc:
+    `{ v: string | number; tag: "c"; }`) — a separate gap.
