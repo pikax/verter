@@ -151,6 +151,7 @@ mod checker_diagnostic;
 pub use checker_diagnostic::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
 };
+pub(crate) use checker_diagnostic::{LIB_AWAITED_NESTED_STEPS, LIB_AWAITED_TAIL_STEPS};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -5339,9 +5340,15 @@ pub enum QueryError {
     /// declaration expanding into itself (e.g., `type TreeNode = {
     /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
     /// this to [`TypeExpr::RecursiveRef`] so the materialiser stops at
-    /// the back-edge instead of recursing indefinitely. /
-    /// recursion handling.
-    RecursiveRef { name: Arc<str> },
+    /// the back-edge instead of recursing indefinitely.
+    ///
+    /// `args` are the type arguments of the instantiation the back-edge
+    /// stands for (`G<[T]>` inside the body of `G<string>` records
+    /// `[[string]]`); empty for a reference without type arguments.
+    RecursiveRef {
+        name: Arc<str>,
+        args: Arc<[SemanticNodeId]>,
+    },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
     /// Declaration resolved but not yet materialized. The node
@@ -5531,7 +5538,16 @@ impl PartialEq for QueryError {
                 Self::IncompleteSemanticOperand { reasons: b },
             ) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
-            (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
+            (
+                Self::RecursiveRef {
+                    name: a,
+                    args: a_args,
+                },
+                Self::RecursiveRef {
+                    name: b,
+                    args: b_args,
+                },
+            ) => a == b && a_args == b_args,
             (Self::Other(a), Self::Other(b)) => a == b,
             (
                 Self::DeclPlaceholder {
@@ -5620,8 +5636,9 @@ impl std::hash::Hash for QueryError {
             Self::AliasCycle { chain } => {
                 chain.hash(state);
             }
-            Self::RecursiveRef { name } => {
+            Self::RecursiveRef { name, args } => {
                 name.hash(state);
+                args.hash(state);
             }
             Self::Other(msg) => {
                 msg.hash(state);
@@ -8473,9 +8490,9 @@ pub enum SemanticQueryKey {
     ///   clause);
     /// - a `Promise<V>` carrier — recognised by RESOLVED declaration
     ///   identity through the intrinsic registry, never by spelling —
-    ///   RE-ENTERS this family on `V`, so nesting unwraps through the
-    ///   memo / singleflight / cycle machinery rather than a private
-    ///   recursion;
+    ///   continues this relation's RUN on `V` as a tail step, in one loop
+    ///   that costs no query depth however long the chain (every step
+    ///   charged to the connected-work budget);
     /// - a union DISTRIBUTES by re-entering this family per arm and
     ///   renormalising through the canonical union; any undecidable arm
     ///   defers the whole reduction (partial distribution would silently
@@ -8494,11 +8511,11 @@ pub enum SemanticQueryKey {
     ///   application is awaited again;
     /// - an object surface follows the checker's thenable protocol: no
     ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
-    ///   is callable RE-ENTERS this family on the promised value; a callable
+    ///   is callable continues the run on a single promised value; a callable
     ///   `then` that promises nothing, or an optional callable `then` ⇒
     ///   `any` (the checker reports the operand);
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands
-    ///   one level through `Instantiate` and re-enters this family on the
+    ///   one level through `Instantiate` and continues the run on the
     ///   body; an unchanged body answers with the CARRIER, so a
     ///   non-thenable alias keeps its identity;
     /// - a thenable whose promised value is a type this family is ALREADY
@@ -10519,6 +10536,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("R"),
+                args: std::sync::Arc::from([]),
             },
             QueryError::Other(Arc::from("x")),
             QueryError::DeclPlaceholder {

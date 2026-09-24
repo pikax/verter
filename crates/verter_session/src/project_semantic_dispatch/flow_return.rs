@@ -2426,13 +2426,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// refusal: the family answers the checker's TS1062 recovery, the error
     /// type an `await` continues with.
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AwaitedNormalize {
-                operand: node,
-                context: self.structural_reduce_context(),
-            })
-            .value
-        {
+        let read = self.execute_read(SemanticQueryKey::AwaitedNormalize {
+            operand: node,
+            context: self.structural_reduce_context(),
+        });
+        // A PARTIAL read (the connected demand's budget ran out part-way
+        // down a chain of thenables) is where the relation stopped, not
+        // what the operand awaits to: never an answer.
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
             QueryResult::Value(reduced) => Some(reduced),
             _ => None,
         }
@@ -2447,13 +2451,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `AsyncGenerator<Awaited<T>, …>`. The two flow positions take two
     /// different relations, which is why they are two families.
     fn async_return_payload_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self
-            .execute_read(SemanticQueryKey::AsyncReturnPayload {
-                operand: node,
-                context: self.structural_reduce_context(),
-            })
-            .value
-        {
+        let read = self.execute_read(SemanticQueryKey::AsyncReturnPayload {
+            operand: node,
+            context: self.structural_reduce_context(),
+        });
+        // A PARTIAL read is where the relation stopped (the connected
+        // demand's budget), not the payload: `Promise<C14>` for a chain
+        // `C0 → … → C14 → number` would publish a thenable the checker
+        // unwraps.
+        if read.result_is_partial {
+            return None;
+        }
+        match read.value {
             QueryResult::Value(payload) => Some(payload),
             _ => None,
         }
@@ -2546,18 +2555,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `AsyncGenerator<Awaited<p>, Awaited<q>, unknown>`). A
                 // SYNC generator awaits neither — it publishes what the
                 // body yielded and returned verbatim.
-                // A join the relation FAILS on (TS1062) has no defined
-                // recovery here: tsc 7.0.2 publishes `never` for one such
-                // yield and crashes on two, so it stays the typed gap.
+                //
+                // A recursive thenable fails the relation (TS1062), and the
+                // two joins recover differently. The RETURN is the checker's
+                // error type, as an async function's return is (tsgo:
+                // `async function* g(r: Rec) { return r }` is
+                // `AsyncGenerator<never, any, unknown>`). A YIELD the relation
+                // fails on contributes NO yield type: tsgo publishes `never`
+                // when every yield fails (`{ yield r }` and `{ yield r; yield
+                // r }`), and drops a failing arm of a yielded union (`yield
+                // a` over `Rec | number` is `number`). Two distinct yields of
+                // which one fails crash tsgo 7.0.2 itself, so no oracle
+                // exists for that program; the yield join still drops the
+                // failing yield, the same rule every measured program follows.
                 let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
                     match (
                         self.awaited_normalize_for_flow(yield_join),
                         self.awaited_normalize_for_flow(body),
                     ) {
-                        (Some(yielded), Some(returned))
-                            if !self.awaited_normalize_failed_on(yield_join, yielded)
-                                && !self.awaited_normalize_failed_on(body, returned) =>
-                        {
+                        (Some(yielded), Some(returned)) => {
+                            let yielded = if self.awaited_normalize_failed_on(yield_join, yielded) {
+                                never
+                            } else {
+                                yielded
+                            };
                             (yielded, returned)
                         }
                         _ => return self.materialize_wrap_typed_gap(result),
@@ -8034,12 +8055,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// The element types one spread SOURCE contributes to a non-const
     /// array literal: an array's element, a tuple's elements (an optional
     /// one with `undefined` under `strictNullChecks`, a rest one with its
-    /// array's element), `any` for `any`, and `string` for a string's
-    /// characters. `None` for a source whose elements this frame cannot
-    /// read.
+    /// array's element), `any` for `any`, `string` for a string's (or a
+    /// string literal's) characters, and every arm's element types for a
+    /// union (tsc 7.0.2: `[...xs]` over `number[] | string[]` is
+    /// `(string | number)[]`, over `"ab"` `string[]`). `None` for a source
+    /// whose elements this frame cannot read.
     fn spread_element_types(&self, source: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
         let graph = self.dispatch.graph();
         match graph.node_data(source).as_deref()? {
+            SemanticNodeData::Union(arms) => {
+                let mut out = Vec::new();
+                for arm in arms.iter() {
+                    out.extend(self.spread_element_types(*arm)?);
+                }
+                Some(out)
+            }
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_)) => Some(
+                vec![graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))],
+            ),
             SemanticNodeData::Array { element, .. } => Some(vec![*element]),
             SemanticNodeData::Tuple { elements, .. } => {
                 let undefined =
@@ -13750,6 +13783,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     declared,
                     freshness,
                     auto_typed_form,
+                    evolving_array,
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -13758,6 +13792,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // scope's writes to bindings that predate it.
                     if !matches!(kind, crate::flow_slice_content::SliceBindingKind::Var) {
                         self.record_scope_shadow(&FlowProductSubject::Local(*binding));
+                    }
+                    // The checker's EVOLVING array (`noImplicitAny` on): an
+                    // unannotated `const a = []` / `let a = []` is typed by
+                    // the operations that reach each read. One the frame
+                    // only reads whole reads `any[]` (tsc 7.0.2, with TS7034
+                    // / TS7005); one some position may evolve is not
+                    // followed here, so the binding holds the typed marker.
+                    // Without `noImplicitAny` it is the ordinary `[]` below.
+                    if let (Some(evolving), true) = (evolving_array, self.no_implicit_any) {
+                        let subject = FlowProductSubject::Local(*binding);
+                        self.set_declared_local(&subject, *kind, None);
+                        let value = match evolving {
+                            crate::flow_slice_content::SliceEvolvingArray::Settled => {
+                                let graph = self.dispatch.graph();
+                                let any = graph
+                                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                                graph.intern_node(SemanticNodeData::Array {
+                                    element: any,
+                                    readonly: false,
+                                })
+                            }
+                            crate::flow_slice_content::SliceEvolvingArray::MayEvolve => {
+                                self.unmodeled_position()
+                            }
+                        };
+                        self.bind_local(&subject, *kind, value, None, false);
+                        continue;
                     }
                     // An authored annotation is the binding's DECLARED
                     // type, seeded HERE (in source order), never at

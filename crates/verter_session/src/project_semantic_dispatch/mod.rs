@@ -327,6 +327,11 @@ pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwner
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// The operands each awaited relation is unwrapping on the current
+    /// path — the checker's `awaitedTypeStack`. A run pushes every operand
+    /// it reaches, its query-free tail steps included, and pops them when
+    /// it ends (`build::AwaitedPathGuard`).
+    pub(super) awaited_active: std::cell::RefCell<Vec<(build::AwaitedRelation, SemanticNodeId)>>,
     /// Carrier-normalization visited set — the small PRE-MEMO cycle guard for
     /// carrier-subject head resolution at the canonical query entry.
     ///
@@ -648,6 +653,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            awaited_active: std::cell::RefCell::new(Vec::new()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1622,10 +1628,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn recursive_ref_sentinel(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::clone(&identity.decl_name),
+                args,
             }),
             NodeScopeId::File {
                 canonical_id: Arc::clone(&identity.canonical_id),
@@ -2577,6 +2585,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                         name: Arc::clone(&k.base().merged_symbol_name),
+                        args: Arc::clone(k.args()),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))

@@ -7237,7 +7237,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // identity is already open and closes coinductively. A
                 // scope-less sentinel stays concrete (fail-closed Unknown
                 // downstream, never a fabricated verdict).
-                SemanticNodeData::Opaque(QueryError::RecursiveRef { name }) => {
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
                     let Some(crate::semantic_query::NodeScopeId::File {
                         canonical_id,
                         owner,
@@ -7254,7 +7254,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             whole_hash,
                             decl_name: Arc::clone(name),
                         },
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        Arc::clone(args),
                     )
                 }
                 SemanticNodeData::DeclRef { identity } => (
@@ -7655,7 +7655,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> SemanticNodeId {
         let graph = self.graph();
         let name = match graph.node_data(value).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name })) => Arc::clone(name),
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => {
+                Arc::clone(name)
+            }
             _ => return value,
         };
         let Some(origin) = origin else {

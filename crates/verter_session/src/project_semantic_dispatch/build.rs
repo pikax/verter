@@ -1757,6 +1757,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (
                     QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                         name: Arc::from("default"),
+                        args: Arc::from([]),
                     })),
                     empty_signature(),
                 )
@@ -3950,6 +3951,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<_> = (
                 QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                     name: Arc::clone(decl_name),
+                    args: Arc::clone(args),
                 })),
                 empty_signature(),
             )
@@ -12195,39 +12197,124 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.awaited_relation_failed_on(AwaitedRelation::Normalize, operand, reduced)
     }
 
-    /// Re-enter `relation`'s own family on `operand`. Going back through the
-    /// query — rather than recursing privately — is what puts nested unwraps
-    /// under the family memo, the singleflight and the connected-work
-    /// budget; each relation re-enters ONLY itself, so an async return
-    /// payload never comes back as `Awaited<T>` for a nested naked `T`.
-    ///
-    /// The re-entry first applies the checker's own recursion rule
-    /// (`getAwaitedTypeNoAlias` and its `awaitedTypeStack`): when `operand`
-    /// is a type this relation is ALREADY unwrapping on the current path, the
-    /// thenable that promised it references itself, directly or indirectly,
-    /// in its fulfillment callback. The checker reports TS1062 there and
-    /// fails the step ([`AwaitedStep::Failed`]). Which operands are in flight
-    /// is a fact about this path, not about `operand`, so every answer built
-    /// over such a failure stays out of the warm memo.
+    /// Whether `operand` is a type `relation` is ALREADY unwrapping on the
+    /// current path — the checker's own recursion rule
+    /// (`getAwaitedTypeNoAlias` and its `awaitedTypeStack`): the thenable
+    /// that promised it references itself, directly or indirectly, in its
+    /// fulfillment callback, and the checker reports TS1062 and fails the
+    /// step. The path is every operand an enclosing run of this relation
+    /// has reached (its tail steps included, which open no query) plus every
+    /// in-flight query of the relation. Which operands are in flight is a
+    /// fact about this path, not about `operand`, so every answer built over
+    /// such a failure stays out of the warm memo.
+    fn awaited_operand_on_path(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> bool {
+        let on_path = self.awaited_active.borrow().contains(&(relation, operand))
+            || self
+                .graph()
+                .is_same_path_inflight_on_current_thread(&relation.key(operand, context));
+        if on_path {
+            self.fold_into_top_build_local_taint(false, true);
+        }
+        on_path
+    }
+
+    /// Re-enter `relation`'s own family on `operand` — a NESTED unwrap (a
+    /// union arm, a type parameter's constraint arm). Going back through the
+    /// query puts it under the family memo and the singleflight; each
+    /// relation re-enters ONLY itself, so an async return payload never
+    /// comes back as `Awaited<T>` for a nested naked `T`. An operand already
+    /// on the path fails the step with TS1062
+    /// ([`Self::awaited_operand_on_path`]).
     fn awaited_relation_step(
         &self,
         relation: AwaitedRelation,
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
-    ) -> AwaitedStep {
-        let key = relation.key(operand, context);
-        if self.graph().is_same_path_inflight_on_current_thread(&key) {
-            self.fold_into_top_build_local_taint(false, true);
-            return AwaitedStep::Failed;
+    ) -> AwaitedOutcome {
+        if self.awaited_operand_on_path(relation, operand, context) {
+            return AwaitedOutcome::Failed;
         }
-        match self.execute_read(key).value {
+        match self.execute_read(relation.key(operand, context)).value {
             QueryResult::Value(node)
                 if self.awaited_relation_failed_on(relation, operand, node) =>
             {
-                AwaitedStep::Failed
+                AwaitedOutcome::Failed
             }
-            QueryResult::Value(node) => AwaitedStep::Value(node),
-            _ => AwaitedStep::Refused,
+            QueryResult::Value(node) => AwaitedOutcome::Value(node),
+            _ => AwaitedOutcome::Refused,
+        }
+    }
+
+    /// One RUN of `relation` from `operand`: its tail steps
+    /// ([`AwaitedStep::Next`], [`AwaitedStep::Expand`]) continue in this
+    /// loop rather than re-entering the query, so a chain of distinct
+    /// thenables costs no query depth — the checker's own relation has no
+    /// depth rule (a 5000-step chain awaits to its value on tsc 7.0.2).
+    ///
+    /// Every operand the run reaches is on the path for the checker's
+    /// recursion rule while the run lasts, nested runs included
+    /// ([`Self::awaited_operand_on_path`]). Every tail step is charged to
+    /// the connected-work budget, so genuinely unbounded work (a thenable
+    /// that grows without repeating) stops as a typed partial instead of
+    /// running on.
+    fn awaited_relation_run(
+        &self,
+        relation: AwaitedRelation,
+        operand: SemanticNodeId,
+        context: crate::semantic_query::StructuralReduceContext,
+    ) -> AwaitedOutcome {
+        let base = self.awaited_active.borrow().len();
+        let _path = AwaitedPathGuard {
+            active: &self.awaited_active,
+            base,
+        };
+        self.awaited_active.borrow_mut().push((relation, operand));
+        // The declaration carriers expanded consecutively into `current`,
+        // outermost first: when `current` is its own answer, the innermost
+        // carrier is, and so on outwards while each carrier was its
+        // predecessor's body.
+        let mut carriers: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut current = operand;
+        loop {
+            let step = match relation {
+                AwaitedRelation::Normalize => self.awaited_normalize_node(current, context),
+                AwaitedRelation::Payload => self.async_return_payload_node(current, context),
+            };
+            let next = match step {
+                AwaitedStep::Value(mut node) => {
+                    for (carrier, body) in carriers.iter().rev() {
+                        if node != *body {
+                            break;
+                        }
+                        node = *carrier;
+                    }
+                    return AwaitedOutcome::Value(node);
+                }
+                AwaitedStep::Failed => return AwaitedOutcome::Failed,
+                AwaitedStep::Refused => return AwaitedOutcome::Refused,
+                AwaitedStep::Next(next) => {
+                    carriers.clear();
+                    next
+                }
+                AwaitedStep::Expand { carrier, body } => {
+                    carriers.push((carrier, body));
+                    body
+                }
+            };
+            if self.awaited_operand_on_path(relation, next, context) {
+                return AwaitedOutcome::Failed;
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                return AwaitedOutcome::Refused;
+            }
+            self.awaited_active.borrow_mut().push((relation, next));
+            current = next;
         }
     }
 
@@ -12245,9 +12332,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in arms {
             match self.awaited_relation_step(relation, *arm, context) {
-                AwaitedStep::Value(node) => reduced.push(node),
-                AwaitedStep::Failed => {}
-                AwaitedStep::Refused => return AwaitedStep::Refused,
+                AwaitedOutcome::Value(node) => reduced.push(node),
+                AwaitedOutcome::Failed => {}
+                AwaitedOutcome::Refused => return AwaitedStep::Refused,
             }
         }
         match reduced.as_slice() {
@@ -12257,19 +12344,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// The declaration a lowering-time self-reference sentinel names.
+    /// The instantiation a lowering-time self-reference sentinel names.
     ///
     /// A declaration's body lowers a reference to the declaration itself as
-    /// `RecursiveRef { name }` (`interface Rec { then(f: (v: Rec) => void):
-    /// void }` — the `Rec` in the callback), scoped to the declaring file.
-    /// For a declaration with no type parameters that sentinel denotes
-    /// exactly the declaration, so it answers as its `DeclRef` carrier.
-    /// A generic declaration's sentinel does not record which instantiation
-    /// it stands for, and a function-local declaration is not addressable by
-    /// its file slot, so both stay the sentinel.
-    fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let name = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name })) => Arc::clone(name),
+    /// `RecursiveRef { name, args }` (`interface Rec { then(f: (v: Rec) =>
+    /// void): void }` — the `Rec` in the callback; `G<[T]>` inside the body
+    /// of `G<string>`), scoped to the declaring file. The sentinel records
+    /// the instantiation it stands for, so it answers as that application's
+    /// carrier: the `InstantiationRef` over the recorded arguments, or the
+    /// `DeclRef` of a declaration with no type parameters. A generic
+    /// declaration referenced without arguments, and a function-local
+    /// declaration (not addressable by its file slot), stay the sentinel.
+    pub(super) fn self_reference_declaration(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (name, args) = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })) => {
+                (Arc::clone(name), Arc::clone(args))
+            }
             _ => return None,
         };
         let scope = self.graph().node_scope(node)?;
@@ -12287,7 +12380,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             *owner,
             name.as_ref(),
         )?;
-        if !prepared.type_parameters.is_empty() {
+        if args.is_empty() && !prepared.type_parameters.is_empty() {
             return None;
         }
         let identity = crate::semantic_query::DeclIdentity {
@@ -12296,10 +12389,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             whole_hash: *whole_hash,
             decl_name: name,
         };
-        Some(
-            self.graph()
-                .intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope.clone()),
-        )
+        let carrier = if args.is_empty() {
+            SemanticNodeData::DeclRef { identity }
+        } else {
+            SemanticNodeData::InstantiationRef {
+                base: identity,
+                args,
+            }
+        };
+        Some(self.graph().intern_node_with_scope(carrier, scope.clone()))
     }
 
     /// Settle the operand once, through the shared deferred evaluator, and
@@ -12350,14 +12448,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// - an object surface is decided by its `then` member
     ///   ([`Self::surface_thenability`]): not thenable ⇒ itself; a valid
-    ///   thenable ⇒ the relation over the promised value; a callable `then`
+    ///   thenable ⇒ the run continues on a single promised value, and
+    ///   several are the checker's union, each arm a nested unwrap; a callable `then`
     ///   with no callable `onfulfilled` ⇒ `any` (the checker reports the
     ///   operand and types it `any`); the promised values are one union to
     ///   the checker, so a value the relation FAILS on is dropped, and the
     ///   step fails only when every value does;
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands ONE
-    ///   level through the shared `Instantiate` family and re-enters the
-    ///   relation on its body. When the body comes back unchanged the
+    ///   level through the shared `Instantiate` family and the run continues
+    ///   on its body. When the body comes back unchanged the
     ///   CARRIER is the answer, so a non-thenable alias keeps its authored
     ///   identity (`Promise<Box<T>>`, never the expanded `{ w: T }`).
     ///
@@ -12378,9 +12477,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 match thenability {
                     Thenability::NotThenable => AwaitedStep::Value(resolved),
-                    Thenability::Promised(values) => {
-                        self.awaited_union_step(relation, &values, context)
-                    }
+                    // A single promised value is a tail step; several are
+                    // the checker's union, each arm its own nested unwrap.
+                    Thenability::Promised(values) => match values.as_slice() {
+                        [single] => AwaitedStep::Next(*single),
+                        _ => self.awaited_union_step(relation, &values, context),
+                    },
                     Thenability::Malformed => AwaitedStep::Value(
                         self.graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
@@ -12397,9 +12499,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if self.same_node_payload(body, resolved) {
                     return AwaitedStep::Refused;
                 }
-                match self.awaited_relation_step(relation, body, context) {
-                    AwaitedStep::Value(reduced) if reduced == body => AwaitedStep::Value(resolved),
-                    step => step,
+                AwaitedStep::Expand {
+                    carrier: resolved,
+                    body,
                 }
             }
             _ => AwaitedStep::Refused,
@@ -12681,15 +12783,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Some(None)` when the application stays deferred, `Some(Some(node))`
     /// when it reduced, `None` on refusal.
     ///
-    /// When `Awaited<argument>` is an application whose evaluation is
-    /// ALREADY in progress on this path, the conditional has recursed back
-    /// into itself with the same argument: `Awaited<V>` for a `then` whose
-    /// fulfillment value leads back to the operand. The checker's
-    /// instantiation never terminates there; it stops at its depth limit,
-    /// reports TS2589 and continues with its error type. That recovery is
-    /// the answer, and it holds whatever else is in flight — every
-    /// application on the path leads back to this one, and the error type
-    /// dominates each union and branch the conditional builds on the way.
+    /// The conditional's own recursion is evaluated inside one root
+    /// ([`Self::lib_awaited_node`]); this read is a root. When
+    /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
+    /// on this path, the conditional has come back to itself with the same
+    /// argument and can never reach a value: the checker stops at its limit,
+    /// reports TS2589 and continues with its error type, which dominates
+    /// each union and branch on the way. That recovery is the answer.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self
@@ -12720,7 +12820,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(Some(body))
     }
 
-    /// The lib `Awaited<T>` CONDITIONAL, evaluated over `operand`:
+    /// The lib `Awaited<T>` CONDITIONAL over `operand`, as the root of one
+    /// evaluation:
     ///
     /// ```text
     /// type Awaited<T> = T extends null | undefined ? T
@@ -12740,7 +12841,99 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// an open binder, a compiler-deferred awaited value, or a nested
     /// deferred application defers; a declaration carrier expands one level
     /// and keeps its identity when the result is the body itself.
+    ///
+    /// The conditional's recursion into `Awaited<V>` is evaluated the way
+    /// the checker evaluates it and stops where the checker stops: a tail
+    /// run reaching [`LIB_AWAITED_TAIL_STEPS`] or a path reaching
+    /// [`LIB_AWAITED_NESTED_STEPS`] nested steps is the TS2589 recovery. So
+    /// is an application that recurs on its own path: it can never reach a
+    /// value, so the checker's count is certain to run out there.
+    ///
+    /// [`LIB_AWAITED_TAIL_STEPS`]: crate::semantic_query::LIB_AWAITED_TAIL_STEPS
+    /// [`LIB_AWAITED_NESTED_STEPS`]: crate::semantic_query::LIB_AWAITED_NESTED_STEPS
     fn lib_awaited_node(&self, operand: SemanticNodeId) -> LibAwaited {
+        let mut walk = LibAwaitedWalk::default();
+        self.lib_awaited_run(operand, &mut walk, 0)
+    }
+
+    /// The TS2589 recovery of the lib conditional.
+    fn lib_awaited_too_deep(&self) -> SemanticNodeId {
+        self.checker_recovery(crate::semantic_query::CheckerDiagnostic {
+            code: crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+            operation: crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+        })
+    }
+
+    /// One TAIL RUN of the lib conditional from `operand`, entered with
+    /// `tail_start` steps already counted: each application whose recursion
+    /// is a single `Awaited<V>` over a non-union `V` continues the run, and
+    /// the run fails at the checker's tail limit. Every step is charged to
+    /// the connected-work budget, whose trip is a typed partial.
+    fn lib_awaited_run(
+        &self,
+        operand: SemanticNodeId,
+        walk: &mut LibAwaitedWalk,
+        tail_start: u32,
+    ) -> LibAwaited {
+        let mark = walk.path.len();
+        let mut current = operand;
+        let mut tail = tail_start;
+        let result = loop {
+            match self.lib_awaited_application(current, walk) {
+                LibStep::Done(result) => break result,
+                LibStep::Next(value) if self.settled_union_arms_of(value).is_some() => {
+                    break self.lib_awaited_nested(value, walk, false);
+                }
+                LibStep::Next(value) => {
+                    tail += 1;
+                    if tail >= crate::semantic_query::LIB_AWAITED_TAIL_STEPS {
+                        break LibAwaited::Reduced(self.lib_awaited_too_deep());
+                    }
+                    if let Err(reasons) = self.charge_connected_work() {
+                        self.fold_local_partial_completeness(reasons);
+                        break LibAwaited::Refused;
+                    }
+                    current = value;
+                }
+            }
+        };
+        walk.path.truncate(mark);
+        result
+    }
+
+    /// A NESTED step to `Awaited<value>`: one through a callback union
+    /// (`through_callback_union`), one into a union `value`, two for both.
+    /// The path fails at the checker's nesting limit. A union's arms each
+    /// start a fresh tail run; a callback arm continues into a run the
+    /// checker enters with one step already counted.
+    fn lib_awaited_nested(
+        &self,
+        value: SemanticNodeId,
+        walk: &mut LibAwaitedWalk,
+        through_callback_union: bool,
+    ) -> LibAwaited {
+        let is_union = self.settled_union_arms_of(value).is_some();
+        let steps = u32::from(through_callback_union) + u32::from(is_union);
+        walk.nesting += steps;
+        let result = if walk.nesting >= crate::semantic_query::LIB_AWAITED_NESTED_STEPS {
+            LibAwaited::Reduced(self.lib_awaited_too_deep())
+        } else if let Err(reasons) = self.charge_connected_work() {
+            self.fold_local_partial_completeness(reasons);
+            LibAwaited::Refused
+        } else {
+            self.lib_awaited_run(value, walk, if is_union { 0 } else { 1 })
+        };
+        walk.nesting -= steps;
+        result
+    }
+
+    /// One application of the lib conditional: its value, or the single
+    /// `V` a tail step continues with.
+    fn lib_awaited_application(
+        &self,
+        operand: SemanticNodeId,
+        walk: &mut LibAwaitedWalk,
+    ) -> LibStep {
         use crate::project_semantic_dispatch::absorb::SpecialKind;
         let resolved = self
             .evaluate_deferred_semantic_node_with_context(
@@ -12752,93 +12945,93 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .self_reference_declaration(resolved)
             .unwrap_or(resolved);
         if let Some((kind, special)) = self.peek_special(resolved) {
-            return match kind {
+            return LibStep::Done(match kind {
                 SpecialKind::Any
                 | SpecialKind::Never
                 | SpecialKind::Unknown
                 | SpecialKind::Error => LibAwaited::Reduced(special),
-            };
+            });
         }
         if self.settled_non_thenable(resolved) {
-            return LibAwaited::Reduced(resolved);
+            return LibStep::Done(LibAwaited::Reduced(resolved));
         }
+        if walk.path.contains(&resolved) {
+            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep()));
+        }
+        walk.path.push(resolved);
         let Some(data) = self.graph().node_data(resolved) else {
-            return LibAwaited::Refused;
+            return LibStep::Done(LibAwaited::Refused);
         };
         match data.as_ref() {
             SemanticNodeData::TypeParam { .. } | SemanticNodeData::IntrinsicApplication { .. } => {
-                LibAwaited::Deferred
+                LibStep::Done(LibAwaited::Deferred)
             }
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
                 drop(data);
                 let mut reduced = Vec::with_capacity(members.len());
                 for member in members.iter() {
-                    match self.lib_awaited_read(*member) {
-                        Some(Some(node)) => reduced.push(node),
-                        Some(None) => return LibAwaited::Deferred,
-                        None => return LibAwaited::Refused,
+                    match self.lib_awaited_run(*member, walk, 0) {
+                        LibAwaited::Reduced(node) => reduced.push(node),
+                        other => return LibStep::Done(other),
                     }
                 }
-                LibAwaited::Reduced(self.intern_normalized_union_or_intersection(&reduced, true))
+                LibStep::Done(LibAwaited::Reduced(
+                    self.intern_normalized_union_or_intersection(&reduced, true),
+                ))
             }
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {
-                // `Promise<V>.then`'s `onfulfilled` is `(value: V) => …`.
+                // `Promise<V>.then`'s `onfulfilled` is the optional, nullable
+                // `((value: V) => ...) | null | undefined`: a callback union.
                 let value = args[0];
                 drop(data);
-                match self.lib_awaited_read(value) {
-                    Some(Some(node)) => LibAwaited::Reduced(node),
-                    Some(None) => LibAwaited::Deferred,
-                    None => LibAwaited::Refused,
-                }
+                LibStep::Done(self.lib_awaited_nested(value, walk, true))
             }
             SemanticNodeData::InstantiationRef { .. }
                 if self.lib_awaited_carrier_argument(resolved).is_some() =>
             {
-                // A nested authored application: reduced when its own
-                // application reduces, otherwise the whole stays deferred.
+                // A nested authored application: its own evaluation decides
+                // the operand this one continues on; a deferred one keeps the
+                // whole deferred.
                 let inner = self
                     .lib_awaited_carrier_argument(resolved)
                     .expect("guarded by the arm");
                 drop(data);
                 match self.lib_awaited_read(inner) {
-                    Some(Some(node)) => match self.lib_awaited_read(node) {
-                        Some(Some(outer)) => LibAwaited::Reduced(outer),
-                        Some(None) => LibAwaited::Deferred,
-                        None => LibAwaited::Refused,
-                    },
-                    Some(None) => LibAwaited::Deferred,
-                    None => LibAwaited::Refused,
+                    Some(Some(node)) => self.lib_awaited_application(node, walk),
+                    Some(None) => LibStep::Done(LibAwaited::Deferred),
+                    None => LibStep::Done(LibAwaited::Refused),
                 }
             }
             SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {
                 drop(data);
                 let Some(body) = self.declaration_carrier_body(resolved) else {
-                    return LibAwaited::Refused;
+                    return LibStep::Done(LibAwaited::Refused);
                 };
                 if self.same_node_payload(body, resolved) {
-                    return LibAwaited::Refused;
+                    return LibStep::Done(LibAwaited::Refused);
                 }
-                match self.lib_awaited_read(body) {
-                    Some(Some(node)) if node == body => LibAwaited::Reduced(resolved),
-                    Some(Some(node)) => LibAwaited::Reduced(node),
-                    Some(None) => LibAwaited::Deferred,
-                    None => LibAwaited::Refused,
+                match self.lib_awaited_application(body, walk) {
+                    LibStep::Done(LibAwaited::Reduced(node)) if node == body => {
+                        LibStep::Done(LibAwaited::Reduced(resolved))
+                    }
+                    step => step,
                 }
             }
             SemanticNodeData::Object(surface) => {
-                let outcome = self.lib_awaited_surface(resolved, surface);
+                let outcome = self.lib_awaited_surface(resolved, surface, walk);
                 drop(data);
                 match outcome {
-                    LibThen::NotMatched => LibAwaited::Reduced(resolved),
-                    LibThen::Result(node) => LibAwaited::Reduced(node),
-                    LibThen::Deferred => LibAwaited::Deferred,
-                    LibThen::Refused => LibAwaited::Refused,
+                    LibThen::NotMatched => LibStep::Done(LibAwaited::Reduced(resolved)),
+                    LibThen::Result(node) => LibStep::Done(LibAwaited::Reduced(node)),
+                    LibThen::Next(value) => LibStep::Next(value),
+                    LibThen::Deferred => LibStep::Done(LibAwaited::Deferred),
+                    LibThen::Refused => LibStep::Done(LibAwaited::Refused),
                 }
             }
-            _ => LibAwaited::Refused,
+            _ => LibStep::Done(LibAwaited::Refused),
         }
     }
 
@@ -12890,10 +13083,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `then` signature by receiver eligibility (tsc 7.0.2 types
     /// `Awaited<{ y: 2; then(this: { x: 1 }, onfulfilled: (v: number) => void): void }>`
     /// as `number`, where awaiting the same value is `any`).
+    ///
+    /// A single callback `F` is the checker's tail recursion: its `V` is
+    /// [`LibThen::Next`]. A callback UNION (several `then` sources, several
+    /// callable arms, or a nullable or optional `onfulfilled`) distributes,
+    /// each arm a nested step.
     fn lib_awaited_surface(
         &self,
         operand: SemanticNodeId,
         surface: &crate::semantic_query::SurfaceView,
+        walk: &mut LibAwaitedWalk,
     ) -> LibThen {
         let thens = then_members(surface);
         // An absent or OPTIONAL `then` does not satisfy the required member.
@@ -12950,15 +13149,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             members => vec![members.iter().map(|member| member.value).collect()],
         };
+        let single_source = then_sources.len() == 1;
         let mut results = Vec::new();
         for source in &then_sources {
             let Some(inferred) = self.lib_inferred_onfulfilled(source) else {
                 return LibThen::Refused;
             };
-            let onfulfilled = match inferred {
+            let (onfulfilled, callback_union) = match inferred {
                 Some(PositionalArgument::Type {
-                    non_nullish_arms, ..
-                }) => non_nullish_arms,
+                    ty,
+                    non_nullish_arms,
+                    includes_undefined,
+                }) => {
+                    let callback_union = !single_source
+                        || includes_undefined
+                        || non_nullish_arms.len() != 1
+                        || self.settled_union_arms_of(ty).is_some();
+                    (non_nullish_arms, callback_union)
+                }
                 // `infer F` over a missing parameter is `unknown`, which is
                 // not a function: `never`.
                 Some(PositionalArgument::Absent) => return LibThen::Result(never),
@@ -12971,42 +13179,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // contributes `Awaited<unknown>` (tsc 7.0.2:
             // `then(onfulfilled: any)` is `unknown`).
             for arm in onfulfilled {
-                if matches!(
+                let value = if matches!(
                     self.graph().node_data(arm).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
                 ) {
-                    let unknown = self
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-                    match self.lib_awaited_read(unknown) {
-                        Some(Some(node)) => results.push(node),
-                        Some(None) => return LibThen::Deferred,
-                        None => return LibThen::Refused,
+                    self.graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                } else {
+                    self.note_awaited_evidence([arm]);
+                    let callbacks = match self.shared_positional_reads(
+                        arm,
+                        crate::semantic_query::SignatureKind::Call,
+                        0,
+                    ) {
+                        Ok(found) => found,
+                        Err(_) => return LibThen::Refused,
+                    };
+                    let Some(callback) = callbacks.last() else {
+                        continue;
+                    };
+                    match &callback.argument {
+                        PositionalArgument::Type { ty, .. } => *ty,
+                        PositionalArgument::Absent => self
+                            .graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
                     }
-                    continue;
+                };
+                if !callback_union {
+                    return LibThen::Next(value);
                 }
-                self.note_awaited_evidence([arm]);
-                let callbacks = match self.shared_positional_reads(
-                    arm,
-                    crate::semantic_query::SignatureKind::Call,
-                    0,
-                ) {
-                    Ok(found) => found,
-                    Err(_) => return LibThen::Refused,
-                };
-                let Some(callback) = callbacks.last() else {
-                    continue;
-                };
-                let value = match &callback.argument {
-                    PositionalArgument::Type { ty, .. } => *ty,
-                    PositionalArgument::Absent => self
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
-                };
-                match self.lib_awaited_read(value) {
-                    Some(Some(node)) => results.push(node),
-                    Some(None) => return LibThen::Deferred,
-                    None => return LibThen::Refused,
+                match self.lib_awaited_nested(value, walk, true) {
+                    LibAwaited::Reduced(node) => results.push(node),
+                    LibAwaited::Deferred => return LibThen::Deferred,
+                    LibAwaited::Refused => return LibThen::Refused,
                 }
             }
         }
@@ -13062,7 +13267,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arms.into_iter().any(|arm| {
             !matches!(
                 self.awaited_relation_step(AwaitedRelation::Normalize, arm, context),
-                AwaitedStep::Value(node) if node == arm
+                AwaitedOutcome::Value(node) if node == arm
             )
         })
     }
@@ -13081,7 +13286,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::StructuralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_awaited_normalize();
-        let reduced = self.awaited_normalize_node(operand, context);
+        let reduced = self.awaited_relation_run(AwaitedRelation::Normalize, operand, context);
         self.awaited_relation_output(AwaitedRelation::Normalize, operand, reduced)
     }
 
@@ -13099,14 +13304,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         match data.as_ref() {
             // `Promise<V>` — recognised by RESOLVED declaration identity
-            // through the registry, never by spelling — unwraps its payload
-            // by RE-ENTERING this family.
+            // through the registry, never by spelling — unwraps its payload:
+            // a tail step of this relation's run.
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {
-                let payload = args[0];
-                drop(data);
-                self.awaited_relation_step(AwaitedRelation::Normalize, payload, context)
+                AwaitedStep::Next(args[0])
             }
             // Union distribution: every arm re-enters the family and the
             // results renormalise canonically.
@@ -13148,9 +13351,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.lib_awaited_read(argument) {
                     None => AwaitedStep::Refused,
                     Some(None) => AwaitedStep::Value(resolved),
-                    Some(Some(reduced)) => {
-                        self.awaited_relation_step(AwaitedRelation::Normalize, reduced, context)
-                    }
+                    Some(Some(reduced)) => AwaitedStep::Next(reduced),
                 }
             }
             // Object surfaces and declaration carriers follow the shared
@@ -13177,7 +13378,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::StructuralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         self.graph().record_async_return_payload();
-        let reduced = self.async_return_payload_node(operand, context);
+        let reduced = self.awaited_relation_run(AwaitedRelation::Payload, operand, context);
         self.awaited_relation_output(AwaitedRelation::Payload, operand, reduced)
     }
 
@@ -13217,9 +13418,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if matches!(op, crate::semantic_query::CompilerIntrinsicTypeOp::Awaited)
                     && args.len() == 1 =>
             {
-                let inner = args[0];
-                drop(data);
-                self.awaited_relation_step(AwaitedRelation::Payload, inner, context)
+                AwaitedStep::Next(args[0])
             }
             // An authored lib `Awaited<X>` at the TOP of the payload arrives as
             // the syntax-preserving `__builtin__` carrier, recognised by
@@ -13240,20 +13439,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 match self.lib_awaited_read(argument) {
                     None => AwaitedStep::Refused,
-                    Some(None) => {
-                        self.awaited_relation_step(AwaitedRelation::Payload, argument, context)
-                    }
-                    Some(Some(reduced)) => {
-                        self.awaited_relation_step(AwaitedRelation::Payload, reduced, context)
-                    }
+                    Some(None) => AwaitedStep::Next(argument),
+                    Some(Some(reduced)) => AwaitedStep::Next(reduced),
                 }
             }
             SemanticNodeData::InstantiationRef { base, args }
                 if args.len() == 1 && self.is_promise_global_identity(base) =>
             {
-                let payload = args[0];
-                drop(data);
-                self.awaited_relation_step(AwaitedRelation::Payload, payload, context)
+                AwaitedStep::Next(args[0])
             }
             SemanticNodeData::Union(members) => {
                 let members = members.clone();
@@ -13275,15 +13468,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         relation: AwaitedRelation,
         operand: SemanticNodeId,
-        reduced: AwaitedStep,
+        reduced: AwaitedOutcome,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let observed_self_roots = self.observed_self_roots_from_nodes([operand]);
         let result = match reduced {
-            AwaitedStep::Value(node) => QueryResult::Value(node),
-            AwaitedStep::Failed => {
+            AwaitedOutcome::Value(node) => QueryResult::Value(node),
+            AwaitedOutcome::Failed => {
                 QueryResult::Value(self.checker_recovery(relation.recursion_diagnostic()))
             }
-            AwaitedStep::Refused => QueryResult::Error(QueryError::Miss),
+            AwaitedOutcome::Refused => QueryResult::Error(QueryError::Miss),
         };
         let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
@@ -14268,8 +14461,8 @@ mod carrier_type_param_descent_tests {
 }
 
 /// Which awaited relation a shared structural arm re-enters.
-#[derive(Debug, Clone, Copy)]
-enum AwaitedRelation {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AwaitedRelation {
     /// [`SemanticQueryKey::AwaitedNormalize`].
     Normalize,
     /// [`SemanticQueryKey::AsyncReturnPayload`].
@@ -14316,6 +14509,45 @@ enum AwaitedStep {
     Failed,
     /// The protocol cannot decide the operand.
     Refused,
+    /// A TAIL step: the relation's answer for the operand is its answer for
+    /// this one node (a `Promise<V>` payload, a thenable promising a single
+    /// value, an awaited application's argument). The run continues with it
+    /// in the same loop ([`ProjectSemanticDispatch::awaited_relation_run`]).
+    Next(SemanticNodeId),
+    /// A declaration carrier expanded to its body: the run continues with
+    /// the body, and when the body is its own answer the CARRIER is, so a
+    /// non-thenable alias keeps its authored identity.
+    Expand {
+        /// The carrier the step expanded.
+        carrier: SemanticNodeId,
+        /// Its body, the node the run continues with.
+        body: SemanticNodeId,
+    },
+}
+
+/// The outcome of one awaited relation over an operand.
+#[derive(Debug, Clone, Copy)]
+enum AwaitedOutcome {
+    /// The relation reduced the operand to this node.
+    Value(SemanticNodeId),
+    /// The checker's TS1062 failure ([`AwaitedStep::Failed`]).
+    Failed,
+    /// The protocol cannot decide the operand, or the connected-work budget
+    /// ran out first.
+    Refused,
+}
+
+/// Pops the operands one awaited run pushed onto the dispatch's path when
+/// the run ends, however it ends.
+struct AwaitedPathGuard<'g> {
+    active: &'g std::cell::RefCell<Vec<(AwaitedRelation, SemanticNodeId)>>,
+    base: usize,
+}
+
+impl Drop for AwaitedPathGuard<'_> {
+    fn drop(&mut self) {
+        self.active.borrow_mut().truncate(self.base);
+    }
 }
 
 /// The lib `Awaited<T>` conditional's outcome over one operand.
@@ -14329,6 +14561,27 @@ enum LibAwaited {
     Refused,
 }
 
+/// One application of the lib conditional.
+#[derive(Debug)]
+enum LibStep {
+    /// The application's outcome.
+    Done(LibAwaited),
+    /// The application recurses into `Awaited<V>` through a single callback:
+    /// the checker's tail step, continuing the current run on `V`.
+    Next(SemanticNodeId),
+}
+
+/// The lib conditional's recursion on one evaluation path, counted the way
+/// the checker counts it.
+#[derive(Debug, Default)]
+struct LibAwaitedWalk {
+    /// Nested (non-tail) steps on the path.
+    nesting: u32,
+    /// The applications on the path, for the recurrence that never reaches
+    /// a value.
+    path: Vec<SemanticNodeId>,
+}
+
 /// The lib conditional's `then` branch over one object surface.
 #[derive(Debug)]
 enum LibThen {
@@ -14336,6 +14589,8 @@ enum LibThen {
     NotMatched,
     /// The branch result.
     Result(SemanticNodeId),
+    /// A single callback `F`: the conditional continues as `Awaited<V>`.
+    Next(SemanticNodeId),
     /// A promised value is still generic.
     Deferred,
     /// A signature source did not settle.
