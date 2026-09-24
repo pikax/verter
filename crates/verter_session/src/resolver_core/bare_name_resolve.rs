@@ -53,6 +53,7 @@ use crate::resolver_core::ResolverContext;
 /// the dispatch gates, and [`ScopeShadowing`](crate::resolver_core::scope_shadowing::ScopeShadowing)
 /// all check both sources), so the materialized union the payload used
 /// to carry is redundant.
+#[derive(Clone)]
 pub(crate) struct DeclarationScopePayload {
     bundle: Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -85,6 +86,14 @@ impl DeclarationScopePayload {
     #[must_use]
     pub(crate) fn owner(&self) -> verter_type_expr::TopLevelOwnerId {
         self.owner
+    }
+
+    /// The prepared bundle this payload views.
+    #[cfg(test)]
+    pub(crate) fn bundle_for_tests(
+        &self,
+    ) -> &Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle> {
+        &self.bundle
     }
 
     fn owner_scope(&self) -> Option<&crate::resolver_core::prepared_decl::PreparedOwnerScope> {

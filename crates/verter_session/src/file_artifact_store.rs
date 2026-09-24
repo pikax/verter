@@ -102,6 +102,26 @@ impl FileArtifactKey {
         .expect("IndexedReady retains a compatible runtime language and parse artifact")
     }
 
+    /// [`Self::for_source_identity`] for a plain script whose parse identity
+    /// the source stage already derived: no pass over the source bytes.
+    pub(crate) fn for_script_parse_identity(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        parse_key: verter_language::ParseKey,
+        file_language_id: FileLanguage,
+        parse_env_hash: Hash16,
+    ) -> Self {
+        Self {
+            canonical,
+            content_hash,
+            parse_env_hash,
+            parse_key,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            file_language_id,
+        }
+    }
+
     /// Builds an exact key from the source-stage identity that produced an artifact.
     pub(crate) fn for_source_identity(
         canonical: Arc<str>,

@@ -5021,6 +5021,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }),
             pending_statement_gap: None,
             auto_typed_locals: rustc_hash::FxHashSet::default(),
+            evolving_locals: rustc_hash::FxHashSet::default(),
             unwidened_views: rustc_hash::FxHashMap::default(),
             conditional_arm_nesting: 0,
             call_fresh_literal_returns: Vec::new(),
@@ -5398,6 +5399,92 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// The union of `members` under SUBTYPE reduction, each union member
+    /// taken arm by arm ([`Self::reduce_arms_to_supertypes_by`]); a pair the
+    /// relation authority cannot decide keeps every arm and reports the
+    /// composite incomplete.
+    pub(super) fn subtype_reduced_union(
+        &self,
+        members: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        let graph = self.graph();
+        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+        for member in members {
+            match graph.node_data(*member).as_deref() {
+                Some(SemanticNodeData::Union(nested)) => {
+                    for arm in nested.iter() {
+                        if !arms.contains(arm) {
+                            arms.push(*arm);
+                        }
+                    }
+                }
+                _ => {
+                    if !arms.contains(member) {
+                        arms.push(*member);
+                    }
+                }
+            }
+        }
+        let mut incomplete = false;
+        if arms.len() >= 2 {
+            match self.reduce_arms_to_supertypes_by(&arms, &arms, nullability) {
+                ReunionReduction::Reduced(reduced) => arms = reduced,
+                ReunionReduction::Undecided => incomplete = true,
+            }
+        }
+        super::flow_products::FlowAlgebraComposite {
+            node: self.intern_normalized_union(&arms, nullability),
+            incomplete,
+        }
+    }
+
+    /// The final type of an EVOLVING array holding `elements` (the
+    /// checker's `createFinalArrayType`): `any[]` with no element — the
+    /// `autoArrayType` a finalizing read converts to `any[]` —, else the
+    /// array of the elements' union under subtype reduction. With
+    /// `strictNullChecks` off a widening `null` / `undefined` element
+    /// vanishes beside any other element and reads `any` alone, the
+    /// array-literal rule.
+    pub(super) fn finalize_evolving_array(
+        &self,
+        elements: &[super::flow_products::EvolvingElement],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> super::flow_products::FlowAlgebraComposite {
+        let graph = self.graph();
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let mut parts: Vec<(SemanticNodeId, bool)> = elements
+            .iter()
+            .map(|element| (element.node, element.widening_nullish))
+            .collect();
+        if !nullability.is_strict() {
+            if parts
+                .iter()
+                .any(|(node, _)| !is_nullable_node(graph, *node))
+            {
+                parts.retain(|(node, _)| !is_nullable_node(graph, *node));
+            } else if !parts.is_empty() && parts.iter().all(|(_, widening)| *widening) {
+                parts = vec![(any, false)];
+            }
+        }
+        let nodes: Vec<SemanticNodeId> = parts.into_iter().map(|(node, _)| node).collect();
+        let element = if nodes.is_empty() {
+            super::flow_products::FlowAlgebraComposite {
+                node: any,
+                incomplete: false,
+            }
+        } else {
+            self.subtype_reduced_union(&nodes, nullability)
+        };
+        super::flow_products::FlowAlgebraComposite {
+            node: graph.intern_node(SemanticNodeData::Array {
+                element: element.node,
+                readonly: false,
+            }),
+            incomplete: element.incomplete,
+        }
+    }
+
     /// The properties of an object or tuple type in the checker's order,
     /// each with its type when that type is a UNIT type (`None` when it is
     /// not): an object's members, a tuple's elements then its `length`
@@ -5486,9 +5573,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// not before the reduction existed — so nothing is claimed about it
     /// and nothing is degraded. Only an ADMITTED candidate goes on to the
     /// reverse direction, where the authority separates a strict subtype
-    /// (absorbed) from a mutually-assignable twin (both kept); an
-    /// UNDECIDED reverse leaves that admitted reduction unfinished, which
-    /// is the one state the caller fails closed on.
+    /// (absorbed) from a mutually-related twin (both kept); an UNDECIDED
+    /// reverse leaves that admitted reduction unfinished, which is the one
+    /// state the caller fails closed on.
+    ///
+    /// The reverse direction is the SUBTYPE relation, as the checker's
+    /// reduction asks: `any` is assignable to everything but a subtype of
+    /// nothing but `any` / `unknown`, so `number[]` beside `any[]` is
+    /// absorbed (tsc 7.0.2: `if (c) return x; return y` over `number[]`
+    /// and `any[]` is `any[]`) where assignability would call the two
+    /// twins.
     fn arm_is_strict_subtype(
         &self,
         arm: SemanticNodeId,
@@ -5501,12 +5595,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.relation_answer(arm, peer, decided) != Some(true) {
             return StrictSubtype::No;
         }
-        match self.relation_answer(peer, arm, decided) {
-            // Mutually assignable: the same type to the authority, so
+        match self.execute_relate_pair_kind(peer, arm, crate::semantic_query::RelationKind::Subtype)
+        {
+            // Mutually related: the same type to the authority, so
             // neither arm is strictly below the other.
-            Some(true) => StrictSubtype::No,
-            Some(false) => StrictSubtype::Yes,
-            None => StrictSubtype::Undecided,
+            super::dispatch_txn::RelationStep::Assignable { .. } => StrictSubtype::No,
+            super::dispatch_txn::RelationStep::NotAssignable => StrictSubtype::Yes,
+            super::dispatch_txn::RelationStep::Unknown
+            | super::dispatch_txn::RelationStep::BudgetExceeded(_)
+            | super::dispatch_txn::RelationStep::Assumed(_) => StrictSubtype::Undecided,
         }
     }
 
@@ -5930,6 +6027,25 @@ fn collect_assignment_spans(
                     collect_expression_write_spans(value, out);
                 }
             }
+            crate::flow_slice_content::SliceStatement::Update { span, .. } => {
+                out.insert(*span);
+            }
+            crate::flow_slice_content::SliceStatement::Loop { iteration } => {
+                collect_assignment_spans(iteration, out, include_expression_writes);
+            }
+            crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
+                if let crate::flow_slice_content::SliceEvolvingOperationKind::Reset {
+                    span, ..
+                } = &operation.kind
+                {
+                    out.insert(*span);
+                }
+                if include_expression_writes {
+                    for operand in operation.operands() {
+                        collect_expression_write_spans(operand, out);
+                    }
+                }
+            }
             crate::flow_slice_content::SliceStatement::If {
                 consequent,
                 alternate,
@@ -5980,6 +6096,11 @@ fn collect_assignment_spans(
                 }
             }
             crate::flow_slice_content::SliceStatement::Binding { init, .. } => {
+                // A `for … of` / `for … in` binding applies its
+                // per-iteration write.
+                if let Some(crate::flow_slice_content::SliceExpr::Iterated { write, .. }) = init {
+                    out.insert(*write);
+                }
                 if include_expression_writes {
                     if let Some(init) = init {
                         collect_expression_write_spans(init, out);
@@ -6008,22 +6129,60 @@ fn collect_expression_write_spans(
     out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
 ) {
     for write in expression_write_tree(expr) {
-        if let crate::flow_slice_content::SliceExpr::Assignment { span, .. } = write {
-            out.insert(*span);
+        match write {
+            crate::flow_slice_content::SliceExpr::Assignment { span, .. } => {
+                out.insert(*span);
+            }
+            crate::flow_slice_content::SliceExpr::EvolvingArray(operation) => {
+                if let crate::flow_slice_content::SliceEvolvingOperationKind::Reset {
+                    span, ..
+                } = &operation.kind
+                {
+                    out.insert(*span);
+                }
+            }
+            _ => {}
         }
     }
 }
 
 /// Every expression-position write in an expression tree, in tree order —
-/// the pre-scan's work list.
+/// the pre-scan's work list: the whole-binding writes and the empty-array
+/// resets of an EVOLVING array.
 fn expression_write_tree(
     expr: &crate::flow_slice_content::SliceExpr,
 ) -> Vec<&crate::flow_slice_content::SliceExpr> {
+    expression_effect_tree(expr, |operation| {
+        matches!(
+            operation.kind,
+            crate::flow_slice_content::SliceEvolvingOperationKind::Reset { .. }
+        )
+    })
+}
+
+/// Whether an expression tree changes a binding's reaching value: a
+/// whole-binding write, or any operation on an EVOLVING array.
+fn expression_changes_reaching_values(expr: &crate::flow_slice_content::SliceExpr) -> bool {
+    !expression_effect_tree(expr, |_| true).is_empty()
+}
+
+/// The whole-binding writes of an expression tree and the EVOLVING-array
+/// operations `keep` admits, in tree order.
+fn expression_effect_tree(
+    expr: &crate::flow_slice_content::SliceExpr,
+    keep: fn(&crate::flow_slice_content::SliceEvolvingOperation) -> bool,
+) -> Vec<&crate::flow_slice_content::SliceExpr> {
     use crate::flow_slice_content::{
-        SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey,
+        SliceArrayElement, SliceCall, SliceEvolvingOperation, SliceExpr, SliceObjectEntry,
+        SliceObjectKey,
     };
     let mut out = Vec::new();
-    fn walk<'e>(expr: &'e SliceExpr, out: &mut Vec<&'e SliceExpr>) {
+    fn walk<'e>(
+        expr: &'e SliceExpr,
+        keep: fn(&SliceEvolvingOperation) -> bool,
+        out: &mut Vec<&'e SliceExpr>,
+    ) {
+        let walk = |expr: &'e SliceExpr, out: &mut Vec<&'e SliceExpr>| walk(expr, keep, out);
         match expr {
             SliceExpr::Assignment { value, .. } => {
                 out.push(expr);
@@ -6067,10 +6226,18 @@ fn expression_write_tree(
             SliceExpr::Call(SliceCall::Construct(constructor), _) => {
                 walk(constructor, out);
             }
+            SliceExpr::EvolvingArray(operation) => {
+                if keep(operation) {
+                    out.push(expr);
+                }
+                for operand in operation.operands() {
+                    walk(operand, out);
+                }
+            }
             _ => {}
         }
     }
-    walk(expr, &mut out);
+    walk(expr, keep, &mut out);
     out
 }
 
@@ -6162,6 +6329,142 @@ fn widen_values_within(
         return dispatch.intern_normalized_union(&widened, nullability);
     }
     node
+}
+
+/// The bindings a [`crate::flow_slice_content::SliceStatement::Loop`]
+/// iteration writes and that live across iterations, in first-write order:
+/// every write target and EVOLVING-array operation of the iteration's
+/// statements and expressions, nested regions included, less the bindings
+/// the iteration declares (each pass binds those afresh).
+fn loop_carried_subjects(
+    iteration: &crate::flow_slice_content::SliceRegion,
+) -> Vec<FlowProductSubject> {
+    use crate::flow_slice_content::{SliceExpr, SliceRegion, SliceStatement};
+    fn narrow_root_subject(
+        root: &crate::flow_slice_content::SliceNarrowRoot,
+    ) -> FlowProductSubject {
+        match root {
+            crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
+                FlowProductSubject::Local(*binding)
+            }
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. } => binding.clone(),
+        }
+    }
+    fn expression(expr: &SliceExpr, written: &mut Vec<FlowProductSubject>) {
+        for effect in expression_effect_tree(expr, |_| true) {
+            match effect {
+                SliceExpr::Assignment { target, .. } => {
+                    written.push(narrow_root_subject(&target.root))
+                }
+                SliceExpr::EvolvingArray(operation) => written.push(operation.binding.clone()),
+                _ => {}
+            }
+        }
+    }
+    fn walk_region(
+        region: &SliceRegion,
+        written: &mut Vec<FlowProductSubject>,
+        declared: &mut Vec<FlowProductSubject>,
+    ) {
+        for statement in region.statements.iter() {
+            match statement {
+                SliceStatement::Return { argument, .. }
+                | SliceStatement::Yield { argument, .. } => {
+                    if let Some(argument) = argument {
+                        expression(argument, written);
+                    }
+                }
+                SliceStatement::If {
+                    consequent,
+                    alternate,
+                    ..
+                } => {
+                    walk_region(consequent, written, declared);
+                    if let Some(alternate) = alternate {
+                        walk_region(alternate, written, declared);
+                    }
+                }
+                SliceStatement::Assignment { target, value, .. } => {
+                    expression(value, written);
+                    written.push(narrow_root_subject(&target.root));
+                }
+                SliceStatement::Update { target, .. } => {
+                    written.push(narrow_root_subject(&target.root));
+                }
+                SliceStatement::EvolvingArray(operation) => {
+                    for operand in operation.operands() {
+                        expression(operand, written);
+                    }
+                    written.push(operation.binding.clone());
+                }
+                SliceStatement::Binding { binding, init, .. } => {
+                    if let Some(init) = init {
+                        expression(init, written);
+                    }
+                    declared.push(FlowProductSubject::Local(*binding));
+                }
+                SliceStatement::Block(body) => walk_region(body, written, declared),
+                SliceStatement::Labeled { body, .. } => walk_region(body, written, declared),
+                SliceStatement::Loop { iteration } => walk_region(iteration, written, declared),
+                SliceStatement::Switch { cases, .. } => {
+                    for case in cases.iter() {
+                        walk_region(&case.region, written, declared);
+                    }
+                }
+                SliceStatement::Try {
+                    block,
+                    catch,
+                    finally,
+                    ..
+                } => {
+                    walk_region(block, written, declared);
+                    if let Some(catch) = catch {
+                        walk_region(&catch.region, written, declared);
+                    }
+                    if let Some(finally) = finally {
+                        walk_region(finally, written, declared);
+                    }
+                }
+                SliceStatement::Gap(_)
+                | SliceStatement::Assertion { .. }
+                | SliceStatement::Break { .. }
+                | SliceStatement::Throw
+                | SliceStatement::ThrowPoint
+                | SliceStatement::TransparentLoop
+                | SliceStatement::DivergentLoop
+                | SliceStatement::Unsupported(_) => {}
+            }
+        }
+    }
+    let mut written = Vec::new();
+    let mut declared = Vec::new();
+    walk_region(iteration, &mut written, &mut declared);
+    let mut carried: Vec<FlowProductSubject> = Vec::with_capacity(written.len());
+    for subject in written {
+        if !declared.contains(&subject) && !carried.contains(&subject) {
+            carried.push(subject);
+        }
+    }
+    carried
+}
+
+/// Whether a `for … in` object's key type is generic — a type parameter
+/// (or a union / intersection holding one), whose `keyof` the checker
+/// keeps deferred.
+fn node_has_generic_keys(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> bool {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::KeyOf { .. }) => true,
+        Some(SemanticNodeData::Union(arms)) => {
+            arms.iter().any(|arm| node_has_generic_keys(graph, *arm))
+        }
+        Some(SemanticNodeData::Intersection(arms)) => {
+            arms.iter().any(|arm| node_has_generic_keys(graph, *arm))
+        }
+        _ => false,
+    }
 }
 
 /// Whether `node` is the `null` or the `undefined` type.
@@ -6641,6 +6944,9 @@ fn slice_statements_have_non_subject_return<'a>(
         SliceStatement::Labeled { body, .. } => {
             slice_region_has_non_subject_return(body, is_exact_subject_read)
         }
+        SliceStatement::Loop { iteration } => {
+            slice_region_has_non_subject_return(iteration, is_exact_subject_read)
+        }
         SliceStatement::Switch { cases, .. } => cases
             .iter()
             .any(|case| slice_region_has_non_subject_return(&case.region, is_exact_subject_read)),
@@ -6660,6 +6966,8 @@ fn slice_statements_have_non_subject_return<'a>(
         }
         SliceStatement::Gap(_)
         | SliceStatement::Assignment { .. }
+        | SliceStatement::Update { .. }
+        | SliceStatement::EvolvingArray(_)
         | SliceStatement::Assertion { .. }
         | SliceStatement::Break { .. }
         | SliceStatement::Yield { .. }
@@ -6736,6 +7044,19 @@ impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
     ) -> Result<super::flow_products::LiteralProvenanceResult, crate::semantic_query::FlowGap> {
         self.observation.borrow_mut().provenance.push(inputs.len());
         self.delegate.literal_provenance(inputs, result)
+    }
+    fn subtype_union(
+        &self,
+        members: &[SemanticNodeId],
+    ) -> super::flow_products::FlowAlgebraComposite {
+        self.observation.borrow_mut().unions.push(members.len());
+        self.delegate.subtype_union(members)
+    }
+    fn evolving_array(
+        &self,
+        elements: &[super::flow_products::EvolvingElement],
+    ) -> super::flow_products::FlowAlgebraComposite {
+        self.delegate.evolving_array(elements)
     }
 }
 
@@ -6863,6 +7184,10 @@ struct FlowEvaluator<'d, 'b> {
     /// fact of the paths reaching a read, carried on its reaching-type
     /// product ([`Self::reads_widening_nullish_local`]).
     auto_typed_locals: rustc_hash::FxHashSet<FlowProductSubject>,
+    /// The frame's EVOLVING-array bindings (declared `autoArrayType` under
+    /// `noImplicitAny`), by canonical runtime subject: a write to one takes
+    /// the checker's `autoArrayType` assignment rule.
+    evolving_locals: rustc_hash::FxHashSet<FlowProductSubject>,
     /// Under `strictNullChecks` off: each object or array literal value
     /// this evaluation built with a widening `null` / `undefined` member
     /// or element (widened to `any`), mapped to the same literal UNWIDENED.
@@ -8652,6 +8977,368 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         );
     }
 
+    /// [`Self::bind_local_value`] for a prepared reaching product (an
+    /// EVOLVING array's).
+    fn bind_local_reaching(
+        &mut self,
+        binding: &FlowProductSubject,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        reaching: ReachingTypeProduct,
+        degraded: bool,
+    ) {
+        let definition = match binding {
+            FlowProductSubject::Local(binding) => Some(
+                self.skeleton
+                    .binding(*binding)
+                    .initializer
+                    .map(|site| self.flow_graph.expr_site_node(site))
+                    .unwrap_or_else(|| self.flow_graph.binding_node(*binding)),
+            ),
+            FlowProductSubject::Captured(_) => self
+                .products
+                .key(super::flow_solve::FlowDomain::ReachingValue, binding)
+                .map(|key| key.node()),
+        };
+        let single_path = if kind == crate::flow_slice_content::SliceBindingKind::Var {
+            self.conditional_arm_nesting > 0
+        } else {
+            self.products.assignment(binding).single_path()
+        };
+        self.bind_local_at(binding, single_path, reaching, degraded, definition);
+    }
+
+    /// Whether `subject` is declared `autoArrayType` here: an EVOLVING-array
+    /// local this frame declared under `noImplicitAny`, or a captured
+    /// binding an enclosing frame declared so.
+    fn is_evolving_subject(&self, subject: &FlowProductSubject) -> bool {
+        match subject {
+            FlowProductSubject::Local(_) => self
+                .evolving_locals
+                .contains(&self.canonical_runtime_subject(subject)),
+            FlowProductSubject::Captured(identity) => {
+                self.no_implicit_any && identity.evolving_array
+            }
+        }
+    }
+
+    /// The DECLARED type of an EVOLVING-array binding, as a read takes it:
+    /// `autoArrayType`, read as `any[]`, under `noImplicitAny`; the empty
+    /// literal's widened type — `never[]`, `any[]` with `strictNullChecks`
+    /// off — without it.
+    fn evolving_declared_type(&self) -> SemanticNodeId {
+        let graph = self.dispatch.graph();
+        let element = if self.no_implicit_any || !self.nullability.is_strict() {
+            PrimitiveKind::Any
+        } else {
+            PrimitiveKind::Never
+        };
+        let element = graph.intern_node(SemanticNodeData::Primitive(element));
+        graph.intern_node(SemanticNodeData::Array {
+            element,
+            readonly: false,
+        })
+    }
+
+    /// The reaching product of an EVOLVING array holding `elements`.
+    fn evolving_product(
+        &mut self,
+        elements: Vec<super::flow_products::EvolvingElement>,
+    ) -> ReachingTypeProduct {
+        let finalized = self
+            .dispatch
+            .finalize_evolving_array(&elements, self.nullability);
+        if finalized.incomplete {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::NominalRelation,
+            ));
+        }
+        ReachingTypeProduct::evolving(finalized.node, Arc::from(elements.into_boxed_slice()))
+    }
+
+    /// Evaluate one operation on an EVOLVING array
+    /// ([`crate::flow_slice_content::SliceEvolvingOperation`]) — the
+    /// checker's array-mutation flow node over the binding's reaching
+    /// value. Each operand evaluates in source order; a binding that no
+    /// longer holds an evolving array (it was assigned an ordinary value)
+    /// is unchanged, since its `push` is then the plain array method.
+    ///
+    /// An added value contributes the base type of its literal
+    /// (`addEvolvingArrayElementType`: `a.push("s")` adds `string`, a
+    /// spread its source's element types), and an element write only
+    /// under a number-like index (`a["k"] = 1` adds nothing).
+    fn eval_evolving_operation(
+        &mut self,
+        operation: &crate::flow_slice_content::SliceEvolvingOperation,
+    ) -> Positional<SemanticNodeId> {
+        use super::flow_products::EvolvingElement;
+        use crate::flow_slice_content::SliceEvolvingOperationKind;
+        let subject = operation.binding.clone();
+        let graph = self.dispatch.graph();
+        match &operation.kind {
+            SliceEvolvingOperationKind::Append(arguments) => {
+                let mut added: Vec<EvolvingElement> = Vec::new();
+                for argument in arguments.iter() {
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(&argument.value);
+                    let node = self.settle_composite_part(outcome, holds_before);
+                    if argument.spread {
+                        match self.spread_element_types(node) {
+                            Some(elements) => {
+                                added.extend(elements.into_iter().map(|node| EvolvingElement {
+                                    node: widen_fresh_read_node(
+                                        self.dispatch,
+                                        node,
+                                        self.nullability,
+                                    ),
+                                    widening_nullish: false,
+                                }))
+                            }
+                            None => added.push(EvolvingElement {
+                                node: self.unmodeled_position(),
+                                widening_nullish: false,
+                            }),
+                        }
+                    } else {
+                        added.push(EvolvingElement {
+                            node: widen_fresh_read_node(self.dispatch, node, self.nullability),
+                            widening_nullish: self
+                                .widening_nullish_value(&argument.value, &argument.freshness),
+                        });
+                    }
+                }
+                // The call is a throw point, entered before it adds.
+                self.capture_throw_point();
+                self.evolve(&subject, added);
+                Positional::Value(
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+                )
+            }
+            SliceEvolvingOperationKind::ElementWrite {
+                index,
+                value,
+                freshness,
+            } => {
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(index);
+                let index = self.settle_composite_part(outcome, holds_before);
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(value);
+                self.holds.truncate(holds_before);
+                let Positional::Value(node) = outcome else {
+                    return outcome;
+                };
+                let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                match self.assignable(index, number) {
+                    Some(true) => {
+                        let element = EvolvingElement {
+                            node: widen_fresh_read_node(self.dispatch, node, self.nullability),
+                            widening_nullish: self.widening_nullish_value(value, freshness),
+                        };
+                        self.evolve(&subject, vec![element]);
+                    }
+                    Some(false) => {}
+                    None => {
+                        let marker = self.unmodeled_position();
+                        self.evolve(
+                            &subject,
+                            vec![EvolvingElement {
+                                node: marker,
+                                widening_nullish: false,
+                            }],
+                        );
+                    }
+                }
+                Positional::Value(node)
+            }
+            SliceEvolvingOperationKind::Reset {
+                definition, value, ..
+            } => {
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(value);
+                self.holds.truncate(holds_before);
+                // Without `noImplicitAny` the binding is declared as the
+                // empty literal's widened type, and the write holds it.
+                let product = if self.no_implicit_any {
+                    self.evolving_product(Vec::new())
+                } else {
+                    ReachingTypeProduct::of(self.evolving_declared_type())
+                };
+                let single_path = if self.uses_conditional_definition_policy(&subject) {
+                    self.conditional_arm_nesting > 0
+                } else {
+                    self.products.assignment(&subject).single_path()
+                };
+                let definition = self.flow_graph.expr_site_node(*definition);
+                self.bind_local_at(&subject, single_path, product, false, Some(definition));
+                outcome
+            }
+        }
+    }
+
+    /// A conditional expression whose arms change reaching values (a
+    /// write, an EVOLVING-array operation): the checker's flow branches at
+    /// the test, so each arm evaluates from the state reaching the
+    /// expression under its reading of the guard, and the arms' states
+    /// join after it as an `if`'s do. The value is the arms' union.
+    fn eval_branching_union(
+        &mut self,
+        consequent: &crate::flow_slice_content::SliceExpr,
+        alternate: &crate::flow_slice_content::SliceExpr,
+        guard: &crate::flow_slice_content::SliceGuard,
+    ) -> Positional<SemanticNodeId> {
+        let entry_products = self.products.clone();
+        let entry_writes = self.products.observe_writes();
+        self.conditional_arm_nesting += 1;
+        let mut nodes = Vec::with_capacity(2);
+        let mut arm_products = Vec::with_capacity(2);
+        for (index, arm) in [consequent, alternate].into_iter().enumerate() {
+            let holds_before = self.holds.len();
+            let mark = self.narrowing_snapshot();
+            self.apply_guard_scoped(guard, index == 0);
+            let outcome = self.eval_expr(arm);
+            self.restore_narrowings(mark);
+            nodes.push(self.settle_composite_part(outcome, holds_before));
+            arm_products.push(self.products.clone());
+            self.restore_arm_entry(&entry_products);
+        }
+        self.conditional_arm_nesting -= 1;
+        self.join_arm_writes(
+            &arm_products[0],
+            true,
+            &arm_products[1],
+            true,
+            &entry_products,
+            &entry_writes,
+        );
+        Positional::Value(self.union(&nodes))
+    }
+
+    /// One pass of a [`crate::flow_slice_content::SliceStatement::Loop`]
+    /// iteration from `start`, charged to the connected demand's work
+    /// budget: its abrupt edges (breaks, returns, throw points) replace any
+    /// an earlier pass left, and the state it completes with — the back
+    /// edge — is returned when the iteration falls through.
+    fn eval_loop_pass(
+        &mut self,
+        iteration: &crate::flow_slice_content::SliceRegion,
+        start: FlowProductStore,
+        (break_base, return_base, throw_base): (usize, usize, usize),
+    ) -> Result<(Option<FlowLayerState>, Vec<FlowContribution>), FlowReturnFailure> {
+        if self.dispatch.charge_connected_work().is_err() {
+            return Err(FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            ));
+        }
+        self.break_exits.truncate(break_base);
+        self.return_edges.truncate(return_base);
+        self.throw_points.truncate(throw_base);
+        self.products = start;
+        let (result, falls) = self.eval_region(iteration);
+        let returned = result?;
+        Ok((falls.then(|| self.layer_state()), returned))
+    }
+
+    /// The checker's loop-head state for `carried[subject]` while the
+    /// references `frozen` marks are under analysis
+    /// (`getTypeAtFlowLoopLabel`): the reference's state entering the loop
+    /// joined with the state ONE pass of the iteration leaves it in. In
+    /// that pass the reference itself and every frozen one read their
+    /// entry state — an in-analysis loop label answers with the types it
+    /// has so far — and every other carried reference reads its own
+    /// loop-head state, analysed with this one frozen too. Returned as the
+    /// whole joined store; the caller takes `carried[subject]` from it.
+    #[allow(clippy::too_many_arguments)]
+    fn loop_head_products(
+        &mut self,
+        iteration: &crate::flow_slice_content::SliceRegion,
+        entry: &FlowLayerState,
+        carried: &[FlowProductSubject],
+        subject: usize,
+        frozen: &mut Vec<bool>,
+        memo: &mut rustc_hash::FxHashMap<(usize, Vec<bool>), FlowProductStore>,
+        bases: (usize, usize, usize),
+    ) -> Result<FlowProductStore, FlowReturnFailure> {
+        let key = (subject, frozen.clone());
+        if let Some(known) = memo.get(&key) {
+            return Ok(known.clone());
+        }
+        let mut start = entry.products.clone();
+        frozen[subject] = true;
+        for other in 0..carried.len() {
+            if frozen[other] {
+                continue;
+            }
+            let head = match self
+                .loop_head_products(iteration, entry, carried, other, frozen, memo, bases)
+            {
+                Ok(head) => head,
+                Err(failure) => {
+                    frozen[subject] = false;
+                    return Err(failure);
+                }
+            };
+            start.restore_reaching_from(&carried[other], &head, None, true);
+        }
+        frozen[subject] = false;
+        let joined = match self.eval_loop_pass(iteration, start, bases)?.0 {
+            Some(back) => {
+                self.join_states(&[entry, &back], &entry.write_observation)
+                    .products
+            }
+            None => entry.products.clone(),
+        };
+        memo.insert(key, joined.clone());
+        Ok(joined)
+    }
+
+    /// Add `added` to the element types of the EVOLVING array `subject`
+    /// reaches with. An element already present (or `never`) changes
+    /// nothing; a binding holding an ordinary value is unchanged.
+    fn evolve(
+        &mut self,
+        subject: &FlowProductSubject,
+        added: Vec<super::flow_products::EvolvingElement>,
+    ) {
+        let Some(mut elements) = self
+            .products
+            .reaching_type(subject)
+            .and_then(|product| product.evolving_elements())
+            .map(<[_]>::to_vec)
+        else {
+            return;
+        };
+        let graph = self.dispatch.graph();
+        let mut changed = false;
+        for element in added {
+            let arms: Vec<SemanticNodeId> = match graph.node_data(element.node).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => Vec::new(),
+                Some(SemanticNodeData::Union(arms)) => arms.to_vec(),
+                _ => vec![element.node],
+            };
+            for node in arms {
+                match elements.iter_mut().find(|existing| existing.node == node) {
+                    Some(existing) => {
+                        if existing.widening_nullish && !element.widening_nullish {
+                            existing.widening_nullish = false;
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        elements.push(super::flow_products::EvolvingElement {
+                            node,
+                            widening_nullish: element.widening_nullish,
+                        });
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            let product = self.evolving_product(elements);
+            self.products.set_reaching_type(subject, product);
+        }
+    }
+
     fn bind_local_at(
         &mut self,
         binding: &FlowProductSubject,
@@ -9031,6 +9718,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             node
         } else {
             self.assignment_node_for_target(target, node)
+        };
+        // A write to an EVOLVING-array binding (declared `autoArrayType`)
+        // holds the written value when it is assignable to `any[]`, else
+        // `any[]` (tsc 7.0.2: `a = [1]` is `number[]`, `a = "s" as string`
+        // `any[]`).
+        let node = match &target.root {
+            crate::flow_slice_content::SliceNarrowRoot::Local { binding, .. }
+                if !degraded && self.is_evolving_subject(binding) =>
+            {
+                let graph = self.dispatch.graph();
+                let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                let any_array = graph.intern_node(SemanticNodeData::Array {
+                    element: any,
+                    readonly: false,
+                });
+                match self.assignable(node, any_array) {
+                    Some(true) => node,
+                    Some(false) => any_array,
+                    None => self.unmodeled_position(),
+                }
+            }
+            _ => node,
         };
         match &target.root {
             crate::flow_slice_content::SliceNarrowRoot::Param {
@@ -13764,6 +14473,120 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.capture_throw_point();
                     path_alive = false;
                 }
+                crate::flow_slice_content::SliceStatement::EvolvingArray(operation) => {
+                    let holds_before = self.holds.len();
+                    let _ = self.eval_evolving_operation(operation);
+                    self.holds.truncate(holds_before);
+                }
+                crate::flow_slice_content::SliceStatement::Update {
+                    target, definition, ..
+                } => {
+                    // The checker's compound-like assignment: the binding
+                    // holds the base type of its declared type — the
+                    // parameter's annotation, a local's declaration, or an
+                    // unannotated local's widened value.
+                    let declared =
+                        self.target_declared_node(target)
+                            .or_else(|| match &target.root {
+                                crate::flow_slice_content::SliceNarrowRoot::Local {
+                                    binding,
+                                    ..
+                                } => self.local_value(binding),
+                                crate::flow_slice_content::SliceNarrowRoot::Param { .. } => None,
+                            });
+                    match declared {
+                        Some(declared) => {
+                            let node =
+                                widen_fresh_read_node(self.dispatch, declared, self.nullability);
+                            self.apply_write(target, node, false, *definition, false);
+                        }
+                        None => {
+                            let marker =
+                                super::flow_return_callee::unmodeled_position_marker(self.dispatch);
+                            self.apply_write(target, marker, true, *definition, false);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Loop { iteration } => {
+                    // The checker analyses a loop per reference
+                    // (`getTypeAtFlowLoopLabel`): a reference's loop-head
+                    // type is its entry type joined with ONE pass of the
+                    // iteration, in which it reads its own entry type and
+                    // every other reference its own loop-head type
+                    // ([`Self::loop_head_products`]; tsc 7.0.2: `a.push(a)`
+                    // in a loop over `const a = []; a.push(1)` is
+                    // `(number | number[])[]`, and a chain `a.push(v); v =
+                    // w; w = "s"` reaches `w`'s `string` in `a`). The paths
+                    // leaving (the test failing, an authored `break`) and
+                    // the returns are the pass from the head state, where
+                    // every reference reads its loop-head type.
+                    let entry = self.layer_state();
+                    let bases = (
+                        self.break_exits.len(),
+                        self.return_edges.len(),
+                        self.throw_points.len(),
+                    );
+                    let carried = loop_carried_subjects(iteration);
+                    let mut memo = rustc_hash::FxHashMap::default();
+                    let mut frozen = vec![false; carried.len()];
+                    let mut head = entry.products.clone();
+                    let mut failure = None;
+                    for subject in 0..carried.len() {
+                        match self.loop_head_products(
+                            iteration,
+                            &entry,
+                            &carried,
+                            subject,
+                            &mut frozen,
+                            &mut memo,
+                            bases,
+                        ) {
+                            Ok(products) => {
+                                head.restore_reaching_from(
+                                    &carried[subject],
+                                    &products,
+                                    None,
+                                    true,
+                                );
+                            }
+                            Err(error) => {
+                                failure = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                    let pass = match failure {
+                        Some(failure) => Err(failure),
+                        None => self.eval_loop_pass(iteration, head, bases),
+                    };
+                    let returned = match pass {
+                        Ok((_, returned)) => returned,
+                        Err(failure) => {
+                            return (
+                                Err(failure),
+                                region
+                                    .can_fall_through
+                                    .reaches_end(CompletionDischarge::EvaluatorRegionWalk),
+                            )
+                        }
+                    };
+                    let break_base = bases.0;
+                    contributors.extend(returned);
+                    let exits = self.drain_break_exits(break_base, None);
+                    let reaches = !exits.is_empty();
+                    let mut joined = if reaches {
+                        let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> =
+                            exits.iter().collect();
+                        self.join_states(&incoming, &entry.write_observation)
+                    } else {
+                        entry.clone()
+                    };
+                    if reaches {
+                        self.flag_conditionally_defined_bindings(&mut joined, &exits);
+                    }
+                    self.restore_layer_state(joined);
+                    path_alive = reaches;
+                }
                 crate::flow_slice_content::SliceStatement::ThrowPoint => {
                     // A bare call statement: value-neutral, but a throw
                     // point for an enclosing `try`.
@@ -13789,29 +14612,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     // The checker's EVOLVING array (`noImplicitAny` on): an
                     // unannotated `const a = []` / `let a = []` is typed by
-                    // the operations that reach each read. One the frame
-                    // only reads whole reads `any[]` (tsc 7.0.2, with TS7034
-                    // / TS7005); one some position may evolve is not
-                    // followed here, so the binding holds the typed marker.
-                    // Without `noImplicitAny` it is the ordinary `[]` below.
-                    if let (Some(evolving), true) = (evolving_array, self.no_implicit_any) {
+                    // the operations that reach each read — it starts with
+                    // no element, and a read with none is `any[]` (tsc
+                    // 7.0.2, with TS7034 / TS7005). Without `noImplicitAny`
+                    // it is the ordinary `[]` below.
+                    let evolving_subject =
+                        self.canonical_runtime_subject(&FlowProductSubject::Local(*binding));
+                    if *evolving_array && self.no_implicit_any {
                         let subject = FlowProductSubject::Local(*binding);
                         self.set_declared_local(&subject, *kind, None);
-                        let value = match evolving {
-                            crate::flow_slice_content::SliceEvolvingArray::Settled => {
-                                let graph = self.dispatch.graph();
-                                let any = graph
-                                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-                                graph.intern_node(SemanticNodeData::Array {
-                                    element: any,
-                                    readonly: false,
-                                })
-                            }
-                            crate::flow_slice_content::SliceEvolvingArray::MayEvolve => {
-                                self.unmodeled_position()
-                            }
-                        };
-                        self.bind_local(&subject, *kind, value, None, false);
+                        self.auto_typed_locals.remove(&evolving_subject);
+                        self.evolving_locals.insert(evolving_subject);
+                        let product = self.evolving_product(Vec::new());
+                        self.bind_local_reaching(&subject, *kind, product, false);
+                        continue;
+                    }
+                    self.evolving_locals.remove(&evolving_subject);
+                    // Without `noImplicitAny` the binding is DECLARED as the
+                    // empty literal's widened type, which no write retypes
+                    // (tsc 7.0.2: `let a = []; a = [1]; return a` is
+                    // `never[]`, `any[]` with `strictNullChecks` off).
+                    if *evolving_array {
+                        let subject = FlowProductSubject::Local(*binding);
+                        let declared = self.evolving_declared_type();
+                        self.set_declared_local(&subject, *kind, Some(declared));
+                        self.bind_local(&subject, *kind, declared, None, false);
                         continue;
                     }
                     // An authored annotation is the binding's DECLARED
@@ -14329,6 +15154,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 SliceStatement::Labeled { body, .. } => {
                     self.seed_hoisted_var_declarations(body);
                 }
+                SliceStatement::Loop { iteration } => {
+                    self.seed_hoisted_var_declarations(iteration);
+                }
                 SliceStatement::Switch { cases, .. } => {
                     for case in cases.iter() {
                         self.seed_hoisted_var_declarations(&case.region);
@@ -14370,6 +15198,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         function: &verter_semantic::analysis::function_program::FunctionProgramKey,
         context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         has_declared_return: bool,
+        declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
         outer_env: &FlowBinderEnv,
     ) -> SemanticNodeId {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
@@ -14454,6 +15283,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &content.params,
             &content.type_parameters,
             context,
+            declared_evolving_captures,
             content.declared_return.as_ref(),
             content.declared_predicate.as_ref(),
             &content.body,
@@ -14549,6 +15379,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         nested_params: &[crate::flow_slice_content::SliceParam],
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
+        declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         body: &crate::flow_slice_content::SliceRegion,
@@ -14738,6 +15569,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     && self.products.reaching(&parent).is_none()
                 {
                     self.seed_destructured_param_element(&parent);
+                }
+                // A captured EVOLVING array reads its declared type, or
+                // (a `let` past its last assignment) continues from the
+                // evolving array it holds here.
+                if value_demanded && declared_evolving_captures.contains(identity) {
+                    let declared = self.evolving_declared_type();
+                    return PreparedFlowCaptureInput {
+                        subject: FlowProductSubject::Captured(identity.clone()),
+                        value_demanded,
+                        assignment: self.products.assignment(&parent).with_single_path(false),
+                        deferred_write: None,
+                        reaching: Some(ReachingTypeProduct::of(declared)),
+                        declared: None,
+                    };
                 }
                 PreparedFlowCaptureInput {
                     subject: FlowProductSubject::Captured(identity.clone()),
@@ -14956,6 +15801,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 degradation: None,
                 pending_statement_gap: None,
                 auto_typed_locals: rustc_hash::FxHashSet::default(),
+                evolving_locals: rustc_hash::FxHashSet::default(),
                 unwidened_views: rustc_hash::FxHashMap::default(),
                 conditional_arm_nesting: 0,
                 call_fresh_literal_returns: Vec::new(),
@@ -15614,6 +16460,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 context,
                 has_declared_return,
                 gap,
+                declared_evolving_captures,
             } => {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
@@ -15623,6 +16470,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     function,
                     context,
                     *has_declared_return,
+                    declared_evolving_captures,
                     outer_env,
                 ))
             }
@@ -15643,6 +16491,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Positional::Value(value) => Positional::Value(value.into_node()),
                     Positional::Hold => Positional::Hold,
                     Positional::Unmodeled => Positional::Unmodeled,
+                }
+            }
+            crate::flow_slice_content::SliceExpr::EvolvingArray(operation) => {
+                self.eval_evolving_operation(operation)
+            }
+            // A `for … of` binding holds the iterated element type (a
+            // tuple's elements, an array's element, a string's `string`);
+            // a `for … in` binding `string`, unless the object is generic
+            // (the checker's `Extract<keyof T, string>`).
+            crate::flow_slice_content::SliceExpr::Iterated { source, of, .. } => {
+                let holds_before = self.holds.len();
+                let outcome = self.eval_expr(source);
+                self.holds.truncate(holds_before);
+                let Positional::Value(source) = outcome else {
+                    return outcome;
+                };
+                if *of {
+                    match self.spread_element_types(source) {
+                        Some(elements) => Positional::Value(self.union(&elements)),
+                        None => Positional::Unmodeled,
+                    }
+                } else if node_has_generic_keys(graph, source) {
+                    Positional::Unmodeled
+                } else {
+                    Positional::Value(
+                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                    )
                 }
             }
             crate::flow_slice_content::SliceExpr::SemanticAny => Positional::Value(
@@ -15692,6 +16567,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // under its NEGATED one — the same overlay the `if` twin
             // applies, arm-scoped.
             crate::flow_slice_content::SliceExpr::Union { arms, guard } => {
+                if let [consequent, alternate] = &arms[..] {
+                    if expression_changes_reaching_values(consequent)
+                        || expression_changes_reaching_values(alternate)
+                    {
+                        return self.eval_branching_union(consequent, alternate, guard);
+                    }
+                }
                 let mut nodes = Vec::with_capacity(arms.len());
                 for (index, arm) in arms.iter().enumerate() {
                     // A coinductive HOLD inside a branch cannot be

@@ -383,6 +383,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             context,
             has_declared_return,
             gap,
+            declared_evolving_captures,
         } = function
         else {
             return None;
@@ -390,7 +391,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if let Some(gap) = gap {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(*gap));
         }
-        Some(self.eval_nested_function(function, context, *has_declared_return, env))
+        Some(self.eval_nested_function(
+            function,
+            context,
+            *has_declared_return,
+            declared_evolving_captures,
+            env,
+        ))
     }
 
     /// Lower one gated member-position type under `env`: the typed marker

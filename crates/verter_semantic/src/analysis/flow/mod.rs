@@ -374,6 +374,14 @@ pub struct SkeletonBinding {
     /// the binding: a callable authored there is created and retains its
     /// captures whenever the binding is demanded.
     pub pattern_sites: Arc<[SkeletonExprSiteId]>,
+    /// Whether the declaration has the checker's EVOLVING-array form: an
+    /// unannotated whole-identifier declarator initialised to an empty array
+    /// literal (`const a = []`). Under `noImplicitAny` its type follows the
+    /// operations that reach each read — `push` / `unshift` calls and
+    /// element writes ([`evolving_array_mutation_root`],
+    /// [`evolving_array_element_write_root`]) — so each records a write of
+    /// the values it adds into the binding.
+    pub evolving_array: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,6 +1250,10 @@ struct SkeletonBuilder<'entry> {
     yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
     nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
+    /// The spans of this frame's references to an enclosing frame's
+    /// EVOLVING-array binding
+    /// ([`crate::analysis::function_program::FlowBindingIdentity::evolving_array`]).
+    captured_evolving_references: FxHashSet<verter_span::Span>,
     capture_subjects: FxHashSet<(SkeletonExprSiteId, FlowBindingRef)>,
     capture_names: FxHashSet<(SkeletonExprSiteId, FlowNameId)>,
     /// How many class expressions' value positions enclose the walk. Their
@@ -1288,6 +1300,20 @@ impl<'entry> SkeletonBuilder<'entry> {
                         .nested_captures
                         .iter()
                         .map(|child| (child.span, child))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            captured_evolving_references: entry
+                .map(|entry| {
+                    entry
+                        .references
+                        .iter()
+                        .filter(|reference| {
+                            reference.binding.resolved().is_some_and(|identity| {
+                                identity.evolving_array && identity.defining_function != entry.key
+                            })
+                        })
+                        .map(|reference| reference.span)
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1762,6 +1788,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             annotation_span: None,
             destructured,
             pattern_sites: Arc::from([]),
+            evolving_array: false,
         });
     }
 
@@ -2511,6 +2538,12 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 .as_ref()
                 .map(|annotation| self.frame_span(annotation.span.into()));
             self.collect_declarator_pattern(&declarator.id, kind, initializer, annotation_span);
+            if declarator.type_annotation.is_none()
+                && matches!(declarator.id, BindingPattern::BindingIdentifier(_))
+                && is_evolving_array_initializer(declarator.init.as_ref())
+            {
+                self.bindings.last_mut().unwrap().evolving_array = true;
+            }
         }
     }
 
@@ -2587,6 +2620,40 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         let containing = self
             .current_site()
             .expect("assignment scope guarantees a current site");
+        // An element write into an EVOLVING array adds the written value
+        // to the element type when its index is number-like: the value and
+        // the index are each their own value site, and both are values of
+        // the binding (the index decides whether the write adds anything).
+        if let Some((member, root)) =
+            evolving_array_element_write_root(it).filter(|(_, root)| self.evolving_reference(root))
+        {
+            let name = self.intern(root.name.as_str());
+            self.push_read(name, root.span.into());
+            let index = self.open_site(&member.expression, Some(containing));
+            let value = self.open_site(&it.right, Some(containing));
+            let path: Arc<[SkeletonPathSegment]> =
+                Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice());
+            self.push_write(
+                SkeletonWriteTarget::Named(name),
+                Arc::clone(&path),
+                SkeletonWriteCertainty::Definite,
+                Some(value),
+                member.span.into(),
+                Some(root.span.into()),
+            );
+            self.push_write(
+                SkeletonWriteTarget::Named(name),
+                path,
+                SkeletonWriteCertainty::Optional,
+                Some(index),
+                member.span.into(),
+                Some(root.span.into()),
+            );
+            if scoped {
+                self.site_stack.pop();
+            }
+            return;
+        }
         let certainty = match it.operator {
             oxc_ast::ast::AssignmentOperator::LogicalAnd
             | oxc_ast::ast::AssignmentOperator::LogicalOr
@@ -2682,6 +2749,32 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                     binding: None,
                 });
         });
+        // A `push` / `unshift` on an EVOLVING array writes each argument
+        // into the array's element type: every argument is its own value
+        // site, a value provider of the binding like an element write's
+        // right-hand side.
+        if let Some(root) =
+            evolving_array_mutation_root(it).filter(|root| self.evolving_reference(root))
+        {
+            let name = self.intern(root.name.as_str());
+            self.visit_expression(&it.callee);
+            for argument in &it.arguments {
+                let expression = match argument {
+                    oxc_ast::ast::Argument::SpreadElement(spread) => &spread.argument,
+                    other => other.to_expression(),
+                };
+                let value = self.open_site(expression, Some(site));
+                self.push_write(
+                    SkeletonWriteTarget::Named(name),
+                    Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice()),
+                    SkeletonWriteCertainty::Definite,
+                    Some(value),
+                    it.span.into(),
+                    Some(root.span.into()),
+                );
+            }
+            return;
+        }
         walk::walk_call_expression(self, it);
     }
 
@@ -2692,6 +2785,23 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
 }
 
 impl SkeletonBuilder<'_> {
+    /// Whether `root` names an EVOLVING array: the innermost declaration
+    /// of its name visible here ([`SkeletonBinding::evolving_array`]), or,
+    /// when this frame declares none, the enclosing frame's binding it
+    /// captures ([`crate::analysis::function_program::FlowBindingIdentity::evolving_array`]).
+    fn evolving_reference(&self, root: &oxc_ast::ast::IdentifierReference<'_>) -> bool {
+        let name = root.name.as_str();
+        match self.bindings.iter().rev().find(|binding| {
+            self.names[binding.name.index()].as_ref() == name
+                && self.region_stack.contains(&binding.region.index())
+        }) {
+            Some(binding) => binding.evolving_array,
+            None => self
+                .captured_evolving_references
+                .contains(&verter_span::Span::from(root.span)),
+        }
+    }
+
     fn record_for_left(
         &mut self,
         left: &oxc_ast::ast::ForStatementLeft<'_>,
@@ -2749,6 +2859,64 @@ impl SkeletonBuilder<'_> {
                 }
             }
         }
+    }
+}
+
+/// Whether a declarator initializer is the checker's EVOLVING-array form:
+/// an empty array literal, not parenthesized (tsc 7.0.2 does not look
+/// through parentheses: `const a = ([])` is `never[]`).
+#[must_use]
+pub fn is_evolving_array_initializer(init: Option<&Expression<'_>>) -> bool {
+    matches!(init, Some(Expression::ArrayExpression(array)) if array.elements.is_empty())
+}
+
+/// The root identifier of a `push` / `unshift` call on an identifier —
+/// `a.push(..)`, `(a).unshift(..)`, `a?.push(..)`, `a.push?.(..)` — the
+/// calls that evolve an evolving array's element type (the checker's
+/// array-mutation flow node, whose reference root looks through
+/// parentheses).
+#[must_use]
+pub fn evolving_array_mutation_root<'a, 'ast>(
+    call: &'a oxc_ast::ast::CallExpression<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return None;
+    };
+    if !matches!(member.property.name.as_str(), "push" | "unshift") {
+        return None;
+    }
+    reference_root_identifier(&member.object)
+}
+
+/// The element write `a[i] = v` into an identifier (`(a)[i] = v` alike):
+/// the checker's other array-mutation flow node. Only a plain `=` whose
+/// target is the element access itself — a compound operator, or an
+/// element inside a destructuring pattern, is an ordinary reference.
+#[must_use]
+pub fn evolving_array_element_write_root<'a, 'ast>(
+    assignment: &'a oxc_ast::ast::AssignmentExpression<'ast>,
+) -> Option<(
+    &'a oxc_ast::ast::ComputedMemberExpression<'ast>,
+    &'a oxc_ast::ast::IdentifierReference<'ast>,
+)> {
+    if assignment.operator != oxc_ast::ast::AssignmentOperator::Assign {
+        return None;
+    }
+    let AssignmentTarget::ComputedMemberExpression(member) = &assignment.left else {
+        return None;
+    };
+    Some((member, reference_root_identifier(&member.object)?))
+}
+
+/// The identifier a reference expression names, looking through
+/// parentheses.
+fn reference_root_identifier<'a, 'ast>(
+    expression: &'a Expression<'ast>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'ast>> {
+    match expression {
+        Expression::Identifier(root) => Some(root),
+        Expression::ParenthesizedExpression(paren) => reference_root_identifier(&paren.expression),
+        _ => None,
     }
 }
 

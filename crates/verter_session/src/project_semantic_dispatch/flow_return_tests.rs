@@ -11044,12 +11044,14 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
     assert_eq!(cold.degradation(), None, "the join is clean");
     // The whole request's relation budget, PINNED. Most of it belongs to
     // the `typeof` guard's own narrowing; the reunion's share is bounded
-    // by "once per ordered arm pair", and dropping the per-join memo (so
-    // a pair is re-asked once per scan) raises this number. A pin rather
-    // than an inequality: an inequality with slack cannot see the memo
-    // disappear.
+    // by "once per ordered arm pair and relation" — assignability forward,
+    // and for an admitted pair the SUBTYPE relation in reverse (`{ v: "a" }`
+    // below `{ v: string }` asks `{ v: string }` ≤ `{ v: "a" }` under the
+    // subtype relation once) — and dropping the per-join memo (so a pair
+    // is re-asked once per scan) raises this number. A pin rather than an
+    // inequality: an inequality with slack cannot see the memo disappear.
     assert_eq!(
-        cold_reads, 13,
+        cold_reads, 15,
         "the cold relation budget of this three-arm join moved; a reunion that re-asks a \
          decided arm pair spends more"
     );

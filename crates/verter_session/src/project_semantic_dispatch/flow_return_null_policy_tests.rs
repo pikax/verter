@@ -2387,3 +2387,959 @@ fn object_arms_reduce_to_their_supertype_before_widening() {
         mismatches.join("\n")
     );
 }
+
+/// Operations on an evolving array: `push` / `unshift` calls and element writes under a number-like index, on `const`, `let` and `var` bindings.
+const EVOLVING_OPERATIONS_SOURCE: &str = r#"
+function makeEvolving() { const a = []; a.push(1); a.push("s"); return a; }
+export function returnedEmpty() { const a = []; return a; }
+export function pushOne() { const a = []; a.push(1); return a; }
+export function pushTwo() { const a = []; a.push(1); a.push("s"); return a; }
+export function pushMany() { const a = []; a.push(1, "s"); return a; }
+export function pushNoArgs() { const a = []; a.push(); return a; }
+export function unshiftOne() { const a = []; a.unshift(true); return a; }
+export function unshiftAndPush() { const a = []; a.unshift(1); a.push("s"); return a; }
+export function pushLiteralConst() { const a = []; a.push("lit" as const); return a; }
+export function pushParam(v: "x" | "y") { const a = []; a.push(v); return a; }
+export function pushAny(x: any) { const a = []; a.push(x); a.push(1); return a; }
+export function pushUnknown(x: unknown) { const a = []; a.push(x); a.push(1); return a; }
+export function pushNever(x: never) { const a = []; a.push(x); return a; }
+export function pushNull() { const a = []; a.push(null); return a; }
+export function pushUndefined() { const a = []; a.push(undefined); return a; }
+export function pushNullRead() { const a = []; a.push(null); const b = a; return b; }
+export function pushArray() { const a = []; a.push([1]); return a; }
+export function pushEmptyArray() { const a = []; a.push([]); return a; }
+export function pushTwoArrays() { const a = []; a.push([1]); a.push(["s"]); return a; }
+export function pushFunction() { const a = []; a.push(() => 1); return a; }
+export function pushAsConstObj() { const a = []; a.push({ k: "v" } as const); return a; }
+export function pushSubtypes(x: { a: number }, y: { a: number; b: number }) { const a = []; a.push(y); a.push(x); return a; }
+export function pushStringEnumLike(k: "a" | "b") { const a = []; a.push(k); a.push(k); return a; }
+export function pushSpread(xs: number[]) { const a = []; a.push(...xs); return a; }
+export function spreadString(s: string) { const a = []; a.push(...s); return a; }
+export function spreadTuple(t: [number, string]) { const a = []; a.push(...t); return a; }
+export function pushOptional() { const a = []; a?.push(1); return a; }
+export function parenPush() { const a = []; (a).push(1); return a; }
+export function letPush() { let a = []; a.push(1); return a; }
+export function varPush() { var a = []; a.push(1); return a; }
+export function letUnshift() { let a = []; a.unshift(1); return a; }
+export function varUnshift() { var a = []; a.unshift("s"); return a; }
+export function indexWrite() { const a = []; a[0] = "x"; return a; }
+export function letIndexWrite() { let a = []; a[0] = 1; return a; }
+export function varIndexWrite() { var a = []; a[0] = 1; return a; }
+export function parenWrite() { const a = []; (a)[0] = 1; return a; }
+export function anyIndexWrite() { const a = []; a["k" as any] = 1; return a; }
+export function stringKeyWrite() { const a = []; a["k"] = 1; return a; }
+export function stringTypedIndex(k: string) { const a = []; a[k] = 1; return a; }
+export function unionIndex(k: number | string) { const a = []; a[k] = 1; return a; }
+export function literalUnionIndex(k: 0 | 1) { const a = []; a[k] = "s"; return a; }
+export function compoundWrite() { const a = []; a[0] = 1; a[0] += 1; return a; }
+export function compoundKey() { const a = []; a[0] = 1; a[1] ??= "s"; return a; }
+export function destructureWrite() { const a = []; [a[0]] = [1]; return a; }
+export function lengthAssign() { const a = []; a.length = 0; a.push(1); return a; }
+export function returnPush() { const a = []; return a.push(1); }
+export function writeThenPushExpr() { const a = []; return a.push(1); }
+export function parenthesized() { const a = ([]); return a; }
+export function returnedFromFunction() { return makeEvolving(); }
+export function returnedFromFunctionLet() { let a = []; a[0] = 1; a.unshift(true); return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_OPERATIONS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // any[] {TS7034@41,TS7005@56} / any[] {TS7034@41,TS7005@56} / never[] / any[]
+    ("returnedEmpty", "any[]", "any[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@50} / any[]
+    ("pushOne", "number[]", "number[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@50,TS2345@61} / any[]
+    (
+        "pushTwo",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@51} / any[]
+    (
+        "pushMany",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] {TS7034@38,TS7005@63} / any[] {TS7034@38,TS7005@63} / never[] / any[]
+    ("pushNoArgs", "any[]", "any[]", "never[]", "any[]"),
+    // boolean[] / boolean[] / never[] {TS2345@56} / any[]
+    ("unshiftOne", "boolean[]", "boolean[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@60,TS2345@71} / any[]
+    (
+        "unshiftAndPush",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // string[] / string[] / never[] {TS2345@59} / any[]
+    (
+        "pushLiteralConst",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // string[] / string[] / never[] {TS2345@64} / any[]
+    ("pushParam", "string[]", "string[]", "never[]", "any[]"),
+    // any[] / any[] / never[] {TS2345@56,TS2345@67} / any[]
+    ("pushAny", "any[]", "any[]", "never[]", "any[]"),
+    // unknown[] / unknown[] / never[] {TS2345@64,TS2345@75} / any[]
+    ("pushUnknown", "unknown[]", "unknown[]", "never[]", "any[]"),
+    // any[] {TS7034@45,TS7005@71} / any[] {TS7034@45,TS7005@71} / never[] / any[]
+    ("pushNever", "any[]", "any[]", "never[]", "any[]"),
+    // null[] / any[] {TS7010@17} / never[] {TS2345@51} / any[]
+    ("pushNull", "null[]", "any[]", "never[]", "any[]"),
+    // undefined[] / any[] {TS7010@17} / never[] {TS2345@56} / any[]
+    ("pushUndefined", "undefined[]", "any[]", "never[]", "any[]"),
+    // null[] / any[] {TS7005@68} / never[] {TS2345@55} / any[]
+    ("pushNullRead", "null[]", "any[]", "never[]", "any[]"),
+    // number[][] / number[][] / never[] {TS2345@52} / any[]
+    ("pushArray", "number[][]", "number[][]", "never[]", "any[]"),
+    // never[][] / any[][] {TS7010@17} / never[] {TS2345@57} / any[]
+    ("pushEmptyArray", "never[][]", "any[][]", "never[]", "any[]"),
+    // (string[] | number[])[] / (string[] | number[])[] / never[] {TS2345@56,TS2345@69} / any[]
+    (
+        "pushTwoArrays",
+        "(number[] | string[])[]",
+        "(number[] | string[])[]",
+        "never[]",
+        "any[]",
+    ),
+    // (() => number)[] / (() => number)[] / never[] {TS2345@55} / any[]
+    (
+        "pushFunction",
+        "(() => number)[]",
+        "(() => number)[]",
+        "never[]",
+        "any[]",
+    ),
+    // { readonly k: "v"; }[] / { readonly k: "v"; }[] / never[] {TS2345@57} / any[]
+    (
+        "pushAsConstObj",
+        "{ readonly k: \"v\" }[]",
+        "{ readonly k: \"v\" }[]",
+        "never[]",
+        "any[]",
+    ),
+    // { a: number; }[] / { a: number; }[] / never[] {TS2345@100,TS2345@111} / any[]
+    (
+        "pushSubtypes",
+        "{ a: number }[]",
+        "{ a: number }[]",
+        "never[]",
+        "any[]",
+    ),
+    // string[] / string[] / never[] {TS2345@73,TS2345@84} / any[]
+    (
+        "pushStringEnumLike",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@65} / any[]
+    ("pushSpread", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@64} / any[]
+    ("spreadString", "string[]", "string[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@73} / any[]
+    (
+        "spreadTuple",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@56} / any[]
+    ("pushOptional", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@54} / any[]
+    ("parenPush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@48} / any[]
+    ("letPush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@48} / any[]
+    ("varPush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@54} / any[]
+    ("letUnshift", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@54} / any[]
+    ("varUnshift", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2322@46} / any[]
+    ("indexWrite", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@47} / any[]
+    ("letIndexWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@47} / any[]
+    ("varIndexWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@46} / any[]
+    ("parenWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@49} / any[]
+    ("anyIndexWrite", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS7034@42,TS7005@50,TS7015@52,TS7005@69} / any[] {TS7034@42,TS7005@50,TS7015@52,TS7005@69} / never[] / any[]
+    ("stringKeyWrite", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@53,TS7005@61,TS7015@63,TS7005@78} / any[] {TS7034@53,TS7005@61,TS7015@63,TS7005@78} / never[] / any[]
+    ("stringTypedIndex", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@56,TS7005@64,TS7015@66,TS7005@81} / any[] {TS7034@56,TS7005@64,TS7015@66,TS7005@81} / never[] / any[]
+    ("unionIndex", "any[]", "any[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2322@61} / any[]
+    (
+        "literalUnionIndex",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2322@49,TS2322@59} / any[]
+    ("compoundWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] {TS2322@57} / number[] {TS2322@57} / never[] {TS2322@47,TS2322@57} / any[]
+    ("compoundKey", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS7034@44,TS7005@53,TS7005@73} / any[] {TS7034@44,TS7005@53,TS7005@73} / never[] {TS2322@53} / any[]
+    ("destructureWrite", "any[]", "any[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@69} / any[]
+    ("lengthAssign", "number[]", "number[]", "never[]", "any[]"),
+    // number / number / number {TS2345@60} / number
+    ("returnPush", "number", "number", "number", "number"),
+    // number / number / number {TS2345@67} / number
+    ("writeThenPushExpr", "number", "number", "number", "number"),
+    // never[] / any[] {TS7005@41} / never[] / any[]
+    ("parenthesized", "never[]", "any[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] / any[]
+    (
+        "returnedFromFunction",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | boolean)[] / (number | boolean)[] / never[] {TS2322@57,TS2345@77} / any[]
+    (
+        "returnedFromFunctionLet",
+        "(boolean | number)[]",
+        "(boolean | number)[]",
+        "never[]",
+        "any[]",
+    ),
+];
+
+/// References to an evolving array that are not operations on it: each reads the array finalized where it stands, and the array keeps evolving after it.
+const EVOLVING_FINALIZING_SOURCE: &str = r#"
+export function readThenPush() { const a = []; const b = a; a.push(1); return b; }
+export function readInElement() { const a = []; return [a]; }
+export function evolvingInObject() { const a = []; a.push(1); return { a }; }
+export function exprPush() { const a = []; const n = a.push(1); return [n, a]; }
+export function assignExprValue() { const a = []; const v = (a[0] = "s"); return [v, a]; }
+export function selfPush() { const a = []; a.push(a); return a; }
+export function pushThenReadThenPush() { const a = []; a.push(1); const b = a; a.push("s"); return [b, a]; }
+export function readBetweenPushes() { const a = []; a.push(1); const b = a; a.push("s"); return b; }
+export function readBetweenPushesWhole() { const a = []; a.push(1); const b = a; a.push("s"); return a; }
+export function earlyReturn(c: boolean) { const a = []; if (c) return a; a.push(1); return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_FINALIZING_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // any[] {TS7034@40,TS7005@58} / any[] {TS7034@40,TS7005@58} / never[] {TS2345@68} / any[]
+    ("readThenPush", "any[]", "any[]", "never[]", "any[]"),
+    // any[][] {TS7034@41,TS7005@57} / any[][] {TS7034@41,TS7005@57} / never[][] / any[][]
+    (
+        "readInElement",
+        "any[][]",
+        "any[][]",
+        "never[][]",
+        "any[][]",
+    ),
+    // { a: number[]; } / { a: number[]; } / { a: never[]; } {TS2345@59} / { a: any[]; }
+    (
+        "evolvingInObject",
+        "{ a: number[] }",
+        "{ a: number[] }",
+        "{ a: never[] }",
+        "{ a: any[] }",
+    ),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] {TS2345@61} / (number | any[])[]
+    (
+        "exprPush",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (string | string[])[] / (string | string[])[] / (string | never[])[] {TS2322@62} / (string | any[])[]
+    (
+        "assignExprValue",
+        "(string | string[])[]",
+        "(string | string[])[]",
+        "(never[] | string)[]",
+        "(any[] | string)[]",
+    ),
+    // any[][] {TS7034@36,TS7005@51} / any[][] {TS7034@36,TS7005@51} / never[] {TS2345@51} / any[]
+    ("selfPush", "any[][]", "any[][]", "never[]", "any[]"),
+    // (string | number)[][] / (string | number)[][] / never[][] {TS2345@63,TS2345@87} / any[][]
+    (
+        "pushThenReadThenPush",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "never[][]",
+        "any[][]",
+    ),
+    // number[] / number[] / never[] {TS2345@60,TS2345@84} / any[]
+    (
+        "readBetweenPushes",
+        "number[]",
+        "number[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@65,TS2345@89} / any[]
+    (
+        "readBetweenPushesWhole",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] {TS7034@49,TS7005@71} / any[] {TS7034@49,TS7005@71} / never[] {TS2345@81} / any[]
+    ("earlyReturn", "any[]", "any[]", "never[]", "any[]"),
+];
+
+/// Assignments to an evolving array binding: an unparenthesized `[]` starts a new evolving array, any other value is held when assignable to `any[]` (else `any[]`), and paths holding an ordinary value join the evolving ones under subtype reduction.
+const EVOLVING_ASSIGNMENTS_SOURCE: &str = r#"
+export function reassignLiteral() { let a = []; a = [1]; return a; }
+export function reassignAfterRead() { let a = []; a.push(1); const b = a; a = ["s"]; return [a, b]; }
+export function letReassignAfterRead() { let a = []; a.push(1); const b = a; a = [true]; a.push("s"); return [a, b]; }
+export function varReassignAfterRead() { var a = []; a.push(1); const b = a; a = [true]; return [a, b]; }
+export function resetEmpty() { let a = []; a.push(1); a = []; a.push("s"); return a; }
+export function parenReset() { let a = []; a = ([]); a.push(1); return a; }
+export function parenAssign() { let a = []; a = ([]); a.push(1); return a; }
+export function assignThenPush() { let a = []; a = [1]; a.push("s"); return a; }
+export function assignString() { let a = []; a.push(1); a = "s" as any as string; return a; }
+export function assignTuple() { let a = []; a = [1, "s"] as [number, string]; return a; }
+export function valueReset() { let a = []; a.push(1); const b = (a = []); a.push("s"); return [a, b]; }
+export function mixedJoin(c: boolean) { let a = []; if (c) a = [1]; return a; }
+export function mixedJoin2(c: boolean) { let a = []; if (c) { a = [1]; } else { a.push("s"); } return a; }
+export function mixedJoin3(c: boolean) { let a = []; a.push(true); if (c) a = [1]; return a; }
+export function mixedJoinRead(c: boolean) { let a = []; if (c) a = [1]; const b = a; return b; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_ASSIGNMENTS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] {TS2322@54} / any[]
+    (
+        "reassignLiteral",
+        "number[]",
+        "number[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string[] | number[])[] / (string[] | number[])[] / never[][] {TS2345@58,TS2322@80} / any[][]
+    (
+        "reassignAfterRead",
+        "(number[] | string[])[]",
+        "(number[] | string[])[]",
+        "never[][]",
+        "any[][]",
+    ),
+    // (number[] | boolean[])[] {TS2345@97} / (number[] | boolean[])[] {TS2345@97} / never[][] {TS2345@61,TS2322@83,TS2345@97} / any[][]
+    (
+        "letReassignAfterRead",
+        "(boolean[] | number[])[]",
+        "(boolean[] | number[])[]",
+        "never[][]",
+        "any[][]",
+    ),
+    // (number[] | boolean[])[] / (number[] | boolean[])[] / never[][] {TS2345@61,TS2322@83} / any[][]
+    (
+        "varReassignAfterRead",
+        "(boolean[] | number[])[]",
+        "(boolean[] | number[])[]",
+        "never[][]",
+        "any[][]",
+    ),
+    // string[] / string[] / never[] {TS2345@51,TS2345@70} / any[]
+    ("resetEmpty", "string[]", "string[]", "never[]", "any[]"),
+    // never[] {TS2345@61} / any[] {TS7010@17} / never[] {TS2345@61} / any[]
+    ("parenReset", "never[]", "any[]", "never[]", "any[]"),
+    // never[] {TS2345@62} / any[] {TS7010@17} / never[] {TS2345@62} / any[]
+    ("parenAssign", "never[]", "any[]", "never[]", "any[]"),
+    // number[] {TS2345@64} / number[] {TS2345@64} / never[] {TS2322@53,TS2345@64} / any[]
+    ("assignThenPush", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS2322@57} / any[] {TS2322@57} / never[] {TS2345@53,TS2322@57} / any[] {TS2322@57}
+    ("assignString", "any[]", "any[]", "never[]", "any[]"),
+    // [number, string] / [number, string] / never[] {TS2322@45} / any[]
+    (
+        "assignTuple",
+        "[number, string]",
+        "[number, string]",
+        "never[]",
+        "any[]",
+    ),
+    // string[][] / any[][] {TS7005@61} / never[][] {TS2345@51,TS2345@82} / any[][]
+    (
+        "valueReset",
+        "string[][]",
+        "any[][]",
+        "never[][]",
+        "any[][]",
+    ),
+    // any[] {TS7034@45,TS7005@76} / any[] {TS7034@45,TS7005@76} / never[] {TS2322@65} / any[]
+    ("mixedJoin", "any[]", "any[]", "never[]", "any[]"),
+    // string[] | number[] / string[] | number[] / never[] {TS2322@68,TS2345@88} / any[]
+    (
+        "mixedJoin2",
+        "number[] | string[]",
+        "number[] | string[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] | boolean[] / number[] | boolean[] / never[] {TS2345@61,TS2322@80} / any[]
+    (
+        "mixedJoin3",
+        "boolean[] | number[]",
+        "boolean[] | number[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] {TS7034@49,TS7005@83} / any[] {TS7034@49,TS7005@83} / never[] {TS2322@69} / any[]
+    ("mixedJoinRead", "any[]", "any[]", "never[]", "any[]"),
+];
+
+/// Evolving arrays where paths meet: `if` / `switch` / `try` arms, conditional and logical expressions in statement and value position.
+const EVOLVING_BRANCHES_SOURCE: &str = r#"
+export function branchPush(c: boolean) { const a = []; if (c) { a.push(1); } else { a.push("s"); } return a; }
+export function branchOnePush(c: boolean) { const a = []; if (c) { a.push(1); } return a; }
+export function pushInIf(c: boolean) { const a = []; if (c) a.push(1); return a; }
+export function switchPush(k: number) { const a = []; switch (k) { case 1: a.push(1); break; default: a.push("s"); } return a; }
+export function pushInTry() { const a = []; try { a.push(1); } catch { a.push("s"); } return a; }
+export function pushInTernary(c: boolean) { const a = []; c ? a.push(1) : a.push("s"); return a; }
+export function pushInLogical(c: boolean) { const a = []; c && a.push(1); return a; }
+export function orPush(c: boolean) { const a = []; c || a.push(1); return a; }
+export function coalescePush(x: number | null) { const a = []; x ?? a.push("s"); return a; }
+export function narrowedAndPush(x: string | null) { const a = []; x !== null && a.push(x); return a; }
+export function ternaryWrite(c: boolean) { const a = []; c ? (a[0] = 1) : (a[0] = true); return a; }
+export function valueTernaryPush(c: boolean) { const a = []; const n = c ? a.push(1) : a.push("s"); return [n, a]; }
+export function valueTernaryRead(c: boolean) { const a = []; const r = c ? a.push(1) : a; return r; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_BRANCHES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (string | number)[] / (string | number)[] / never[] {TS2345@72,TS2345@92} / any[]
+    (
+        "branchPush",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@75} / any[]
+    ("branchOnePush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@68} / any[]
+    ("pushInIf", "number[]", "number[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@83,TS2345@110} / any[]
+    (
+        "switchPush",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@58,TS2345@79} / any[]
+    (
+        "pushInTry",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@70,TS2345@82} / any[]
+    (
+        "pushInTernary",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@71} / any[]
+    ("pushInLogical", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@64} / any[]
+    ("orPush", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@76} / any[]
+    ("coalescePush", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@88} / any[]
+    (
+        "narrowedAndPush",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | boolean)[] / (number | boolean)[] / never[] {TS2322@63,TS2322@76} / any[]
+    (
+        "ternaryWrite",
+        "(boolean | number)[]",
+        "(boolean | number)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | (string | number)[])[] / (number | (string | number)[])[] / (number | never[])[] {TS2345@83,TS2345@95} / (number | any[])[]
+    (
+        "valueTernaryPush",
+        "((number | string)[] | number)[]",
+        "((number | string)[] | number)[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // number | any[] {TS7034@54,TS7005@88} / number | any[] {TS7034@54,TS7005@88} / number | never[] {TS2345@83} / number | any[]
+    (
+        "valueTernaryRead",
+        "any[] | number",
+        "any[] | number",
+        "never[] | number",
+        "any[] | number",
+    ),
+];
+
+/// Evolving arrays in loops: each reference's loop-head type is its entry type joined with one pass of the iteration in which it reads its own entry type.
+const EVOLVING_LOOPS_SOURCE: &str = r#"
+export function loopWrite(n: number) { const a = []; for (let i = 0; i < n; i++) { a[i] = i; } return a; }
+export function letLoopWrite(n: number) { let a = []; for (let i = 0; i < n; i++) { a[i] = i; } return a; }
+export function varLoopWrite(n: number) { var a = []; for (let i = 0; i < n; i++) { a[i] = "s"; } return a; }
+export function loopPush(xs: string[]) { const a = []; for (const x of xs) { a.push(x); } return a; }
+export function whileLoop(n: number) { const a = []; while (n > 0) { a.push(n); n--; } return a; }
+export function doWhile(n: number) { const a = []; do { a.push(n); n--; } while (n > 0); return a; }
+export function forOfNarrow(xs: (string | null)[]) { const a = []; for (const x of xs) { if (x !== null) a.push(x); } return a; }
+export function forInLoop(o: { p: number }) { const a = []; for (const k in o) { a.push(k); } return a; }
+export function nestedLoop(xs: number[][]) { const a = []; for (const r of xs) { for (const v of r) { a.push(v); } } return a; }
+export function breakLoop(xs: number[]) { const a = []; for (const x of xs) { if (x > 1) break; a.push(x); } return a; }
+export function continueLoop(xs: number[]) { const a = []; for (const x of xs) { if (x > 1) continue; a.push("s"); } return a; }
+export function labeledBreak(xs: number[][]) { const a = []; outer: for (const r of xs) { for (const v of r) { if (v) break outer; a.push(v); } } return a; }
+export function returnInLoop(xs: number[]) { const a = []; for (const x of xs) { a.push(x); if (x) return a; } return a; }
+export function loopTwoKinds(xs: number[], ys: string[]) { const a = []; for (const x of xs) { a.push(x); } for (const y of ys) { a.push(y); } return a; }
+export function selfPushLoop(xs: number[]) { const a = []; for (const x of xs) { a.push(a); } return a; }
+export function typedSelfPushLoop(xs: number[]) { const a = []; a.push(1); for (const x of xs) { a.push(a); } return a; }
+export function wrapLoop(xs: number[]) { const a = []; a.push(1); for (const x of xs) { a.push([a]); } return a; }
+export function copyLoop(xs: number[]) { const a = []; const b = []; a.push(1); for (const x of xs) { b.push(a); a.push(b); } return a; }
+export function chainedLoop(xs: number[]) { const a = []; const b = []; for (const x of xs) { a.push(b); b.push(x); } return a; }
+export function chainedLoop3(xs: string[]) { const a = []; const b = []; const c = []; for (const x of xs) { a.push(b); b.push(c); c.push(x); } return a; }
+export function nestPushLoop(xs: number[]) { const a = []; let b: any = 1; for (const x of xs) { a.push(b); b = [b]; } return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_LOOPS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[][] / number[][] / never[] {TS2345@102,TS2345@113} / any[]
+    (
+        "chainedLoop",
+        "number[][]",
+        "number[][]",
+        "never[]",
+        "any[]",
+    ),
+    // string[][][] / string[][][] / never[] {TS2345@117,TS2345@128,TS2345@139} / any[]
+    (
+        "chainedLoop3",
+        "string[][][]",
+        "string[][][]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2322@84} / any[]
+    ("loopWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@85} / any[]
+    ("letLoopWrite", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2322@85} / any[]
+    ("varLoopWrite", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@85} / any[]
+    ("loopPush", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@77} / any[]
+    ("whileLoop", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@64} / any[]
+    ("doWhile", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@113} / any[]
+    ("forOfNarrow", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@89} / any[]
+    ("forInLoop", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@110} / any[]
+    ("nestedLoop", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@104} / any[]
+    ("breakLoop", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@110} / any[]
+    ("continueLoop", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@139} / any[]
+    ("labeledBreak", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@89} / any[]
+    ("returnInLoop", "number[]", "number[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@103,TS2345@138} / any[]
+    (
+        "loopTwoKinds",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[][] {TS7034@52,TS7005@89} / any[][] {TS7034@52,TS7005@89} / never[] {TS2345@89} / any[]
+    ("selfPushLoop", "any[][]", "any[][]", "never[]", "any[]"),
+    // (number | number[])[] / (number | number[])[] / never[] {TS2345@72,TS2345@105} / any[]
+    (
+        "typedSelfPushLoop",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | number[][])[] / (number | number[][])[] / never[] {TS2345@63,TS2345@96} / any[]
+    (
+        "wrapLoop",
+        "(number | number[][])[]",
+        "(number | number[][])[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | number[][])[] / (number | number[][])[] / never[] {TS2345@77,TS2345@110,TS2345@121} / any[]
+    (
+        "copyLoop",
+        "(number | number[][])[]",
+        "(number | number[][])[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] / any[] / never[] {TS2345@105} / any[]
+    ("nestPushLoop", "any[]", "any[]", "never[]", "any[]"),
+];
+
+/// Evolving arrays captured by a nested function: a `const` or `var` one, and a `let` one not past its last assignment, read the declared `autoArrayType`; a `let` one past its last assignment continues from the array it holds where the function is created, and operations inside the function evolve it.
+const EVOLVING_CAPTURES_SOURCE: &str = r#"
+export function captured() { const a = []; const f = () => a; a.push(1); return f(); }
+export function capturedLater() { const a = []; a.push(1); const f = () => a; return f(); }
+export function readInClosureLater() { const a = []; a.push(1); return () => a; }
+export function letCaptured() { let a = []; const f = () => a; a.push(1); return f(); }
+export function varCaptured() { var a = []; const f = () => a; a.push(1); return f(); }
+export function letCapturedLater() { let a = []; a.push(1); return () => a; }
+export function letCapturedBefore() { let a = []; const f = () => a; a.push(1); return f; }
+export function varCapturedLater() { var a = []; a.push(1); return () => a; }
+export function letCapturedAfterReassign() { let a = []; a = []; a.push(1); return () => a; }
+export function letCapturedThenReassign() { let a = []; a.push(1); const f = () => a; a = ["s"]; return f; }
+export function letCapturedLoopAssign(xs: number[]) { let a = []; for (const x of xs) { a = [x]; } a.push("s"); return () => a; }
+export function nestedEvolving() { const f = () => { const b = []; b.push(1); return b; }; return f; }
+export function closureReadsAfterPushLet() { let a = []; a.push(1); const f = () => { a.push("s"); return a; }; return f; }
+export function nestedArrowPushLet() { let a = []; a.push(1); const f = () => { a.push("s"); return a; }; return f; }
+export function nestedArrowReadLet() { let a = []; a.push(1); const f = () => { const b = a; a.push("s"); return b; }; return f; }
+export function nestedArrowPushConst() { const a = []; a.push(1); const f = () => { a.push("s"); return a; }; return f; }
+export function nestedTernaryPushLet() { let a = []; a.push(1); const f = (c: boolean) => { c ? a.push("s") : 0; return a; }; return f; }
+export function nestedLoopPushLet() { let a = []; a.push(1); const f = (xs: string[]) => { for (const x of xs) { a.push(x); } return a; }; return f; }
+export function nestedLetReset() { let a = []; a.push(1); const f = () => { a = []; return a; }; return f; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_CAPTURES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (c: boolean) => (string | number)[] / (c: boolean) => (string | number)[] / (c: boolean) => never[] {TS2345@61,TS2345@104} / (c: boolean) => any[]
+    (
+        "nestedTernaryPushLet",
+        "(c: boolean) => (number | string)[]",
+        "(c: boolean) => (number | string)[]",
+        "(c: boolean) => never[]",
+        "(c: boolean) => any[]",
+    ),
+    // (xs: string[]) => (string | number)[] / (xs: string[]) => (string | number)[] / (xs: string[]) => never[] {TS2345@58,TS2345@121} / (xs: string[]) => any[]
+    (
+        "nestedLoopPushLet",
+        "(xs: string[]) => (number | string)[]",
+        "(xs: string[]) => (number | string)[]",
+        "(xs: string[]) => never[]",
+        "(xs: string[]) => any[]",
+    ),
+    // any[] {TS7034@36,TS7005@60} / any[] {TS7034@36,TS7005@60} / never[] {TS2345@70} / any[]
+    ("captured", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@41,TS7005@76} / any[] {TS7034@41,TS7005@76} / never[] {TS2345@56} / any[]
+    ("capturedLater", "any[]", "any[]", "never[]", "any[]"),
+    // () => any[] {TS7034@46,TS7005@78} / () => any[] {TS7034@46,TS7005@78} / () => never[] {TS2345@61} / () => any[]
+    (
+        "readInClosureLater",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // any[] {TS7034@37,TS7005@61} / any[] {TS7034@37,TS7005@61} / never[] {TS2345@71} / any[]
+    ("letCaptured", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@37,TS7005@61} / any[] {TS7034@37,TS7005@61} / never[] {TS2345@71} / any[]
+    ("varCaptured", "any[]", "any[]", "never[]", "any[]"),
+    // () => number[] / () => number[] / () => never[] {TS2345@57} / () => any[]
+    (
+        "letCapturedLater",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@43,TS7005@67} / () => any[] {TS7034@43,TS7005@67} / () => never[] {TS2345@77} / () => any[]
+    (
+        "letCapturedBefore",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@42,TS7005@74} / () => any[] {TS7034@42,TS7005@74} / () => never[] {TS2345@57} / () => any[]
+    (
+        "varCapturedLater",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => number[] / () => number[] / () => never[] {TS2345@73} / () => any[]
+    (
+        "letCapturedAfterReassign",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@49,TS7005@84} / () => any[] {TS7034@49,TS7005@84} / () => never[] {TS2345@64,TS2322@92} / () => any[]
+    (
+        "letCapturedThenReassign",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@59,TS7005@126} / () => any[] {TS7034@59,TS7005@126} / () => never[] {TS2322@94,TS2345@107} / () => any[]
+    (
+        "letCapturedLoopAssign",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => number[] / () => number[] / () => never[] {TS2345@75} / () => any[]
+    (
+        "nestedEvolving",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => (string | number)[] / () => (string | number)[] / () => never[] {TS2345@65,TS2345@94} / () => any[]
+    (
+        "closureReadsAfterPushLet",
+        "() => (number | string)[]",
+        "() => (number | string)[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => (string | number)[] / () => (string | number)[] / () => never[] {TS2345@59,TS2345@88} / () => any[]
+    (
+        "nestedArrowPushLet",
+        "() => (number | string)[]",
+        "() => (number | string)[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => number[] / () => number[] / () => never[] {TS2345@59,TS2345@101} / () => any[]
+    (
+        "nestedArrowReadLet",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@48,TS7005@105} / () => any[] {TS7034@48,TS7005@105} / () => never[] {TS2345@63,TS2345@92} / () => any[]
+    (
+        "nestedArrowPushConst",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@40,TS7005@92} / () => any[] {TS7034@40,TS7005@92} / () => never[] {TS2345@55} / () => any[]
+    (
+        "nestedLetReset",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+];
+
+// ──────────────────────────────────────────────────────────────────────
+// The checker's evolving array (`autoArrayType`)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Every `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` row of `table` answers its own project's measured
+/// TypeScript 7.0.2 print ([`matrix_mismatches`]).
+fn assert_measured_matrix(file: &str, source: &str, table: &[(&str, &str, &str, &str, &str)]) {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(&host, file, source, table);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Under `noImplicitAny` an unannotated declaration initialised to an
+/// unparenthesized `[]` is the checker's EVOLVING array. Its element type
+/// grows only at a `push` / `unshift` call on it (each argument adds the
+/// base type of its literal, a spread argument its source's element
+/// types, and `never` adds nothing) and at an element write `a[i] = v`
+/// whose index is number-like (`a["k"] = 1` and a `string` or `number |
+/// string` index add nothing); a compound write, an element inside a
+/// destructuring target and a `length` write are ordinary references. A
+/// read with nothing added is `any[]` (TS7034 at the declaration, TS7005
+/// at the read); otherwise the array of the added types' subtype-reduced
+/// union — with `strictNullChecks` off a widening `null` / `undefined`
+/// element reads `any` alone. Without `noImplicitAny` the binding is
+/// declared as the literal's widened type (`never[]`, `any[]` with
+/// `strictNullChecks` off) and no operation retypes it.
+#[test]
+fn evolving_array_operations_grow_the_element_type() {
+    assert_measured_matrix(
+        "evolving-operations.ts",
+        EVOLVING_OPERATIONS_SOURCE,
+        EVOLVING_OPERATIONS_TABLE,
+    );
+}
+
+/// Every reference to an evolving array that is not one of its operations
+/// FINALIZES it there: it reads the array of the elements added so far
+/// (`any[]` with none), and the array goes on evolving past it — `const b
+/// = a; a.push(1)` leaves `b` `any[]`, and `a.push(1); const b = a;
+/// a.push("s")` reads `number[]` in `b` and `(string | number)[]` in `a`.
+#[test]
+fn a_reference_finalizes_an_evolving_array_where_it_reads() {
+    assert_measured_matrix(
+        "evolving-finalizing.ts",
+        EVOLVING_FINALIZING_SOURCE,
+        EVOLVING_FINALIZING_TABLE,
+    );
+}
+
+/// A write to an evolving-array binding takes the checker's
+/// `autoArrayType` assignment rule: an unparenthesized `[]` starts a new
+/// evolving array (`a = ([])` assigns `never[]`), any other value is held
+/// when it is assignable to `any[]` and is `any[]` otherwise, and a join
+/// of a path holding an ordinary value with an evolving one finalizes the
+/// evolving one and reduces by subtype — `if (c) a = [1]` over an
+/// untouched `let a = []` is `any[]`.
+#[test]
+fn writes_to_an_evolving_array_follow_the_auto_array_rule() {
+    assert_measured_matrix(
+        "evolving-assignments.ts",
+        EVOLVING_ASSIGNMENTS_SOURCE,
+        EVOLVING_ASSIGNMENTS_TABLE,
+    );
+}
+
+/// Where paths meet, evolving arrays join by the union of their elements:
+/// the arms of an `if`, a `switch` or a `try`, and the operands of a
+/// conditional or logical expression, whose flow branches at the test in
+/// statement and value position alike — `c ? a.push(1) : a` reads the
+/// untouched array in its alternate.
+#[test]
+fn evolving_arrays_join_where_paths_meet() {
+    assert_measured_matrix(
+        "evolving-branches.ts",
+        EVOLVING_BRANCHES_SOURCE,
+        EVOLVING_BRANCHES_TABLE,
+    );
+}
+
+/// In a loop, each reference's loop-head type is its entry type joined
+/// with ONE pass of the iteration in which it reads its own entry type and
+/// every other reference its own loop-head type: `a.push(a)` over `const
+/// a = []; a.push(1)` is `(number | number[])[]`, never a growing nest,
+/// while `a.push(v)` over `v = w; w = "s"` reaches the `string` two
+/// iterations away. Breaks, `continue`s and returns leave from the pass
+/// where every reference reads its loop-head type.
+#[test]
+fn evolving_arrays_in_loops_take_the_checkers_loop_head() {
+    assert_measured_matrix(
+        "evolving-loops.ts",
+        EVOLVING_LOOPS_SOURCE,
+        EVOLVING_LOOPS_TABLE,
+    );
+}
+
+/// A nested function reads a captured evolving array by the checker's
+/// capture rule: a `const` or `var` one, or a `let` one assigned after
+/// the function is created or inside a nested function, reads the declared
+/// `autoArrayType` (`any[]`), and an operation inside the function starts
+/// from it; a `let` one past its last assignment continues from the array
+/// it holds where the function is created, so an operation inside the
+/// function evolves that array further.
+#[test]
+fn closures_read_a_captured_evolving_array_by_the_capture_rule() {
+    assert_measured_matrix(
+        "evolving-captures.ts",
+        EVOLVING_CAPTURES_SOURCE,
+        EVOLVING_CAPTURES_TABLE,
+    );
+}
+
+/// Array types relate covariantly in their element (the checker's
+/// `arrayVariances`), and a join reduces by the SUBTYPE relation, under
+/// which `any` is below nothing but `any` / `unknown`: a return join of
+/// `number[]` and `any[]` is `any[]`, of `string[]` and `(string |
+/// number)[]` is `(string | number)[]`, and so is an array literal's
+/// element union of the two.
+const ARRAY_JOIN_SOURCE: &str = r#"
+export function anyJoin(c: boolean, x: number[], y: any[]) { if (c) return x; return y; }
+export function subtypeJoin(c: boolean, x: string[], y: (string | number)[]) { if (c) return x; return y; }
+export function arrayOfArrays(x: number[], y: (string | number)[]) { return [x, y]; }
+export function arrayOfLocals(x: number[], y: (string | number)[]) { const b = x; return [b, y]; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`; no diagnostics); then the four answers.
+const ARRAY_JOIN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // any[] / any[] / any[] / any[]
+    ("anyJoin", "any[]", "any[]", "any[]", "any[]"),
+    // (string | number)[] / (string | number)[] / (string | number)[] / (string | number)[]
+    (
+        "subtypeJoin",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // (string | number)[][] / (string | number)[][] / (string | number)[][] / (string | number)[][]
+    (
+        "arrayOfArrays",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+    ),
+    // (string | number)[][] / (string | number)[][] / (string | number)[][] / (string | number)[][]
+    (
+        "arrayOfLocals",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+    ),
+];
+
+#[test]
+fn array_joins_reduce_by_the_covariant_subtype_relation() {
+    assert_measured_matrix("array-joins.ts", ARRAY_JOIN_SOURCE, ARRAY_JOIN_TABLE);
+}

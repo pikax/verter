@@ -56,6 +56,11 @@ pub struct HostSourceData {
     /// compilation to avoid re-parsing. `None` for plain scripts.
     pub(crate) framework_parse:
         Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
+    /// A plain script's parse identity for this source revision, derived
+    /// from the source bytes once here (a framework carrier's is its
+    /// `framework_parse` key). `None` for carriers, and for a language
+    /// with no default parse identity.
+    pub(crate) script_parse_key: Option<verter_language::ParseKey>,
     /// Sole registered envelope owner for carrier sources.
     pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
     pub(crate) revision_token: crate::carrier_publication_store::HostSourceRevisionToken,
@@ -400,6 +405,7 @@ impl StageExecutor for HostStageExecutor {
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
+                    script_parse_key: None,
                     structure: Some(structure),
                     revision_token,
                     file_language,
@@ -417,6 +423,10 @@ impl StageExecutor for HostStageExecutor {
             );
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(&file_language, None);
+            let script_parse_key =
+                verter_language::default_parse_identity_for(&content, &file_language)
+                    .ok()
+                    .map(|(_, parse_key)| parse_key);
             SourceSnapshot {
                 source: Arc::clone(&content),
                 whole_hash: parse_snapshot.whole_hash,
@@ -425,6 +435,7 @@ impl StageExecutor for HostStageExecutor {
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: None,
+                    script_parse_key,
                     structure: None,
                     revision_token: crate::carrier_publication_store::HostSourceRevisionToken {
                         host_instance: self.host_instance,

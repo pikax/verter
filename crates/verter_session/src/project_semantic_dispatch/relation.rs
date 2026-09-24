@@ -3275,15 +3275,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .is_some_and(|session| session.is_projection_target(node))
     }
 
-    /// Whether the active inference session declares `node` as one of its
-    /// frozen inference parameters (a deposit target).
-    pub(super) fn relation_session_declares(&self, node: SemanticNodeId) -> bool {
-        self.dispatch_txn
-            .borrow()
-            .active_session()
-            .is_some_and(|session| session.declares(node))
-    }
-
     /// Deposit the assembled reverse candidate through the same frame/session
     /// ownership gate as ordinary and projection candidates. A nested frame
     /// mutating an outer session is a session-local delta and therefore cannot
@@ -3389,10 +3380,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .all(|element| self.relation_reverse_input_is_semantically_resolved(element.value)),
             _ => false,
         }
-    }
-
-    fn relation_subtree_contains_projection(&self, root: SemanticNodeId) -> bool {
-        self.relation_subtree_matches(root, |node, _| self.relation_projection_target(node))
     }
 
     fn relation_subtree_matches(
@@ -6598,38 +6585,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     results.push(RelationResult::NotAssignable);
                     return;
                 }
-                // An INFERENCE element position under an active session is
-                // covariant-only: the forward arm's deposit IS the binding,
-                // and an invariant reverse arm against the binding node
-                // (`Infer ≤ element`, `T ≤ element`) is undecidable and
-                // would defer the whole pattern. This covers `infer`
-                // declarations AND the session's own declared type-parameter
-                // binders (a call argument against a generic `T[]`
-                // parameter). Other mutable arrays KEEP the invariant
-                // bidirectional check.
-                let inference_element = match occurrence.variance {
-                    VariancePhase::Covariant | VariancePhase::Invariant => t_el,
-                    VariancePhase::Contravariant => s_el,
-                };
-                let infer_element = self.relation_session_active()
-                    && (matches!(
-                        graph.node_data(inference_element).as_deref(),
-                        Some(SemanticNodeData::Infer { .. })
-                    ) || (matches!(
-                        graph.node_data(inference_element).as_deref(),
-                        Some(SemanticNodeData::TypeParam { .. })
-                    ) && self.relation_session_declares(inference_element))
-                        || self.relation_subtree_contains_projection(inference_element));
-                if t_ro || s_ro || infer_element {
-                    work.push(RelateWork::Eval(s_el, t_el));
-                } else {
-                    let forward = vec![
-                        RelateWork::Eval(s_el, t_el),
-                        RelateWork::Eval(t_el, s_el),
-                        RelateWork::ReduceAnd(2),
-                    ];
-                    push_forward_work(work, forward);
-                }
+                // Array element types relate COVARIANTLY, mutable or
+                // readonly: the checker's `arrayVariances` (tsc 7.0.2:
+                // `string[]` is assignable to `(string | number)[]`, and
+                // `number[]` is a subtype of `any[]`).
+                work.push(RelateWork::Eval(s_el, t_el));
                 return;
             }
             (

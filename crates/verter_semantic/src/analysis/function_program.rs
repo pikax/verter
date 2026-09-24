@@ -180,6 +180,13 @@ pub struct FunctionBindingRecord {
     /// `var`. A reference resolves to the same-name binding whose scope
     /// CONTAINS the reference and is innermost among those.
     pub scope_span: verter_span::Span,
+    /// Whether the declarator has the checker's EVOLVING-array form: an
+    /// unannotated whole-identifier declarator initialised to an empty
+    /// array literal (`const a = []`). Under `noImplicitAny` its declared
+    /// type is `autoArrayType`, which every frame referencing it — the
+    /// defining one and each capturing one — types by the checker's
+    /// evolving-array rule.
+    pub evolving_array: bool,
 }
 
 /// Runtime-variable equivalence over exact declaration slots. Hoisted
@@ -406,6 +413,9 @@ pub struct FlowBindingIdentity {
     pub defining_function: FunctionProgramKey,
     /// The binding's source-order slot in that frame's binding inventory.
     pub binding_slot: u32,
+    /// [`FunctionBindingRecord::evolving_array`] of the binding in the
+    /// DEFINING frame. Metadata like [`Self::kind`]: identity is the slot.
+    pub evolving_array: bool,
 }
 
 impl PartialEq for FlowBindingIdentity {
@@ -1178,6 +1188,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
                 kind: frame_bindings[frame][slot as usize].kind,
                 defining_function: frame_keys[frame].clone(),
                 binding_slot: slot,
+                evolving_array: frame_bindings[frame][slot as usize].evolving_array,
             })
         };
         let mut captured_sites = Vec::new();
@@ -3486,6 +3497,7 @@ impl InventoryVisitor<'_, '_> {
             kind,
             span: id.span.into(),
             scope_span,
+            evolving_array: false,
         });
     }
 
@@ -3629,6 +3641,7 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
                     kind: FunctionBindingKind::Class,
                     span: id.span.into(),
                     scope_span: class.span.into(),
+                    evolving_array: false,
                 });
             }
         }
@@ -3787,6 +3800,19 @@ impl<'a> Visit<'a> for InventoryVisitor<'_, 'a> {
         };
         for declarator in &it.declarations {
             self.record_pattern(&declarator.id, kind, scope_span);
+            if declarator.type_annotation.is_none()
+                && matches!(declarator.id, BindingPattern::BindingIdentifier(_))
+                && crate::analysis::flow::is_evolving_array_initializer(declarator.init.as_ref())
+            {
+                let bindings = if self.class_local_scope.is_some() {
+                    &mut self.unmodeled_bindings
+                } else {
+                    &mut self.bindings
+                };
+                if let Some(binding) = bindings.last_mut() {
+                    binding.evolving_array = true;
+                }
+            }
         }
         walk::walk_variable_declaration(self, it);
     }

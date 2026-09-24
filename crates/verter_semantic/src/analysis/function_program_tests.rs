@@ -1098,6 +1098,7 @@ function outer() {
             kind: FunctionBindingKind::Const,
             defining_function: outer.key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the nested body captures `x` from the parent frame (defining frame + slot)"
     );
@@ -1139,6 +1140,7 @@ function outer() {
             kind: FunctionBindingKind::Const,
             defining_function: entry_of(&index, "outer").key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the callback captures the enclosing `x`"
     );
@@ -1205,6 +1207,7 @@ function outer() {
             kind: FunctionBindingKind::NestedFunction,
             defining_function: entry_of(&index, "outer").key.clone(),
             binding_slot: 0,
+            evolving_array: false,
         }],
         "the hoisted nested name is a capture of kind NestedFunction"
     );

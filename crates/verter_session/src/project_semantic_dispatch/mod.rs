@@ -325,7 +325,7 @@ pub struct ProjectSemanticDispatch<'a> {
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
     /// it reaches, its query-free tail steps included, and pops them when
     /// it ends (`build::AwaitedPathGuard`).
-    pub(super) awaited_active: std::cell::RefCell<Vec<(build::AwaitedRelation, SemanticNodeId)>>,
+    pub(super) awaited_active: std::cell::RefCell<build::AwaitedPath>,
     /// Carrier-normalization visited set — the small PRE-MEMO cycle guard for
     /// carrier-subject head resolution at the canonical query entry.
     ///
@@ -647,7 +647,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            awaited_active: std::cell::RefCell::new(Vec::new()),
+            awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),

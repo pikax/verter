@@ -7140,15 +7140,13 @@ fn array_of(element: TypeExpr) -> TypeExpr {
 /// An empty array literal initialising an unannotated declaration is the
 /// checker's EVOLVING array under `noImplicitAny`: its type follows the
 /// `push` / `unshift` / element writes / reassignments that reach each
-/// read. A binding the frame only reads whole reads `any[]`; one some
-/// position may evolve is not followed here, so it is the typed gap rather
-/// than the `never[]` of a bare `[]`.
+/// read, and a read with nothing added is `any[]`.
 ///
-/// tsc 7.0.2 (`--strict`, each with TS7034 / TS7005 at the declaration and
-/// the read): `readWhole`, `readThroughLocal` and `readVar` are `any[]`,
-/// `readInElement` (`[a]`) is `any[][]`; `pushed` (`a.push(1)`) and
-/// `reassigned` (`a = [1]`) are `number[]` and `captured` (read inside an
-/// arrow) `any[]` — the three this frame does not follow. The controls:
+/// tsc 7.0.2 (`--strict`; each `any[]` read with TS7034 at the declaration
+/// and TS7005 at the read): `readWhole`, `readThroughLocal` and `readVar`
+/// are `any[]`, `readInElement` (`[a]`) is `any[][]`; `pushed`
+/// (`a.push(1)`) and `reassigned` (`a = [1]`) are `number[]`, and
+/// `captured` (a `const` read inside an arrow) is `any[]`. The controls:
 /// `annotated` is `number[]`, a bare `return []` is `never[]`, and so is
 /// `readParenthesized` — `const a = ([])` is not the evolving form (no
 /// TS7034; the checker does not look through the parentheses).
@@ -7156,17 +7154,12 @@ fn array_of(element: TypeExpr) -> TypeExpr {
 fn an_empty_array_initializer_is_the_checkers_evolving_array() {
     let host = host_with(&[(EVOLVING, EVOLVING_SRC)]);
     let any_array = array_of(any());
-    for name in ["readWhole", "readThroughLocal", "readVar"] {
+    for name in ["readWhole", "readThroughLocal", "readVar", "captured"] {
         assert_clean_warm(&host, EVOLVING, name, any_array.clone());
     }
     assert_clean_warm(&host, EVOLVING, "readInElement", array_of(any_array));
-    for name in ["pushed", "reassigned", "captured"] {
-        assert_degraded(
-            &host,
-            EVOLVING,
-            name,
-            FlowReturnDegradation::UnmodeledPosition,
-        );
+    for name in ["pushed", "reassigned"] {
+        assert_clean_warm(&host, EVOLVING, name, array_of(number()));
     }
     assert_clean_warm(&host, EVOLVING, "annotated", array_of(number()));
     for name in ["literal", "readParenthesized"] {

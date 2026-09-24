@@ -525,11 +525,43 @@ pub enum SliceStatement {
         /// variable's type follows its assignments; without it the
         /// variable is declared as its initializer's widened type.
         auto_typed_form: bool,
-        /// The checker's EVOLVING array form (`autoArrayType`): an
-        /// unannotated declaration whose initializer is an empty array
-        /// literal — not a parenthesized one (tsc 7.0.2: `const a = ([])`
-        /// is `never[]`). `None` for every other declaration.
-        evolving_array: Option<SliceEvolvingArray>,
+        /// Whether the declaration has the checker's EVOLVING-array form
+        /// (`autoArrayType`, [`verter_semantic::analysis::flow::SkeletonBinding::evolving_array`]):
+        /// an unannotated declarator initialised to an empty array literal.
+        /// Under `noImplicitAny` its type follows the
+        /// [`SliceStatement::EvolvingArray`] operations that reach each
+        /// read; without it the binding is declared as the literal's type.
+        evolving_array: bool,
+    },
+    /// A statement-position operation on an EVOLVING array
+    /// ([`SliceEvolvingOperation`]).
+    EvolvingArray(SliceEvolvingOperation),
+    /// `x++` / `x--` / `++x` / `--x` at statement position on a parameter
+    /// or modelable local: afterwards the binding holds the base type of
+    /// its declared type (the checker's compound-like assignment rule,
+    /// `getBaseTypeOfLiteralType(declaredType)`).
+    Update {
+        /// The updated binding.
+        target: SliceNarrowSubject,
+        /// The site the write's evaluation belongs to (its reaching
+        /// definition).
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        /// The update expression's span — the identity the unapplied-write
+        /// ledger subtracts.
+        span: FrameSpan,
+    },
+    /// A loop whose only transfer past it is an operation on an EVOLVING
+    /// array the demand selected (`for (const x of xs) a.push(x)`). The
+    /// evaluator runs [`Self::Loop::iteration`] from the state reaching
+    /// the loop, joined with the state each completed iteration leaves,
+    /// until that state repeats; an anonymous [`Self::Break`] in it — the
+    /// test failing, or an authored `break` — leaves the loop. A `for`
+    /// initializer lowers ahead of the loop, in the enclosing block.
+    Loop {
+        /// One iteration: the test's dispatch (an `if` whose alternate
+        /// leaves), the per-iteration binding, the body — its `continue`s
+        /// absorbed by a label wrapping it — and the update.
+        iteration: Box<SliceRegion>,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -1038,6 +1070,29 @@ pub enum SliceExpr {
         context: Arc<NestedFlowContext>,
         has_declared_return: bool,
         gap: Option<crate::semantic_query::FlowGap>,
+        /// The captured EVOLVING arrays the function reads through their
+        /// DECLARED type (`autoArrayType`, read as `any[]` under
+        /// `noImplicitAny`): every capture of a `const` or `var` one, and of
+        /// a `let` one written after the function is created or inside a
+        /// nested function. A captured `let` one past its last assignment
+        /// reads the value it holds where the function is created.
+        declared_evolving_captures:
+            Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
+    },
+    /// A value-position operation on an EVOLVING array
+    /// ([`SliceEvolvingOperation`]): `a.push(v)` is the new length,
+    /// `number`; `a[i] = v` is the assigned value.
+    EvolvingArray(Box<SliceEvolvingOperation>),
+    /// The value a `for … of` (`of`) or `for … in` binding holds on each
+    /// iteration: the iterated element type of `source`, or its key type.
+    Iterated {
+        /// The iterated expression.
+        source: Box<SliceExpr>,
+        /// `for … of` (else `for … in`).
+        of: bool,
+        /// The per-iteration write's span — the identity the
+        /// unapplied-write ledger subtracts, since the binding applies it.
+        write: FrameSpan,
     },
     /// A class EXPRESSION's value — its constructor. The evaluator composes
     /// the constructor type and the instance surface from the lowered
@@ -1643,20 +1698,84 @@ pub enum SliceObjectEntry {
     },
 }
 
-/// What the frame does with an EVOLVING array binding
-/// ([`SliceStatement::Binding::evolving_array`]). Under `noImplicitAny`
-/// the checker types such a binding by the operations that reach each read
-/// (`push`, `unshift`, element writes, reassignments); a binding the frame
-/// only reads whole — never through a member, a call, a write, or a
-/// closure — reads `any[]` everywhere (tsc 7.0.2: `const a = []; return
-/// a` is `any[]`, and so are `[a]`'s element and `{ a }`'s member).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SliceEvolvingArray {
-    /// Only whole reads of the binding in this frame.
-    Settled,
-    /// Some position may evolve the binding's element type: this frame
-    /// does not follow those operations, so its reads are the typed gap.
-    MayEvolve,
+/// One operation on an EVOLVING array binding
+/// ([`SliceStatement::Binding::evolving_array`]) — the checker's
+/// array-mutation flow nodes (a `push` / `unshift` call, an element write
+/// `a[i] = v`) and the empty-array assignment that starts a new evolving
+/// array.
+///
+/// Every other reference to the binding FINALIZES its type there (`any[]`
+/// while nothing has evolved it, else the array of the evolved element
+/// union): the evaluator's reaching product carries the evolving elements
+/// beside the finalized array every ordinary read takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceEvolvingOperation {
+    /// The evolving binding: a local of this frame, or an enclosing
+    /// frame's binding this frame captures.
+    pub binding: FlowBindingRef,
+    /// The operation.
+    pub kind: SliceEvolvingOperationKind,
+}
+
+impl SliceEvolvingOperation {
+    /// The operation's operand expressions, in evaluation order.
+    #[must_use]
+    pub fn operands(&self) -> Vec<&SliceExpr> {
+        match &self.kind {
+            SliceEvolvingOperationKind::Append(arguments) => {
+                arguments.iter().map(|argument| &argument.value).collect()
+            }
+            SliceEvolvingOperationKind::ElementWrite { index, value, .. } => {
+                vec![&**index, &**value]
+            }
+            SliceEvolvingOperationKind::Reset { value, .. } => vec![&**value],
+        }
+    }
+}
+
+/// The kinds of [`SliceEvolvingOperation`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceEvolvingOperationKind {
+    /// `a.push(..)` / `a.unshift(..)`: each argument adds its type (a
+    /// spread argument its source's element types). The call's value is
+    /// the new length, `number`.
+    Append(Arc<[SliceMutationArgument]>),
+    /// `a[index] = value`: adds the value's type when the index is
+    /// number-like. The expression's value is the assigned value.
+    ElementWrite {
+        /// The index expression.
+        index: Box<SliceExpr>,
+        /// The assigned value.
+        value: Box<SliceExpr>,
+        /// The assigned value's freshness mirror (a bare `null` is the
+        /// widening nullable type).
+        freshness: SliceFreshness,
+    },
+    /// `a = []`: the binding holds a new evolving array with no elements
+    /// (not through parentheses — `a = ([])` assigns `never[]` on 7.0.2,
+    /// an ordinary [`SliceStatement::Assignment`]). The expression's value
+    /// is the empty literal's.
+    Reset {
+        /// The written value's site (the reaching definition).
+        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        /// The write's span — the identity the unapplied-write ledger
+        /// subtracts, exactly like an applied assignment's.
+        span: FrameSpan,
+        /// The lowered empty literal.
+        value: Box<SliceExpr>,
+    },
+}
+
+/// One argument of an [`SliceEvolvingOperationKind::Append`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceMutationArgument {
+    /// The lowered argument (a spread's source).
+    pub value: SliceExpr,
+    /// Whether the argument is a spread (`...xs`).
+    pub spread: bool,
+    /// The argument's freshness mirror (a bare `null` is the widening
+    /// nullable type).
+    pub freshness: SliceFreshness,
 }
 
 /// One element of a structurally lowered array literal.
@@ -2245,6 +2364,10 @@ pub(crate) fn build_flow_slice_content(
         narrowing_alias_locals: FxHashSet::default(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
+        assignment_extent_statements: Vec::new(),
+        continue_targets: Vec::new(),
+        loop_labels_minted: 0,
+        loop_label_base: 0,
         active_guard_bindings: Vec::new(),
         active_guard_subjects: Vec::new(),
         break_targets: Vec::new(),
@@ -2257,6 +2380,10 @@ pub(crate) fn build_flow_slice_content(
         lowerer.unsafe_invoked_closure_effects =
             lowerer.index_unsafe_invoked_closure_effects(&body.statements);
         lowerer.nested_free_writes = lowerer.build_nested_free_writes();
+        collect_assignment_extent_statements(
+            &body.statements,
+            &mut lowerer.assignment_extent_statements,
+        );
     }
     let region = if selection.is_none() {
         SliceRegion {
@@ -3107,6 +3234,12 @@ fn expression_freshness(expression: &Expression<'_>) -> SliceFreshness {
         // fold and the per-arm rule below still apply unchanged, so two
         // awaited fresh arms keep `1 | 2`.
         Expression::AwaitExpression(awaited) => expression_freshness(&awaited.argument),
+        // An `=` assignment's value is its right-hand side's.
+        Expression::AssignmentExpression(assignment)
+            if assignment.operator == oxc_ast::ast::AssignmentOperator::Assign =>
+        {
+            expression_freshness(&assignment.right)
+        }
         Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
             expression_freshness(&conditional.consequent),
             expression_freshness(&conditional.alternate),
@@ -3794,6 +3927,102 @@ enum ExprMode {
         /// Whether the initializer's fresh literal survives lowering.
         preserve_literal: bool,
     },
+}
+
+/// The spans of the statements the checker's `extendAssignmentPosition`
+/// extends an assignment to (a variable or expression statement, an `if`,
+/// a loop, a `with`, a `switch`, a `try`, a class declaration), across the
+/// frame's own statements — never inside a nested function.
+fn collect_assignment_extent_statements(
+    statements: &[Statement<'_>],
+    out: &mut Vec<oxc_span::Span>,
+) {
+    for statement in statements {
+        let listed = matches!(
+            statement,
+            Statement::VariableDeclaration(_)
+                | Statement::ExpressionStatement(_)
+                | Statement::IfStatement(_)
+                | Statement::DoWhileStatement(_)
+                | Statement::WhileStatement(_)
+                | Statement::ForStatement(_)
+                | Statement::ForInStatement(_)
+                | Statement::ForOfStatement(_)
+                | Statement::WithStatement(_)
+                | Statement::SwitchStatement(_)
+                | Statement::TryStatement(_)
+                | Statement::ClassDeclaration(_)
+        );
+        if listed {
+            out.push(statement.span());
+        }
+        let mut nested = |statement: &Statement<'_>| {
+            collect_assignment_extent_statements(std::slice::from_ref(statement), out);
+        };
+        match statement {
+            Statement::BlockStatement(block) => {
+                collect_assignment_extent_statements(&block.body, out);
+            }
+            Statement::IfStatement(if_stmt) => {
+                nested(&if_stmt.consequent);
+                if let Some(alternate) = &if_stmt.alternate {
+                    nested(alternate);
+                }
+            }
+            Statement::DoWhileStatement(loop_stmt) => nested(&loop_stmt.body),
+            Statement::WhileStatement(loop_stmt) => nested(&loop_stmt.body),
+            Statement::ForStatement(loop_stmt) => nested(&loop_stmt.body),
+            Statement::ForInStatement(loop_stmt) => nested(&loop_stmt.body),
+            Statement::ForOfStatement(loop_stmt) => nested(&loop_stmt.body),
+            Statement::WithStatement(with_stmt) => nested(&with_stmt.body),
+            Statement::LabeledStatement(labeled) => nested(&labeled.body),
+            Statement::SwitchStatement(switch) => {
+                for case in &switch.cases {
+                    collect_assignment_extent_statements(&case.consequent, out);
+                }
+            }
+            Statement::TryStatement(try_stmt) => {
+                collect_assignment_extent_statements(&try_stmt.block.body, out);
+                if let Some(handler) = &try_stmt.handler {
+                    collect_assignment_extent_statements(&handler.body.body, out);
+                }
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    collect_assignment_extent_statements(&finalizer.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One lowered loop's `continue` target ([`Lowerer::continue_targets`]).
+struct LoopContinueTarget {
+    /// The labels directly wrapping the loop (`continue outer`).
+    labels: Vec<Arc<str>>,
+    /// The synthetic label wrapping the loop's body.
+    label: Arc<str>,
+}
+
+/// What [`Lowerer::lower_evolving_operation`] made of an expression.
+enum EvolvingLowering {
+    /// An operation on a selected EVOLVING array.
+    Operation(SliceEvolvingOperation),
+    /// An operation on an evolving array the demand did not select: its
+    /// operands' effects were scanned, and nothing retypes.
+    Unselected,
+    /// Not an evolving-array operation.
+    NotEvolving,
+}
+
+/// Whether an assignment is `x = []` — the unparenthesized empty array
+/// literal that starts a new EVOLVING array when `x` is one.
+fn evolving_reset_assignment(assignment: &oxc_ast::ast::AssignmentExpression<'_>) -> bool {
+    assignment.operator == oxc_ast::ast::AssignmentOperator::Assign
+        && matches!(
+            &assignment.left,
+            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(_)
+        )
+        && verter_semantic::analysis::flow::is_evolving_array_initializer(Some(&assignment.right))
 }
 
 /// The region lowering result: the region plus whether any nested lowering
@@ -4605,6 +4834,19 @@ struct Lowerer<'a> {
     narrowing_alias_locals: FxHashSet<Arc<str>>,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
+    /// The statements an assignment's position extends to
+    /// ([`Lowerer::is_past_last_assignment`]), as source spans.
+    assignment_extent_statements: Vec<oxc_span::Span>,
+    /// The loops whose bodies are being lowered
+    /// ([`SliceStatement::Loop`]), innermost last: each loop's direct
+    /// labels and the synthetic label its `continue`s break to.
+    continue_targets: Vec<LoopContinueTarget>,
+    /// How many [`LoopContinueTarget`] labels this frame minted.
+    loop_labels_minted: usize,
+    /// Where the innermost lowered loop body's own entries start in
+    /// [`Lowerer::loop_direct_labels`]: the labels past it wrap the loop
+    /// being lowered now.
+    loop_label_base: usize,
     active_guard_bindings: Vec<SkeletonBindingId>,
     active_guard_subjects: Vec<FlowBindingRef>,
     /// The stack of breakable constructs whose bodies are currently being
@@ -4729,7 +4971,34 @@ impl Lowerer<'_> {
     /// involving the slot (which may be a predicate/assertion), or a write to
     /// the slot. A loop with none of those captures stays transparent.
     fn loop_has_selected_transfer(&mut self, statement: &Statement<'_>) -> bool {
+        self.loop_has_selected_transfer_where(statement, false)
+    }
+
+    /// [`Self::loop_has_selected_transfer`] with every operation on an
+    /// EVOLVING array set aside — a `push` / `unshift` call on one and a
+    /// write to or into one (a reassignment, its element writes, and any
+    /// other path write, which never retypes it): the loop's body lowers
+    /// them all. What remains transfers past the loop.
+    fn loop_has_selected_transfer_beyond_evolving(&mut self, statement: &Statement<'_>) -> bool {
+        self.loop_has_selected_transfer_where(statement, true)
+    }
+
+    fn loop_has_selected_transfer_where(
+        &mut self,
+        statement: &Statement<'_>,
+        beyond_evolving: bool,
+    ) -> bool {
         let loop_span = self.rebase(statement.span());
+        let mut evolving_calls: FxHashSet<FrameSpan> = FxHashSet::default();
+        if beyond_evolving {
+            for_each_call_expression(std::slice::from_ref(statement), |call| {
+                if verter_semantic::analysis::flow::evolving_array_mutation_root(call)
+                    .is_some_and(|root| self.evolving_binding_at(root.span).is_some())
+                {
+                    evolving_calls.insert(self.rebase(call.span));
+                }
+            });
+        }
         let control_guard_reads_selected =
             self.statement_has_selected_guard_transfer(statement, loop_span);
         if control_guard_reads_selected {
@@ -4739,6 +5008,7 @@ impl Lowerer<'_> {
         let call_reads_selected = self.skeleton.expr_sites.iter().any(|site| {
             site.calls.iter().any(|call| {
                 loop_span.contains(call.span)
+                    && !evolving_calls.contains(&call.span)
                     && !self.span_is_in_literal_dead_branch(statement, call.span)
                     && self.span_reads_downstream_slot(call.span, loop_span)
             })
@@ -4759,8 +5029,34 @@ impl Lowerer<'_> {
                 self.inert_write_spans.insert(write.span);
                 return false;
             }
-            matches!(write.binding, Some(FlowBindingRef::Local(binding))
-                if self.binding_is_read_after_loop_at_path(binding, &write.path, loop_span))
+            if beyond_evolving
+                && write
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| self.is_evolving_binding(binding))
+            {
+                return false;
+            }
+            match &write.binding {
+                Some(FlowBindingRef::Local(binding)) => {
+                    self.binding_is_read_after_loop_at_path(*binding, &write.path, loop_span)
+                }
+                // An operation on a captured EVOLVING array retypes this
+                // frame's input: a transfer when the frame reads it after
+                // the loop.
+                Some(captured @ FlowBindingRef::Captured(_)) => {
+                    self.is_evolving_binding(captured)
+                        && self.skeleton.expr_sites.iter().any(|site| {
+                            site.span > loop_span
+                                && !loop_span.contains(site.span)
+                                && site
+                                    .reads
+                                    .iter()
+                                    .any(|read| read.binding.as_ref() == Some(captured))
+                        })
+                }
+                None => false,
+            }
         })
     }
 
@@ -5478,164 +5774,7 @@ impl Lowerer<'_> {
                     }
                 }
                 Statement::VariableDeclaration(decl) => {
-                    let kind = match decl.kind {
-                        VariableDeclarationKind::Const
-                        | VariableDeclarationKind::Using
-                        | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
-                        VariableDeclarationKind::Let => SliceBindingKind::Let,
-                        VariableDeclarationKind::Var => SliceBindingKind::Var,
-                    };
-                    for declarator in &decl.declarations {
-                        // An eligible alias of a CONDITION or a
-                        // DISCRIMINANT re-establishes its initializer's
-                        // fact at every later test of the bound name,
-                        // whether or not the demand value-selected the
-                        // declaration — the name still resolves either
-                        // way, and a destructured discriminant aliases
-                        // exactly as a whole-binding one does.
-                        self.record_narrowing_aliases(&decl.kind, declarator);
-                        let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-                            // Destructuring declarators are not simple
-                            // local reaching definitions — but the
-                            // initializer still RUNS at the statement, so
-                            // its effects take the same fail-closed scan
-                            // every unmodeled position gets.
-                            if let Some(init) = declarator.init.as_ref() {
-                                self.scan_unmodeled_position_effects(init);
-                            }
-                            continue;
-                        };
-                        // A binding OUTSIDE the slice's value-selected
-                        // slot set never lowers: the elided declaration's
-                        // initializer stays cold (no lowering, no
-                        // resolution, no budget charge). Classification of
-                        // later reads/calls is unchanged — the skeleton
-                        // indexes the declaration regardless of the
-                        // demand. The gate is the binding-identifier SPAN
-                        // (declaration-precise), never the name — a
-                        // shadowed same-named sibling the plan kept out
-                        // must not lower.
-                        //
-                        // The elided initializer still RUNS at the
-                        // statement, though: an assertion call or a
-                        // whole-binding write inside it narrows / retypes
-                        // what follows in the checker while the slice's
-                        // obligations never reach the position — scan it
-                        // with the same fail-closed discipline (a
-                        // pure-literal initializer carries no effect and
-                        // stays silent).
-                        if !self.slot_selected(id.span) {
-                            if let Some(init) = declarator.init.as_ref() {
-                                self.scan_unmodeled_position_effects(init);
-                            }
-                            continue;
-                        }
-                        // An ANNOTATED declarator preserves its
-                        // initializer's fresh literal: the declared type
-                        // governs the binding, and for a union declared
-                        // type the initializer only SELECTS which
-                        // declared constituents survive — a widened
-                        // initializer would select none.
-                        let preserve_literal =
-                            kind == SliceBindingKind::Const || declarator.type_annotation.is_some();
-                        // A class expression that directly initializes a
-                        // variable is named after it (`const C = class {}`
-                        // is the checker's `C`).
-                        let init = declarator.init.as_ref().map(|expr| {
-                            self.lower_assigned_value(
-                                expr,
-                                id.name.as_str(),
-                                ExprMode::BindingInit { preserve_literal },
-                            )
-                        });
-                        // The authored annotation is the binding's
-                        // DECLARED type — it SUPPLIES a value, it does
-                        // not merely suppress the initializer's
-                        // widening.
-                        // A declarator annotation is a BODY position: it
-                        // sits IN this frame's region chain, so it takes
-                        // the frame gate with NO nearer-clause binders —
-                        // this frame's own clause is consulted BEHIND
-                        // this frame's lexical authority, which is what
-                        // lets a block-scoped local of the binder's name
-                        // win. The initializer's gate cannot stand in for
-                        // it — the `(Some(init), None)` arm binds the
-                        // DECLARED node and skips the initializer
-                        // entirely.
-                        let declared = declarator.type_annotation.as_ref().map(|annotation| {
-                            self.gate(
-                                lower_ts_type(&annotation.type_annotation, self.source),
-                                id.span,
-                                &[],
-                            )
-                        });
-                        // The initializer's FRESHNESS shape for an
-                        // unannotated `const` — the evaluator's widening
-                        // membership input. An all-fresh tree (a bare
-                        // literal, or a conditional whose EVERY leaf is
-                        // one — `f ? 1 : "s"`) is the classic
-                        // widening-literal binding: the checker widens
-                        // every arm at a widening read (`{ label: v }`
-                        // reads `string | number`). A MIXED tree (an
-                        // `as const` arm, a call, a reference beside a
-                        // fresh leaf) carries per-arm verdicts so the
-                        // evaluator widens exactly the fresh arms and
-                        // keeps the authored pins. `let` / `var`
-                        // initializers already widened at `BindingInit`
-                        // lowering, and an annotated `const` takes its
-                        // declared type — both stay `Pinned` here.
-                        // An unannotated `let` / `var` whose initializer is
-                        // a bare `null` / `undefined` / `void` value carries
-                        // that shape too: it is the checker's auto-typed
-                        // variable, reading the widening nullable type
-                        // until a later write retypes it.
-                        let freshness = match (declared.as_ref(), declarator.init.as_ref()) {
-                            (None, Some(init)) if kind == SliceBindingKind::Const => {
-                                expression_freshness(init)
-                            }
-                            (None, Some(init)) if expr_is_widening_nullish(init) => {
-                                expression_freshness(init)
-                            }
-                            _ => SliceFreshness::Pinned,
-                        };
-                        let auto_typed_form = declared.is_none()
-                            && kind != SliceBindingKind::Const
-                            && declarator
-                                .init
-                                .as_ref()
-                                .is_none_or(|init| self.is_null_or_undefined_keyword(init));
-                        let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span))
-                        else {
-                            out.push(SliceStatement::Gap(
-                                crate::semantic_query::FlowGap::UnmodeledExpression,
-                            ));
-                            continue;
-                        };
-                        let evolving_array = (declared.is_none()
-                            && declarator.init.as_ref().is_some_and(|init| {
-                                matches!(
-                                    init,
-                                    Expression::ArrayExpression(array) if array.elements.is_empty()
-                                )
-                            }))
-                        .then(|| {
-                            if self.binding_only_read_whole(binding) {
-                                SliceEvolvingArray::Settled
-                            } else {
-                                SliceEvolvingArray::MayEvolve
-                            }
-                        });
-                        out.push(SliceStatement::Binding {
-                            binding,
-                            name: Arc::from(id.name.as_str()),
-                            kind,
-                            init,
-                            declared,
-                            freshness,
-                            auto_typed_form,
-                            evolving_array,
-                        });
-                    }
+                    self.lower_variable_declaration(decl, &mut out);
                 }
                 // An expression statement's value is never consumed by the
                 // evaluator; its evaluation effects ride the slice's typed
@@ -5710,9 +5849,26 @@ impl Lowerer<'_> {
                     // guard, call/assertion, or write depends on iteration
                     // flow. Every shape takes the existing typed loop
                     // refusal.
-                    if self.control_has_return(statement)
-                        || statement_yields_in_own_frame(statement)
-                        || declares_var(statement)
+                    // A loop body that lowers whole carries its own
+                    // returns; a `yield` or an escaping `var` stays refused.
+                    let refused_form =
+                        statement_yields_in_own_frame(statement) || declares_var(statement);
+                    if !refused_form
+                        && self.loop_has_selected_transfer(statement)
+                        && !self.loop_has_selected_transfer_beyond_evolving(statement)
+                    {
+                        // The only transfers past the loop are operations
+                        // on EVOLVING arrays: the loop lowers whole.
+                        let lowered = self.lower_evolving_loop(statement);
+                        can_fall_through = lowered
+                            .region
+                            .can_fall_through
+                            .reaches_end(CompletionDischarge::RegionComposition);
+                        hit_unsupported = lowered.hit_unsupported;
+                        may_break.extend(lowered.may_break);
+                        out.push(SliceStatement::Block(lowered.region));
+                    } else if refused_form
+                        || self.control_has_return(statement)
                         || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
                     {
@@ -6115,13 +6271,36 @@ impl Lowerer<'_> {
                         }
                     }
                 }
-                Statement::ContinueStatement(_) => {
-                    // A `continue` always targets a loop, and a loop body
-                    // never lowers — so no modelled construct can absorb
-                    // one.
-                    out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
-                    hit_unsupported = true;
-                    can_fall_through = false;
+                Statement::ContinueStatement(continue_stmt) => {
+                    // A `continue` targets a loop: one whose body lowers
+                    // ([`SliceStatement::Loop`]) absorbs it at the end of
+                    // the body, as a break to the label wrapping the body.
+                    // Any other loop's body never lowers, so nothing
+                    // absorbs it.
+                    let target = match continue_stmt.label.as_ref() {
+                        None => self.continue_targets.last(),
+                        Some(label) => self.continue_targets.iter().rev().find(|target| {
+                            target
+                                .labels
+                                .iter()
+                                .any(|name| name.as_ref() == label.name.as_str())
+                        }),
+                    }
+                    .map(|target| Arc::clone(&target.label));
+                    match target {
+                        Some(label) => {
+                            may_break.push(SliceBreakTarget::Named(Arc::clone(&label)));
+                            out.push(SliceStatement::Break {
+                                target: Some(label),
+                            });
+                            can_fall_through = false;
+                        }
+                        None => {
+                            out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
+                            hit_unsupported = true;
+                            can_fall_through = false;
+                        }
+                    }
                 }
                 Statement::ImportDeclaration(_)
                 | Statement::ExportAllDeclaration(_)
@@ -6221,6 +6400,414 @@ impl Lowerer<'_> {
             },
             hit_unsupported,
             may_break,
+        }
+    }
+
+    /// Lower a loop whose only transfers past it are EVOLVING-array
+    /// operations into the block holding its initializer and the
+    /// [`SliceStatement::Loop`]. Each iteration is an `if` over the test
+    /// (a `for … of` / `for … in` tests nothing the checker narrows by)
+    /// whose alternate leaves the loop through an anonymous break, around
+    /// the per-iteration binding, the body — wrapped in the label its
+    /// `continue`s break to — and the update. A `do … while` tests after
+    /// the body. A loop form this lowering does not model keeps the typed
+    /// loop refusal.
+    fn lower_evolving_loop(&mut self, statement: &Statement<'_>) -> LoweredRegion {
+        let refused = || LoweredRegion {
+            region: SliceRegion {
+                statements: Arc::from(vec![SliceStatement::Unsupported(SliceUnsupported::Loop)]),
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
+            },
+            hit_unsupported: true,
+            may_break: Vec::new(),
+        };
+        enum LoopTest<'e, 'a> {
+            /// No test: the loop leaves only through a `break`.
+            Never,
+            /// A test before each iteration.
+            Before(&'e Expression<'a>),
+            /// A test after each iteration (`do … while`).
+            After(&'e Expression<'a>),
+            /// The per-iteration step of a `for … of` / `for … in`.
+            Iteration,
+        }
+        let mut prologue: Vec<SliceStatement> = Vec::new();
+        let mut iteration_binding: Option<SliceStatement> = None;
+        let mut update: Option<&Expression<'_>> = None;
+        let (test, body) = match statement {
+            Statement::ForStatement(for_stmt) => {
+                match for_stmt.init.as_ref() {
+                    Some(oxc_ast::ast::ForStatementInit::VariableDeclaration(declaration)) => {
+                        self.lower_variable_declaration(declaration, &mut prologue);
+                    }
+                    Some(init) => {
+                        if let Some(expression) = init.as_expression() {
+                            if let Some(lowered) = self.lower_effect_statement(expression) {
+                                prologue.push(lowered);
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                update = for_stmt.update.as_ref();
+                let test = match for_stmt.test.as_ref() {
+                    Some(test) if literal_boolean_value(test) != Some(true) => {
+                        LoopTest::Before(test)
+                    }
+                    _ => LoopTest::Never,
+                };
+                (test, &for_stmt.body)
+            }
+            Statement::WhileStatement(while_stmt) => {
+                let test = if literal_boolean_value(&while_stmt.test) == Some(true) {
+                    LoopTest::Never
+                } else {
+                    LoopTest::Before(&while_stmt.test)
+                };
+                (test, &while_stmt.body)
+            }
+            Statement::DoWhileStatement(do_stmt) => {
+                let test = if literal_boolean_value(&do_stmt.test) == Some(true) {
+                    LoopTest::Never
+                } else {
+                    LoopTest::After(&do_stmt.test)
+                };
+                (test, &do_stmt.body)
+            }
+            Statement::ForOfStatement(_) | Statement::ForInStatement(_) => {
+                let (left, right, body, of) = match statement {
+                    Statement::ForOfStatement(for_of) if !for_of.r#await => {
+                        (&for_of.left, &for_of.right, &for_of.body, true)
+                    }
+                    Statement::ForInStatement(for_in) => {
+                        (&for_in.left, &for_in.right, &for_in.body, false)
+                    }
+                    _ => return refused(),
+                };
+                let oxc_ast::ast::ForStatementLeft::VariableDeclaration(declaration) = left else {
+                    return refused();
+                };
+                let [declarator] = declaration.declarations.as_slice() else {
+                    return refused();
+                };
+                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                    return refused();
+                };
+                if self.slot_selected(id.span) {
+                    let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span))
+                    else {
+                        return refused();
+                    };
+                    let kind = match declaration.kind {
+                        VariableDeclarationKind::Let => SliceBindingKind::Let,
+                        VariableDeclarationKind::Const => SliceBindingKind::Const,
+                        _ => return refused(),
+                    };
+                    let source = self.lower_expr(
+                        right,
+                        ExprMode::BindingInit {
+                            preserve_literal: true,
+                        },
+                    );
+                    iteration_binding = Some(SliceStatement::Binding {
+                        binding,
+                        name: Arc::from(id.name.as_str()),
+                        kind,
+                        init: Some(SliceExpr::Iterated {
+                            source: Box::new(source),
+                            of,
+                            write: self.rebase(id.span),
+                        }),
+                        declared: None,
+                        freshness: SliceFreshness::Pinned,
+                        auto_typed_form: false,
+                        evolving_array: false,
+                    });
+                } else {
+                    // The source still runs, once, ahead of the loop.
+                    self.scan_unmodeled_position_effects(right);
+                }
+                (LoopTest::Iteration, body)
+            }
+            _ => return refused(),
+        };
+        // The test's dispatch statements (its typed gaps and throw point)
+        // and its guard, lowered like an `if` test's.
+        let mut test_statements: Vec<SliceStatement> = Vec::new();
+        let mut guard = SliceGuard::None;
+        let mut guard_bindings = Vec::new();
+        let mut guard_name = None;
+        if let LoopTest::Before(test) | LoopTest::After(test) = test {
+            guard = self.lower_guard(test);
+            let unprovable_guard = std::mem::take(&mut self.control_test_gap);
+            let unprovable_control_call = self.record_control_position_calls(test);
+            guard_bindings = self.guard_bindings(&guard, test.span());
+            guard_name = self.predicate_subject_binding(test);
+            if unprovable_guard || unprovable_control_call {
+                test_statements.push(SliceStatement::Gap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            if verter_semantic::analysis::flow::expression_contains_call(test) {
+                test_statements.push(SliceStatement::ThrowPoint);
+            }
+        }
+        // The body: an anonymous `break` leaves this loop, a `continue`
+        // ends the body, and the test's facts cover it like an `if` arm.
+        let labels: Vec<Arc<str>> = self.loop_direct_labels
+            [self.loop_label_base.min(self.loop_direct_labels.len())..]
+            .to_vec();
+        let continue_label: Arc<str> = Arc::from(format!("#continue{}", self.loop_labels_minted));
+        self.loop_labels_minted += 1;
+        self.break_targets.push(None);
+        self.break_target_followed_by_return
+            .push(SuffixReturn::NotGuaranteed);
+        self.continue_targets.push(LoopContinueTarget {
+            labels,
+            label: Arc::clone(&continue_label),
+        });
+        let label_base =
+            std::mem::replace(&mut self.loop_label_base, self.loop_direct_labels.len());
+        let active_guard_base = self.active_guard_bindings.len();
+        let active_guard_subject_base = self.active_guard_subjects.len();
+        self.active_guard_bindings
+            .extend(guard_bindings.iter().copied());
+        self.active_guard_subjects
+            .extend(guard_name.iter().cloned());
+        let body = self.lower_arm(body);
+        let update = update.and_then(|update| self.lower_effect_statement(update));
+        self.active_guard_bindings.truncate(active_guard_base);
+        self.active_guard_subjects
+            .truncate(active_guard_subject_base);
+        self.loop_label_base = label_base;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.break_target_followed_by_return.pop();
+        let mut may_break = Vec::new();
+        let mut breaks = false;
+        let mut continues = false;
+        for target in body.may_break {
+            match target {
+                SliceBreakTarget::Anonymous => breaks = true,
+                SliceBreakTarget::Named(name) if name == continue_label => continues = true,
+                named => may_break.push(named),
+            }
+        }
+        let hit_unsupported = body.hit_unsupported;
+        let back_edge = body
+            .region
+            .can_fall_through
+            .reaches_end(CompletionDischarge::RegionComposition)
+            || continues;
+        let region = |statements: Vec<SliceStatement>, falls: bool| SliceRegion {
+            statements: Arc::from(statements.into_boxed_slice()),
+            can_fall_through: NormalCompletion::minted(
+                falls,
+                CompletionConstruction::SynthesizedRegion,
+            ),
+        };
+        let mut pass: Vec<SliceStatement> = Vec::new();
+        pass.extend(iteration_binding);
+        pass.push(SliceStatement::Labeled {
+            label: continue_label,
+            body: Box::new(body.region),
+        });
+        if back_edge {
+            pass.extend(update);
+        }
+        let leave = || {
+            Some(Box::new(SliceRegion {
+                statements: Arc::from(vec![SliceStatement::Break { target: None }]),
+                can_fall_through: NormalCompletion::minted(
+                    false,
+                    CompletionConstruction::SynthesizedRegion,
+                ),
+            }))
+        };
+        let (iteration, leaves) = match test {
+            LoopTest::Never => (pass, false),
+            LoopTest::Before(_) | LoopTest::Iteration => {
+                let mut statements = test_statements;
+                statements.push(SliceStatement::If {
+                    guard,
+                    consequent: Box::new(region(pass, back_edge)),
+                    alternate: leave(),
+                });
+                (statements, true)
+            }
+            LoopTest::After(_) => {
+                let mut statements = pass;
+                if back_edge {
+                    statements.extend(test_statements);
+                    statements.push(SliceStatement::If {
+                        guard,
+                        consequent: Box::new(region(Vec::new(), true)),
+                        alternate: leave(),
+                    });
+                }
+                (statements, back_edge)
+            }
+        };
+        let completes = (leaves || breaks) && !hit_unsupported;
+        prologue.push(SliceStatement::Loop {
+            iteration: Box::new(region(iteration, back_edge && !hit_unsupported)),
+        });
+        LoweredRegion {
+            region: region(prologue, completes),
+            hit_unsupported,
+            may_break,
+        }
+    }
+
+    /// Lower one variable declaration's declarators into `out` — a
+    /// statement's, or a `for` initializer's.
+    fn lower_variable_declaration(
+        &mut self,
+        decl: &oxc_ast::ast::VariableDeclaration<'_>,
+        out: &mut Vec<SliceStatement>,
+    ) {
+        let kind = match decl.kind {
+            VariableDeclarationKind::Const
+            | VariableDeclarationKind::Using
+            | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
+            VariableDeclarationKind::Let => SliceBindingKind::Let,
+            VariableDeclarationKind::Var => SliceBindingKind::Var,
+        };
+        for declarator in &decl.declarations {
+            // An eligible alias of a CONDITION or a
+            // DISCRIMINANT re-establishes its initializer's
+            // fact at every later test of the bound name,
+            // whether or not the demand value-selected the
+            // declaration — the name still resolves either
+            // way, and a destructured discriminant aliases
+            // exactly as a whole-binding one does.
+            self.record_narrowing_aliases(&decl.kind, declarator);
+            let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                // Destructuring declarators are not simple
+                // local reaching definitions — but the
+                // initializer still RUNS at the statement, so
+                // its effects take the same fail-closed scan
+                // every unmodeled position gets.
+                if let Some(init) = declarator.init.as_ref() {
+                    self.scan_unmodeled_position_effects(init);
+                }
+                continue;
+            };
+            // A binding OUTSIDE the slice's value-selected
+            // slot set never lowers: the elided declaration's
+            // initializer stays cold (no lowering, no
+            // resolution, no budget charge). Classification of
+            // later reads/calls is unchanged — the skeleton
+            // indexes the declaration regardless of the
+            // demand. The gate is the binding-identifier SPAN
+            // (declaration-precise), never the name — a
+            // shadowed same-named sibling the plan kept out
+            // must not lower.
+            //
+            // The elided initializer still RUNS at the
+            // statement, though: an assertion call or a
+            // whole-binding write inside it narrows / retypes
+            // what follows in the checker while the slice's
+            // obligations never reach the position — scan it
+            // with the same fail-closed discipline (a
+            // pure-literal initializer carries no effect and
+            // stays silent).
+            if !self.slot_selected(id.span) {
+                if let Some(init) = declarator.init.as_ref() {
+                    self.scan_unmodeled_position_effects(init);
+                }
+                continue;
+            }
+            // An ANNOTATED declarator preserves its
+            // initializer's fresh literal: the declared type
+            // governs the binding, and for a union declared
+            // type the initializer only SELECTS which
+            // declared constituents survive — a widened
+            // initializer would select none.
+            let preserve_literal =
+                kind == SliceBindingKind::Const || declarator.type_annotation.is_some();
+            // A class expression that directly initializes a
+            // variable is named after it (`const C = class {}`
+            // is the checker's `C`).
+            let init = declarator.init.as_ref().map(|expr| {
+                self.lower_assigned_value(
+                    expr,
+                    id.name.as_str(),
+                    ExprMode::BindingInit { preserve_literal },
+                )
+            });
+            // The authored annotation is the binding's
+            // DECLARED type — it SUPPLIES a value, it does
+            // not merely suppress the initializer's
+            // widening.
+            // A declarator annotation is a BODY position: it
+            // sits IN this frame's region chain, so it takes
+            // the frame gate with NO nearer-clause binders —
+            // this frame's own clause is consulted BEHIND
+            // this frame's lexical authority, which is what
+            // lets a block-scoped local of the binder's name
+            // win. The initializer's gate cannot stand in for
+            // it — the `(Some(init), None)` arm binds the
+            // DECLARED node and skips the initializer
+            // entirely.
+            let declared = declarator.type_annotation.as_ref().map(|annotation| {
+                self.gate(
+                    lower_ts_type(&annotation.type_annotation, self.source),
+                    id.span,
+                    &[],
+                )
+            });
+            // The initializer's FRESHNESS shape for an
+            // unannotated `const` — the evaluator's widening
+            // membership input. An all-fresh tree (a bare
+            // literal, or a conditional whose EVERY leaf is
+            // one — `f ? 1 : "s"`) is the classic
+            // widening-literal binding: the checker widens
+            // every arm at a widening read (`{ label: v }`
+            // reads `string | number`). A MIXED tree (an
+            // `as const` arm, a call, a reference beside a
+            // fresh leaf) carries per-arm verdicts so the
+            // evaluator widens exactly the fresh arms and
+            // keeps the authored pins. `let` / `var`
+            // initializers already widened at `BindingInit`
+            // lowering, and an annotated `const` takes its
+            // declared type — both stay `Pinned` here.
+            // An unannotated `let` / `var` whose initializer is
+            // a bare `null` / `undefined` / `void` value carries
+            // that shape too: it is the checker's auto-typed
+            // variable, reading the widening nullable type
+            // until a later write retypes it.
+            let freshness = match (declared.as_ref(), declarator.init.as_ref()) {
+                (None, Some(init)) if kind == SliceBindingKind::Const => expression_freshness(init),
+                (None, Some(init)) if expr_is_widening_nullish(init) => expression_freshness(init),
+                _ => SliceFreshness::Pinned,
+            };
+            let auto_typed_form = declared.is_none()
+                && kind != SliceBindingKind::Const
+                && declarator
+                    .init
+                    .as_ref()
+                    .is_none_or(|init| self.is_null_or_undefined_keyword(init));
+            let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span)) else {
+                out.push(SliceStatement::Gap(
+                    crate::semantic_query::FlowGap::UnmodeledExpression,
+                ));
+                continue;
+            };
+            let evolving_array = self.skeleton.binding(binding).evolving_array;
+            out.push(SliceStatement::Binding {
+                binding,
+                name: Arc::from(id.name.as_str()),
+                kind,
+                init,
+                declared,
+                freshness,
+                auto_typed_form,
+                evolving_array,
+            });
         }
     }
 
@@ -7487,6 +8074,34 @@ impl Lowerer<'_> {
     /// and its skeleton-visible writes already ride the unapplied-write
     /// ledger.
     fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
+        // An operation on an EVOLVING array retypes the binding in source
+        // order; on a binding the demand did not select it only runs its
+        // operands, and a `push` / `unshift` is still a throw point.
+        match self.lower_evolving_operation(
+            unwrap_parenthesized(expression),
+            ExprMode::BindingInit {
+                preserve_literal: true,
+            },
+        ) {
+            EvolvingLowering::Operation(operation) => {
+                return Some(SliceStatement::EvolvingArray(operation))
+            }
+            EvolvingLowering::Unselected => {
+                return verter_semantic::analysis::flow::expression_contains_call(expression)
+                    .then_some(SliceStatement::ThrowPoint)
+            }
+            EvolvingLowering::NotEvolving => {}
+        }
+        if let Expression::UpdateExpression(update) = unwrap_parenthesized(expression) {
+            if let Some(statement) = self.modeled_update_statement(update) {
+                return Some(statement);
+            }
+        }
+        if let Some(statement) =
+            self.lower_evolving_branch_statement(unwrap_parenthesized(expression))
+        {
+            return Some(statement);
+        }
         match unwrap_parenthesized(expression) {
             // `void x = v;` retypes `x` exactly as the bare write statement
             // does; every other `void` statement's operand only RUNS, and
@@ -7513,6 +8128,9 @@ impl Lowerer<'_> {
                     oxc_ast::ast::AssignmentOperator::Assign
                 ) =>
             {
+                if let Some(statement) = self.evolving_reset_statement(assignment) {
+                    return Some(statement);
+                }
                 if let Some(statement) = self.modeled_assignment_statement(assignment) {
                     return Some(statement);
                 }
@@ -7595,6 +8213,151 @@ impl Lowerer<'_> {
             }
             other => self.scan_unmodeled_statement_effects(other),
         }
+    }
+
+    /// A statement-position conditional (`c ? a.push(1) : a.push("s")`)
+    /// or logical (`c && a.push(1)`, `c || …`, `c ?? …`) expression whose
+    /// arms write an EVOLVING array: the checker's flow branches there as
+    /// an `if` over the test does, so it lowers as one — the test's guard
+    /// narrows each arm, each arm is its own effect statement, and the
+    /// paths join after it. `None` for every other expression.
+    fn lower_evolving_branch_statement(
+        &mut self,
+        expression: &Expression<'_>,
+    ) -> Option<SliceStatement> {
+        let (test, consequent, alternate, prefix) = match expression {
+            Expression::ConditionalExpression(conditional) => (
+                Some(&conditional.test),
+                Some(&conditional.consequent),
+                Some(&conditional.alternate),
+                None,
+            ),
+            Expression::LogicalExpression(logical) => match logical.operator {
+                LogicalOperator::And => (Some(&logical.left), Some(&logical.right), None, None),
+                LogicalOperator::Or => (Some(&logical.left), None, Some(&logical.right), None),
+                // `a ?? b` runs `a`, then `b` on the path where `a` is
+                // nullish — a test this lowering expresses no guard for.
+                LogicalOperator::Coalesce => {
+                    (None, Some(&logical.right), None, Some(&logical.left))
+                }
+            },
+            _ => return None,
+        };
+        let arms: Vec<FrameSpan> = [consequent, alternate]
+            .into_iter()
+            .flatten()
+            .map(|arm| self.rebase(arm.span()))
+            .collect();
+        let writes_evolving = self.skeleton.writes.iter().any(|write| {
+            arms.iter().any(|arm| arm.contains(write.span))
+                && write
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| self.is_evolving_binding(binding))
+        });
+        if !writes_evolving {
+            return None;
+        }
+        let region = |statements: Vec<SliceStatement>| SliceRegion {
+            statements: Arc::from(statements.into_boxed_slice()),
+            can_fall_through: NormalCompletion::minted(
+                true,
+                CompletionConstruction::SynthesizedRegion,
+            ),
+        };
+        let mut statements: Vec<SliceStatement> = Vec::new();
+        if let Some(prefix) = prefix {
+            statements.extend(self.lower_effect_statement(prefix));
+        }
+        let mut guard = SliceGuard::None;
+        let mut guard_bindings = Vec::new();
+        let mut guard_name = None;
+        if let Some(test) = test {
+            guard = self.lower_guard(test);
+            let unprovable_guard = std::mem::take(&mut self.control_test_gap);
+            let unprovable_control_call = self.record_control_position_calls(test);
+            guard_bindings = self.guard_bindings(&guard, test.span());
+            guard_name = self.predicate_subject_binding(test);
+            let nested_predicate_gap = guard_name.as_ref().is_some_and(|name| {
+                self.active_guard_subjects.contains(name)
+                    && matches!(name, FlowBindingRef::Captured(_))
+            });
+            if nested_predicate_gap || unprovable_control_call || unprovable_guard {
+                statements.push(SliceStatement::Gap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            if verter_semantic::analysis::flow::expression_contains_call(test) {
+                statements.push(SliceStatement::ThrowPoint);
+            }
+        }
+        let lower_arm = |this: &mut Self, arm: Option<&Expression<'_>>| {
+            let active_guard_base = this.active_guard_bindings.len();
+            let active_guard_subject_base = this.active_guard_subjects.len();
+            this.active_guard_bindings
+                .extend(guard_bindings.iter().copied());
+            this.active_guard_subjects
+                .extend(guard_name.iter().cloned());
+            let lowered = arm.and_then(|arm| this.lower_effect_statement(arm));
+            this.active_guard_bindings.truncate(active_guard_base);
+            this.active_guard_subjects
+                .truncate(active_guard_subject_base);
+            region(lowered.into_iter().collect())
+        };
+        let consequent = lower_arm(self, consequent);
+        let alternate = alternate.map(|alternate| Box::new(lower_arm(self, Some(alternate))));
+        statements.push(SliceStatement::If {
+            guard,
+            consequent: Box::new(consequent),
+            alternate,
+        });
+        Some(SliceStatement::Block(region(statements)))
+    }
+
+    /// The modeled `x++` / `x--` statement ([`SliceStatement::Update`]),
+    /// when `x` is a parameter or modelable local the demand selected.
+    fn modeled_update_statement(
+        &mut self,
+        update: &oxc_ast::ast::UpdateExpression<'_>,
+    ) -> Option<SliceStatement> {
+        let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
+            &update.argument
+        else {
+            return None;
+        };
+        let binding = match self.binding_at(identifier.span)? {
+            FlowBindingRef::Local(binding) => binding,
+            FlowBindingRef::Captured(_) => return None,
+        };
+        if !self.binding_is_selected(binding) {
+            return None;
+        }
+        let name = identifier.name.as_str();
+        let root = match self.classify_occurrence(identifier.span) {
+            NameBinding::Param(ordinal) => {
+                self.narrow_root(name, identifier.span, Some(ordinal))?
+            }
+            NameBinding::Local(_) => self.narrow_root(name, identifier.span, None)?,
+            NameBinding::Captured
+            | NameBinding::Free
+            | NameBinding::NestedFunction
+            | NameBinding::Unmodeled => return None,
+        };
+        let span = self.rebase(update.span);
+        let definition = self
+            .skeleton
+            .writes
+            .iter()
+            .find(|write| write.span == span)?
+            .site;
+        Some(SliceStatement::Update {
+            target: SliceNarrowSubject {
+                root,
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            definition,
+            span,
+        })
     }
 
     /// The modeled whole-binding-write statement form, when the
@@ -7707,6 +8470,24 @@ impl Lowerer<'_> {
         let (root, definition, span) = self
             .modeled_assignment_parts(assignment, site_span)
             .or_else(|| self.modeled_assignment_parts(assignment, assignment.span()))?;
+        // `(a = [])` starts a new EVOLVING array.
+        if evolving_reset_assignment(assignment) {
+            if let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
+                &assignment.left
+            {
+                if let Some(binding) = self.evolving_binding_at(identifier.span) {
+                    let value = Box::new(self.lowered_assignment_rhs(assignment));
+                    return Some(SliceExpr::EvolvingArray(Box::new(SliceEvolvingOperation {
+                        binding,
+                        kind: SliceEvolvingOperationKind::Reset {
+                            definition,
+                            span,
+                            value,
+                        },
+                    })));
+                }
+            }
+        }
         let value = self.lowered_assignment_rhs(assignment);
         Some(SliceExpr::Assignment {
             definition,
@@ -7760,6 +8541,23 @@ impl Lowerer<'_> {
     /// take the shared shallow-pass per-expression lowering for the
     /// position.
     fn lower_expr(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
+        match self.lower_evolving_operation(expr, mode) {
+            EvolvingLowering::Operation(operation) => {
+                return SliceExpr::EvolvingArray(Box::new(operation))
+            }
+            // The operation's value without its binding: a `push` /
+            // `unshift` is the new length; an element write is its
+            // assigned value, which the demand did not select.
+            EvolvingLowering::Unselected => {
+                return match expr {
+                    Expression::AssignmentExpression(_) => SliceExpr::Elided,
+                    _ => {
+                        SliceExpr::Type(GatedLeaf(TypeExpr::Primitive(PrimitiveName::Number), None))
+                    }
+                }
+            }
+            EvolvingLowering::NotEvolving => {}
+        }
         match expr {
             Expression::Identifier(identifier) => self.lower_identifier_read(identifier, mode),
             Expression::ChainExpression(chain) => {
@@ -8164,40 +8962,138 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Whether this frame only ever reads `binding` WHOLE: no read of a
-    /// member of it, no call through it, no write to it or into it after
-    /// its declaration, and no closure capturing it. Over-approximate by
-    /// construction — any of those positions may evolve an empty array's
-    /// element type in the checker.
-    fn binding_only_read_whole(&self, binding: SkeletonBindingId) -> bool {
-        let runtime = self.bindings.canonical_local(binding);
-        let is_binding = |candidate: &Option<FlowBindingRef>| {
-            matches!(
-                candidate,
-                Some(FlowBindingRef::Local(local))
-                    if self.bindings.canonical_local(*local) == runtime
-            )
+    /// The EVOLVING-array binding an identifier occurrence names, when it
+    /// names one: a local of this frame
+    /// ([`SliceStatement::Binding::evolving_array`]) or a captured binding
+    /// of an enclosing frame
+    /// ([`verter_semantic::analysis::function_program::FlowBindingIdentity::evolving_array`]).
+    fn evolving_binding_at(&self, span: oxc_span::Span) -> Option<FlowBindingRef> {
+        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        match self.bindings.occurrence(self.rebase(span)) {
+            FlowBindingOccurrence::Resolved(binding) if self.is_evolving_binding(binding) => {
+                Some(binding.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a resolved binding is an EVOLVING array.
+    fn is_evolving_binding(&self, binding: &FlowBindingRef) -> bool {
+        match binding {
+            FlowBindingRef::Local(local) => self.skeleton.binding(*local).evolving_array,
+            FlowBindingRef::Captured(identity) => identity.evolving_array,
+        }
+    }
+
+    /// Whether the demand selected an EVOLVING-array binding's value. A
+    /// captured one is this frame's input: its operations always lower.
+    fn evolving_binding_selected(&self, binding: &FlowBindingRef) -> bool {
+        match binding {
+            FlowBindingRef::Local(local) => self.binding_is_selected(*local),
+            FlowBindingRef::Captured(_) => true,
+        }
+    }
+
+    /// Lower `expression` as an EVOLVING-array operation, when it is one
+    /// ([`SliceEvolvingOperation`]): a `push` / `unshift` call on an
+    /// evolving local (optional forms included), or an element `=` write
+    /// into one. A call is modelled HERE either way — it feeds no callee
+    /// return to any value and an array's `push` / `unshift` narrows
+    /// nothing — so its span is decided above; an operation on a binding
+    /// the demand did not select only runs its operands' effects.
+    fn lower_evolving_operation(
+        &mut self,
+        expression: &Expression<'_>,
+        mode: ExprMode,
+    ) -> EvolvingLowering {
+        let call = match expression {
+            Expression::CallExpression(call) => Some(&**call),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                oxc_ast::ast::ChainElement::CallExpression(call) => Some(&**call),
+                _ => None,
+            },
+            _ => None,
         };
-        let sites_ok = self.skeleton.expr_sites.iter().all(|site| {
-            site.reads
-                .iter()
-                .all(|read| read.path.is_empty() || !is_binding(&read.binding))
-                && site.calls.iter().all(|call| !is_binding(&call.binding))
-                && site.capture_bindings.iter().all(|capture| {
-                    !matches!(
-                        capture,
-                        FlowBindingRef::Local(local)
-                            if self.bindings.canonical_local(*local) == runtime
-                    )
+        if let Some(call) = call {
+            let Some(binding) = verter_semantic::analysis::flow::evolving_array_mutation_root(call)
+                .and_then(|root| self.evolving_binding_at(root.span))
+            else {
+                return EvolvingLowering::NotEvolving;
+            };
+            self.decided_above_call_spans.push(call.span.into());
+            let arguments = call.arguments.iter().map(|argument| match argument {
+                oxc_ast::ast::Argument::SpreadElement(spread) => (&spread.argument, true),
+                other => (other.to_expression(), false),
+            });
+            if !self.evolving_binding_selected(&binding) {
+                for (argument, _) in arguments {
+                    self.scan_unmodeled_position_effects(argument);
+                }
+                return EvolvingLowering::Unselected;
+            }
+            let arguments: Vec<SliceMutationArgument> = arguments
+                .map(|(argument, spread)| SliceMutationArgument {
+                    value: self.lower_expr(argument, mode),
+                    spread,
+                    freshness: expression_freshness(argument),
                 })
-        });
-        // The declarator's own initializer is not a skeleton write.
-        sites_ok
-            && !self
-                .skeleton
-                .writes
-                .iter()
-                .any(|write| is_binding(&write.binding))
+                .collect();
+            return EvolvingLowering::Operation(SliceEvolvingOperation {
+                binding,
+                kind: SliceEvolvingOperationKind::Append(Arc::from(arguments.into_boxed_slice())),
+            });
+        }
+        let Expression::AssignmentExpression(assignment) = expression else {
+            return EvolvingLowering::NotEvolving;
+        };
+        let Some((member, binding)) =
+            verter_semantic::analysis::flow::evolving_array_element_write_root(assignment)
+                .and_then(|(member, root)| Some((member, self.evolving_binding_at(root.span)?)))
+        else {
+            return EvolvingLowering::NotEvolving;
+        };
+        if !self.evolving_binding_selected(&binding) {
+            self.scan_unmodeled_position_effects(&member.expression);
+            self.scan_unmodeled_position_effects(&assignment.right);
+            return EvolvingLowering::Unselected;
+        }
+        EvolvingLowering::Operation(SliceEvolvingOperation {
+            binding,
+            kind: SliceEvolvingOperationKind::ElementWrite {
+                index: Box::new(self.lower_expr(&member.expression, mode)),
+                value: Box::new(self.lower_expr(&assignment.right, mode)),
+                freshness: expression_freshness(&assignment.right),
+            },
+        })
+    }
+
+    /// The statement-position `a = []` that starts a new EVOLVING array
+    /// ([`SliceEvolvingOperationKind::Reset`]) — the unparenthesized empty
+    /// literal only, written to a selected evolving local.
+    fn evolving_reset_statement(
+        &mut self,
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+    ) -> Option<SliceStatement> {
+        if !evolving_reset_assignment(assignment) {
+            return None;
+        }
+        let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
+            &assignment.left
+        else {
+            return None;
+        };
+        let binding = self.evolving_binding_at(identifier.span)?;
+        let (_, definition, span) =
+            self.modeled_assignment_parts(assignment, assignment.right.span())?;
+        let value = Box::new(self.lowered_assignment_rhs(assignment));
+        Some(SliceStatement::EvolvingArray(SliceEvolvingOperation {
+            binding,
+            kind: SliceEvolvingOperationKind::Reset {
+                definition,
+                span,
+                value,
+            },
+        }))
     }
 
     fn lower_identifier_read(
@@ -8690,6 +9586,7 @@ impl Lowerer<'_> {
         let entry = entry.entry();
         let captures = self.capture_scope_for(node_span(node));
         let mut gap = None;
+        let mut declared_evolving_captures = Vec::new();
         // Mutability constrains captured values. A closure that only
         // forwards a write effect does not observe the entering value.
         let mut checked = rustc_hash::FxHashSet::default();
@@ -8702,6 +9599,21 @@ impl Lowerer<'_> {
                 continue;
             };
             let fact = self.skeleton.binding(binding);
+            // A captured EVOLVING array reads its declared type unless it is
+            // a `let` past its last assignment, whose flow the function
+            // continues from where it is created — its operations evolve
+            // the array it holds there (tsc 7.0.2: `let a = []; a.push(1);
+            // return () => a` is `() => number[]`, `const` and `var` alike
+            // `() => any[]`).
+            if fact.evolving_array {
+                if fact.kind != SkeletonBindingKind::Let
+                    || self.nested_free_writes.contains(&binding)
+                    || !self.is_past_last_assignment(binding, node_span(node))
+                {
+                    declared_evolving_captures.push(identity.clone());
+                }
+                continue;
+            }
             if fact.kind == SkeletonBindingKind::Let && self.nested_free_writes.contains(&binding) {
                 let writes_capture = entry.writes.iter().flat_map(|write| write.targets.iter()).any(|target| {
                     matches!(target,
@@ -8725,7 +9637,43 @@ impl Lowerer<'_> {
             context: Arc::new(NestedFlowContext { captures }),
             has_declared_return: node.return_type().is_some(),
             gap,
+            declared_evolving_captures: Arc::from(declared_evolving_captures.into_boxed_slice()),
         }
+    }
+
+    /// The checker's `isPastLastAssignment` for a `let` binding at a
+    /// function created at `creation_span`: every whole-binding write of the
+    /// frame counts up to the end of the outermost statement enclosing it
+    /// that starts after the declaration (`extendAssignmentPosition` — an
+    /// assignment in a loop reaches the loop's end), and the function must
+    /// start after all of them.
+    fn is_past_last_assignment(
+        &self,
+        binding: SkeletonBindingId,
+        creation_span: oxc_span::Span,
+    ) -> bool {
+        let declaration = self.skeleton.binding(binding).span.to_absolute(self.anchor);
+        let runtime = self.bindings.canonical_local(binding);
+        self.skeleton.writes.iter().all(|write| {
+            if !write.path.is_empty()
+                || !matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(local) == runtime)
+            {
+                return true;
+            }
+            let written = write.span.to_absolute(self.anchor);
+            let end = self
+                .assignment_extent_statements
+                .iter()
+                .filter(|statement| {
+                    statement.start > declaration.start
+                        && statement.start <= written.start
+                        && statement.end >= written.end
+                })
+                .map(|statement| statement.end)
+                .fold(written.end, u32::max);
+            end < creation_span.start
+        })
     }
 
     /// Lower a leaf expression through the shared shallow-pass entry,
