@@ -526,7 +526,13 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
     /// resolved global population of the request's project. An absent global
     /// (`noLib`) is the checker's empty apparent type: a complete negative.
     fn apparent(&mut self, name: &str, args: &[SemanticNodeId]) -> Found {
-        match self.dispatch().global_wrapper_surface(name, args) {
+        let d = self.dispatch();
+        let Some(canonical) = crate::request_context::current_request_canonical()
+            .or_else(|| d.lexical_demand_scope.borrow().last().cloned())
+        else {
+            return unsettled();
+        };
+        match d.global_wrapper_surface(name, args, canonical.as_ref()) {
             super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
             super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
             super::apparent_type::GlobalWrapper::Unsettled => unsettled(),

@@ -2184,8 +2184,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
-        // Cheap subject-shape probe — a non-carrier key skips the tracer.
-        if !self.key_subject_is_carrier(&key) {
+        // Cheap subject-shape probe — a key with neither a carrier subject
+        // nor a first step through a shared subject's apparent wrapper skips
+        // the tracer.
+        if !self.key_subject_is_carrier(&key) && !self.key_reads_apparent_wrapper(&key) {
             return (key, CarrierNormalizationPrelude::none());
         }
         let ((normalized, partial_reasons), finalise) =
@@ -2194,6 +2196,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 || {
                     let normalized = self.normalize_carrier_subject_key(key);
                     let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
+                    // The wrapper read is scoped to the demand's project here,
+                    // so its lookup's facts root the admitted entry too.
+                    let normalized = self.scope_apparent_wrapper_subject(normalized);
                     // Test-only: force a fenced (ReturnOnly) serve observation onto
                     // the prelude tracer so the suppress wiring is exercisable
                     // without a superseded-artifact fixture. Zero-cost when unset.

@@ -862,37 +862,12 @@ struct NullishSplit {
     common_nullish: Vec<SemanticNodeId>,
 }
 
-/// The global wrapper interface a primitive's members come from — its
-/// apparent type (`string` and a string literal read `String`).
-fn primitive_wrapper_name(data: &SemanticNodeData) -> Option<&'static str> {
-    use crate::semantic_query::PrimitiveKind;
-    match data {
-        SemanticNodeData::Primitive(PrimitiveKind::String)
-        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_))
-        | SemanticNodeData::TemplateLiteral { .. } => Some("String"),
-        SemanticNodeData::Primitive(PrimitiveKind::Number)
-        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(_)) => {
-            Some("Number")
-        }
-        SemanticNodeData::Primitive(PrimitiveKind::Boolean)
-        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(_)) => {
-            Some("Boolean")
-        }
-        SemanticNodeData::Primitive(PrimitiveKind::BigInt)
-        | SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_)) => {
-            Some("BigInt")
-        }
-        SemanticNodeData::Primitive(PrimitiveKind::Symbol) => Some("Symbol"),
-        _ => None,
-    }
-}
-
 /// Whether a string key is a CANONICAL non-negative integer key —
 /// TS's numeric-key coercion rule `String(Number(s)) === s` restricted
 /// to the integer positions a tuple can hold: nonempty, ASCII digits
 /// only, and no leading zero unless the key is exactly `"0"`. `"01"`,
 /// `"+1"`, `"1.0"`, `" 1"` all fail.
-fn is_canonical_index_digits(key: &str) -> bool {
+pub(super) fn is_canonical_index_digits(key: &str) -> bool {
     let bytes = key.as_bytes();
     match bytes {
         [] => false,
@@ -977,6 +952,11 @@ pub(super) struct PathWalker<'a, 'b> {
     /// [`Self::expand_empty_path_terminal`] (the slot-binding indexed-
     /// access preservation policy at the empty-path terminal expander).
     original_path_non_empty: bool,
+    /// The file the walk's subject was declared in, when it was: an
+    /// apparent-wrapper read on the way is scoped to that file's project, so
+    /// the entry's key names the project it read
+    /// ([`Self::apparent_wrapper_read`]).
+    origin_file: Option<Arc<str>>,
 }
 
 impl<'a> super::ProjectSemanticDispatch<'a> {
@@ -1315,6 +1295,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             open_spread_partial: false,
             original_path_non_empty: false,
+            origin_file: None,
         }
     }
 
@@ -1552,24 +1533,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .intern_normalized_union(&arms, NullabilityPolicy::Erased)
     }
 
-    /// The property name a path segment reads when it is a string key that
-    /// is not a numeric position (`length`, `map`) — the key an array,
-    /// tuple or primitive reads off its apparent type.
-    fn segment_string_name(&self, segment: &PathSegment) -> Option<Arc<str>> {
-        let name = match segment {
-            PathSegment::Member(PropertyKey::String(name))
-            | PathSegment::Index(IndexKey::String(name)) => Arc::clone(name),
-            PathSegment::Index(IndexKey::Computed(node)) => {
-                match self.dispatch.normalized_index_key_node(*node) {
-                    IndexKey::String(name) => name,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        (!is_canonical_index_digits(&name)).then_some(name)
-    }
-
     /// A tuple's `length`: `number` with a rest element, else the union of
     /// the lengths from its required count to its element count
     /// (`[1, 2?]['length']` is `1 | 2`).
@@ -1592,29 +1555,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .intern_normalized_union_or_intersection(&lengths, true)
     }
 
-    /// The apparent `Array<element>` (`ReadonlyArray` for a readonly
-    /// array or tuple) whose members an array's non-index keys read.
-    fn array_apparent_surface(
-        &self,
-        element: SemanticNodeId,
-        readonly: bool,
-    ) -> Option<SemanticNodeId> {
-        self.global_wrapper_read(if readonly { "ReadonlyArray" } else { "Array" }, &[element])
-    }
-
-    /// The global wrapper interface `name` over `args` whose members a
-    /// primitive, an array or a tuple reads
-    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]); `None` when
-    /// the project declares none or the lookup does not settle. The node
-    /// names no project: the lookup is scoped by the request, so whatever it
-    /// answers is transaction-local — never served from the shared memo to a
-    /// request of another project.
-    fn global_wrapper_read(&self, name: &str, args: &[SemanticNodeId]) -> Option<SemanticNodeId> {
+    /// The apparent wrapper surface a primitive, an array or a tuple reads
+    /// its non-index keys from
+    /// ([`ProjectSemanticDispatch::apparent_wrapper_of`]); `None` when the
+    /// project declares none or no project settles.
+    ///
+    /// The read is scoped to the project of the file the walk's subject was
+    /// declared in, so the entry's key names that project. A path whose
+    /// FIRST step reads a shared subject's wrapper arrives already rewritten
+    /// to the demand project's wrapper
+    /// ([`ProjectSemanticDispatch::scope_apparent_wrapper_subject`]); a
+    /// later step under a shared subject, or a read with no demand site at
+    /// all, is scoped to the demand, which the key cannot name — that entry
+    /// stays out of the shared memo.
+    fn apparent_wrapper_read(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use super::apparent_type::GlobalWrapper;
+        let (name, args) = self.dispatch.apparent_wrapper_of(node)?;
+        if let Some(origin) = self.origin_file.as_deref() {
+            match self.dispatch.global_wrapper_surface(name, &args, origin) {
+                GlobalWrapper::Surface(surface) => return Some(surface),
+                GlobalWrapper::Absent => return None,
+                GlobalWrapper::Unsettled => {}
+            }
+        }
         self.dispatch.fold_into_top_build_local_taint(false, true);
-        match self.dispatch.global_wrapper_surface(name, args) {
-            super::apparent_type::GlobalWrapper::Surface(surface) => Some(surface),
-            super::apparent_type::GlobalWrapper::Absent
-            | super::apparent_type::GlobalWrapper::Unsettled => None,
+        let demand = self.dispatch.wrapper_demand_canonical()?;
+        match self
+            .dispatch
+            .global_wrapper_surface(name, &args, demand.as_ref())
+        {
+            GlobalWrapper::Surface(surface) => Some(surface),
+            GlobalWrapper::Absent | GlobalWrapper::Unsettled => None,
         }
     }
 
@@ -1750,6 +1721,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // terminal under the caller's mode (path-precision), whereas the
         // empty whole-surface projection stays carrier-preserving.
         self.original_path_non_empty = !path.is_empty();
+        self.origin_file = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
         let initial_path: Arc<[PathSegment]> = Arc::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
@@ -3440,7 +3415,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
-                SemanticNodeData::Tuple { elements, readonly } => {
+                SemanticNodeData::Tuple { elements, .. } => {
                     // Tuple slot projection. A literal integer position
                     // projects element `i`'s VALUE type — the label is
                     // dropped by construction (only `element.value`
@@ -3457,9 +3432,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // any other key is a member of the tuple's apparent
                     // `Array`.
                     let elements = elements.clone();
-                    let readonly = *readonly;
                     drop(data);
-                    if self.segment_string_name(segment).as_deref() == Some("length") {
+                    let member = self.dispatch.apparent_member_name(segment);
+                    if member.as_deref() == Some("length") {
                         let length = self.tuple_length(&elements);
                         let (edge_kind, meta) = match segment {
                             PathSegment::Index(ix) => {
@@ -3485,28 +3460,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         self.intermediate_nodes.push(Some(current));
                         continue;
                     }
-                    if self.classify_numeric_index_segment(segment).is_none()
-                        && self.segment_string_name(segment).is_some()
-                    {
-                        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len());
-                        for element in elements.iter() {
-                            let value = if element.rest {
-                                match self.rest_element_item_type(element.value) {
-                                    Some(item) => item,
-                                    None => {
-                                        results.push(self.opaque_miss());
-                                        return;
-                                    }
-                                }
-                            } else {
-                                element.value
-                            };
-                            self.push_union_flattened(&mut arms, value);
-                        }
-                        let element = self
-                            .dispatch
-                            .intern_normalized_union_or_intersection(&arms, true);
-                        match self.array_apparent_surface(element, readonly) {
+                    if member.is_some() {
+                        match self.apparent_wrapper_read(current) {
                             Some(surface) => {
                                 current = surface;
                                 continue;
@@ -3552,18 +3507,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                     }
                 }
-                SemanticNodeData::Array { element, readonly } => {
+                SemanticNodeData::Array { element, .. } => {
                     // Array indexed access: any numeric demand — a
                     // literal position or the broad `number` key —
                     // projects the element type; any other key is a
                     // member of the apparent `Array` (`length`, `map`).
                     let element = *element;
-                    let readonly = *readonly;
                     drop(data);
-                    if self.classify_numeric_index_segment(segment).is_none()
-                        && self.segment_string_name(segment).is_some()
-                    {
-                        match self.array_apparent_surface(element, readonly) {
+                    if self.dispatch.apparent_member_name(segment).is_some() {
+                        match self.apparent_wrapper_read(current) {
                             Some(surface) => {
                                 current = surface;
                                 continue;
@@ -3657,11 +3609,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::TemplateLiteral { .. }
-                    if primitive_wrapper_name(&data).is_some() =>
+                    if self.dispatch.apparent_wrapper_of(current).is_some() =>
                 {
-                    let wrapper = primitive_wrapper_name(&data).expect("guarded above");
                     drop(data);
-                    match self.global_wrapper_read(wrapper, &[]) {
+                    match self.apparent_wrapper_read(current) {
                         Some(surface) if surface != current => {
                             current = surface;
                             continue;
