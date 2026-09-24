@@ -39,6 +39,9 @@ interface X extends SS { a: 1 }
 interface Z extends X { z: 1 }
 interface SNS { [index: number]: 'n'; [k: string]: 'n' | 's' }
 interface Y extends SNS { [index: number]: 'n' }
+interface SS2 { [key: string]: 2 }
+interface NS { [n: number]: 'N'; [k: string]: 'S' }
+type Fn = () => void;
 declare const uniq: unique symbol;
 ";
 
@@ -311,24 +314,107 @@ fn the_global_objects_members_are_read_after_an_index_signature_without_properti
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The arms of a union or intersection read their own properties only: the
-/// index signatures a composite applies are the composite's, not any one
-/// arm's.
+/// The members of the library's `Object` and `Function` a composite's arms
+/// read, as `lib.es5.d.ts` declares them.
+const APPARENT_LIB: &str = "\
+interface Object { toString(): string; }
+interface Function { bind(this: Function, thisArg: any, ...argArray: any[]): any; prototype: any; readonly length: number; readonly name: string; }
+";
+
+/// An indexed access over a union or an intersection object reads the
+/// composite as the checker does (`getIndexedAccessType`): every arm
+/// string-index-only reads the composite's `string` index; a property an
+/// arm declares reads the arms' properties — a union member without one
+/// reading its apparent member or its applicable index signature, an
+/// intersection reading only the arms that declare it; otherwise the
+/// composite's own index signatures — an intersection's every arm's,
+/// intersected, a union's the key types every arm declares, unioned.
 ///
-/// Measured on TypeScript 7.0.2: `(SS & { x: 2 })['x']` is `2` — the
-/// property, never intersected with the other arm's index signature; `(SN
-/// | SS)[0]` is TS2339 ("Property '0' does not exist on type 'SN | SS'"):
-/// the union's index signatures are the key types every arm declares, and
-/// `SN` and `SS` share none.
+/// Measured on TypeScript 7.0.2: `(SS | { x: 2 })['x']`, `(SS |
+/// SS2)['x']`, `(SS | { x: 2 } | SS2)['x']` and `(SS | SS2)[number]` are
+/// `1 | 2`; `(SS & SN)[0]`, `(SS & SN)[number]`, `(SNS | SN)[0]`, `(SN |
+/// { 0: 'z' })[0]` and `(SS & SN & { a: 1 })[5]` are `string`; `(SS &
+/// SN)['x']`, `(SS & { y: 1 })['x']` and `(SS & { a: 'A' })['b']` are
+/// `1`; `(SS & SS2)['x']` is `never`; `(SNS | SS)[0]` is `"n" | "s" | 1`;
+/// `(SS & { x: 2 })['x']` is `2`; `(TL & SS)['data-x']` is `"D"`; `(SS |
+/// SS2)[symbol]` is `1 | 2` with TS2538. `(SS | { y: 2 })['x']` and `(SN
+/// | SS)[0]` are TS2339: no arm but one declares the key, and the arms
+/// share no index key type.
 #[test]
-fn a_composites_arms_read_their_own_properties_only() {
-    let failures = mismatches(FIXTURE, &[("(SS & { x: 2 })['x']", "2")]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-    let measured = with_probe(FIXTURE, "(SN | SS)[0]", |dispatch, node| {
-        render_node(dispatch, node, 0)
-    });
-    assert_eq!(
-        measured, "Opaque(Miss)",
-        "`(SN | SS)[0]` is the checker's error"
+fn a_composite_object_reads_its_properties_then_its_index_signatures() {
+    let failures = mismatches(
+        FIXTURE,
+        &[
+            ("(SS | { x: 2 })['x']", "1 | 2"),
+            ("(SS | SS2)['x']", "1 | 2"),
+            ("(SS | { x: 2 } | SS2)['x']", "1 | 2"),
+            ("(SS | SS2)[number]", "1 | 2"),
+            ("(SS & SN)[0]", "string"),
+            ("(SS & SN)[number]", "string"),
+            ("(SNS | SN)[0]", "string"),
+            ("(SN | { 0: 'z' })[0]", "string"),
+            ("(SS & SN & { a: 1 })[5]", "string"),
+            ("(SS & SN)['x']", "1"),
+            ("(SS & { y: 1 })['x']", "1"),
+            ("(SS & { a: 'A' })['b']", "1"),
+            ("(SS & SS2)['x']", "never"),
+            ("(SNS | SS)[0]", "\"n\" | \"s\" | 1"),
+            ("(SS & { x: 2 })['x']", "2"),
+            ("(TL & SS)['data-x']", "\"D\""),
+            ("(SS | SS2)[symbol]", "1 | 2"),
+        ],
     );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for probe in ["(SS | { y: 2 })['x']", "(SN | SS)[0]"] {
+        let measured = with_probe(FIXTURE, probe, |dispatch, node| {
+            render_node(dispatch, node, 0)
+        });
+        assert_eq!(measured, "Opaque(Miss)", "`{probe}` is the checker's error");
+    }
+}
+
+/// A composite's arms read the members the apparent `Function` and
+/// `Object` types add before the composite's index signatures — unless
+/// every arm is string-index-only, when the key reads the composite's
+/// `string` index.
+///
+/// Measured on TypeScript 7.0.2 (with the library's `Object` and
+/// `Function`): `(SS | { x: 2 })['toString']` and `(SS & { y: 1
+/// })['toString']` are `() => string`, `(SS | { toString: 5
+/// })['toString']` is `5 | (() => string)`, `(SS | SS2)['toString']` is
+/// `1 | 2`, `(SS & SS2)['toString']` and `(SS & CS)['bind']` are `never`,
+/// `(CS & { y: 1 })['bind'] extends Function['bind']` and `(SS &
+/// Fn)['bind'] extends Function['bind']` are `"y"`, `(SS & Fn)['x']` is
+/// `1`, `NS['toString']` is `() => string` and `NS['q']` is `"S"`.
+#[test]
+fn a_composites_arms_read_apparent_members_before_its_index_signatures() {
+    let project = ProbeProject {
+        files: &[],
+        compiler_options: None,
+        ambient_lib: Some(APPARENT_LIB),
+    };
+    let failures = mismatches_in(
+        project,
+        FIXTURE,
+        &[
+            ("(SS | { x: 2 })['toString']", "() => string"),
+            ("(SS & { y: 1 })['toString']", "() => string"),
+            ("(SS | { toString: 5 })['toString']", "5 | (() => string)"),
+            ("(SS | SS2)['toString']", "1 | 2"),
+            ("(SS & SS2)['toString']", "never"),
+            ("(SS & CS)['bind']", "never"),
+            (
+                "(CS & { y: 1 })['bind'] extends Function['bind'] ? 'y' : 'n'",
+                "\"y\"",
+            ),
+            (
+                "(SS & Fn)['bind'] extends Function['bind'] ? 'y' : 'n'",
+                "\"y\"",
+            ),
+            ("(SS & Fn)['x']", "1"),
+            ("NS['toString']", "() => string"),
+            ("NS['q']", "\"S\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

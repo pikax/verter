@@ -780,6 +780,105 @@ enum IndexAccessKey<'a> {
     Type(SemanticNodeId),
 }
 
+/// An owned [`IndexAccessKey`], read off a path segment.
+enum OwnedIndexAccessKey {
+    Name(PropertyKey),
+    Type(SemanticNodeId),
+}
+
+impl OwnedIndexAccessKey {
+    fn borrowed(&self) -> IndexAccessKey<'_> {
+        match self {
+            Self::Name(name) => IndexAccessKey::Name(name),
+            Self::Type(node) => IndexAccessKey::Type(*node),
+        }
+    }
+}
+
+/// How an arm of a union or intersection split reads the segment the
+/// composite was split at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArmMode {
+    /// The arm's own properties only: an intersection's first read
+    /// (`getPropertyOfType`'s pass that skips apparent members), since the
+    /// composite's index signatures and apparent members are not any one
+    /// arm's.
+    Own,
+    /// A union member's property (`createUnionOrIntersectionProperty`): its
+    /// own, else its apparent member, else the index signature that
+    /// applies to the name.
+    Member,
+}
+
+/// The segment position an arm of a union or intersection split reads as
+/// its composite decides, and the probe slot the arm reports the surface
+/// it settled on to.
+#[derive(Clone, Copy)]
+struct ArmRead {
+    at: usize,
+    mode: ArmMode,
+    /// `(slot, arm)` in [`PathWalker::arm_probes`].
+    probe: Option<(usize, usize)>,
+}
+
+/// How an arm that declares no property for the segment its composite
+/// was split at read it. An arm that reads its own property reports
+/// nothing: its composite then keeps the arms' reads, which is the
+/// checker's answer whenever an arm declares the key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArmHow {
+    /// A member its apparent `Function` / `Object` type adds.
+    Apparent,
+    /// The index signature that applies to the name.
+    Index,
+    /// Nothing: the checker's `ReadPartial`.
+    Nothing,
+    /// An apparent surface its read needs did not settle.
+    Undecided,
+}
+
+/// The surface one arm of a composite split settled on, and how it read
+/// the split's segment — the facts the composite decides with at its join
+/// ([`PathWalker::composite_hop`]).
+struct ArmProbe {
+    view: crate::semantic_query::SurfaceView,
+    node: SemanticNodeId,
+    how: ArmHow,
+}
+
+/// The composite a join decides the segment for once its arms reported
+/// ([`PathWalker::composite_hop`]).
+struct CompositeJoin {
+    slot: usize,
+    node: SemanticNodeId,
+    path: Arc<[PathSegment]>,
+    index: usize,
+}
+
+/// Whether an apparent type declares a member
+/// ([`PathWalker::apparent_member_surface`]).
+enum ApparentMember {
+    /// The apparent surface that declares it.
+    Found(SemanticNodeId),
+    Absent,
+    /// An apparent surface did not settle.
+    Undecided,
+}
+
+/// What a union or intersection join reads the segment it was split at as
+/// ([`PathWalker::composite_hop`]).
+enum CompositeHop {
+    /// The arms' reads: the join of their results.
+    Arms,
+    /// The composite's own read, the walk's next node.
+    Value(SemanticNodeId),
+    /// The apparent surfaces an intersection reads the member off, each for
+    /// its own property.
+    Apparent(Vec<SemanticNodeId>),
+    /// The checker's error: no property and no index signature applies.
+    Miss,
+}
+
 /// Worklist frame for the iterative `walk_path` driver (
 /// "Iterative worklist").
 ///
@@ -793,30 +892,18 @@ enum WalkFrame {
         node: SemanticNodeId,
         path: Arc<[PathSegment]>,
         index: usize,
-        /// The path position at which this step reads properties only: an
-        /// arm of a union or intersection split there, where the index
-        /// signatures the composite applies are not any one arm's own.
-        property_only_at: Option<usize>,
+        /// The union or intersection split this step is an arm of, and how
+        /// it reads the segment there.
+        arm_read: Option<ArmRead>,
     },
     JoinUnion {
         arm_count: usize,
+        composite: Option<CompositeJoin>,
     },
     JoinIntersection {
         arm_count: usize,
-        /// A heritage body split for a property its arms may not carry:
-        /// when every arm misses, the remaining path is read off the
-        /// body's composed surface instead — the one object the checker
-        /// reads, with its inherited index signatures and apparent members.
-        heritage_retry: Option<HeritageRetry>,
+        composite: Option<CompositeJoin>,
     },
-}
-
-/// The heritage body a [`WalkFrame::JoinIntersection`] retries through its
-/// composed surface, and the path position the retry resumes at.
-struct HeritageRetry {
-    body: SemanticNodeId,
-    path: Arc<[PathSegment]>,
-    index: usize,
 }
 
 /// Literal key used by the Mapped operator-level narrowing path.
@@ -927,6 +1014,9 @@ pub(super) struct PathWalker<'a, 'b> {
     /// re-entry, so linear-chain walks cost O(n) set inserts, not O(n^2)
     /// depth checks.
     visited_nodes: rustc_hash::FxHashSet<SemanticNodeId>,
+    /// The surfaces the arms of each composite split settled on, one slot
+    /// per split ([`ArmProbe`]). Owned by this walk and dropped with it.
+    arm_probes: Vec<Vec<Option<ArmProbe>>>,
     /// Per-step intermediate nodes for backfill.
     /// `intermediate_nodes[i]` = node reached after consuming path[..i+1].
     /// `Some(node)` only on linear `Object` member-step transitions.
@@ -1314,6 +1404,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             fence,
             visited_aliases: smallvec::SmallVec::new(),
             visited_nodes: rustc_hash::FxHashSet::default(),
+            arm_probes: Vec::new(),
             intermediate_nodes: Vec::new(),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
@@ -1384,11 +1475,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.dispatch.opaque(QueryError::Miss)
     }
 
-    /// The type an indexed access reads off `surface`'s index signatures for
-    /// a key no property of the surface names — TypeScript's
-    /// `getPropertyTypeForIndexType` over `getApplicableIndexInfo`. `None`
-    /// when no index signature applies, or when the answer is not decided
-    /// from the graph.
+    /// The type an indexed access reads off the index signatures
+    /// `signatures` for a key no property names — the index step of
+    /// TypeScript's `getPropertyTypeForIndexType` over
+    /// `getApplicableIndexInfo`. `None` when no index signature applies, or
+    /// when the answer is not decided from the graph.
     ///
     /// - An index whose key type is not `string` applies when the key is
     ///   assignable to it (a number or number literal to a number index, a
@@ -1397,33 +1488,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     ///   (`'1.5'`, `'-1'`) and to `` `${number}` ``. Several applicable ones
     ///   intersect their types.
     /// - A `string` index applies when no other does, to a key assignable to
-    ///   `string` or `number`; a symbol key no other index takes reads it
-    ///   too, the type the checker recovers with after TS2538.
-    /// - A NAMED key on a surface that declares properties reads the
-    ///   members the apparent `Function` / `Object` type adds first
-    ///   (`{ a: 1; [k: string]: 1 }['toString']` is `Object`'s), so the
-    ///   index applies only when neither declares the name. A surface with
-    ///   no property of its own reads its index first (`{ [k: string]: 1
-    ///   }['toString']` is `1`).
+    ///   `string` or `number`. With `recover_symbol`, a symbol key no other
+    ///   index takes reads it too — the type the checker recovers with after
+    ///   TS2538 (`getApplicableIndexInfo(…) || getIndexInfoOfType(…,
+    ///   string)`); a union member's read (`getApplicableIndexInfoForName`)
+    ///   does not.
     ///
     /// The read follows the declaring project's `strictNullChecks` as a
     /// property read does ([`Self::index_read`]).
     fn index_signature_read(
         &self,
         object: SemanticNodeId,
-        surface: &crate::semantic_query::SurfaceView,
+        signatures: &[crate::semantic_query::IndexSignature],
         key: IndexAccessKey<'_>,
+        recover_symbol: bool,
     ) -> Option<SemanticNodeId> {
         use crate::semantic_query::{LiteralValue, PrimitiveKind};
-        if surface.index_signatures.is_empty() {
+        if signatures.is_empty() {
             return None;
-        }
-        if let IndexAccessKey::Name(name) = key {
-            if !surface.positive_members().is_empty()
-                && !self.apparent_members_absent(object, surface, name)
-            {
-                return None;
-            }
         }
         let key_node = match key {
             IndexAccessKey::Name(PropertyKey::String(text)) => Some(self.graph().intern_node(
@@ -1454,21 +1536,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // index signature per constituent, as the checker splits it.
         let mut string_values: Vec<(SemanticNodeId, Option<Arc<str>>)> = Vec::new();
         let mut applicable: Vec<(SemanticNodeId, Option<Arc<str>>)> = Vec::new();
-        for signature in surface.index_signatures.iter() {
-            let key_types: Vec<SemanticNodeId> =
-                match self.graph().node_data(signature.key_type).as_deref() {
-                    Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
-                    _ => vec![signature.key_type],
-                };
+        for signature in signatures {
             let origin = signature
                 .declaration_origin
                 .clone()
                 .or_else(|| object_scope.clone());
-            for key_type in key_types {
-                if matches!(
-                    self.graph().node_data(key_type).as_deref(),
-                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
-                ) {
+            for key_type in self.index_key_types(signature.key_type) {
+                if self.is_string_key_type(key_type) {
                     string_values.push((signature.value_type, origin.clone()));
                     continue;
                 }
@@ -1480,7 +1554,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let chosen = if !applicable.is_empty() {
             applicable
         } else if !string_values.is_empty()
-            && (symbol_like || self.index_key_applies_to_string(key_node)?)
+            && ((recover_symbol && symbol_like) || self.index_key_applies_to_string(key_node)?)
         {
             string_values
         } else {
@@ -1496,6 +1570,71 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 .dispatch
                 .intern_normalized_union_or_intersection(&reads, false),
         })
+    }
+
+    /// The key types one index signature declares: a union key type
+    /// declares one per constituent, as the checker splits it.
+    fn index_key_types(&self, key_type: SemanticNodeId) -> Vec<SemanticNodeId> {
+        match self.graph().node_data(key_type).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![key_type],
+        }
+    }
+
+    fn is_string_key_type(&self, key_type: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(key_type).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::String
+            ))
+        )
+    }
+
+    /// Whether `view` is the checker's `isStringIndexSignatureOnlyType`
+    /// object: no property, and one index key type, `string`.
+    fn is_string_index_only(&self, view: &crate::semantic_query::SurfaceView) -> bool {
+        if !view.positive_members().is_empty()
+            || (view.has_known_index_signature() && view.index_signatures.is_empty())
+        {
+            return false;
+        }
+        let mut key_types: Vec<SemanticNodeId> = Vec::new();
+        for signature in view.index_signatures.iter() {
+            for key_type in self.index_key_types(signature.key_type) {
+                if !key_types.contains(&key_type) {
+                    key_types.push(key_type);
+                }
+            }
+        }
+        matches!(key_types.as_slice(), [only] if self.is_string_key_type(*only))
+    }
+
+    /// Whether the key is assignable to `string | number` — the keys a
+    /// string-index-only object reads as `string`.
+    fn key_is_string_or_number_like(&self, key: IndexAccessKey<'_>) -> bool {
+        use crate::semantic_query::{LiteralValue, PrimitiveKind};
+        match key {
+            IndexAccessKey::Name(PropertyKey::String(_) | PropertyKey::Number(_)) => true,
+            IndexAccessKey::Name(PropertyKey::UniqueSymbol(_)) => false,
+            IndexAccessKey::Type(node) => matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(
+                    SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Number)
+                        | SemanticNodeData::Literal(
+                            LiteralValue::String(_) | LiteralValue::Number(_)
+                        )
+                        | SemanticNodeData::TemplateLiteral { .. }
+                )
+            ),
+        }
+    }
+
+    /// The `string` key type node the checker rewrites a string-index-only
+    /// read's key to.
+    fn string_key(&self) -> SemanticNodeId {
+        self.graph().intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ))
     }
 
     /// Whether a non-`string` index whose key type is `index_key` applies
@@ -1555,9 +1694,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let Some(key) = key else {
             return Some(false);
         };
-        let string = self
-            .graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let string = self.string_key();
         if self.key_assignable(key, string)? {
             return Some(true);
         }
@@ -1577,35 +1714,42 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
     }
 
-    /// Whether neither the apparent `Function` type of a callable surface
-    /// nor the global `Object` declares `name` — the members an access
-    /// reads before an index signature on a surface with properties. A
-    /// surface with construct signatures only, an apparent type that does
-    /// not settle, or an `Object` that does not settle is not proven
-    /// absent.
-    fn apparent_members_absent(
+    /// The apparent surface that declares `name` for the object `node`
+    /// whose own surface is `view` — the members the checker's
+    /// `getPropertyOfType` adds after an object's own: the apparent
+    /// `Function` type of an object with call or construct signatures,
+    /// then the global `Object`.
+    fn apparent_member_surface(
         &self,
-        object: SemanticNodeId,
-        surface: &crate::semantic_query::SurfaceView,
+        node: SemanticNodeId,
+        view: &crate::semantic_query::SurfaceView,
         name: &PropertyKey,
-    ) -> bool {
+    ) -> ApparentMember {
         use super::apparent_type::GlobalWrapper;
-        if !surface.call_signatures.is_empty() {
-            let Some(apparent) = self.dispatch.apparent_type_of(object) else {
-                return false;
+        if !view.call_signatures.is_empty() || !view.construct_signatures.is_empty() {
+            let Some(apparent) = self.dispatch.apparent_type_of(node) else {
+                return ApparentMember::Undecided;
             };
-            if !self.surface_proves_absent(apparent, name) {
-                return false;
+            if apparent != node && !self.surface_proves_absent(apparent, name) {
+                return ApparentMember::Found(apparent);
             }
-        } else if !surface.construct_signatures.is_empty() {
-            return false;
         }
-        match self.global_surface_read("Object", &[]) {
-            GlobalWrapper::Absent => true,
-            GlobalWrapper::Surface(object_surface) => {
-                self.surface_proves_absent(object_surface, name)
+        // Read in the subject's own project, so an answer that names no
+        // project stays a shared one.
+        let Some(origin) = self.origin_file.as_deref() else {
+            return ApparentMember::Undecided;
+        };
+        match self.dispatch.global_wrapper_surface("Object", &[], origin) {
+            GlobalWrapper::Absent => ApparentMember::Absent,
+            GlobalWrapper::Surface(object) if object == node => ApparentMember::Absent,
+            GlobalWrapper::Surface(object) => {
+                if self.surface_proves_absent(object, name) {
+                    ApparentMember::Absent
+                } else {
+                    ApparentMember::Found(object)
+                }
             }
-            GlobalWrapper::Unsettled => false,
+            GlobalWrapper::Unsettled => ApparentMember::Undecided,
         }
     }
 
@@ -1617,6 +1761,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             return false;
         };
         self.surface_view_proves_absent(&view, name)
+    }
+
+    /// [`Self::surface_proves_absent`] over a surface already read.
+    fn surface_view_proves_absent(
+        &self,
+        view: &crate::semantic_query::SurfaceView,
+        name: &PropertyKey,
+    ) -> bool {
+        let absent = |needle: &PropertyKey| {
+            view.project_known_key_accessor(needle).is_none()
+                && matches!(
+                    view.project_known_key(needle),
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                )
+        };
+        !view
+            .positive_members()
+            .iter()
+            .any(|member| member.key.as_known().is_none())
+            && absent(name)
+            && name.element_access_equivalent().as_ref().is_none_or(absent)
     }
 
     /// Record the step an indexed access takes through an index signature
@@ -1648,53 +1813,293 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         value
     }
 
-    /// The composed surface a heritage body's read retries through
-    /// ([`HeritageRetry`]) once every arm of its split missed: the one
-    /// object the checker reads the declaration as, own and inherited
-    /// members, index signatures and all. `None` when an arm answered or
-    /// the body composes no surface.
-    fn heritage_retry_surface(
-        &self,
-        arm_count: usize,
-        results: &[SemanticNodeId],
-        retry: &HeritageRetry,
-    ) -> Option<SemanticNodeId> {
-        let arm_results = results.get(results.len().checked_sub(arm_count)?..)?;
-        let every_arm_missed = arm_results.iter().all(|result| {
-            matches!(
-                self.graph().node_data(*result).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            )
-        });
-        if !every_arm_missed {
-            return None;
+    /// The key a path segment reads: a property name, or a key type that
+    /// names none (`number`, `string`, a template or `symbol`).
+    fn owned_index_access_key(&self, segment: &PathSegment) -> OwnedIndexAccessKey {
+        match segment {
+            PathSegment::Member(key) => OwnedIndexAccessKey::Name(key.clone()),
+            PathSegment::Index(IndexKey::String(value)) => {
+                OwnedIndexAccessKey::Name(PropertyKey::String(Arc::clone(value)))
+            }
+            PathSegment::Index(IndexKey::Number(value)) => {
+                OwnedIndexAccessKey::Name(PropertyKey::Number(*value))
+            }
+            PathSegment::Index(IndexKey::UniqueSymbol(identity)) => {
+                OwnedIndexAccessKey::Name(PropertyKey::UniqueSymbol(identity.clone()))
+            }
+            PathSegment::Index(IndexKey::Computed(node)) => {
+                match self.dispatch.normalized_index_key_node(*node) {
+                    IndexKey::String(text) => OwnedIndexAccessKey::Name(PropertyKey::String(text)),
+                    IndexKey::Number(number) => {
+                        OwnedIndexAccessKey::Name(PropertyKey::Number(number))
+                    }
+                    IndexKey::UniqueSymbol(identity) => {
+                        OwnedIndexAccessKey::Name(PropertyKey::UniqueSymbol(identity))
+                    }
+                    IndexKey::Computed(resolved) => {
+                        match self.graph().node_data(resolved).as_deref() {
+                            Some(SemanticNodeData::Literal(
+                                crate::semantic_query::LiteralValue::Number(number),
+                            )) => OwnedIndexAccessKey::Name(PropertyKey::from_js_number(*number)),
+                            _ => OwnedIndexAccessKey::Type(resolved),
+                        }
+                    }
+                }
+            }
         }
-        let (_, surface) = self.dispatch.resolve_typeinfo_surface_view_with_node(
-            retry.body,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
-        )?;
-        (surface != retry.body).then_some(surface)
     }
 
-    /// [`Self::surface_proves_absent`] over a surface already read.
-    fn surface_view_proves_absent(
+    /// The read a union or intersection join takes for the segment its arms
+    /// were split at, decided the checker's way (`getIndexedAccessType`
+    /// over the composite) once every arm reported that it declares no
+    /// property for the key ([`ArmHow`]) — an arm that declares one keeps
+    /// the arms' reads:
+    ///
+    /// - every arm string-index-only and a key assignable to `string |
+    ///   number`: the composite's `string` index — the arms' `string` index
+    ///   types, unioned or intersected (`isStringIndexSignatureOnlyType`);
+    /// - a named key over a union some arm of which has an apparent member
+    ///   for it and every arm of which has one or an applicable index
+    ///   signature: the arms' reads (`createUnionOrIntersectionProperty`);
+    /// - a named key over an intersection: the members the arms' apparent
+    ///   `Function` / `Object` types declare;
+    /// - otherwise the composite's own index signatures: an intersection
+    ///   reads every arm's, a union the key types every arm declares, their
+    ///   types unioned (`getUnionIndexInfos`).
+    fn composite_hop(
         &self,
+        composite: SemanticNodeId,
+        probes: &[ArmProbe],
+        is_union: bool,
+        key: IndexAccessKey<'_>,
+    ) -> CompositeHop {
+        if probes.iter().any(|probe| probe.how == ArmHow::Undecided) {
+            return CompositeHop::Miss;
+        }
+        if self.key_is_string_or_number_like(key)
+            && probes
+                .iter()
+                .all(|probe| self.is_string_index_only(&probe.view))
+        {
+            let signatures = self.composite_index_signatures(probes, is_union);
+            let string = self.string_key();
+            return match self.index_signature_read(
+                composite,
+                &signatures,
+                IndexAccessKey::Type(string),
+                true,
+            ) {
+                Some(value) => CompositeHop::Value(value),
+                None => CompositeHop::Miss,
+            };
+        }
+        if let IndexAccessKey::Name(name) = key {
+            if is_union {
+                if probes.iter().any(|probe| probe.how == ArmHow::Apparent)
+                    && probes.iter().all(|probe| probe.how != ArmHow::Nothing)
+                {
+                    return CompositeHop::Arms;
+                }
+            } else {
+                let mut found: Vec<SemanticNodeId> = Vec::new();
+                for probe in probes {
+                    match self.apparent_member_surface(probe.node, &probe.view, name) {
+                        ApparentMember::Found(surface) => {
+                            if !found.contains(&surface) {
+                                found.push(surface);
+                            }
+                        }
+                        ApparentMember::Undecided => return CompositeHop::Miss,
+                        ApparentMember::Absent => {}
+                    }
+                }
+                if !found.is_empty() {
+                    return CompositeHop::Apparent(found);
+                }
+            }
+        }
+        let signatures = self.composite_index_signatures(probes, is_union);
+        match self.index_signature_read(composite, &signatures, key, true) {
+            Some(value) => CompositeHop::Value(value),
+            None => CompositeHop::Miss,
+        }
+    }
+
+    /// Report, for the arm of a composite split this step reads as, the
+    /// surface it settled on and how it read the split's segment ([`ArmHow`]).
+    /// The first report stands.
+    fn note_arm(
+        &mut self,
+        arm_read: Option<ArmRead>,
+        index: usize,
         view: &crate::semantic_query::SurfaceView,
-        name: &PropertyKey,
-    ) -> bool {
-        let absent = |needle: &PropertyKey| {
-            view.project_known_key_accessor(needle).is_none()
-                && matches!(
-                    view.project_known_key(needle),
-                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
-                )
+        node: SemanticNodeId,
+        how: ArmHow,
+    ) {
+        let Some(ArmRead {
+            at,
+            probe: Some((slot, arm)),
+            ..
+        }) = arm_read
+        else {
+            return;
         };
-        !view
-            .positive_members()
-            .iter()
-            .any(|member| member.key.as_known().is_none())
-            && absent(name)
-            && name.element_access_equivalent().as_ref().is_none_or(absent)
+        if at != index {
+            return;
+        }
+        let Some(entry) = self
+            .arm_probes
+            .get_mut(slot)
+            .and_then(|probes| probes.get_mut(arm))
+        else {
+            return;
+        };
+        if entry.is_none() {
+            *entry = Some(ArmProbe {
+                view: view.clone(),
+                node,
+                how,
+            });
+        }
+    }
+
+    /// Decide a union's or an intersection's join from its arms' reports
+    /// ([`Self::composite_hop`]). `false` when the arms' results stand —
+    /// the arms read the segment as the checker does, or an arm reported
+    /// no surface (one that reads its own property, or settles on no single
+    /// surface); `true` when the composite's own read replaced them.
+    fn decide_composite_join(
+        &mut self,
+        join: CompositeJoin,
+        arm_count: usize,
+        is_union: bool,
+        frames: &mut Vec<WalkFrame>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> bool {
+        let Some(probes) = self.arm_probes.get_mut(join.slot).map(std::mem::take) else {
+            return false;
+        };
+        let Some(probes) = probes.into_iter().collect::<Option<Vec<ArmProbe>>>() else {
+            return false;
+        };
+        let segment = &join.path[join.index];
+        let key = self.owned_index_access_key(segment);
+        let hop = self.composite_hop(join.node, &probes, is_union, key.borrowed());
+        let replaced_from = results.len().saturating_sub(arm_count);
+        match hop {
+            CompositeHop::Arms => return false,
+            CompositeHop::Value(value) => {
+                results.truncate(replaced_from);
+                let value = self.step_through_index_signature(join.node, value, segment);
+                // A fresh step over the composite's own read: not a
+                // re-entry of a node an arm visited.
+                self.visited_nodes.remove(&value);
+                frames.push(WalkFrame::Step {
+                    node: value,
+                    path: join.path,
+                    index: join.index + 1,
+                    arm_read: None,
+                });
+            }
+            CompositeHop::Apparent(surfaces) => {
+                results.truncate(replaced_from);
+                frames.push(WalkFrame::JoinIntersection {
+                    arm_count: surfaces.len(),
+                    composite: None,
+                });
+                for surface in surfaces {
+                    self.visited_nodes.remove(&surface);
+                    frames.push(WalkFrame::Step {
+                        node: surface,
+                        path: Arc::clone(&join.path),
+                        index: join.index,
+                        arm_read: Some(ArmRead {
+                            at: join.index,
+                            mode: ArmMode::Own,
+                            probe: None,
+                        }),
+                    });
+                }
+            }
+            CompositeHop::Miss => {
+                results.truncate(replaced_from);
+                results.push(self.opaque_miss());
+            }
+        }
+        true
+    }
+
+    /// Open a probe slot for a composite split of `arm_count` arms.
+    fn open_arm_probes(&mut self, arm_count: usize) -> usize {
+        self.arm_probes.push((0..arm_count).map(|_| None).collect());
+        self.arm_probes.len() - 1
+    }
+
+    /// A union's or an intersection's index signatures over its arms'
+    /// surfaces: every arm's for an intersection (the read intersects the
+    /// ones of a key type), and for a union one per key type every arm
+    /// declares, typed as the union of the arms' types
+    /// (`getUnionIndexInfos`).
+    fn composite_index_signatures(
+        &self,
+        probes: &[ArmProbe],
+        is_union: bool,
+    ) -> Vec<crate::semantic_query::IndexSignature> {
+        if !is_union {
+            return probes
+                .iter()
+                .flat_map(|probe| probe.view.index_signatures.iter().cloned())
+                .collect();
+        }
+        let Some((first, rest)) = probes.split_first() else {
+            return Vec::new();
+        };
+        let arm_value = |view: &crate::semantic_query::SurfaceView, key_type: SemanticNodeId| {
+            view.index_signatures
+                .iter()
+                .find(|signature| self.index_key_types(signature.key_type).contains(&key_type))
+                .cloned()
+        };
+        let mut signatures = Vec::new();
+        for signature in first.view.index_signatures.iter() {
+            for key_type in self.index_key_types(signature.key_type) {
+                let mut values = vec![self.index_read(
+                    signature.value_type,
+                    false,
+                    signature.declaration_origin.as_deref(),
+                )];
+                let mut readonly = signature.readonly;
+                let mut every_arm = true;
+                for probe in rest {
+                    match arm_value(&probe.view, key_type) {
+                        Some(other) => {
+                            values.push(self.index_read(
+                                other.value_type,
+                                false,
+                                other.declaration_origin.as_deref(),
+                            ));
+                            readonly |= other.readonly;
+                        }
+                        None => {
+                            every_arm = false;
+                            break;
+                        }
+                    }
+                }
+                if every_arm {
+                    signatures.push(crate::semantic_query::IndexSignature {
+                        key_type,
+                        value_type: self
+                            .dispatch
+                            .intern_normalized_union_or_intersection(&values, true),
+                        readonly,
+                        spans: verter_type_expr::IndexSignatureSpans::default(),
+                        declaration_origin: None,
+                    });
+                }
+            }
+        }
+        signatures
     }
 
     /// A global interface of the project the walk reads in — the subject's
@@ -2025,7 +2430,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             node: base,
             path: initial_path,
             index: 0,
-            property_only_at: None,
+            arm_read: None,
         }];
         let mut results: Vec<SemanticNodeId> = Vec::new();
 
@@ -2035,35 +2440,39 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     node,
                     path,
                     index,
-                    property_only_at,
+                    arm_read,
                 } => {
-                    self.advance_step(
-                        node,
-                        &path,
-                        index,
-                        property_only_at,
-                        &mut frames,
-                        &mut results,
-                    );
+                    self.advance_step(node, &path, index, arm_read, &mut frames, &mut results);
                 }
-                WalkFrame::JoinUnion { arm_count } => {
+                WalkFrame::JoinUnion {
+                    arm_count,
+                    composite,
+                } => {
+                    if let Some(join) = composite {
+                        if self.decide_composite_join(
+                            join,
+                            arm_count,
+                            true,
+                            &mut frames,
+                            &mut results,
+                        ) {
+                            continue;
+                        }
+                    }
                     self.join_union(arm_count, &mut results);
                 }
                 WalkFrame::JoinIntersection {
                     arm_count,
-                    heritage_retry,
+                    composite,
                 } => {
-                    if let Some(retry) = heritage_retry {
-                        if let Some(surface) =
-                            self.heritage_retry_surface(arm_count, &results, &retry)
-                        {
-                            results.truncate(results.len() - arm_count);
-                            frames.push(WalkFrame::Step {
-                                node: surface,
-                                path: retry.path,
-                                index: retry.index,
-                                property_only_at: None,
-                            });
+                    if let Some(join) = composite {
+                        if self.decide_composite_join(
+                            join,
+                            arm_count,
+                            false,
+                            &mut frames,
+                            &mut results,
+                        ) {
                             continue;
                         }
                     }
@@ -2091,7 +2500,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         start_node: SemanticNodeId,
         path: &Arc<[PathSegment]>,
         start_index: usize,
-        property_only_at: Option<usize>,
+        arm_read: Option<ArmRead>,
         frames: &mut Vec<WalkFrame>,
         results: &mut Vec<SemanticNodeId>,
     ) {
@@ -2355,17 +2764,40 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                         )) => crate::semantic_query::PropertyKey::from_js_number(*n),
                                         // A key that names no property (`number`,
                                         // `string`, a template or `symbol`) reads
-                                        // the index signature that applies to it.
+                                        // the index signature that applies to it
+                                        // — `string`'s, for a key assignable to
+                                        // `string | number`, on a
+                                        // string-index-only object.
                                         _ => {
                                             let surface = surface.clone();
                                             drop(data);
-                                            let read = if property_only_at == Some(index) {
+                                            let key = if self.is_string_index_only(&surface)
+                                                && self.key_is_string_or_number_like(
+                                                    IndexAccessKey::Type(resolved),
+                                                ) {
+                                                self.string_key()
+                                            } else {
+                                                resolved
+                                            };
+                                            // An arm of a composite split
+                                            // leaves the key to its composite.
+                                            let read = if arm_read
+                                                .is_some_and(|read| read.at == index)
+                                            {
+                                                self.note_arm(
+                                                    arm_read,
+                                                    index,
+                                                    &surface,
+                                                    current,
+                                                    ArmHow::Nothing,
+                                                );
                                                 None
                                             } else {
                                                 self.index_signature_read(
                                                     current,
-                                                    &surface,
-                                                    IndexAccessKey::Type(resolved),
+                                                    &surface.index_signatures,
+                                                    IndexAccessKey::Type(key),
+                                                    true,
                                                 )
                                             };
                                             match read {
@@ -2511,76 +2943,96 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             self.intermediate_nodes.push(Some(current));
                         }
                         None => {
-                            // A key no property names reads the index
-                            // signature that applies to it — before the
-                            // members the apparent `Function` / `Object`
-                            // type adds when the surface declares no
-                            // property of its own, after them otherwise.
+                            // A key no property names reads, in the
+                            // checker's order (`getIndexedAccessType`): a
+                            // string-index-only object's `string` index for
+                            // a key assignable to `string | number`; then the
+                            // members the apparent `Function` type of an
+                            // object with signatures and the global `Object`
+                            // add (`getPropertyOfType`); then the index
+                            // signature that applies to the key. An arm of a
+                            // union or intersection split reads the segment
+                            // as its composite asks ([`ArmMode`]) and reports
+                            // how it did.
+                            let mode = arm_read
+                                .and_then(|read| (read.at == index).then_some(read.mode));
                             let absent = self.surface_view_proves_absent(surface, &known_key);
-                            if absent && property_only_at != Some(index) {
-                                let surface = surface.clone();
-                                drop(data);
-                                if let Some(value) = self.index_signature_read(
+                            let surface = surface.clone();
+                            drop(data);
+                            if !absent || mode == Some(ArmMode::Own) {
+                                let how = if absent {
+                                    ArmHow::Nothing
+                                } else {
+                                    ArmHow::Undecided
+                                };
+                                self.note_arm(arm_read, index, &surface, current, how);
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                            let read = if mode.is_none()
+                                && self.is_string_index_only(&surface)
+                                && self.key_is_string_or_number_like(IndexAccessKey::Name(
+                                    &known_key,
+                                )) {
+                                let string = self.string_key();
+                                self.index_signature_read(
                                     current,
-                                    &surface,
-                                    IndexAccessKey::Name(&known_key),
-                                ) {
+                                    &surface.index_signatures,
+                                    IndexAccessKey::Type(string),
+                                    true,
+                                )
+                            } else {
+                                match self.apparent_member_surface(current, &surface, &known_key) {
+                                    ApparentMember::Found(apparent) => {
+                                        self.note_arm(
+                                            arm_read,
+                                            index,
+                                            &surface,
+                                            current,
+                                            ArmHow::Apparent,
+                                        );
+                                        current = apparent;
+                                        continue;
+                                    }
+                                    ApparentMember::Undecided => {
+                                        self.note_arm(
+                                            arm_read,
+                                            index,
+                                            &surface,
+                                            current,
+                                            ArmHow::Undecided,
+                                        );
+                                        None
+                                    }
+                                    ApparentMember::Absent => {
+                                        let read = self.index_signature_read(
+                                            current,
+                                            &surface.index_signatures,
+                                            IndexAccessKey::Name(&known_key),
+                                            mode.is_none(),
+                                        );
+                                        let how = if read.is_some() {
+                                            ArmHow::Index
+                                        } else {
+                                            ArmHow::Nothing
+                                        };
+                                        self.note_arm(arm_read, index, &surface, current, how);
+                                        read
+                                    }
+                                }
+                            };
+                            match read {
+                                Some(value) => {
                                     current =
                                         self.step_through_index_signature(current, value, segment);
                                     index += 1;
                                     continue;
                                 }
-                                if !surface.call_signatures.is_empty() {
-                                    if let Some(apparent) = self.dispatch.apparent_type_of(current)
-                                    {
-                                        if apparent != current {
-                                            current = apparent;
-                                            continue;
-                                        }
-                                    }
-                                }
-                                // Every object type reads the global
-                                // `Object`'s members last — read in the
-                                // subject's own project, so a miss that
-                                // names no project stays a shared miss.
-                                let object_global = self.origin_file.as_deref().map(|origin| {
-                                    self.dispatch.global_wrapper_surface("Object", &[], origin)
-                                });
-                                if let Some(super::apparent_type::GlobalWrapper::Surface(object)) =
-                                    object_global
-                                {
-                                    if object != current
-                                        && !self.surface_proves_absent(object, &known_key)
-                                    {
-                                        current = object;
-                                        continue;
-                                    }
-                                }
-                                results.push(self.opaque_miss());
-                                return;
-                            }
-                            // A surface that carries CALL SIGNATURES exposes
-                            // the members of the ambient callable-function
-                            // interface in addition to its own. Its own
-                            // members win (the lookup above already ran);
-                            // only an absent member widens to the APPARENT
-                            // type and re-processes this segment there. The
-                            // widening is owned by the `ApparentType` family
-                            // — the walker never looks an ambient symbol up
-                            // itself — and an unproduced apparent surface
-                            // keeps the terminal `Opaque(Miss)` below.
-                            if !surface.call_signatures.is_empty() {
-                                let apparent = self.dispatch.apparent_type_of(current);
-                                drop(data);
-                                if let Some(apparent) = apparent {
-                                    if apparent != current {
-                                        current = apparent;
-                                        continue;
-                                    }
+                                None => {
+                                    results.push(self.opaque_miss());
+                                    return;
                                 }
                             }
-                            results.push(self.opaque_miss());
-                            return;
                         }
                     }
                 }
@@ -2591,16 +3043,45 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // LIFO so the join executes AFTER all arm steps
                     // complete. Union contributor rule: any arm
                     // producing `Opaque(_)` → whole union misses.
+                    //
+                    // Each arm reads the segment as a union member and
+                    // reports the surface it settled on; the join then
+                    // decides the segment for the union
+                    // ([`Self::composite_hop`]).
                     let arms = arms.clone();
+                    drop(data);
+                    let (mode, composite) = match arm_read.filter(|read| read.at == index) {
+                        Some(read) => (read.mode, None),
+                        None => {
+                            let slot = self.open_arm_probes(arms.len());
+                            (
+                                ArmMode::Member,
+                                Some(CompositeJoin {
+                                    slot,
+                                    node: current,
+                                    path: Arc::clone(path),
+                                    index,
+                                }),
+                            )
+                        }
+                    };
+                    let slot = composite.as_ref().map(|join| join.slot);
                     let arm_count = arms.len();
-                    frames.push(WalkFrame::JoinUnion { arm_count });
+                    frames.push(WalkFrame::JoinUnion {
+                        arm_count,
+                        composite,
+                    });
                     let remaining_path = path.clone();
-                    for arm in arms.iter() {
+                    for (arm_index, arm) in arms.iter().enumerate() {
                         frames.push(WalkFrame::Step {
                             node: *arm,
                             path: Arc::clone(&remaining_path),
                             index,
-                            property_only_at: Some(index),
+                            arm_read: Some(ArmRead {
+                                at: index,
+                                mode,
+                                probe: slot.map(|slot| (slot, arm_index)),
+                            }),
                         });
                     }
                     // Arm-split — backfill cannot publish a
@@ -2614,31 +3095,80 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // `Step` frame per arm. Opaque arms are dropped at
                     // join time; only non-opaque contributors survive.
                     //
-                    // A heritage body is one declared object: when none of
-                    // its arms carries the key, the read retries through
-                    // its composed surface.
+                    // A heritage body is one declared object: a key none
+                    // of its properties names is read off its composed
+                    // surface. Any other intersection's arms read their own
+                    // properties and report the surface they settled on;
+                    // the join then decides the segment for the
+                    // intersection ([`Self::composite_hop`]).
                     let heritage = arms.origin_category()
                         == crate::semantic_query::composite::CompositeOriginCategory::Heritage;
                     let arms = arms.clone();
-                    let arm_count = arms.len();
-                    let heritage_retry = (heritage && property_only_at != Some(index)).then(|| {
-                        HeritageRetry {
-                            body: current,
-                            path: Arc::clone(path),
-                            index,
+                    drop(data);
+                    let mut restricted = arm_read.filter(|read| read.at == index);
+                    if heritage {
+                        let key = self.owned_index_access_key(segment);
+                        if let Some((view, composed)) =
+                            self.dispatch.resolve_typeinfo_surface_view_with_node(
+                                current,
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    ProjectionMode::Shallow,
+                                ),
+                            )
+                        {
+                            let declared = match key.borrowed() {
+                                IndexAccessKey::Name(name) => {
+                                    !self.surface_view_proves_absent(&view, name)
+                                }
+                                IndexAccessKey::Type(_) => false,
+                            };
+                            if declared {
+                                // The declaration's own and inherited
+                                // properties, never a base's index
+                                // signature.
+                                restricted = Some(ArmRead {
+                                    at: index,
+                                    mode: ArmMode::Own,
+                                    probe: None,
+                                });
+                            } else if composed != current {
+                                current = composed;
+                                continue;
+                            }
                         }
-                    });
+                    }
+                    let (mode, composite) = match restricted {
+                        Some(read) => (read.mode, None),
+                        None => {
+                            let slot = self.open_arm_probes(arms.len());
+                            (
+                                ArmMode::Own,
+                                Some(CompositeJoin {
+                                    slot,
+                                    node: current,
+                                    path: Arc::clone(path),
+                                    index,
+                                }),
+                            )
+                        }
+                    };
+                    let slot = composite.as_ref().map(|join| join.slot);
+                    let arm_count = arms.len();
                     frames.push(WalkFrame::JoinIntersection {
                         arm_count,
-                        heritage_retry,
+                        composite,
                     });
                     let remaining_path = path.clone();
-                    for arm in arms.iter() {
+                    for (arm_index, arm) in arms.iter().enumerate() {
                         frames.push(WalkFrame::Step {
                             node: *arm,
                             path: Arc::clone(&remaining_path),
                             index,
-                            property_only_at: Some(index),
+                            arm_read: Some(ArmRead {
+                                at: index,
+                                mode,
+                                probe: slot.map(|slot| (slot, arm_index)),
+                            }),
                         });
                     }
                     // Arm-split — backfill cannot publish a

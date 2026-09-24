@@ -13,7 +13,7 @@
 //! every probe here): `export declare const v: <probe>; export const r =
 //! v;` read off the declaration emitted for `r`.
 
-use super::checker_probe_lane_tests::mismatches;
+use super::checker_probe_lane_tests::{mismatches, mismatches_in, ProbeProject};
 
 const FIXTURE: &str = "\
 class D0 { p = 1 as const; private q = 2; protected r = 3; static s = 4 }
@@ -132,6 +132,67 @@ fn a_relation_reads_prototype_as_a_property() {
                 "\"y\"",
             ),
             ("(typeof D0)['prototype'] extends D0 ? 'y' : 'n'", "\"y\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The members of the library's `Function`, as `lib.es5.d.ts` declares
+/// them.
+const FUNCTION_LIB: &str = "\
+interface Function { prototype: any; readonly length: number; readonly name: string; }
+";
+
+const CONSTRUCTOR_TYPES: &str = "\
+interface Foo { f: 1 }
+type Ctor = { new (): Foo };
+type CtorFn = new () => Foo;
+type CallOnly = { (): 1 };
+type Both = { new (): Foo; (): 1 };
+type CtorS = { new (): Foo; s: 2 };
+declare const ctor: Ctor;
+declare const callOnly: CallOnly;
+declare const both: Both;
+";
+
+/// A constructor type that is not a class has no `prototype` of its own:
+/// it reads the apparent `Function`'s, as a function type does, and
+/// `keyof` lists none of the apparent members.
+///
+/// Measured on TypeScript 7.0.2: `Ctor['prototype']`,
+/// `CtorFn['prototype']`, `Both['prototype']`, `CallOnly['prototype']`,
+/// `CtorS['prototype']`, `typeof ctor.prototype`, `typeof
+/// callOnly.prototype` and `typeof both.prototype` are `any`;
+/// `Ctor['length']`, `CallOnly['length']` and `typeof ctor.length` are
+/// `number` and `Ctor['name']` is `string`; `keyof Ctor`, `keyof CallOnly`
+/// and `keyof Both` are `never` and `keyof CtorS` is `"s"`.
+#[test]
+fn a_constructor_type_reads_the_apparent_function_members() {
+    let project = ProbeProject {
+        files: &[],
+        compiler_options: None,
+        ambient_lib: Some(FUNCTION_LIB),
+    };
+    let failures = mismatches_in(
+        project,
+        CONSTRUCTOR_TYPES,
+        &[
+            ("Ctor['prototype']", "any"),
+            ("CtorFn['prototype']", "any"),
+            ("Both['prototype']", "any"),
+            ("CallOnly['prototype']", "any"),
+            ("CtorS['prototype']", "any"),
+            ("typeof ctor.prototype", "any"),
+            ("typeof callOnly.prototype", "any"),
+            ("typeof both.prototype", "any"),
+            ("Ctor['length']", "number"),
+            ("CallOnly['length']", "number"),
+            ("typeof ctor.length", "number"),
+            ("Ctor['name']", "string"),
+            ("keyof Ctor", "never"),
+            ("keyof CallOnly", "never"),
+            ("keyof Both", "never"),
+            ("keyof CtorS", "\"s\""),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
