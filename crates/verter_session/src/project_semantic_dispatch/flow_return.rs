@@ -1161,6 +1161,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::request_context::mark_request_result_partial();
                 None
             }
+            IndexedValueExpression::TemplateStrings { .. } => {
+                self.global_template_strings_array(canonical, owner)
+            }
             IndexedValueExpression::Call(call) => {
                 let callee = self.evaluate_indexed_value_expression_node_inner(
                     canonical,
@@ -6043,8 +6046,11 @@ fn expression_write_tree(
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
             }
-            SliceExpr::Call(SliceCall::Construct(constructor), _) => {
-                walk(constructor, out);
+            SliceExpr::Call(
+                SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee),
+                _,
+            ) => {
+                walk(callee, out);
             }
             _ => {}
         }
@@ -15285,28 +15291,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // evaluates unchanged: its own typed miss carrier is the
                 // honest answer, exactly as for any other unresolved
                 // reference.
-                if shadowed
-                    .iter()
-                    .any(|name| self.owner_scope_answers_name(name))
-                {
-                    return Positional::Unmodeled;
-                }
-                // The owner scope answers NOTHING — but the FRAME may.
+                //
                 // A member path rooted at one of the frame's own bindings
                 // (`x.a.b` over parameter `x`, `node.props.value` over a
-                // reaching local) resolves its root through the frame's
-                // substitution and projects the tail segments through the
-                // one shared path projection, exactly as the owner-scope
-                // lowering projects a free root's tail. Only when the
-                // frame carries no such root does the leaf evaluate
-                // unchanged: its own typed miss carrier is the honest
-                // answer, exactly as for any other unresolved reference.
+                // reaching local) never reads the owner scope at all: its
+                // root is the ONLY name the answer references, it resolves
+                // through the frame's substitution, and the tail projects
+                // through the one shared path projection. So whatever the
+                // owner scope answers for the same name, the frame's read
+                // is the answer.
                 if let crate::flow_slice_content::SliceExpr::Type(leaf) = inner.as_ref() {
                     if let Some(node) =
                         self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
                     {
                         return node;
                     }
+                }
+                if shadowed
+                    .iter()
+                    .any(|name| self.owner_scope_answers_name(name))
+                {
+                    return Positional::Unmodeled;
                 }
                 self.eval_expr(inner)
             }
@@ -16595,6 +16600,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
                 self.eval_call_via_resolve_call(constructor, site)
                     .unwrap_or_else(|| self.degraded_unrepresentable_callee())
+            }
+            crate::flow_slice_content::SliceCall::TaggedTemplate(tag) => {
+                // `` tag`a${x}b` `` — the checker's
+                // `resolveTaggedTemplateExpression`: a call of the tag whose
+                // first argument is the template strings. It takes the
+                // routes an ordinary call over a resolved callee takes: an
+                // overloaded or inference-bearing tag resolves through the
+                // executor, a lone signature through the one call sink.
+                let tag = match self.eval_expr(tag) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                if self.call_group_needs_executor(tag, site) {
+                    let overloaded = matches!(
+                        self.dispatch.shared_signature_buckets(tag),
+                        Ok((call_sigs, construct_sigs))
+                            if call_sigs.len() + construct_sigs.len() > 1
+                    );
+                    if let Some(value) = self.eval_call_via_resolve_call(tag, site) {
+                        return value;
+                    }
+                    if overloaded {
+                        return self.degraded_unrepresentable_callee();
+                    }
+                }
+                self.call_return_of_callee_node(tag, site)
             }
         }
     }

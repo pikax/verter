@@ -2689,6 +2689,15 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
         self.push_call(&it.callee, true, it.span.into());
         walk::walk_new_expression(self, it);
     }
+
+    // A tagged template calls its tag.
+    fn visit_tagged_template_expression(
+        &mut self,
+        it: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+    ) {
+        self.push_call(&it.tag, false, it.span.into());
+        walk::walk_tagged_template_expression(self, it);
+    }
 }
 
 impl SkeletonBuilder<'_> {

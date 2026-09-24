@@ -31535,7 +31535,9 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
 }
 
 /// The DEGRADED twin: the flow return carries a member the substrate cannot
-/// model (`made`, typed marker), so the composed surface is partial — but
+/// model (`made`, typed marker: `notDeclared` is declared nowhere, so its
+/// call is TS2304 and the checker's error type is recovery the lane does not
+/// model), so the composed surface is partial — but
 /// the partiality is the POSITIONAL `FLOW_RETURN_UNINFERRED` class, which
 /// every macro codegen lane CONTAINS (the member carrying the marker
 /// degrades member-locally; its exact siblings keep their constructors).
@@ -31558,9 +31560,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
     upsert_ts(
         &host,
         "/ws.ts",
-        "class Box { readonly tag = \"box\" }\n\
-         declare function box(strings: TemplateStringsArray): Box\n\
-         function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }\n\
+        "function makeProps() { const f = () => notDeclared(); return { label: \"x\", made: f() } }\n\
          interface Props extends ReturnType<typeof makeProps> { extra: string }",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
