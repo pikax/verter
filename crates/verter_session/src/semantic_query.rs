@@ -147,6 +147,10 @@ mod flow_return_result;
 pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
 mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
+mod checker_diagnostic;
+pub use checker_diagnostic::{
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
+};
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1093,10 +1097,11 @@ impl DeclIdentity {
 ///
 /// A class expression declares nothing a [`DeclIdentity`] could name, so it
 /// is identified by where it was authored: the defining file and owner, and
-/// the expression's offset in that file. The two print fields are what the
-/// checker spells the instance type as — `Mixin.(Anonymous class)` for
-/// `function Mixin<S …>(Base: S) { return class extends Base { … } }`,
-/// measured on TypeScript 7.0.2.
+/// the expression's offset in that file. The print fields are what the
+/// checker spells a reference to the instance type with (measured on
+/// TypeScript 7.0.2): the class's own name, and every type-parameter clause
+/// that encloses it, whose declaration qualifies a reference that
+/// instantiates that clause.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassExpressionIdentity {
     /// The file the class expression is authored in.
@@ -1106,26 +1111,95 @@ pub struct ClassExpressionIdentity {
     /// The class expression's start offset in `canonical_id`.
     pub offset: u32,
     /// The class's own printed name: its binding identifier
-    /// (`class Foo {}`), else the variable it directly initializes
-    /// (`const C = class {}`), else the checker's `(Anonymous class)`.
+    /// (`class Foo {}`), else the name it is assigned to (`const C = class
+    /// {}`, `{ C: class {} }`, `C = class {}`), else the checker's
+    /// `(Anonymous class)`.
     pub name: Arc<str>,
-    /// The declaration whose type-parameter clause encloses the class
-    /// (`Mixin` above), when one does. The class then has OUTER type
-    /// parameters, and the checker qualifies every instantiated reference
-    /// with their declaring container (`Mixin.(Anonymous class)`); a class
-    /// no clause encloses prints its bare name (`(Anonymous class)`).
-    pub qualifier: Option<Arc<str>>,
+    /// The type-parameter clauses that enclose the class — its OUTER type
+    /// parameters, outermost clause first, a class member's class clause
+    /// before the member's own.
+    pub outer_clauses: Arc<[ClassExpressionClause]>,
+    /// How many type parameters the class declares itself; a reference
+    /// prints their arguments after the name (`(Anonymous class)<string>`).
+    pub own_arity: u32,
+}
+
+/// One type-parameter clause enclosing a class expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassExpressionClause {
+    /// The name the checker prints for the clause's declaration when it
+    /// qualifies a reference: `outer` for a function, `Holder.make` for a
+    /// class method, `o.m` for a method of an object literal a variable
+    /// holds, `arrow` for the arrow a variable holds, `GHolder` for a
+    /// class.
+    pub container: Arc<str>,
+    /// The clause's type parameters, in declaration order.
+    pub parameters: Arc<[Arc<str>]>,
 }
 
 impl ClassExpressionIdentity {
-    /// The printed name the checker spells an instantiated reference to
-    /// this class as.
+    /// The name the checker prints for a reference to this class with
+    /// `type_arguments` (one per outer type parameter, then one per own
+    /// type parameter), without the own arguments' list.
+    ///
+    /// The checker's `typeReferenceToTypeNode`: each enclosing clause whose
+    /// arguments are not exactly its own parameters prints its
+    /// declaration, in order, before the class's name — so a reference
+    /// read inside the declaring body (`C`) stays unqualified, and an
+    /// instantiated one (`outer.(Anonymous class)`,
+    /// `outer3.inner.(Anonymous class)`) is qualified by every clause it
+    /// instantiates.
     #[must_use]
-    pub fn printed_name(&self) -> String {
-        match &self.qualifier {
-            Some(qualifier) => format!("{qualifier}.{}", self.name),
-            None => self.name.to_string(),
+    pub fn printed_name(
+        &self,
+        type_arguments: &[SemanticNodeId],
+        is_parameter: impl Fn(SemanticNodeId, &str) -> bool,
+    ) -> String {
+        let mut printed = String::new();
+        let mut start = 0;
+        for clause in self.outer_clauses.iter() {
+            let end = start + clause.parameters.len();
+            let instantiated = clause.parameters.iter().enumerate().any(|(index, name)| {
+                type_arguments
+                    .get(start + index)
+                    .is_none_or(|argument| !is_parameter(*argument, name))
+            });
+            if instantiated {
+                printed.push_str(&clause.container);
+                printed.push('.');
+            }
+            start = end;
         }
+        printed.push_str(&self.name);
+        printed
+    }
+
+    /// [`Self::printed_name`] over `store`: an argument is its clause's
+    /// parameter when it is the type parameter of that name.
+    #[must_use]
+    pub(crate) fn printed_name_in(
+        &self,
+        store: &crate::semantic_query_memo::SemanticGraphStore,
+        type_arguments: &[SemanticNodeId],
+    ) -> String {
+        self.printed_name(type_arguments, |argument, name| {
+            matches!(
+                store.node_data(argument).as_deref(),
+                Some(SemanticNodeData::TypeParam { display_name, .. })
+                    if display_name.as_ref() == name
+            )
+        })
+    }
+
+    /// The arguments a reference passes to the class's OWN type
+    /// parameters (the trailing `own_arity` of `type_arguments`).
+    #[must_use]
+    pub fn own_type_arguments<'a>(
+        &self,
+        type_arguments: &'a [SemanticNodeId],
+    ) -> &'a [SemanticNodeId] {
+        let own = (self.own_arity as usize).min(type_arguments.len());
+        &type_arguments[type_arguments.len() - own..]
     }
 }
 
@@ -1555,6 +1629,12 @@ pub struct FlowReturnPolicy {
     /// or a fall-through adds `undefined`, and which union algebra every
     /// join of the body runs.
     pub nullability: NullabilityPolicy,
+    /// `noImplicitAny` of the project owning the function: whether an
+    /// unannotated `let` / `var` with no initializer or a bare `null` /
+    /// `undefined` one is the checker's AUTO-TYPED variable (its type
+    /// follows its assignments) or is declared as its initializer's
+    /// widened type (`any` with no initializer).
+    pub no_implicit_any: bool,
 }
 
 impl FlowReturnPolicy {
@@ -1565,6 +1645,7 @@ impl FlowReturnPolicy {
     ) -> Self {
         Self {
             nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
+            no_implicit_any: options.no_implicit_any,
         }
     }
 }
@@ -5304,6 +5385,17 @@ pub enum QueryError {
     /// minted itself one frame down: doing so fed the marker straight back
     /// into the frame-level failure it exists to avoid.
     UnmodeledPosition,
+    /// The checker's ERROR TYPE after a diagnostic it recovers from: the
+    /// operation [`CheckerDiagnostic::operation`] names raised
+    /// [`CheckerDiagnostic::code`], and the checker continues with its error
+    /// type, which reads as the diagnostic's
+    /// [`recovery`](CheckerDiagnostic::recovery) (`any`).
+    ///
+    /// A complete, language-defined answer: it relates, absorbs and raises
+    /// as that recovery, carrying the diagnostic that produced it. Never a
+    /// stand-in for something this substrate cannot answer — those stay
+    /// typed gaps.
+    CheckerRecovery(CheckerDiagnostic),
 }
 
 impl QueryError {
@@ -5311,13 +5403,16 @@ impl QueryError {
     ///
     /// Recursive references and declaration placeholders are publishable type
     /// carriers: the former is a settled recursion leaf, while the latter is
-    /// an addressable declaration shell. Every other variant represents a
+    /// an addressable declaration shell. A checker recovery is the checker's
+    /// own answer after a diagnostic. Every other variant represents a
     /// failure, unresolved control state, or unrepresentable/open value and
     /// therefore cannot contribute a recovered inference value.
     #[must_use]
     pub(crate) fn means_type_is_not_yet_known(&self) -> bool {
         match self {
-            QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. } => false,
+            QueryError::RecursiveRef { .. }
+            | QueryError::DeclPlaceholder { .. }
+            | QueryError::CheckerRecovery(_) => false,
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
@@ -5355,6 +5450,9 @@ impl QueryError {
     ///   resolved to an intrinsic the registry cannot compute.
     /// - [`ValueDomainMismatch`](Self::ValueDomainMismatch) — a genuine
     ///   value-domain type error.
+    /// - [`CheckerRecovery`](Self::CheckerRecovery) — the checker's own error
+    ///   type after a diagnostic it recovers from (it raises as its recovery
+    ///   rather than as a failure shell).
     ///
     /// The CONTROL / recursion sentinels are NOT the error type and keep their
     /// existing semantics — the walker / raiser / relation engine interpret
@@ -5373,8 +5471,8 @@ impl QueryError {
     ///
     /// Derived from the SINGLE `QueryError` disposition authority
     /// (`project_semantic_dispatch::query_error_disposition`) — the §22 error
-    /// type is exactly the `Failure` disposition. There is no second listing
-    /// of which arms are errors.
+    /// type is exactly the `Failure` and `CheckerRecovery` dispositions. There
+    /// is no second listing of which arms are errors.
     #[must_use]
     pub(crate) fn is_error_type(&self) -> bool {
         crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(self)
@@ -5440,6 +5538,7 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
+            (Self::CheckerRecovery(a), Self::CheckerRecovery(b)) => a == b,
             _ => false,
         }
     }
@@ -5474,6 +5573,7 @@ impl QueryError {
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
+            Self::CheckerRecovery(_) => 21,
         }
     }
 }
@@ -5528,6 +5628,7 @@ impl std::hash::Hash for QueryError {
             | Self::UnrepresentableSurfaceMember
             | Self::UnmodeledPosition
             | Self::OpenSurface => {}
+            Self::CheckerRecovery(diagnostic) => diagnostic.hash(state),
         }
     }
 }
@@ -8374,10 +8475,16 @@ pub enum SemanticQueryKey {
     ///   one level through `Instantiate` and re-enters this family on the
     ///   body; an unchanged body answers with the CARRIER, so a
     ///   non-thenable alias keeps its identity;
+    /// - a thenable whose promised value is a type this family is ALREADY
+    ///   unwrapping on the current path is the checker's recursive
+    ///   thenable: TS1062, with the arm dropped from an enclosing union and
+    ///   otherwise the checker's error type as the answer
+    ///   (`Opaque(QueryError::CheckerRecovery(..))`, reading as `any`) —
+    ///   complete, but ReturnOnly;
     /// - a `then` shape the reader cannot enumerate, a carrier that does
-    ///   not expand, a cyclic carrier, an exhausted budget, or any other
-    ///   unsettled shape is an HONEST REFUSAL (the deferred `Opaque(Miss)`
-    ///   shell), never a fabricated passthrough.
+    ///   not expand, an exhausted budget, or any other unsettled shape is
+    ///   an HONEST REFUSAL (the deferred `Opaque(Miss)` shell), never a
+    ///   fabricated passthrough.
     ///
     /// Value domain: [`SemanticQueryValueTag::TypeNode`].
     ///
@@ -8422,7 +8529,8 @@ pub enum SemanticQueryKey {
     ///   first: a reduced application is this family's operand, a deferred
     ///   one strips to this family over `X`;
     /// - object surfaces and declaration carriers follow the same thenable
-    ///   protocol and carrier expansion as [`Self::AwaitedNormalize`], each
+    ///   protocol, carrier expansion and recursive-thenable rule (TS1062,
+    ///   raised by the async return) as [`Self::AwaitedNormalize`], each
     ///   re-entering THIS family;
     /// - anything else is an honest refusal.
     ///
@@ -9412,13 +9520,20 @@ pub enum SemanticNodeData {
     /// is nominal exactly where a `DeclRef` is: display, stable keys and a
     /// declaration-keeping read keep the identity, and a structural read
     /// reads through to `surface` exactly as a `DeclRef` read resolves its
-    /// declaration's body. Instantiating the class's outer type parameters
-    /// substitutes into `surface` under the same identity.
+    /// declaration's body. Instantiating a type parameter the class can see
+    /// substitutes into `type_arguments` and `surface` under the same
+    /// identity — the checker's type reference to the class, whose
+    /// arguments decide how it prints.
     ///
     /// Raises to the raised `surface` — the declaration emitter's own
     /// spelling of a class expression's instance type.
     ClassExpressionInstance {
         identity: Arc<ClassExpressionIdentity>,
+        /// The reference's arguments: one per outer type parameter (in
+        /// [`ClassExpressionIdentity::outer_clauses`] order), then one per
+        /// own type parameter. Where the class is authored each is its
+        /// parameter itself.
+        type_arguments: Arc<[SemanticNodeId]>,
         surface: SemanticNodeId,
     },
 
@@ -9779,13 +9894,15 @@ impl PartialEq for SemanticNodeData {
             (
                 Self::ClassExpressionInstance {
                     identity: ai,
+                    type_arguments: ata,
                     surface: asf,
                 },
                 Self::ClassExpressionInstance {
                     identity: bi,
+                    type_arguments: bta,
                     surface: bsf,
                 },
-            ) => ai == bi && asf == bsf,
+            ) => ai == bi && ata == bta && asf == bsf,
             (
                 Self::IntrinsicApplication { op: ao, args: aa },
                 Self::IntrinsicApplication { op: bo, args: ba },
@@ -9946,8 +10063,13 @@ impl std::hash::Hash for SemanticNodeData {
                 base.hash(state);
                 args.hash(state);
             }
-            Self::ClassExpressionInstance { identity, surface } => {
+            Self::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
                 identity.hash(state);
+                type_arguments.hash(state);
                 surface.hash(state);
             }
             Self::IntrinsicApplication { op, args } => {
@@ -10371,6 +10493,10 @@ mod tests {
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
             QueryError::UnmodeledPosition,
+            QueryError::CheckerRecovery(CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::LibAwaited,
+            }),
         ];
         let mut tags = HashSet::new();
         for variant in &variants {

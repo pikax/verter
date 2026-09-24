@@ -1837,9 +1837,16 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             base.hash(hasher);
             args.len().hash(hasher);
         }
-        // The class identity; the instance surface hashes through the
-        // shared child walk.
-        D::ClassExpressionInstance { identity, .. } => identity.hash(hasher),
+        // The class identity and the reference's arity; the type arguments
+        // and the instance surface hash through the shared child walk.
+        D::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        } => {
+            identity.hash(hasher);
+            type_arguments.len().hash(hasher);
+        }
         // Childless payloads (whole-payload hashed by the caller before
         // this function is ever reached) and the opaque payloads (same):
         // deliberately unreachable here, hashed as their full payload for
@@ -2490,21 +2497,25 @@ fn compare_shallow(
         // payload-Eq fast path already admitted identical pairs).
         (D::DeferredCallable(_), D::DeferredCallable(_)) => false,
         (D::DeclRef { identity: a }, D::DeclRef { identity: b }) => a == b,
-        // One class expression, compared through its instance surface (an
-        // instantiation of its outer type parameters).
+        // One class expression, compared through the reference's type
+        // arguments and its instance surface (an instantiation of the type
+        // parameters the class can see).
         (
             D::ClassExpressionInstance {
                 identity: ia,
+                type_arguments: ta,
                 surface: sa,
             },
             D::ClassExpressionInstance {
                 identity: ib,
+                type_arguments: tb,
                 surface: sb,
             },
         ) => {
-            if ia != ib {
+            if ia != ib || ta.len() != tb.len() {
                 return false;
             }
+            work.extend(ta.iter().copied().zip(tb.iter().copied()));
             work.push((*sa, *sb));
             true
         }

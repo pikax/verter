@@ -615,8 +615,22 @@ pub(crate) fn render_node(
         SemanticNodeData::InstantiationRef { base, .. } => {
             format!("InstantiationRef({})", base.decl_name)
         }
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
-            format!("ClassExpressionInstance({})", identity.printed_name())
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            ..
+        } => {
+            let own: Vec<String> = identity
+                .own_type_arguments(type_arguments)
+                .iter()
+                .map(|arg| render_node(dispatch, *arg, depth + 1))
+                .collect();
+            let name = identity.printed_name_in(dispatch.graph(), type_arguments);
+            if own.is_empty() {
+                format!("ClassExpressionInstance({name})")
+            } else {
+                format!("ClassExpressionInstance({name}<{}>)", own.join(", "))
+            }
         }
         SemanticNodeData::BareRef(_) => format!(
             "BareRef({})",
@@ -1096,17 +1110,19 @@ pub(crate) fn check_boundary_refusal(
 /// arrays only), `Name<T, …>` generic arguments, objects whose members
 /// are properties (`name: T` with `readonly` / `?` modifiers), methods
 /// (`name(p: T, …): R`), accessors (`get name(): R`, `set name(p: T);`)
-/// and the `... N more ...` print elision, plus `(p: T, …) => T` and the
-/// predicate prints `… => p is T` / `… => asserts p [is T]` /
-/// `… => this is T` / `… => asserts this [is T]`.
+/// and the `... N more ...` print elision, plus `(p: T, …) => T`, the
+/// construct print `new (p: T, …) => T`, and the predicate prints
+/// `… => p is T` / `… => asserts p [is T]` / `… => this is T` /
+/// `… => asserts this [is T]`.
 /// Unsupported text is a loud parse error — never a silent exemption.
 ///
 /// Unions are order-insensitive exact sets; intersections are source-
 /// ordered; objects are exact member sets compared on name, modifiers,
-/// method kind, and value; a function print is a Call signature only
-/// (`new (…) => T` never satisfies it) — either a live `Signature` node or
-/// an object whose ONLY content is one call signature, which TypeScript
-/// prints as a function type. Parameter names are ignored; types and
+/// method kind, and value; a function print is a Call signature and a
+/// `new (…) => T` print a Construct signature, never the other kind —
+/// either a live `Signature` node of that kind or an object whose ONLY
+/// content is one signature of that kind, which TypeScript prints as a
+/// function / constructor type. Parameter names are ignored; types and
 /// arity are exact. A printed predicate matches a live predicate of the
 /// same kind about the same parameter POSITION with an equal target, and
 /// a predicate-less print never matches a predicate signature. A reference
@@ -1153,6 +1169,9 @@ pub(crate) mod checker_syntax {
         Intersection(Vec<CheckerType>),
         Object(Vec<CheckerMember>),
         Function {
+            /// `new (…) => T` — a construct-signature print, which only a
+            /// live CONSTRUCT signature satisfies; `(…) => T` is a call.
+            construct: bool,
             params: Vec<CheckerType>,
             /// The printed return: `boolean` for a type-predicate print and
             /// `void` for an assertion print — the return the checker gives
@@ -1377,7 +1396,7 @@ pub(crate) mod checker_syntax {
                     // `(p: T, …) => R` or a parenthesised type — try the
                     // function print first, backtrack on failure.
                     let save = self.pos;
-                    match self.function() {
+                    match self.function(false) {
                         Ok(function) => Ok(function),
                         Err(_) => {
                             self.pos = save;
@@ -1415,6 +1434,18 @@ pub(crate) mod checker_syntax {
                     Ok(CheckerType::NumberLit(value))
                 }
                 _ => {
+                    // `new (p: T, …) => R` — the construct print; `new` is
+                    // a keyword, never a type name.
+                    if self.eat_keyword("new") {
+                        self.skip_ws();
+                        if !self.rest().starts_with('(') {
+                            return Err(format!(
+                                "expected the construct print's `(` at byte {} of `{}`",
+                                self.pos, self.text
+                            ));
+                        }
+                        return self.function(true);
+                    }
                     let mut name = self.ident()?;
                     // A dotted reference print (`Intl.NumberFormatOptions`)
                     // carries its qualification inside the name, including
@@ -1661,7 +1692,7 @@ pub(crate) mod checker_syntax {
             Ok((names, params))
         }
 
-        fn function(&mut self) -> Result<CheckerType, String> {
+        fn function(&mut self, construct: bool) -> Result<CheckerType, String> {
             self.expect('(')?;
             let (names, params) = self.named_param_list()?;
             self.skip_ws();
@@ -1695,6 +1726,7 @@ pub(crate) mod checker_syntax {
                 }
             };
             Ok(CheckerType::Function {
+                construct,
                 params,
                 ret: Box::new(ret),
                 predicate,
@@ -1855,13 +1887,38 @@ pub(crate) mod checker_syntax {
                 &*identity.decl_name == name.as_str()
             }
             // A class-expression instance matches the name the checker
-            // prints for it (`Mixin.(Anonymous class)`, `(Anonymous
-            // class)`, the variable a class expression initializes) — its
-            // printed NAME, never its structural surface.
+            // prints for a reference to it (`Mixin.(Anonymous class)`,
+            // `(Anonymous class)`, the variable a class expression
+            // initializes) — its printed NAME, never its structural surface
+            // — and a generic class's own type arguments
+            // (`(Anonymous class)<string>`) in order.
             (
                 CheckerType::Ref(name),
-                SemanticNodeData::ClassExpressionInstance { identity, .. },
-            ) => identity.printed_name() == *name,
+                SemanticNodeData::ClassExpressionInstance {
+                    identity,
+                    type_arguments,
+                    ..
+                },
+            ) => {
+                identity.own_arity == 0
+                    && identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+            }
+            (
+                CheckerType::GenericRef { name, args },
+                SemanticNodeData::ClassExpressionInstance {
+                    identity,
+                    type_arguments,
+                    ..
+                },
+            ) => {
+                let own = identity.own_type_arguments(type_arguments);
+                identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+                    && own.len() == args.len()
+                    && own
+                        .iter()
+                        .zip(args.iter())
+                        .all(|(got, want)| matches_node(dispatch, *got, want, depth + 1))
+            }
             (
                 CheckerType::Ref(name),
                 SemanticNodeData::InstantiationRef {
@@ -1946,6 +2003,7 @@ pub(crate) mod checker_syntax {
             }
             (
                 CheckerType::Function {
+                    construct,
                     params,
                     ret,
                     predicate,
@@ -1958,27 +2016,34 @@ pub(crate) mod checker_syntax {
                     ..
                 },
             ) => {
-                predicate_matches(dispatch, *got_predicate, predicate.as_ref(), depth)
-                    && function_matches(
-                        dispatch,
-                        *kind,
-                        got_params,
-                        *return_type,
-                        params,
-                        ret,
-                        depth,
-                    )
+                *kind == printed_signature_kind(*construct)
+                    && predicate_matches(dispatch, *got_predicate, predicate.as_ref(), depth)
+                    && function_matches(dispatch, got_params, *return_type, params, ret, depth)
             }
             // TypeScript prints an object type whose ONLY content is one
             // call signature — no members, index signatures or construct
-            // signatures — as that signature's function type, so a function
-            // print is compared against the lone call signature.
-            (expected @ CheckerType::Function { .. }, SemanticNodeData::Object(surface))
-                if surface.positive_members().is_empty()
-                    && surface.index_signatures.is_empty()
-                    && surface.construct_signatures.is_empty() =>
+            // signatures — as that signature's function type, and one
+            // whose only content is one construct signature as that
+            // signature's constructor type (`{ new (): T }` prints `new ()
+            // => T`), so a function / construct print is compared against
+            // the lone signature of its own kind.
+            (
+                expected @ CheckerType::Function { construct, .. },
+                SemanticNodeData::Object(surface),
+            ) if surface.positive_members().is_empty()
+                && surface.index_signatures.is_empty()
+                && if *construct {
+                    surface.call_signatures.is_empty()
+                } else {
+                    surface.construct_signatures.is_empty()
+                } =>
             {
-                match surface.call_signatures.as_ref() {
+                let lone = if *construct {
+                    surface.construct_signatures.as_ref()
+                } else {
+                    surface.call_signatures.as_ref()
+                };
+                match lone {
                     [signature] => matches_node(dispatch, *signature, expected, depth + 1),
                     _ => false,
                 }
@@ -2056,20 +2121,27 @@ pub(crate) mod checker_syntax {
         matches_node(dispatch, node, expected, depth)
     }
 
-    /// The shared signature clause: a function print is a Call
-    /// signature. Construct (`new (…) => T`) must never satisfy it.
-    /// Arity is exact; parameter types are ordered.
+    /// The live signature kind a function print names: `new (…) => T` a
+    /// Construct signature, `(…) => T` a Call signature — never the other.
+    fn printed_signature_kind(construct: bool) -> SignatureKind {
+        if construct {
+            SignatureKind::Construct
+        } else {
+            SignatureKind::Call
+        }
+    }
+
+    /// The shared signature clause, once the kind matched: arity is
+    /// exact; parameter types are ordered.
     fn function_matches(
         dispatch: &ProjectSemanticDispatch<'_>,
-        kind: SignatureKind,
         got_params: &[crate::semantic_query::FunctionParam],
         return_type: SemanticNodeId,
         params: &[CheckerType],
         ret: &CheckerType,
         depth: usize,
     ) -> bool {
-        kind == SignatureKind::Call
-            && got_params.len() == params.len()
+        got_params.len() == params.len()
             && got_params
                 .iter()
                 .zip(params.iter())
@@ -2127,10 +2199,10 @@ pub(crate) mod checker_syntax {
                         else {
                             return false;
                         };
-                        predicate_matches(dispatch, *predicate, None, depth)
+                        *kind == SignatureKind::Call
+                            && predicate_matches(dispatch, *predicate, None, depth)
                             && function_matches(
                                 dispatch,
-                                *kind,
                                 got_params,
                                 *return_type,
                                 params,
@@ -3637,8 +3709,7 @@ mod expectation_controls {
     /// argument misses. A construct signature must be REJECTED where a
     /// call signature is pinned; a call signature must be REJECTED
     /// where a construct signature is pinned; and the checker-syntax
-    /// function print (call-only grammar) must reject the construct
-    /// node too.
+    /// CALL print must reject the construct node too.
     #[test]
     fn construct_signature_is_distinct_from_call_signature() {
         const BOX_REF: ExpectedNode = ExpectedNode::DeclRef { name: "Box" };
@@ -3677,8 +3748,8 @@ mod expectation_controls {
                 let checker_fn = checker_syntax::parse("() => Box").expect("call print parses");
                 assert!(
                     !checker_syntax::matches_node(dispatch, node, &checker_fn, 0),
-                    "the checker-syntax function print (call-only grammar) must reject the \
-                     live construct node (measured {measured})"
+                    "the checker-syntax CALL print must reject the live construct node \
+                     (measured {measured})"
                 );
             },
         );
@@ -3779,6 +3850,94 @@ mod expectation_controls {
                 );
             },
         );
+    }
+
+    /// CONTROL — the checker's display rule for a CONSTRUCT signature,
+    /// live, beside its call twin. TypeScript 7.0.2 prints an object type
+    /// whose only content is one construct signature as a constructor
+    /// type and one whose only content is one call signature as a
+    /// function type (`.d.ts` of `f(x: T) { return x }`): `{ new ():
+    /// Box }` is `new () => Box`, `{ new (n: number, s?: string): Box }`
+    /// is `new (n: number, s?: string) => Box`, `new () => Box` is itself,
+    /// `{ (): Box }` is `() => Box`; `{ (): Box; new (): Box }` and `{ new
+    /// (): Box; tag: string }` stay object prints. A construct print
+    /// never satisfies a call signature and a call print never a construct
+    /// signature, and neither rule applies to an object with other
+    /// content.
+    #[test]
+    fn a_construct_print_matches_only_the_lone_construct_signature() {
+        const BOX: &str = "class Box { readonly tag = \"box\" }
+";
+        let accepts = |dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, text: &str| {
+            let parsed = checker_syntax::parse(text)
+                .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+            checker_syntax::matches_node(dispatch, node, &parsed, 0)
+        };
+        for (annotation, matching, rejected) in [
+            (
+                "{ new (): Box }",
+                Some("new () => Box"),
+                &["() => Box", "new (n: number) => Box"][..],
+            ),
+            (
+                "{ new (n: number, s?: string): Box }",
+                Some("new (n: number, s?: string) => Box"),
+                &["new (n: number) => Box", "(n: number, s?: string) => Box"][..],
+            ),
+            ("new () => Box", Some("new () => Box"), &["() => Box"][..]),
+            ("{ (): Box }", Some("() => Box"), &["new () => Box"][..]),
+            (
+                "{ (): Box; new (): Box }",
+                None,
+                &["() => Box", "new () => Box"][..],
+            ),
+            ("{ new (): Box; tag: string }", None, &["new () => Box"][..]),
+        ] {
+            with_flow_node(
+                &format!("{BOX}function makeProps(x: {annotation}) {{ return x }}"),
+                "makeProps",
+                |dispatch, node| {
+                    let measured = render_node(dispatch, node, 0);
+                    if let Some(matching) = matching {
+                        assert!(
+                            accepts(dispatch, node, matching),
+                            "`{annotation}` prints `{matching}` on 7.0.2 (measured {measured})"
+                        );
+                    }
+                    for rejected in rejected {
+                        assert!(
+                            !accepts(dispatch, node, rejected),
+                            "`{annotation}` must REJECT `{rejected}` (measured {measured})"
+                        );
+                    }
+                },
+            );
+        }
+    }
+
+    /// The construct print parses strictly: an operand-less `new`, a
+    /// missing arrow, and the `abstract` modifier (not modelled) are loud
+    /// errors.
+    #[test]
+    fn construct_prints_parse_strictly() {
+        for text in [
+            "new () => Box",
+            "new (n: number, s?: string) => Box",
+            "(new () => Box) | string",
+        ] {
+            assert!(checker_syntax::parse(text).is_ok(), "`{text}` must parse");
+        }
+        for text in [
+            "new => Box",
+            "new () Box",
+            "new Box",
+            "abstract new () => Box",
+        ] {
+            assert!(
+                checker_syntax::parse(text).is_err(),
+                "`{text}` must be a LOUD parse error"
+            );
+        }
     }
 
     /// CONTROL — the fail-closed STRUCTURAL guards of [`node_matches`]:
@@ -5577,15 +5736,21 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
 }
 
 /// A union arm the graph cannot classify against a runtime guard test
-/// (`any`, `unknown`) stays possible on BOTH edges of the test: the
-/// checker narrows such an arm, so dropping it fabricates a dead branch
-/// and loses that branch's return contributor from a result then
-/// certified complete and warm. The sound public outcome is the
+/// (`any`, `unknown` under `instanceof`) stays possible on BOTH edges of
+/// the test: the checker narrows such an arm, so dropping it fabricates a
+/// dead branch and loses that branch's return contributor from a result
+/// then certified complete and warm. The sound public outcome is the
 /// retained superset carrying the typed `FlowGap::GuardNarrowing`
 /// degradation — `ReturnOnly`, two cold computes, zero warm candidates —
-/// while a fully classified union keeps its exact, warm, gap-free
-/// narrow. Covers the positive and negated `typeof` spellings and the
-/// `instanceof` spelling.
+/// while a classified arm keeps its exact, warm, gap-free narrow. A
+/// `typeof` test classifies a top arm: the checker substitutes the
+/// kind's implied type for `unknown` / `any` on the positive edge (`any`
+/// stays `any` under `"object"`) and keeps the arm on the negated one,
+/// except that `unknown` loses `undefined` under a negated `"undefined"`
+/// (measured, 7.0.2 `--strict`: `string | 0` for both `"string"` spellings
+/// over `unknown` and the positive one over `any`, `0 | object | null`
+/// under `"object"`, `any` for `any` under `"object"`, `{} | null` under
+/// `!== "undefined"`).
 #[test]
 fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
     struct Case {
@@ -5603,28 +5768,54 @@ fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
     }
     let cases = [
         Case {
-            id: "guard_unclassified_typeof_unknown_positive",
+            id: "guard_typeof_unknown_positive",
             script: "export function f(x: unknown) { if (typeof x === \"string\") return x; return 0; }",
             checker: "string | 0",
-            rendered: "unknown",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
-            id: "guard_unclassified_typeof_any_positive",
+            id: "guard_typeof_any_positive",
             script: "export function f(x: any) { if (typeof x === \"string\") return x; return 0; }",
             checker: "string | 0",
-            rendered: "any",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
-            id: "guard_unclassified_typeof_unknown_negated",
+            id: "guard_typeof_unknown_negated",
             script: "export function f(x: unknown) { if (typeof x !== \"string\") return 0; return x; }",
             checker: "0 | string",
-            rendered: "unknown",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "guard_typeof_unknown_object",
+            script: "export function f(x: unknown) { if (typeof x === \"object\") return x; return 0; }",
+            checker: "0 | object | null",
+            rendered: "Union(object | null | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "guard_typeof_any_object",
+            script: "export function f(x: any) { if (typeof x === \"object\") return x; return 0; }",
+            checker: "any",
+            rendered: "any",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "guard_typeof_unknown_negated_undefined",
+            script: "export function f(x: unknown) { if (typeof x !== \"undefined\") return x; return 0; }",
+            checker: "{} | null",
+            // Extensionally the checker's answer: its return reunion
+            // absorbs `0` into `{}`, which this join keeps as an arm.
+            rendered: "Union({  } | null | 0)",
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             id: "guard_unclassified_instanceof_unknown",

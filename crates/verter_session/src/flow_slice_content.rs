@@ -92,6 +92,9 @@ use verter_semantic::analysis::type_eval_build::{
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
 
+#[path = "flow_slice_content_class.rs"]
+mod class_expression;
+
 /// The demand selection one content lowering serves: the value-selected
 /// expression spans and the value-selected slot declaration spans of ONE
 /// lowered flow slice. Derived from the content-free `FlowSliceIR` — the
@@ -322,6 +325,11 @@ pub enum SliceStatement {
         /// per-arm tree additionally tells the evaluator WHICH kept
         /// constituents stay fresh on the sealed return.
         freshness: SliceFreshness,
+        /// What the returned expression establishes over the function's
+        /// parameters, carried only on the single return of a function
+        /// the checker may infer a type predicate for
+        /// ([`ReturnPredicateTest`]).
+        predicate_test: Option<ReturnPredicateTest>,
     },
     /// A statement-position `yield x` in a generator body. The yielded
     /// expression lowers like a return argument (a call rides the call
@@ -511,6 +519,13 @@ pub enum SliceStatement {
         /// `null` / `undefined` / `void` value, which carries its
         /// [`SliceFreshness::WideningNullish`] shape.
         freshness: SliceFreshness,
+        /// Whether the declaration has the checker's AUTO-TYPED form: an
+        /// unannotated `let` / `var` with no initializer or with a bare
+        /// `null` / free `undefined` one (`isNullOrUndefined`; `void 0`
+        /// and a conditional do not qualify). Under `noImplicitAny` such a
+        /// variable's type follows its assignments; without it the
+        /// variable is declared as its initializer's widened type.
+        auto_typed_form: bool,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -817,6 +832,36 @@ pub enum SliceGuard {
     Or(Arc<[SliceGuard]>),
 }
 
+/// The single returned expression of a function the checker may infer a
+/// type predicate for, read as a test over the function's parameters.
+///
+/// The checker's rule (`getTypePredicateFromBody`): a plain (not `async`,
+/// not generator) function with NO return annotation and exactly one
+/// `return` statement — or an expression body — whose returned expression
+/// is `boolean` infers `p is T` for the FIRST parameter `p` the expression
+/// narrows to `T` on its true edge while its false edge narrows `T` itself
+/// to `never`. A parameter takes part only when it is a plain identifier,
+/// not a rest parameter, never assigned anywhere in the function (a nested
+/// closure's write included), and not itself `boolean`; the evaluator
+/// decides the last clause and the narrowing, the lowering the rest. An
+/// accessor never infers one: a getter has no parameter and a setter
+/// cannot return a value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReturnPredicateTest {
+    /// The narrowing facts the returned expression establishes
+    /// ([`SliceGuard::None`] when it establishes none), and the ordinals
+    /// of the parameters a predicate may name, in source order.
+    Guard {
+        guard: Box<SliceGuard>,
+        parameters: Arc<[u32]>,
+    },
+    /// The returned expression narrows a parameter in a form the guard
+    /// vocabulary cannot express, so the predicate the checker may infer
+    /// is unknown: a `boolean` return degrades rather than publishing a
+    /// predicate-less signature.
+    Unexpressible,
+}
+
 fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNarrowSubject)) {
     match guard {
         SliceGuard::None => {}
@@ -966,6 +1011,19 @@ pub enum SliceExpr {
         /// (a later entry overrides what an earlier one provisioned).
         entries: Arc<[SliceObjectEntry]>,
     },
+    /// An array literal evaluated STRUCTURALLY: every element is a flow
+    /// expression (parameter / local references substitute). Without a
+    /// const assertion the value is `E[]`, `E` the subtype-reduced union
+    /// of the element values (a fresh literal widened, a spread
+    /// contributing its source's element type); under `as const` it is
+    /// the readonly tuple of the element values, a spread splicing its
+    /// source in.
+    Array {
+        /// The elements in source order.
+        elements: Arc<[SliceArrayElement]>,
+        /// Whether an enclosing `as const` pins the literal.
+        const_asserted: bool,
+    },
     /// A nested function VALUE (a function / arrow expression or an
     /// object-literal method in any expression position): its parameters
     /// and OWNED body region, lowered inline — the evaluator answers its
@@ -1096,36 +1154,41 @@ pub enum SliceExpr {
 
 /// One class expression's body, lowered for the evaluator's class
 /// composition: the constructor type is the class's construct signatures
-/// (its own constructor's parameters, else the base constructor's) over
-/// its static members, and the instance type is its own members over the
-/// base instance, under the class's own identity.
+/// (its own constructor's, else the base constructor's) over its static
+/// members, and the instance type is its own members over the base
+/// instance, under the class's own identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceClass {
     /// The class expression's start offset in the defining file — what
     /// identifies the class among every class expression of that file.
     pub offset: u32,
-    /// The class's printed name: its binding identifier, else the variable
-    /// it directly initializes, else the checker's `(Anonymous class)`.
+    /// The class's printed name: its binding identifier, else the name it
+    /// is assigned to, else the checker's `(Anonymous class)`.
     pub name: Arc<str>,
-    /// The declaration whose type-parameter clause encloses the class, when
-    /// one does (the class then has outer type parameters, and the checker
-    /// qualifies references to it with that declaration).
-    pub qualifier: Option<Arc<str>>,
+    /// The type-parameter clauses enclosing the class — its OUTER type
+    /// parameters, outermost first.
+    pub outer_clauses: Arc<[crate::semantic_query::ClassExpressionClause]>,
+    /// The class's own type-parameter clause (`class<T> { … }`).
+    pub type_parameters: Arc<[SliceTypeParam]>,
     /// The `extends` clause.
     pub heritage: Option<SliceClassHeritage>,
-    /// The declared constructor's parameters; `None` when the class
-    /// declares no constructor (the base constructor's parameters apply).
-    pub constructor: Option<Arc<[SliceClassParam]>>,
+    /// The declared constructor's visible signatures — its overload
+    /// signatures, else its implementation's; `None` when the class
+    /// declares no constructor (the base constructor's signatures apply).
+    pub constructors: Option<Arc<[Arc<[SliceClassParam]>]>>,
     /// The instance and static members in declaration order, including
-    /// the constructor's parameter properties.
+    /// the constructor's parameter properties. An overloaded method is one
+    /// member per visible overload signature, in order.
     pub members: Arc<[SliceClassMember]>,
+    /// The declared index signatures, instance and static.
+    pub index_signatures: Arc<[SliceClassIndexSignature]>,
 }
 
 /// One class expression's `extends` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceClassHeritage {
-    /// The base constructor reference, lowered as a flow value — a
-    /// parameter or a local rides its own binding carrier.
+    /// The base constructor value, lowered as a flow value — a parameter
+    /// or a local rides its own binding carrier, a call its call carrier.
     pub base: Box<SliceExpr>,
     /// The authored `extends Base<Args>` type arguments.
     pub type_arguments: Arc<[GatedType]>,
@@ -1145,25 +1208,58 @@ pub struct SliceClassParam {
     pub rest: bool,
 }
 
+/// One declared index signature of a class expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceClassIndexSignature {
+    /// Whether the signature is on the constructor (`static`).
+    pub is_static: bool,
+    /// The key type.
+    pub key: GatedType,
+    /// The value type.
+    pub value: GatedType,
+    pub readonly: bool,
+}
+
 /// One member of a class expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceClassMember {
-    /// The member's static name.
-    pub key: Arc<str>,
+    /// The member's name: a static name, else the computed key's value
+    /// (a literal or unique-symbol key names the member; any other key
+    /// contributes to the class's implicit index signature).
+    pub key: SliceObjectKey,
     /// Whether the member is on the constructor (`static`) rather than the
     /// instance.
     pub is_static: bool,
     pub optional: bool,
     pub readonly: bool,
     pub visibility: verter_type_expr::MemberVisibility,
-    /// `Some` for a method or accessor, `None` for a property.
+    /// `Some` for a method, `None` for a property (accessors included).
     pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
     pub spans: verter_type_expr::MemberSpans,
-    /// The member's type, or `None` when this half does not model it (a
-    /// method whose return is body-derived, an initializer that reads the
-    /// frame): the member stays on the surface over the typed unresolved
-    /// marker.
-    pub ty: Option<GatedType>,
+    /// The member's type.
+    pub value: SliceClassMemberValue,
+}
+
+/// Where one class member's type comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceClassMemberValue {
+    /// An authored type: an annotation, or an overload signature composed
+    /// from annotations.
+    Declared(GatedType),
+    /// A property initializer, evaluated in this frame over the DECLARED
+    /// type of every binding it reads (a property initializer is its own
+    /// flow container: no narrowing of the enclosing frame reaches it),
+    /// widened unless the property is `readonly`.
+    Initializer { value: Box<SliceExpr>, widen: bool },
+    /// A method's nested function value: the member's type is its
+    /// signature, with a body-derived return inferred by the flow lane.
+    Method(Box<SliceExpr>),
+    /// A getter's nested function value: the property's type is its
+    /// signature's return.
+    Getter(Box<SliceExpr>),
+    /// A member whose type this half cannot model: it stays on the surface
+    /// over the typed unresolved marker.
+    Unmodeled,
 }
 
 /// The source of one mutable closure capture's authored declaration authority.
@@ -1558,6 +1654,25 @@ pub enum SliceObjectEntry {
     },
 }
 
+/// One element of a structurally lowered array literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceArrayElement {
+    /// An element value with its freshness mirror.
+    Value {
+        /// The lowered element value.
+        value: SliceExpr,
+        /// The element expression's top-level freshness shape.
+        freshness: SliceFreshness,
+    },
+    /// A spread (`...source`): the source's elements enter here.
+    Spread {
+        /// The spread source's lowered value.
+        source: SliceExpr,
+    },
+    /// A hole (`[a, , b]`).
+    Elision,
+}
+
 /// How one structurally lowered object-literal member NAMES its key.
 ///
 /// A key spelling whose property name is not the authored text —
@@ -1708,6 +1823,11 @@ pub struct SliceObjectMember {
     /// view to select declared union constituents; ordinary object evaluation
     /// continues to use `value`.
     pub assignment_value: Option<SliceExpr>,
+    /// The value a bare `null` / `undefined` / `void` member holds before
+    /// the literal's widening turns it into `any` (`strictNullChecks`
+    /// off): a join of several values compares them unwidened, as the
+    /// checker's subtype reduction runs before its widening.
+    pub unwidened: Option<SliceExpr>,
     /// The authored method / accessor kind (`None` for a plain property).
     pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
     /// Whether the member is `readonly` — true exactly under an enclosing
@@ -1894,22 +2014,20 @@ pub(crate) fn build_function_type_param_clause(
 /// Classify the function's authored form for the empty-completion seed.
 ///
 /// An arrow is always `never`-seeded. A `function` node is `void`-seeded
-/// when it is a declaration, and otherwise only when the locator's final
-/// descent step places it as a CLASS member — an object-literal method and
-/// a plain function expression share the declaration's OXC node type and
-/// are separated only by that step.
-fn empty_completion_of(
-    node: &FunctionNode<'_>,
-    locator: &verter_semantic::analysis::function_program::FunctionBodyLocator,
-) -> EmptyCompletion {
+/// when it is a declaration, and otherwise only when it is a CLASS member —
+/// the locator's final descent step places a served class member, and the
+/// index marks a class expression's member nested in a body. An
+/// object-literal method and a plain function expression share the
+/// declaration's OXC node type and are separated only by that position.
+fn empty_completion_of(node: &FunctionNode<'_>, entry: &FunctionProgramEntry) -> EmptyCompletion {
     use verter_semantic::analysis::function_program::FunctionDescentStep;
     let FunctionNode::Function(function) = node else {
         return EmptyCompletion::Never;
     };
-    if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration {
+    if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration || entry.class_member {
         return EmptyCompletion::Void;
     }
-    match locator.descent.last() {
+    match entry.locator.descent.last() {
         Some(FunctionDescentStep::ClassMember { .. }) => EmptyCompletion::Void,
         _ => EmptyCompletion::Never,
     }
@@ -2013,7 +2131,7 @@ pub(crate) fn build_flow_slice_content(
                     false,
                     CompletionConstruction::SynthesizedRegion,
                 ),
-                empty_completion: empty_completion_of(&node, &entry.locator),
+                empty_completion: empty_completion_of(&node, entry),
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
                 enclosing_type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -2053,6 +2171,10 @@ pub(crate) fn build_flow_slice_content(
             skeleton: Arc::clone(skeleton),
             bindings: Arc::clone(&bindings),
             type_parameters: Arc::from(type_param_names.clone()),
+            enclosing_type_parameters: enclosing_type_parameters
+                .iter()
+                .map(|param| Arc::clone(&param.name))
+                .collect(),
             parameters: params
                 .iter()
                 .enumerate()
@@ -2084,15 +2206,6 @@ pub(crate) fn build_flow_slice_content(
             outer: captures.clone(),
             anchor,
         });
-    // A class expression authored here has OUTER type parameters when any
-    // clause encloses the frame; the checker then qualifies references to
-    // it with the declaration that owns them.
-    let class_qualifier = (!type_param_names.is_empty()
-        || resolved
-            .enclosing_type_parameters
-            .is_some_and(|clause| !clause.params.is_empty())
-        || captures.encloses_type_parameters())
-    .then(|| Arc::clone(&entry.key.declaration.name));
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -2111,11 +2224,18 @@ pub(crate) fn build_flow_slice_content(
         program,
         module_scope,
         namespace_owned,
-        class_qualifier,
+        contributor: entry.locator.contributor.contributor_index,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
         predicate_guard_call_spans: FxHashSet::default(),
+        predicate_parameters: predicate_parameters(
+            declared_return.is_some(),
+            skeleton,
+            &bindings,
+            entry,
+            &params,
+        ),
         control_test_gap: false,
         narrowing_alias_locals: FxHashSet::default(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
@@ -2161,11 +2281,15 @@ pub(crate) fn build_flow_slice_content(
             }
         } else {
             let freshness = expression_freshness(&expression.expression);
-            let argument = if lowerer.value_span_selected(expression.expression.span()) {
-                lowerer.lower_expr(&expression.expression, ExprMode::Return)
-            } else {
-                SliceExpr::Elided
-            };
+            let (argument, predicate_test) =
+                if lowerer.value_span_selected(expression.expression.span()) {
+                    (
+                        lowerer.lower_expr(&expression.expression, ExprMode::Return),
+                        lowerer.return_predicate_test(&expression.expression),
+                    )
+                } else {
+                    (SliceExpr::Elided, None)
+                };
             // An expression body has no statement loop to drain the
             // ternary-test gap into: it lands ahead of the synthesized
             // `return` here.
@@ -2178,6 +2302,7 @@ pub(crate) fn build_flow_slice_content(
             statements.push(SliceStatement::Return {
                 argument: Some(argument),
                 freshness,
+                predicate_test,
             });
             SliceRegion {
                 statements: Arc::from(statements.into_boxed_slice()),
@@ -2188,7 +2313,25 @@ pub(crate) fn build_flow_slice_content(
             }
         }
     } else {
-        lowerer.lower_region(&body.statements).region
+        let region = lowerer.lower_region(&body.statements).region;
+        // Only a statement-position `yield x` / `yield;` contributes to
+        // the yield join. A yield anywhere else (`const r = yield x`,
+        // `f(yield x)`, a delegating `yield*`) still yields, so a body
+        // holding one has no complete yield type: the region carries the
+        // typed gap ahead of its statements.
+        if body_has_unmodeled_yield(&body.statements) {
+            let mut statements = Vec::with_capacity(region.statements.len() + 1);
+            statements.push(SliceStatement::Gap(
+                crate::semantic_query::FlowGap::UnmodeledExpression,
+            ));
+            statements.extend(region.statements.iter().cloned());
+            SliceRegion {
+                statements: Arc::from(statements.into_boxed_slice()),
+                can_fall_through: region.can_fall_through,
+            }
+        } else {
+            region
+        }
     };
     let budget_failure = lowerer.budget_failure;
     let inert_write_spans = lowerer.inert_write_spans;
@@ -2203,7 +2346,7 @@ pub(crate) fn build_flow_slice_content(
                 .reaches_end(CompletionDischarge::BodyComposition),
             CompletionConstruction::BodyFromRootRegion,
         ),
-        empty_completion: empty_completion_of(&node, &entry.locator),
+        empty_completion: empty_completion_of(&node, entry),
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
         enclosing_type_parameters: Arc::from(enclosing_type_parameters.into_boxed_slice()),
@@ -2212,6 +2355,52 @@ pub(crate) fn build_flow_slice_content(
         inert_write_spans,
         decided_above_call_spans,
     })
+}
+
+/// The parameters a type predicate inferred from the function's body may
+/// name, in source order ([`ReturnPredicateTest`]): every plain identifier
+/// parameter that is not a rest parameter and that nothing in the function
+/// ever assigns — a nested closure's write included. `None` when the
+/// function cannot infer one at all: it has a return annotation, it is
+/// `async` or a generator, or its body does not hold exactly one `return`
+/// (reachable or not), carrying a value.
+fn predicate_parameters(
+    declared_return: bool,
+    skeleton: &FunctionBodySkeleton,
+    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    entry: &FunctionProgramEntry,
+    params: &[SliceParam],
+) -> Option<Arc<[u32]>> {
+    if declared_return || skeleton.kind != verter_semantic::analysis::flow::FunctionBodyKind::Plain
+    {
+        return None;
+    }
+    let [site] = skeleton.return_sites.as_ref() else {
+        return None;
+    };
+    site.argument?;
+    let assigned = |binding: SkeletonBindingId| {
+        let runtime = bindings.canonical_local(binding);
+        skeleton.writes.iter().any(|write| {
+            write.path.is_empty()
+                && matches!(write.binding, Some(FlowBindingRef::Local(local))
+                    if bindings.canonical_local(local) == runtime)
+        }) || entry
+            .descendant_writes
+            .iter()
+            .filter_map(|identity| bindings.local(identity))
+            .any(|local| bindings.canonical_local(local) == runtime)
+    };
+    let parameters: Vec<u32> = params
+        .iter()
+        .enumerate()
+        .filter(|(_, param)| !param.rest && param.name.is_some() && param.destructured.is_empty())
+        .filter_map(|(ordinal, param)| {
+            let binding = param.binding?;
+            (!assigned(binding)).then(|| u32::try_from(ordinal).ok())?
+        })
+        .collect();
+    (!parameters.is_empty()).then(|| Arc::from(parameters.into_boxed_slice()))
 }
 
 /// Whether the retained program carries top-level MODULE syntax: an
@@ -2762,6 +2951,53 @@ fn pure_optional_member_root_identifier<'a>(
     }
 }
 
+/// Widen the fresh literals of a value stored into a MUTABLE slot (an
+/// object member, an array element): tsc's literal widening at a mutable
+/// location. The widening reaches INTO a branch join — a ternary's fresh
+/// literal arm is the slot's fresh literal — but a narrowed reference arm
+/// is NOT fresh (the checker's own early-return-guard shapes keep their
+/// literal unions), so only leaf arms widen.
+fn widen_mutable_slot_literals(value: SliceExpr) -> SliceExpr {
+    match value {
+        SliceExpr::Type(leaf) => SliceExpr::Type(
+            leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
+        ),
+        SliceExpr::Union { arms, guard } => SliceExpr::Union {
+            arms: Arc::from(
+                arms.iter()
+                    .map(|arm| match arm {
+                        SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
+                            verter_semantic::analysis::type_eval_build::widen_shallow_literal,
+                        )),
+                        other => other.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            guard,
+        },
+        value => value,
+    }
+}
+
+/// The type of a bare `null` / `undefined` / `void` value
+/// ([`expr_is_widening_nullish`]): `null`, `undefined`, or the union of a
+/// conditional's two arms.
+fn widening_nullish_type(expression: &Expression<'_>) -> TypeExpr {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => widening_nullish_type(&paren.expression),
+        Expression::TSSatisfiesExpression(satisfies) => {
+            widening_nullish_type(&satisfies.expression)
+        }
+        Expression::ConditionalExpression(conditional) => TypeExpr::Union(Arc::from(vec![
+            widening_nullish_type(&conditional.consequent),
+            widening_nullish_type(&conditional.alternate),
+        ])),
+        Expression::NullLiteral(_) => TypeExpr::Primitive(PrimitiveName::Null),
+        _ => TypeExpr::Primitive(PrimitiveName::Undefined),
+    }
+}
+
 /// Whether an initializer is a BARE literal expression — a fresh
 /// (widening) literal source: a string / numeric / boolean literal or a
 /// substitution-free template, seen through the freshness-transparent
@@ -2837,6 +3073,18 @@ impl SliceFreshness {
     #[must_use]
     pub fn is_mixed(&self) -> bool {
         self.any_fresh() && !self.all_fresh()
+    }
+
+    /// Whether EVERY leaf of the tree is a bare `null` / `undefined` /
+    /// `void` value (and the tree is non-empty) — an initializer whose
+    /// value is only nullable, whatever the null algebra.
+    #[must_use]
+    pub fn all_widening_nullish(&self) -> bool {
+        match self {
+            Self::WideningNullish => true,
+            Self::Fresh | Self::Pinned => false,
+            Self::PerArm(arms) => !arms.is_empty() && arms.iter().all(Self::all_widening_nullish),
+        }
     }
 }
 
@@ -3596,6 +3844,9 @@ struct DefiningFrameGate {
     skeleton: Arc<FunctionBodySkeleton>,
     bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
     type_parameters: Arc<[Arc<str>]>,
+    /// The ENCLOSING declaration's clause, by name: a class member's
+    /// class clause (`class C<T> { m() { … } }`), empty otherwise.
+    enclosing_type_parameters: Arc<[Arc<str>]>,
     parameters: Arc<rustc_hash::FxHashMap<SkeletonBindingId, CaptureParameterLocator>>,
     parameter_names: Arc<rustc_hash::FxHashMap<Arc<str>, u32>>,
     body_hash: [u8; 16],
@@ -3727,18 +3978,6 @@ impl NestedFlowContext {
 }
 
 impl CaptureScope {
-    /// Whether any enclosing frame declares a type-parameter clause.
-    fn encloses_type_parameters(&self) -> bool {
-        let mut current = self.enclosing.as_deref();
-        while let Some(frame) = current {
-            if !frame.gate.type_parameters.is_empty() {
-                return true;
-            }
-            current = frame.gate.outer.enclosing.as_deref();
-        }
-        false
-    }
-
     fn gate(&self, ty: TypeExpr, binders: &[Arc<str>]) -> GatedType {
         let names = verter_type_expr::referenced_names(&ty);
         let mut shadowed = Vec::new();
@@ -4313,11 +4552,10 @@ struct Lowerer<'a> {
     /// declared inside a function, so the block chain between a call site
     /// and the top level is fixed by the served function's own position.
     namespace_owned: bool,
-    /// The declaration a class expression authored in this frame is
-    /// qualified with: the served function's declaration when a
-    /// type-parameter clause encloses the frame (its own, its class's, or an
-    /// enclosing frame's), `None` when none does.
-    class_qualifier: Option<Arc<str>>,
+    /// The contributing top-level statement the served function (and every
+    /// frame enclosing it) sits in — where a class expression's enclosing
+    /// clauses are named.
+    contributor: u32,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
     /// Write effects proven unreachable by a literal control edge.
@@ -4330,6 +4568,11 @@ struct Lowerer<'a> {
     /// control-position recorder neither certifies them decided-above nor
     /// gaps them.
     predicate_guard_call_spans: FxHashSet<verter_span::Span>,
+    /// The parameters a type predicate inferred from the body may name —
+    /// `Some` only for a function the checker may infer one for (see
+    /// [`ReturnPredicateTest`]). Its single return reads its argument as a
+    /// test over them.
+    predicate_parameters: Option<Arc<[u32]>>,
     /// A narrowing position lowered inside the CURRENT statement — a
     /// control-position test, an assertion statement, a sequence's
     /// discarded operand — carried a fact this half can neither certify
@@ -5105,9 +5348,12 @@ impl Lowerer<'_> {
                         .argument
                         .as_ref()
                         .map_or(SliceFreshness::Pinned, expression_freshness);
+                    let mut predicate_test = None;
                     let argument = ret.argument.as_ref().map(|arg| {
                         if self.value_span_selected(arg.span()) {
-                            self.lower_expr(arg, ExprMode::Return)
+                            let lowered = self.lower_expr(arg, ExprMode::Return);
+                            predicate_test = self.return_predicate_test(arg);
+                            lowered
                         } else {
                             // An unselected return argument still RUNS:
                             // scan its effects like every elided position.
@@ -5118,6 +5364,7 @@ impl Lowerer<'_> {
                     out.push(SliceStatement::Return {
                         argument,
                         freshness,
+                        predicate_test,
                     });
                     can_fall_through = false;
                 }
@@ -5286,14 +5533,15 @@ impl Lowerer<'_> {
                         // initializer would select none.
                         let preserve_literal =
                             kind == SliceBindingKind::Const || declarator.type_annotation.is_some();
-                        let init = declarator.init.as_ref().map(|expr| match expr {
-                            // A class expression that directly initializes a
-                            // variable is named after it (`const C = class {}`
-                            // is the checker's `C`).
-                            Expression::ClassExpression(class) => {
-                                self.lower_class_expression(class, Some(id.name.as_str()))
-                            }
-                            _ => self.lower_expr(expr, ExprMode::BindingInit { preserve_literal }),
+                        // A class expression that directly initializes a
+                        // variable is named after it (`const C = class {}`
+                        // is the checker's `C`).
+                        let init = declarator.init.as_ref().map(|expr| {
+                            self.lower_assigned_value(
+                                expr,
+                                id.name.as_str(),
+                                ExprMode::BindingInit { preserve_literal },
+                            )
                         });
                         // The authored annotation is the binding's
                         // DECLARED type — it SUPPLIES a value, it does
@@ -5345,6 +5593,12 @@ impl Lowerer<'_> {
                             }
                             _ => SliceFreshness::Pinned,
                         };
+                        let auto_typed_form = declared.is_none()
+                            && kind != SliceBindingKind::Const
+                            && declarator
+                                .init
+                                .as_ref()
+                                .is_none_or(|init| self.is_null_or_undefined_keyword(init));
                         out.push(SliceStatement::Binding {
                             binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
                                 Some(binding) => binding,
@@ -5360,6 +5614,7 @@ impl Lowerer<'_> {
                             init,
                             declared,
                             freshness,
+                            auto_typed_form,
                         });
                     }
                 }
@@ -5437,6 +5692,7 @@ impl Lowerer<'_> {
                     // flow. Every shape takes the existing typed loop
                     // refusal.
                     if self.control_has_return(statement)
+                        || statement_yields_in_own_frame(statement)
                         || declares_var(statement)
                         || loop_transfers_to_enclosing_label(statement, &self.loop_direct_labels)
                         || self.loop_has_selected_transfer(statement)
@@ -5869,8 +6125,8 @@ impl Lowerer<'_> {
                 // non-narrowing calls are decided above, every other call
                 // flags the enclosing statement's typed gap, and a
                 // whole-binding WRITE to a frame-owned target — invisible
-                // to the slice's effect ledger, which the skeleton never
-                // feeds from the class subtree — takes the same typed gap.
+                // to the slice's effect ledger, which no class subtree
+                // feeds — takes the same typed gap.
                 // Deferred bodies (a method runs when called, an instance
                 // property initializer at construction) keep the
                 // nested-frame blanket treatment.
@@ -5987,6 +6243,67 @@ impl Lowerer<'_> {
                 SliceGuard::None
             }
         }
+    }
+
+    /// The single returned expression of a function that may infer a type
+    /// predicate, read as a test through the ONE guard authority
+    /// ([`ReturnPredicateTest`]); `None` for every other function. An
+    /// unexpressible test raises no gap here: only a `boolean` return
+    /// makes the unknown predicate matter, and only the evaluator sees
+    /// the returned type.
+    fn return_predicate_test(&mut self, argument: &Expression<'_>) -> Option<ReturnPredicateTest> {
+        let parameters = self.predicate_parameters.clone()?;
+        let guard = match self.classify_guard(argument) {
+            GuardDisposition::Modeled(guard) => *guard,
+            GuardDisposition::NoNarrowing => SliceGuard::None,
+            GuardDisposition::Unexpressible => return Some(ReturnPredicateTest::Unexpressible),
+        };
+        if self.holds_unprovable_narrowing_call(argument) {
+            return Some(ReturnPredicateTest::Unexpressible);
+        }
+        Some(ReturnPredicateTest::Guard {
+            guard: Box::new(guard),
+            parameters,
+        })
+    }
+
+    /// Whether a returned expression holds a call whose result could
+    /// narrow a parameter beyond what the guard lowering minted. A call
+    /// narrows only a reference it is handed — an argument or the
+    /// receiver — so only a call reaching a parameter that way counts. The
+    /// guard vocabulary reads a call as a fact only for a provably closed
+    /// same-file predicate callee, so every other such call
+    /// (`Array.isArray(x)`, an imported guard) is proved inert only when
+    /// its callee is a closed same-file declaration with a non-predicate
+    /// return annotation — the control-test rule, read here without
+    /// recording anything.
+    fn holds_unprovable_narrowing_call(&self, argument: &Expression<'_>) -> bool {
+        let mut scanner = LeafCallScanner {
+            control_nesting: 1,
+            ..LeafCallScanner::default()
+        };
+        scanner.visit_expression(argument);
+        scanner.control.iter().any(|call| match call {
+            ControlCall::Construct(_) | ControlCall::TaggedTemplate(_) => false,
+            ControlCall::Call {
+                span,
+                callee,
+                assertion_subject_roots,
+            } => {
+                assertion_subject_roots.iter().any(|(_, root)| {
+                    matches!(self.classify_occurrence(*root), NameBinding::Param(_))
+                }) && !self.predicate_guard_call_spans.contains(span)
+                    && !callee.as_ref().is_some_and(|(name, callee_span)| {
+                        matches!(self.classify_occurrence(*callee_span), NameBinding::Free)
+                            && self
+                                .closed_callee_declaration(name)
+                                .is_some_and(|function| {
+                                    ResultIndependentPosition::ControlTest
+                                        .certifies_closed_return(function.return_type.as_deref())
+                                })
+                    })
+            }
+        })
     }
 
     /// The tri-state classification behind [`Self::lower_guard`] — the
@@ -7152,6 +7469,25 @@ impl Lowerer<'_> {
     /// ledger.
     fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
         match unwrap_parenthesized(expression) {
+            // `void x = v;` retypes `x` exactly as the bare write statement
+            // does; every other `void` statement's operand only RUNS, and
+            // its calls are never entered into control flow (the leaf
+            // scanner's `void` rule).
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
+                if let Expression::AssignmentExpression(assignment) =
+                    unwrap_parenthesized(&unary.argument)
+                {
+                    if matches!(
+                        assignment.operator,
+                        oxc_ast::ast::AssignmentOperator::Assign
+                    ) {
+                        if let Some(statement) = self.modeled_assignment_statement(assignment) {
+                            return Some(statement);
+                        }
+                    }
+                }
+                self.scan_unmodeled_statement_effects(expression)
+            }
             Expression::AssignmentExpression(assignment)
                 if matches!(
                     assignment.operator,
@@ -7315,6 +7651,15 @@ impl Lowerer<'_> {
         &mut self,
         assignment: &oxc_ast::ast::AssignmentExpression<'_>,
     ) -> SliceExpr {
+        // A class expression assigned to a binding is named after it
+        // (`C = class {}` is the checker's `C`).
+        if let (
+            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier),
+            Expression::ClassExpression(class),
+        ) = (&assignment.left, &assignment.right)
+        {
+            return self.lower_class_expression(class, Some(identifier.name.as_str()));
+        }
         self.lower_expr(
             &assignment.right,
             ExprMode::BindingInit {
@@ -7705,11 +8050,18 @@ impl Lowerer<'_> {
                     // and every other carrier keeps the whole-carrier leaf
                     // lowering (its type is genuinely the carrier's, not its
                     // operand's).
+                    //
+                    // An ARRAY literal lowers structurally under the same
+                    // policy: its const tuple under `as const`, its
+                    // literals kept under `satisfies`.
                     ValueDescent::TypeCarrier(inner) => {
                         match member_literal_policy(other, self.source) {
                             Some(policy) => match value_descent(inner) {
                                 ValueDescent::Object(object) => self
                                     .lower_object_literal_with_policy(object, other, mode, policy),
+                                ValueDescent::Array(array) => {
+                                    self.lower_array_literal(array, policy)
+                                }
                                 _ => self.lower_leaf(other, mode),
                             },
                             None => self.lower_leaf(other, mode),
@@ -7721,6 +8073,9 @@ impl Lowerer<'_> {
                         mode,
                         ObjectMemberPolicy::Widen,
                     ),
+                    ValueDescent::Array(array) => {
+                        self.lower_array_literal(array, ObjectMemberPolicy::Widen)
+                    }
                     // A CONDITIONAL's value is the union of its branch
                     // values, and each branch is lowered as a flow
                     // expression — so a call in a branch rides
@@ -7845,6 +8200,107 @@ impl Lowerer<'_> {
                 }),
                 None,
             )),
+        }
+    }
+
+    /// Lower an array literal to [`SliceExpr::Array`] under an object
+    /// literal's member policy. Every element is its own evaluated
+    /// position — the planner opened each one (a spread's argument for a
+    /// spread) as a child site of the array — so an element outside the
+    /// demand selection rides the typed `Elided` carrier, exactly as an
+    /// object member value does. A fresh element literal widens (the
+    /// element slot is mutable) unless the policy keeps literals or a
+    /// const assertion pins that element; under `as const` a nested
+    /// object or array literal is in the const context too.
+    fn lower_array_literal(
+        &mut self,
+        array: &oxc_ast::ast::ArrayExpression<'_>,
+        policy: ObjectMemberPolicy,
+    ) -> SliceExpr {
+        let const_asserted = policy == ObjectMemberPolicy::ConstAssert;
+        let mode = ExprMode::BindingInit {
+            preserve_literal: true,
+        };
+        let mut elements = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let (expression, spread) = match element {
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                    (&spread.argument, true)
+                }
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                    elements.push(SliceArrayElement::Elision);
+                    continue;
+                }
+                other => match other.as_expression() {
+                    Some(expression) => (expression, false),
+                    None => continue,
+                },
+            };
+            let value = if !self.value_span_selected(expression.span()) {
+                // The elided element still RUNS at the literal's
+                // evaluation: its effects take the fail-closed scan.
+                self.scan_unmodeled_position_effects(expression);
+                SliceExpr::Elided
+            } else if const_asserted {
+                self.lower_in_const_context(expression, mode)
+            } else {
+                self.lower_expr(expression, mode)
+            };
+            if spread {
+                elements.push(SliceArrayElement::Spread { source: value });
+                continue;
+            }
+            let pinned = !policy.widens_member_literals()
+                || verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                    expression,
+                    self.source,
+                );
+            elements.push(SliceArrayElement::Value {
+                value: if pinned {
+                    value
+                } else {
+                    widen_mutable_slot_literals(value)
+                },
+                freshness: expression_freshness(expression),
+            });
+        }
+        SliceExpr::Array {
+            elements: Arc::from(elements.into_boxed_slice()),
+            const_asserted,
+        }
+    }
+
+    /// Whether an initializer is a bare `null` or a FREE `undefined`,
+    /// through parentheses — the checker's `isNullOrUndefined`, which
+    /// resolves the name, so a local `undefined` does not qualify.
+    fn is_null_or_undefined_keyword(&self, expression: &Expression<'_>) -> bool {
+        match unwrap_parenthesized(expression) {
+            Expression::NullLiteral(_) => true,
+            Expression::Identifier(identifier) => {
+                identifier.name.as_str() == "undefined"
+                    && matches!(self.classify_occurrence(identifier.span), NameBinding::Free)
+            }
+            _ => false,
+        }
+    }
+
+    /// Lower a value sitting DIRECTLY in a const context — a member value
+    /// or element of a const-asserted literal, through parentheses: a
+    /// nested object or array literal inherits the const assertion
+    /// (TypeScript's `isConstContext`), and every other form lowers as it
+    /// would anywhere else.
+    fn lower_in_const_context(&mut self, expression: &Expression<'_>, mode: ExprMode) -> SliceExpr {
+        match value_descent(unwrap_parenthesized(expression)) {
+            ValueDescent::Object(object) => self.lower_object_literal_with_policy(
+                object,
+                expression,
+                mode,
+                ObjectMemberPolicy::ConstAssert,
+            ),
+            ValueDescent::Array(array) => {
+                self.lower_array_literal(array, ObjectMemberPolicy::ConstAssert)
+            }
+            _ => self.lower_expr(expression, mode),
         }
     }
 
@@ -8055,6 +8511,7 @@ impl Lowerer<'_> {
                     key,
                     value: SliceExpr::Elided,
                     assignment_value: None,
+                    unwidened: None,
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
@@ -8082,6 +8539,7 @@ impl Lowerer<'_> {
                     key,
                     value,
                     assignment_value: None,
+                    unwidened: None,
                     method_kind,
                     // A method / accessor member is never `readonly`,
                     // under `as const` or otherwise: the modifier applies
@@ -8103,6 +8561,10 @@ impl Lowerer<'_> {
                     key,
                     value: SliceExpr::SemanticAny,
                     assignment_value: None,
+                    unwidened: Some(SliceExpr::Type(GatedLeaf(
+                        widening_nullish_type(value_expression),
+                        None,
+                    ))),
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
@@ -8121,40 +8583,33 @@ impl Lowerer<'_> {
                     value_expression,
                     self.source,
                 );
-            let value = self.lower_expr(value_expression, mode);
+            // A class expression a static key holds is named after the key
+            // (`{ K: class {} }` is the checker's `K`); every other value of
+            // an `as const` literal lowers in the const context.
+            let value = match &key {
+                SliceObjectKey::Static(name)
+                    if matches!(value_expression, Expression::ClassExpression(_)) =>
+                {
+                    let name = Arc::clone(name);
+                    self.lower_assigned_value(value_expression, &name, mode)
+                }
+                _ if policy == ObjectMemberPolicy::ConstAssert => {
+                    self.lower_in_const_context(value_expression, mode)
+                }
+                _ => self.lower_expr(value_expression, mode),
+            };
             let assignment_value = value.clone();
-            let value = match (widen_member, value) {
-                (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
-                    leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
-                ),
-                // The member slot's widening reaches INTO a branch join:
-                // a ternary member's fresh literal arm is the member's
-                // fresh literal, and tsc widens it at the property
-                // exactly like a direct literal member. A narrowed
-                // reference arm is NOT fresh (the checker's own
-                // early-return-guard shapes keep their literal unions),
-                // so only leaf arms widen here.
-                (true, SliceExpr::Union { arms, guard }) => SliceExpr::Union {
-                    arms: Arc::from(
-                        arms.iter()
-                            .map(|arm| match arm {
-                                SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
-                                    verter_semantic::analysis::type_eval_build::widen_shallow_literal,
-                                )),
-                                other => other.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
-                    guard,
-                },
-                (_, value) => value,
+            let value = if widen_member {
+                widen_mutable_slot_literals(value)
+            } else {
+                value
             };
             let assignment_value = (assignment_value != value).then_some(assignment_value);
             entries.push(SliceObjectEntry::Member(Box::new(SliceObjectMember {
                 key,
                 value,
                 assignment_value,
+                unwidened: None,
                 method_kind,
                 readonly: policy.readonly(),
                 spans,
@@ -8223,412 +8678,6 @@ impl Lowerer<'_> {
             has_declared_return: node.return_type().is_some(),
             gap,
         }
-    }
-
-    /// Lower a class EXPRESSION to its value carrier ([`SliceExpr::Class`]).
-    ///
-    /// The `extends` reference is lowered as a flow value (the base
-    /// constructor is a parameter, a local, a free name or a member path),
-    /// and every member's TYPE is lowered here and gated by the frame like
-    /// any body-position annotation. What a member's type cannot
-    /// be read from without running code the frame does not model — a
-    /// method whose return is body-derived, a field initializer that reads
-    /// the frame or calls — keeps the member over the typed unresolved
-    /// marker. A class form whose SHAPE this half cannot model (its own
-    /// type parameters, an `extends` value that is not a reference, a
-    /// computed member name, an index signature, an `accessor` property,
-    /// an overload signature, a non-public constructor) keeps the typed
-    /// gap.
-    ///
-    /// `assigned_name` is the variable a class expression directly
-    /// initializes, which names it.
-    fn lower_class_expression(
-        &mut self,
-        class: &oxc_ast::ast::Class<'_>,
-        assigned_name: Option<&str>,
-    ) -> SliceExpr {
-        use oxc_ast::ast::{ClassElement, MethodDefinitionKind, PropertyKey};
-        let unmodeled = SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression);
-        if class.type_parameters.is_some() {
-            return unmodeled;
-        }
-        // The skeleton never indexes a class subtree, so the `extends` value
-        // lowers only as a REFERENCE (a parameter, a local, a free name, a
-        // member path) — a form with no call, write or tracked site of its
-        // own; any other heritage form keeps the typed gap.
-        if let Some(base) = &class.super_class {
-            if !matches!(
-                value_descent(unwrap_parenthesized(base)),
-                ValueDescent::Reference
-            ) {
-                return unmodeled;
-            }
-        }
-        let heritage = class.super_class.as_ref().map(|base| SliceClassHeritage {
-            base: Box::new(self.lower_expr(
-                unwrap_parenthesized(base),
-                ExprMode::BindingInit {
-                    preserve_literal: true,
-                },
-            )),
-            type_arguments: class
-                .super_type_arguments
-                .as_ref()
-                .map(|arguments| {
-                    arguments
-                        .params
-                        .iter()
-                        .map(|argument| {
-                            self.gate(lower_ts_type(argument, self.source), argument.span(), &[])
-                        })
-                        .collect()
-                })
-                .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice())),
-        });
-        let mut constructor = None;
-        let mut members = Vec::with_capacity(class.body.body.len());
-        // Each accessor property by name and staticness, with its member
-        // index — a getter and a setter of one name are ONE property.
-        let mut accessors: Vec<(Arc<str>, bool, usize)> = Vec::new();
-        for element in &class.body.body {
-            match element {
-                // A static block runs at class evaluation but declares no
-                // member.
-                ClassElement::StaticBlock(_) => {}
-                ClassElement::PropertyDefinition(property) => {
-                    // A `#private` brand is not a type-level member.
-                    if matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
-                        continue;
-                    }
-                    let Some(key) = class_member_name(&property.key) else {
-                        return unmodeled;
-                    };
-                    let ty = match (&property.type_annotation, &property.value) {
-                        (Some(annotation), _) => Some(self.gate(
-                            lower_ts_type(&annotation.type_annotation, self.source),
-                            annotation.span,
-                            &[],
-                        )),
-                        (None, Some(initializer)) => {
-                            self.lower_class_field_initializer(initializer, property.readonly)
-                        }
-                        (None, None) => Some(self.gate(
-                            TypeExpr::Primitive(PrimitiveName::Any),
-                            property.span,
-                            &[],
-                        )),
-                    };
-                    members.push(SliceClassMember {
-                        key,
-                        is_static: property.r#static,
-                        optional: property.optional,
-                        readonly: property.readonly,
-                        visibility: class_member_visibility(property.accessibility),
-                        method_kind: None,
-                        spans: verter_type_expr::MemberSpans {
-                            declaration: Some(property.span.into()),
-                            name: Some(property.key.span().into()),
-                            type_annotation: property
-                                .type_annotation
-                                .as_ref()
-                                .map(|annotation| annotation.type_annotation.span().into()),
-                        },
-                        ty,
-                    });
-                }
-                ClassElement::MethodDefinition(method) => {
-                    if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
-                        continue;
-                    }
-                    // An overload signature: the group's visible signatures
-                    // are not modelled here.
-                    if method.value.body.is_none() {
-                        return unmodeled;
-                    }
-                    if method.kind == MethodDefinitionKind::Constructor {
-                        if !matches!(
-                            method.accessibility,
-                            None | Some(oxc_ast::ast::TSAccessibility::Public)
-                        ) {
-                            return unmodeled;
-                        }
-                        let Some(parameters) =
-                            self.lower_class_constructor(&method.value.params, &mut members)
-                        else {
-                            return unmodeled;
-                        };
-                        constructor = Some(parameters);
-                        continue;
-                    }
-                    let Some(key) = class_member_name(&method.key) else {
-                        return unmodeled;
-                    };
-                    let spans = verter_type_expr::MemberSpans {
-                        declaration: Some(method.span.into()),
-                        name: Some(method.key.span().into()),
-                        type_annotation: None,
-                    };
-                    let getter = match method.kind {
-                        MethodDefinitionKind::Get => true,
-                        MethodDefinitionKind::Set => false,
-                        MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => {
-                            members.push(SliceClassMember {
-                                key,
-                                is_static: method.r#static,
-                                optional: method.optional,
-                                readonly: false,
-                                visibility: class_member_visibility(method.accessibility),
-                                method_kind: Some(verter_type_expr::ObjectMethodKind::Method),
-                                spans,
-                                ty: self.lower_class_method_type(&method.value),
-                            });
-                            continue;
-                        }
-                    };
-                    // An accessor is a PROPERTY of the type: the getter's
-                    // return (else the setter's parameter), `readonly` when
-                    // no setter pairs with the getter.
-                    let ty = self.lower_class_accessor_type(&method.value, getter);
-                    let paired = accessors
-                        .iter()
-                        .find(|(name, is_static, _)| *name == key && *is_static == method.r#static)
-                        .map(|(_, _, index)| *index);
-                    match paired {
-                        Some(index) => {
-                            let member: &mut SliceClassMember = &mut members[index];
-                            if getter {
-                                member.ty = ty;
-                            }
-                            member.readonly = false;
-                        }
-                        None => {
-                            accessors.push((Arc::clone(&key), method.r#static, members.len()));
-                            members.push(SliceClassMember {
-                                key,
-                                is_static: method.r#static,
-                                optional: method.optional,
-                                readonly: getter,
-                                visibility: class_member_visibility(method.accessibility),
-                                method_kind: None,
-                                spans,
-                                ty,
-                            });
-                        }
-                    }
-                }
-                ClassElement::AccessorProperty(_) | ClassElement::TSIndexSignature(_) => {
-                    return unmodeled;
-                }
-            }
-        }
-        // The class-evaluation-time positions (decorators, static blocks,
-        // static initializers) RUN here, in this frame: their calls take
-        // the same certification a leaf-folded class takes, and an
-        // unprovable one flags the enclosing statement's typed gap.
-        let mut scanner = LeafCallScanner::default();
-        scanner.visit_class(class);
-        self.drain_leaf_call_scanner(scanner);
-        let name: Arc<str> = match (&class.id, assigned_name) {
-            (Some(id), _) => Arc::from(id.name.as_str()),
-            (None, Some(assigned)) => Arc::from(assigned),
-            (None, None) => Arc::from("(Anonymous class)"),
-        };
-        SliceExpr::Class(Arc::new(SliceClass {
-            offset: class.span.start,
-            name,
-            qualifier: self.class_qualifier.clone(),
-            heritage,
-            constructor,
-            members: Arc::from(members.into_boxed_slice()),
-        }))
-    }
-
-    /// A class field's type from its initializer: the shared shallow-pass
-    /// answer, widened unless the field is `readonly`. A field initializer
-    /// runs at construction, long after the frame's reaching definitions
-    /// were read, so an answer that names a frame binding — or composes over
-    /// a call — is not modelled here.
-    fn lower_class_field_initializer(
-        &mut self,
-        initializer: &Expression<'_>,
-        readonly: bool,
-    ) -> Option<GatedType> {
-        match self.leaf_type(
-            initializer,
-            ExprMode::BindingInit {
-                preserve_literal: readonly,
-            },
-        ) {
-            LeafLowering::Free(ty)
-                if !leaf_answer_is_fabricated_at_a_call_position(&ty, initializer) =>
-            {
-                Some(self.gate(ty, initializer.span(), &[]))
-            }
-            LeafLowering::Free(_)
-            | LeafLowering::FrameShadowed { .. }
-            | LeafLowering::Unmodeled => None,
-        }
-    }
-
-    /// A class expression's declared constructor parameters. A parameter
-    /// property (`constructor(public a: string)`) also declares an
-    /// instance member of the parameter's type. `None` when a parameter's
-    /// type cannot be read without running code.
-    fn lower_class_constructor(
-        &self,
-        params: &FormalParameters<'_>,
-        members: &mut Vec<SliceClassMember>,
-    ) -> Option<Arc<[SliceClassParam]>> {
-        let lowered = self.lower_class_signature_params(params)?;
-        let mut out = Vec::with_capacity(lowered.len());
-        for (index, (name, ty, optional, rest, span)) in lowered.into_iter().enumerate() {
-            let ty = self.gate(ty, span, &[]);
-            if let Some(parameter) = params.items.get(index) {
-                let is_property =
-                    parameter.accessibility.is_some() || parameter.readonly || parameter.r#override;
-                if let (true, Some(key)) = (is_property, name.as_ref()) {
-                    members.push(SliceClassMember {
-                        key: Arc::clone(key),
-                        is_static: false,
-                        optional: parameter.optional,
-                        readonly: parameter.readonly,
-                        visibility: class_member_visibility(parameter.accessibility),
-                        method_kind: None,
-                        spans: verter_type_expr::MemberSpans {
-                            declaration: Some(parameter.span.into()),
-                            name: Some(parameter.pattern.span().into()),
-                            type_annotation: parameter
-                                .type_annotation
-                                .as_ref()
-                                .map(|annotation| annotation.type_annotation.span().into()),
-                        },
-                        ty: Some(ty.clone()),
-                    });
-                }
-            }
-            out.push(SliceClassParam {
-                name,
-                ty,
-                optional,
-                rest,
-            });
-        }
-        Some(Arc::from(out.into_boxed_slice()))
-    }
-
-    /// A class accessor property's type: the getter's return annotation, or
-    /// the setter's parameter annotation (`any` when it has none). A
-    /// getter's body-derived return is not modelled.
-    fn lower_class_accessor_type(
-        &self,
-        function: &oxc_ast::ast::Function<'_>,
-        getter: bool,
-    ) -> Option<GatedType> {
-        if getter {
-            let annotation = function.return_type.as_ref()?;
-            return Some(self.gate(
-                lower_ts_type(&annotation.type_annotation, self.source),
-                annotation.span,
-                &[],
-            ));
-        }
-        let parameter = function.params.items.first()?;
-        Some(match &parameter.type_annotation {
-            Some(annotation) => self.gate(
-                lower_ts_type(&annotation.type_annotation, self.source),
-                annotation.span,
-                &[],
-            ),
-            None => self.gate(TypeExpr::Primitive(PrimitiveName::Any), parameter.span, &[]),
-        })
-    }
-
-    /// A class method's type: its authored signature. A body-derived return
-    /// (no return annotation) is not modelled, and neither is a method with
-    /// its own type parameters or a `this` parameter.
-    fn lower_class_method_type(&self, function: &oxc_ast::ast::Function<'_>) -> Option<GatedType> {
-        if function.type_parameters.is_some() || function.this_param.is_some() {
-            return None;
-        }
-        let return_type =
-            lower_ts_type(&function.return_type.as_ref()?.type_annotation, self.source);
-        let parameters = self
-            .lower_class_signature_params(&function.params)?
-            .into_iter()
-            .map(|(name, ty, optional, rest, _)| {
-                verter_type_expr::FunctionParam::synthetic(
-                    name.map(|name| name.to_string()),
-                    ty,
-                    optional,
-                    rest,
-                )
-            })
-            .collect();
-        let ty = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::with_spans(
-            parameters,
-            Some(Arc::new(return_type)),
-            Vec::new(),
-            verter_type_expr::FunctionSpans {
-                signature: Some(function.span.into()),
-                return_type: function
-                    .return_type
-                    .as_ref()
-                    .map(|annotation| annotation.type_annotation.span().into()),
-            },
-        )));
-        Some(self.gate(ty, function.span, &[]))
-    }
-
-    /// The parameters of a class member's signature: each one's annotation,
-    /// else its default initializer's widened type, else `any` (an array of
-    /// `any` for a rest parameter). `None` when a default initializer's
-    /// type composes over a call.
-    #[allow(clippy::type_complexity)]
-    fn lower_class_signature_params(
-        &self,
-        params: &FormalParameters<'_>,
-    ) -> Option<Vec<(Option<Arc<str>>, TypeExpr, bool, bool, oxc_span::Span)>> {
-        let name_of = |pattern: &BindingPattern<'_>| match pattern {
-            BindingPattern::BindingIdentifier(id) => Some(Arc::<str>::from(id.name.as_str())),
-            _ => None,
-        };
-        let mut out = Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
-        for param in &params.items {
-            let ty = match (&param.type_annotation, &param.initializer) {
-                (Some(annotation), _) => lower_ts_type(&annotation.type_annotation, self.source),
-                (None, Some(initializer)) => {
-                    let ty = infer_declaration_expression_type(
-                        initializer,
-                        self.source,
-                        TopLevelLiteralPolicy::Widen,
-                    )
-                    .ok()?;
-                    if leaf_answer_is_fabricated_at_a_call_position(&ty, initializer) {
-                        return None;
-                    }
-                    ty
-                }
-                (None, None) => TypeExpr::Primitive(PrimitiveName::Any),
-            };
-            out.push((
-                name_of(&param.pattern),
-                ty,
-                param.optional || param.initializer.is_some(),
-                false,
-                param.span,
-            ));
-        }
-        if let Some(rest) = &params.rest {
-            let ty = match &rest.type_annotation {
-                Some(annotation) => lower_ts_type(&annotation.type_annotation, self.source),
-                None => TypeExpr::Array {
-                    element: Arc::new(TypeExpr::Primitive(PrimitiveName::Any)),
-                    readonly: false,
-                },
-            };
-            out.push((name_of(&rest.rest.argument), ty, false, true, rest.span));
-        }
-        Some(out)
     }
 
     /// Lower a leaf expression through the shared shallow-pass entry,
@@ -8879,6 +8928,7 @@ impl Lowerer<'_> {
         mode: CertificationMode,
         write_policy: WritePolicy,
     ) -> bool {
+        self.decided_above_call_spans.extend(scanner.unentered);
         let control_unprovable = self.certify_result_independent_calls(
             scanner.control,
             ResultIndependentPosition::ControlTest,
@@ -9307,6 +9357,83 @@ impl<'a> Visit<'a> for OwnFrameReturnFinder {
     }
 }
 
+/// Whether a statement contains a `yield` of ITS OWN frame. A generator's
+/// yield type joins every yield it evaluates, so a loop whose body yields
+/// contributes to the answer exactly as one whose body returns does and
+/// can never be skipped as transparent.
+fn statement_yields_in_own_frame(statement: &Statement<'_>) -> bool {
+    let mut finder = OwnFrameYieldFinder::default();
+    finder.visit_statement(statement);
+    finder.found
+}
+
+/// Whether a body holds a `yield` of its own frame the yield join does not
+/// model: one nested inside another expression, a statement-position
+/// `yield*` delegation, or a yield inside a statement-position yield's
+/// own argument.
+fn body_has_unmodeled_yield(statements: &[Statement<'_>]) -> bool {
+    let mut finder = OwnFrameYieldFinder {
+        statement_yields_modeled: true,
+        ..OwnFrameYieldFinder::default()
+    };
+    for statement in statements {
+        finder.visit_statement(statement);
+    }
+    finder.found
+}
+
+/// The `yield` twin of [`OwnFrameReturnFinder`]. With
+/// `statement_yields_modeled` set it skips the yield of a statement-position
+/// `yield x` / `yield;` (its argument is still searched) and finds only
+/// the other yields.
+#[derive(Default)]
+struct OwnFrameYieldFinder {
+    nested_frame_nesting: u32,
+    statement_yields_modeled: bool,
+    found: bool,
+}
+
+impl<'a> Visit<'a> for OwnFrameYieldFinder {
+    fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        if self.statement_yields_modeled {
+            if let Expression::YieldExpression(yield_expr) = unwrap_parenthesized(&it.expression) {
+                if !yield_expr.delegate {
+                    if let Some(argument) = &yield_expr.argument {
+                        self.visit_expression(argument);
+                    }
+                    return;
+                }
+            }
+        }
+        walk::walk_expression_statement(self, it);
+    }
+    fn visit_yield_expression(&mut self, it: &oxc_ast::ast::YieldExpression<'a>) {
+        if self.nested_frame_nesting == 0 {
+            self.found = true;
+        }
+        walk::walk_yield_expression(self, it);
+    }
+    fn visit_function(
+        &mut self,
+        it: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        self.nested_frame_nesting += 1;
+        walk::walk_function(self, it, flags);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_class(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+}
+
 /// A position whose calls never feed the demanded value, with the rule
 /// under which a PROVABLY CLOSED same-file callee's authored return
 /// annotation certifies a call there as establishing no narrowing.
@@ -9480,23 +9607,43 @@ impl ControlCall {
 /// retypes the binding itself), and the drain resolves each against this
 /// frame's lexical authority: a target the frame OWNS flags the enclosing
 /// statement's typed `GuardNarrowing` gap, a FREE target stays silent.
+///
+/// A `void` operand's value is discarded, and the checker enters a call
+/// into control flow — where an `asserts` callee narrows what follows and
+/// a never-returning one ends the path — only when the call is an
+/// expression statement's own expression or a comma operator's left
+/// operand (the binder's `maybeBindExpressionFlowIfCall`). So a
+/// same-frame call inside a `void` operand that is no comma's left
+/// operand and sits in no control position narrows nothing and is
+/// `unentered`: decided above with no certification (TypeScript 7.0.2:
+/// `void assertString(x); return x` keeps `x` unnarrowed). A
+/// skeleton-visible write there is not collected either: the operand's
+/// value cannot depend on it, and a read after it rides the slice's
+/// unapplied-write ledger like any statement write's.
 #[derive(Default)]
 struct LeafCallScanner<'a> {
     decided: Vec<verter_span::Span>,
+    /// Same-frame calls / constructs the checker never enters into
+    /// control flow — see the `void` rule above.
+    unentered: Vec<verter_span::Span>,
+    /// `void` operand nesting.
+    void_nesting: usize,
+    /// The spans of calls that are a comma operator's left operand.
+    comma_operand_calls: FxHashSet<oxc_span::Span>,
     discarded: Vec<ControlCall>,
     control: Vec<ControlCall>,
     /// Same-frame whole-binding write targets: `(name, identifier span,
     /// skeleton-hidden)`. A write is SKELETON-HIDDEN when it sits under a
-    /// class subtree, which the flow skeleton never indexes: the slice's
-    /// effect ledger cannot see it. A skeleton-VISIBLE write instead rides
+    /// class subtree, whose writes the flow skeleton never records: the
+    /// slice's effect ledger cannot see it. A skeleton-VISIBLE write instead rides
     /// the typed unapplied-write ledger, which applies the demand-selection
     /// discipline (a write to a binding nothing reads degrades nothing).
     writes: Vec<(&'a str, oxc_span::Span, bool)>,
     control_nesting: usize,
     nested_frame_nesting: usize,
-    /// Class-subtree nesting: the flow skeleton never indexes inside a
-    /// class, so a write collected under one is invisible to the slice's
-    /// effect ledger. Unlike `nested_frame_nesting` this is NOT dropped
+    /// Class-subtree nesting: the flow skeleton never records a write
+    /// inside a class, so a write collected under one is invisible to the
+    /// slice's effect ledger. Unlike `nested_frame_nesting` this is NOT dropped
     /// for the class-evaluation-time positions (a static block runs here,
     /// but the skeleton still never saw it).
     class_nesting: usize,
@@ -9513,10 +9660,13 @@ impl<'a> LeafCallScanner<'a> {
     }
 
     /// Record one same-frame whole-binding write target, marking whether
-    /// the flow skeleton can see it (it never indexes inside a class
-    /// subtree, so a write under `class_nesting` is invisible to the
+    /// the flow skeleton can see it (it never records a write inside a
+    /// class subtree, so a write under `class_nesting` is invisible to the
     /// slice's effect ledger).
     fn push_write(&mut self, name: &'a str, span: oxc_span::Span) {
+        if self.void_nesting > 0 && self.class_nesting == 0 {
+            return;
+        }
         self.writes.push((name, span, self.class_nesting > 0));
     }
 
@@ -9782,6 +9932,8 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.decided.push(call.span.into());
         } else if self.control_nesting > 0 {
             self.control.push(ControlCall::of_call(call));
+        } else if self.void_nesting > 0 && !self.comma_operand_calls.contains(&call.span) {
+            self.unentered.push(call.span.into());
         } else {
             self.discarded.push(ControlCall::of_call(call));
         }
@@ -9792,6 +9944,8 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             self.decided.push(new.span.into());
         } else if self.control_nesting > 0 {
             self.control.push(ControlCall::Construct(new.span.into()));
+        } else if self.void_nesting > 0 {
+            self.unentered.push(new.span.into());
         } else {
             self.discarded.push(ControlCall::Construct(new.span.into()));
         }
@@ -9806,11 +9960,29 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         } else if self.control_nesting > 0 {
             self.control
                 .push(ControlCall::TaggedTemplate(tagged.span.into()));
+        } else if self.void_nesting > 0 {
+            self.unentered.push(tagged.span.into());
         } else {
             self.discarded
                 .push(ControlCall::TaggedTemplate(tagged.span.into()));
         }
         walk::walk_tagged_template_expression(self, tagged);
+    }
+    fn visit_unary_expression(&mut self, it: &oxc_ast::ast::UnaryExpression<'a>) {
+        let void = it.operator == UnaryOperator::Void;
+        self.void_nesting += usize::from(void);
+        walk::walk_unary_expression(self, it);
+        self.void_nesting -= usize::from(void);
+    }
+    fn visit_sequence_expression(&mut self, it: &oxc_ast::ast::SequenceExpression<'a>) {
+        if let Some((_, operands)) = it.expressions.split_last() {
+            for operand in operands {
+                if let Expression::CallExpression(call) = operand {
+                    self.comma_operand_calls.insert(call.span);
+                }
+            }
+        }
+        walk::walk_sequence_expression(self, it);
     }
     // Nested function / arrow / class bodies are their own frames.
     fn visit_function(
@@ -9905,7 +10077,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         // order; the name binding, type parameters, and implements clause
         // carry no runtime expressions.)
         //
-        // The skeleton never indexes ANY of the class subtree, so every
+        // The skeleton records no write of the class subtree, so every
         // write under this visit — heritage included — is skeleton-hidden.
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);
@@ -10108,33 +10280,6 @@ fn guard_literal_of(expression: &Expression<'_>, source: &str) -> Option<SliceGu
 /// form that contains a call but whose answer the pass models
 /// (`f() === 1` is `boolean`, `f() as T` is `T`) embeds no `any` and
 /// passes.
-/// A class member's static name — an identifier or a string literal. A
-/// computed name is `None`.
-fn class_member_name(key: &oxc_ast::ast::PropertyKey<'_>) -> Option<Arc<str>> {
-    match key {
-        oxc_ast::ast::PropertyKey::StaticIdentifier(id) => Some(Arc::from(id.name.as_str())),
-        oxc_ast::ast::PropertyKey::StringLiteral(literal) => {
-            Some(Arc::from(literal.value.as_str()))
-        }
-        _ => None,
-    }
-}
-
-/// A class member's declared accessibility.
-fn class_member_visibility(
-    accessibility: Option<oxc_ast::ast::TSAccessibility>,
-) -> verter_type_expr::MemberVisibility {
-    match accessibility {
-        Some(oxc_ast::ast::TSAccessibility::Private) => verter_type_expr::MemberVisibility::Private,
-        Some(oxc_ast::ast::TSAccessibility::Protected) => {
-            verter_type_expr::MemberVisibility::Protected
-        }
-        Some(oxc_ast::ast::TSAccessibility::Public) | None => {
-            verter_type_expr::MemberVisibility::Public
-        }
-    }
-}
-
 fn leaf_answer_is_fabricated_at_a_call_position(ty: &TypeExpr, expr: &Expression<'_>) -> bool {
     if embeds_call_return_carrier(ty) {
         return true;

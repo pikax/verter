@@ -108,6 +108,8 @@ pub(crate) mod signature_discovery;
 #[cfg(test)]
 mod signature_discovery_tests;
 #[cfg(test)]
+mod signature_predicate_inference_tests;
+#[cfg(test)]
 mod signature_predicate_tests;
 pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
@@ -121,6 +123,8 @@ pub(crate) mod flow_return;
 #[cfg(test)]
 mod flow_return_accessor_tests;
 pub(crate) mod flow_return_callee;
+#[cfg(test)]
+mod flow_return_class_tests;
 #[cfg(test)]
 mod flow_return_construct_tests;
 #[cfg(test)]
@@ -4148,6 +4152,12 @@ mod cycle_gate_tests;
 
 #[cfg(test)]
 mod base_signature_tests;
+#[cfg(test)]
+mod checker_probe_lane_tests;
+#[cfg(test)]
+mod heritage_signature_tests;
+#[cfg(test)]
+mod indexed_access_relation_tests;
 #[cfg(test)]
 mod projected_terminal_surface_tests;
 #[cfg(test)]

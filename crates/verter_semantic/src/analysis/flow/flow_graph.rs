@@ -553,6 +553,21 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                     edges.push((node, site_node(*arm), FlowEdgeKind::ValueDef));
                 }
             }
+            // An array's element type is the union of its WHOLE element
+            // values, so each element is an input read of the array: the
+            // demanded suffix never threads into it.
+            SkeletonExprShape::ArrayLiteral { elements } => {
+                for element in elements.iter() {
+                    edges.push((
+                        node,
+                        site_node(*element),
+                        FlowEdgeKind::ReadProjection {
+                            path: Arc::from([]),
+                            kind: FlowReadKind::Input,
+                        },
+                    ));
+                }
+            }
             SkeletonExprShape::ObjectLiteral { entries } => {
                 for entry in entries.iter() {
                     match entry {

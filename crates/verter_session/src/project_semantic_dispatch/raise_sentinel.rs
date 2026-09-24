@@ -63,8 +63,10 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         // minted by another store/generation, which is a hard fault a
         // consumer must observe, not a partially-materialised value to fold
         // into a hole (unlike the genuinely incomplete forces
-        // `Stale`/`Incomplete` above).
+        // `Stale`/`Incomplete` above). A checker recovery raises to its
+        // recovery type — a materialised value.
         QueryError::RaiseMiss
+        | QueryError::CheckerRecovery(_)
         | QueryError::TypeParamCycle
         | QueryError::RecursiveRef { .. }
         | QueryError::ValueDomainMismatch { .. }
@@ -107,6 +109,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         | QueryError::Other(_)
         | QueryError::DeclPlaceholder { .. }
         | QueryError::UnmodeledPosition
+        | QueryError::CheckerRecovery(_)
         | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
@@ -147,6 +150,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         // precisely so a consumer keyed on `Miss` cannot mistake it for
         // one.
         | QueryError::UnmodeledPosition
+        | QueryError::CheckerRecovery(_)
         | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
@@ -213,6 +217,10 @@ mod tests {
             QueryError::IncompleteSemanticOperand {
                 reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
+            QueryError::CheckerRecovery(crate::semantic_query::CheckerDiagnostic {
+                code: crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+                operation: crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand,
+            }),
         ]
     }
 

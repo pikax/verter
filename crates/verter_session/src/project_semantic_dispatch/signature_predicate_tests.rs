@@ -630,3 +630,268 @@ export function makeAssert() { return function (v: unknown): asserts v is Foo { 
         });
     }
 }
+
+/// Guards whose union and intersection signatures the composite-signature
+/// tests read.
+const COMPOSITES: &str = "interface A { a: 1 }\n\
+interface B { b: 1 }\n\
+declare const u: ((x: unknown) => x is A) | ((x: unknown) => x is B);\n\
+declare const uf: ((x: unknown) => x is A) | ((x: unknown) => false);\n\
+declare const u3: ((x: unknown) => x is A) | ((x: unknown) => x is B) | ((x: unknown) => false);\n\
+declare const uu: ((x: unknown) => x is A) | ((y: unknown) => y is B);\n\
+declare const ub: ((x: unknown) => x is A) | ((x: unknown) => boolean);\n\
+declare const ut: ((x: unknown) => x is A) | ((x: unknown) => true);\n\
+declare const uidx: ((x: unknown, y: unknown) => x is A) | ((x: unknown, y: unknown) => y is B);\n\
+declare const ua: ((x: unknown) => asserts x is A) | ((x: unknown) => asserts x is B);\n\
+declare const uab: ((x: unknown) => asserts x is A) | ((x: unknown) => x is B);\n\
+declare const i: ((x: unknown) => x is A) & ((x: unknown) => x is B);\n\
+declare const ib: ((x: unknown) => boolean) & ((x: unknown) => x is B);";
+
+/// One shared call signature of a probe: its graph node and the effect
+/// its kernel candidate reads under the identity call map.
+type SharedCallSignature = (SemanticNodeId, Option<PredicateEffect>);
+
+/// The call signatures `SignaturesOfType` shares for `probe`.
+fn shared_call_signatures(
+    probe: &str,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_>, Vec<SharedCallSignature>),
+) {
+    with_probe(COMPOSITES, probe, |dispatch, node| {
+        let store = dispatch.graph().signature_store();
+        let set = match dispatch.signatures_of_type(
+            store,
+            node,
+            SignatureKind::Call,
+            SemanticContextId::production(),
+        ) {
+            QueryOutcome::Ready(Ready { value, .. }) => value,
+            QueryOutcome::Incomplete(reason) => panic!("`{probe}` is incomplete: {reason:?}"),
+        };
+        let effects: Vec<Option<PredicateEffect>> = candidates(store, set)
+            .into_iter()
+            .map(|candidate| read_effects(dispatch, candidate, identity_call(store, candidate)))
+            .collect();
+        let nodes = match dispatch.shared_signature_nodes(node, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => nodes,
+            super::signature_discovery::SharedSignatureNodes::Incomplete(reason) => {
+                panic!("`{probe}`'s signature nodes are incomplete: {reason:?}")
+            }
+        };
+        assert_eq!(nodes.len(), effects.len());
+        read(dispatch, nodes.into_iter().zip(effects).collect());
+    });
+}
+
+fn shown(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> String {
+    crate::semantic_query::display::display(
+        dispatch.graph(),
+        &crate::semantic_query::SemanticQueryValue::TypeNode(node),
+        crate::semantic_query::demand::DisplayNeeds::empty(),
+    )
+    .to_string()
+}
+
+/// Whether a live node is the checker's `printed` type.
+fn prints_as(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, printed: &str) -> bool {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    let expected = checker_syntax::parse(printed).expect("checker print parses");
+    checker_syntax::matches_node(dispatch, node, &expected, 0)
+}
+
+/// A call through a UNION of guards takes the checker's composite rule
+/// (`getUnionOrIntersectionTypePredicate`), never an OR of the members:
+/// every member must carry a type predicate of the same kind about the
+/// same parameter, and the union signature narrows to the union of their
+/// targets; a member returning exactly `false` is admitted and adds
+/// nothing. Measured on 7.0.2 (`if (g(v)) return v; return null;`): `u`
+/// narrows `v` to `A | B`, `uf` to `A`, a three-member union with a
+/// `false` member to `A | B`, members naming the parameter differently to
+/// `A | B`; a `boolean` or `true` member, predicates about different
+/// parameters, assertions, and an assertion beside a predicate narrow
+/// nothing (`unknown`).
+#[test]
+fn a_union_signature_carries_the_checker_composite_predicate() {
+    for (probe, printed) in [
+        ("typeof u", Some("(x: unknown) => x is A | B")),
+        ("typeof uf", Some("(x: unknown) => x is A")),
+        ("typeof u3", Some("(x: unknown) => x is A | B")),
+        ("typeof uu", Some("(x: unknown) => x is A | B")),
+        ("typeof ub", None),
+        ("typeof ut", None),
+        ("typeof uidx", None),
+        ("typeof ua", None),
+        ("typeof uab", None),
+    ] {
+        shared_call_signatures(probe, |dispatch, signatures| {
+            let [(node, effect)] = signatures.as_slice() else {
+                panic!("`{probe}` has one union signature; measured {signatures:?}");
+            };
+            let predicate = match dispatch.graph().node_data(*node).as_deref() {
+                Some(SemanticNodeData::Signature { predicate, .. }) => *predicate,
+                other => panic!("`{probe}`'s union signature is a signature node: {other:?}"),
+            };
+            match printed {
+                Some(printed) => {
+                    assert!(
+                        prints_as(dispatch, *node, printed),
+                        "`{probe}`'s union signature is `{printed}` on 7.0.2; measured `{}`",
+                        shown(dispatch, *node)
+                    );
+                    let effect = effect.expect("the union signature's effect");
+                    let predicate = predicate.expect("the composite node carries it");
+                    assert_eq!((effect.subject, effect.asserts), (predicate.subject, false));
+                    assert_eq!(
+                        effect.ty.map(|token| {
+                            dispatch
+                                .graph()
+                                .signature_store()
+                                .type_token_node(token)
+                                .expect("live token")
+                        }),
+                        predicate.ty,
+                        "the effect read and the node form agree"
+                    );
+                }
+                None => {
+                    assert_eq!(
+                        (predicate, *effect),
+                        (None, None),
+                        "`{probe}` narrows nothing on 7.0.2; measured `{}`",
+                        shown(dispatch, *node)
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// An INTERSECTION of guards is an overload list, not a composite: its
+/// signatures keep their own predicates in member order, so a call
+/// resolves to the first applicable one. Measured on 7.0.2: `if (i(v))`
+/// narrows `v` to `A` (not `A & B`, not `A | B`), and `if (ib(v))`, whose
+/// first member returns `boolean`, narrows nothing.
+#[test]
+fn an_intersection_of_guards_keeps_each_overload_predicate_in_order() {
+    for (probe, printed) in [
+        (
+            "typeof i",
+            ["(x: unknown) => x is A", "(x: unknown) => x is B"],
+        ),
+        (
+            "typeof ib",
+            ["(x: unknown) => boolean", "(x: unknown) => x is B"],
+        ),
+    ] {
+        shared_call_signatures(probe, |dispatch, signatures| {
+            assert_eq!(signatures.len(), 2, "`{probe}` keeps both overloads");
+            for ((node, effect), printed) in signatures.iter().zip(printed) {
+                assert!(
+                    prints_as(dispatch, *node, printed),
+                    "`{probe}` overload is `{printed}`; measured `{}`",
+                    shown(dispatch, *node)
+                );
+                assert_eq!(
+                    effect.is_some(),
+                    printed.contains(" is "),
+                    "each overload's effect is its own predicate"
+                );
+            }
+        });
+    }
+}
+
+/// Conditional inference from an overloaded source reads its LAST
+/// signature — the checker's `inferFromSignatures` — for a predicate as
+/// for a return, while assignability still accepts any overload.
+/// Measured on 7.0.2: `typeof i extends (x: any) => x is infer U ? U :
+/// never` is `B`, and so is the `ib` twin whose first overload returns
+/// `boolean`; `((() => A) & (() => B)) extends () => infer R ? R : never`
+/// is `B`; over the union `u` inference collects one candidate per member,
+/// `A | B`; `typeof i` extends both `(x: any) => x is A` and `(x: any) =>
+/// x is B` (`1`).
+#[test]
+fn conditional_inference_reads_the_last_overload_predicate() {
+    for (probe, printed) in [
+        ("typeof i extends (x: any) => x is infer U ? U : never", "B"),
+        (
+            "typeof ib extends (x: any) => x is infer U ? U : never",
+            "B",
+        ),
+        (
+            "((() => A) & (() => B)) extends () => infer R ? R : never",
+            "B",
+        ),
+        (
+            "typeof u extends (x: any) => x is infer U ? U : never",
+            "A | B",
+        ),
+        ("typeof i extends (x: any) => x is A ? 1 : 0", "1"),
+        ("typeof i extends (x: any) => x is B ? 1 : 0", "1"),
+    ] {
+        with_probe(COMPOSITES, probe, |dispatch, node| {
+            assert!(
+                prints_as(dispatch, node, printed),
+                "`{probe}` is `{printed}` on 7.0.2; measured `{}`",
+                shown(dispatch, node)
+            );
+        });
+    }
+}
+
+/// A body-derived signature's effect is the predicate the checker infers
+/// from its body: the effects read forces the same body obligation the
+/// return read does. Measured on 7.0.2: `function isStr(x: unknown) {
+/// return typeof x === "string"; }` is `(x: unknown) => x is string`, and
+/// `function multi(x: unknown) { if (x) return typeof x === "string";
+/// return false; }` is `(x: unknown) => boolean`.
+#[test]
+fn a_body_signature_effect_is_its_inferred_predicate() {
+    let source = "export function isStr(x: unknown) { return typeof x === \"string\"; }\n\
+export function multi(x: unknown) { if (x) return typeof x === \"string\"; return false; }";
+    for (probe, inferred) in [("typeof isStr", true), ("typeof multi", false)] {
+        with_probe(source, probe, |dispatch, node| {
+            let store = dispatch.graph().signature_store();
+            let set = match dispatch.signatures_of_type(
+                store,
+                node,
+                SignatureKind::Call,
+                SemanticContextId::production(),
+            ) {
+                QueryOutcome::Ready(Ready { value, .. }) => value,
+                QueryOutcome::Incomplete(reason) => panic!("`{probe}` is incomplete: {reason:?}"),
+            };
+            let [candidate] = candidates(store, set)[..] else {
+                panic!("`{probe}` has one call signature");
+            };
+            let is_body = {
+                let view = SemanticReadView::pin(store);
+                let descriptor = view
+                    .descriptor(candidate.signature)
+                    .expect("live descriptor");
+                let template = view.template(descriptor.template).expect("live template");
+                matches!(
+                    view.recipe(template.result_recipe).expect("live recipe"),
+                    crate::signature_kernel::SignatureResultRecipe::Body { .. }
+                )
+            };
+            assert!(is_body, "`{probe}` publishes a body recipe");
+            let effect = read_effects(dispatch, candidate, identity_call(store, candidate));
+            if inferred {
+                let effect = effect.expect("the inferred predicate is the body's effect");
+                assert_eq!(
+                    (effect.subject, effect.asserts),
+                    (PredicateSubject::Parameter(0), false)
+                );
+                assert_eq!(
+                    effect
+                        .ty
+                        .and_then(|token| store.type_token_node(token).ok())
+                        .and_then(|target| dispatch.graph().node_data(target).as_deref().cloned()),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                );
+            } else {
+                assert_eq!(effect, None, "`{probe}` infers no predicate on 7.0.2");
+            }
+        });
+    }
+}

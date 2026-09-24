@@ -2324,8 +2324,8 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
         ),
         (
             "/src/U1HelperArray.vue",
-            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
-            "{ label: string; made: (string | Box)[] }",
+            "function makeProps() { const f = () => [\"s\", notDeclared()]; return { label: \"x\", made: f() } }",
+            "{ label: string; made: any[] } (TS2304: `notDeclared` is declared nowhere)",
         ),
         // A `switch` whose DISCRIMINANT is not a reference this half
         // represents carries no clause relation the evaluator can apply.

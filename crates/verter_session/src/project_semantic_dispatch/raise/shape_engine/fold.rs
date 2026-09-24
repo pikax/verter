@@ -312,6 +312,11 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
         }
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name } => alg.recursive_ref(Arc::clone(name)),
+            // The checker's recovered error type raises as the recovery the
+            // diagnostic defines.
+            QueryError::CheckerRecovery(diagnostic) => {
+                alg.primitive(semantic_primitive_to_primitive_name(diagnostic.recovery()))
+            }
             // The input is a typed `QueryError`, not a raw carrier — route it
             // through the typed `opaque_sentinel` entry (BORROWED — no clone on
             // this hot traversal arm). The materialize algebra emits the

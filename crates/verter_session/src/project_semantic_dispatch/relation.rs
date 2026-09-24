@@ -635,6 +635,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// never an object, so the recursion bottoms out in the tag / nominal
     /// arms immediately.
     fn unit_types_conflict(&self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
+        // A member value is the type the relation read for it: an indexed
+        // access or a reference that reads a literal IS that literal
+        // (`v: Boxed['k']` over `k: 'a'` is the unit `'a'`).
+        let read = |node: SemanticNodeId| match self.unwrap_identity_carrier_for_relation(node) {
+            IdentityCarrierUnwrap::Concrete(read) => read,
+            IdentityCarrierUnwrap::Unresolvable => node,
+        };
+        let (left, right) = (read(left), read(right));
         let unit = |node: SemanticNodeId| {
             matches!(
                 self.graph().node_data(node).as_deref(),
@@ -3410,7 +3418,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(args.iter().copied());
                 }
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => stack.push(*surface),
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     stack.extend(members.iter().copied());
@@ -3641,11 +3656,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target_signature: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let alternatives: Vec<_> = source_signatures
+        let mut alternatives: Vec<_> = source_signatures
             .iter()
             .map(|source| (*source, target_signature))
             .collect();
+        if self.infers_from_last_source_signature(target_signature) {
+            alternatives.reverse();
+        }
         self.relate_pair_alternatives(&alternatives, bindings, InferPosition::Covariant)
+    }
+
+    /// Whether relating an overloaded source to `target` infers the
+    /// target's `infer` sites: the checker's `inferFromSignatures` reads
+    /// the source's LAST signature, so `(() => A) & (() => B)` against
+    /// `() => infer R` infers `B` and `((x: unknown) => x is A) & ((x:
+    /// unknown) => x is B)` against `(x: any) => x is infer U` infers `B`.
+    /// The overloads are then tried last first.
+    fn infers_from_last_source_signature(&self, target: SemanticNodeId) -> bool {
+        self.relation_session_active()
+            && self
+                .relation_pattern_info(target)
+                .is_some_and(|pattern| pattern.shape == InferPatternShape::Function)
     }
 
     /// Recover the input of an exact homomorphic mapped target. The only
@@ -6481,7 +6512,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
-            let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
+            let mut alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
+            if self.infers_from_last_source_signature(target) {
+                alternatives.reverse();
+            }
             results.push(self.relate_pair_alternatives(
                 &alternatives,
                 bindings,
@@ -7101,6 +7135,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::InstantiationRef { base, args } => {
                     (base.clone(), Arc::clone(args))
                 }
+                // An indexed access over a type that is not generic is the
+                // property type it reads (`Box['lit']` IS `2`): the checker
+                // resolves it where it is written, so a relation compares
+                // that type. One the deferred evaluator cannot read further
+                // (`T['k']` over an open `T`) stays the operand it is, and so
+                // does one that may read an optional property (see
+                // `indexed_access_may_read_optional`).
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    let (object, index) = (*object, index.clone());
+                    drop(data);
+                    if self.indexed_access_may_read_optional(object, &index) {
+                        return IdentityCarrierUnwrap::Concrete(current);
+                    }
+                    let read = self
+                        .evaluate_deferred_semantic_node_with_context(current, transit)
+                        .into_active_query_build_node(self);
+                    if read == current {
+                        return IdentityCarrierUnwrap::Concrete(current);
+                    }
+                    current = read;
+                    continue;
+                }
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };
             drop(data);
@@ -7158,6 +7214,68 @@ impl<'a> ProjectSemanticDispatch<'a> {
             current = unwrapped;
         }
         IdentityCarrierUnwrap::Unresolvable
+    }
+
+    /// Whether `object[index]` may read an OPTIONAL property, `true` unless
+    /// proven otherwise. The checker reads an optional property as its
+    /// declared type plus `undefined` (`{ o?: 3 }['o']` is `3 | undefined`),
+    /// which the type-level indexed-access read does not add, so a relation
+    /// over such a read stays undecided instead of deciding on a type the
+    /// checker does not read. A tuple's optional element already reads
+    /// `undefined`, and an array's element type is exact.
+    fn indexed_access_may_read_optional(&self, object: SemanticNodeId, index: &IndexKey) -> bool {
+        let object = match self.unwrap_identity_carrier_for_relation(object) {
+            IdentityCarrierUnwrap::Concrete(object) => object,
+            IdentityCarrierUnwrap::Unresolvable => return true,
+        };
+        if matches!(
+            self.graph().node_data(object).as_deref(),
+            Some(SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. })
+        ) {
+            return false;
+        }
+        let ComparableSurface::Object(view) = self.comparable_surface(object) else {
+            return true;
+        };
+        let key_of = |key: IndexKey| match key {
+            IndexKey::String(text) => Some(crate::semantic_query::PropertyKey::String(text)),
+            IndexKey::Number(number) => Some(crate::semantic_query::PropertyKey::Number(number)),
+            IndexKey::UniqueSymbol(identity) => {
+                Some(crate::semantic_query::PropertyKey::UniqueSymbol(identity))
+            }
+            IndexKey::Computed(_) => None,
+        };
+        let keys: Vec<crate::semantic_query::PropertyKey> = match index {
+            IndexKey::Computed(node) => match self.normalized_index_key_node(*node) {
+                IndexKey::Computed(resolved) => {
+                    let arms: Vec<SemanticNodeId> =
+                        match self.graph().node_data(resolved).as_deref() {
+                            Some(SemanticNodeData::Union(arms)) => arms.iter().copied().collect(),
+                            _ => return true,
+                        };
+                    let mut keys = Vec::with_capacity(arms.len());
+                    for arm in arms {
+                        match key_of(self.normalized_index_key_node(arm)) {
+                            Some(key) => keys.push(key),
+                            None => return true,
+                        }
+                    }
+                    keys
+                }
+                key => match key_of(key) {
+                    Some(key) => vec![key],
+                    None => return true,
+                },
+            },
+            key => match key_of(key.clone()) {
+                Some(key) => vec![key],
+                None => return true,
+            },
+        };
+        keys.iter().any(|key| match view.project_known_key(key) {
+            crate::semantic_query::SurfaceKeyProjection::Exact(member) => member.optional,
+            _ => true,
+        })
     }
 
     /// Source-side declaration identity carrier with Object body against

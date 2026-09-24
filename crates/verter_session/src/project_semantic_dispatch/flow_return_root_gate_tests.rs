@@ -364,15 +364,17 @@ fn string_lit(value: &str) -> TypeExpr {
 /// was `(() => "OUTERNEST")[]`, and `{ ...spreadBait, x: 1 }` was
 /// `{ a: "OUTERSPREAD"; x: number }` (tsgo: `{ a: number; x: number }`).
 ///
-/// A CONDITIONAL expression and an object SPREAD are no longer
-/// fail-closed rows: both have a structural arm now, so their operands
-/// resolve through the frame's own lexical authority. `c ? condBait : 2`
-/// is the checker's `1 | 2` and `{ ...spreadBait, x: 1 }` is the
-/// checker's `{ a: number; x: number }` — the local and the parameter,
-/// exactly. They stay in this suite as the rows that prove the frame
-/// binding WINS rather than merely blocking an answer: an owner-scope
-/// resolution of the same names reads `"OUTERCOND" | 2` and
-/// `{ a: "OUTERSPREAD"; x: number }`.
+/// A CONDITIONAL expression, an object SPREAD and an ARRAY literal are not
+/// fail-closed rows: each has a structural arm, so their operands resolve
+/// through the frame's own lexical authority.
+/// `c ? condBait : 2` is the checker's `1 | 2`, `{ ...spreadBait, x: 1 }`
+/// is the checker's `{ a: number; x: number }`, and `[arrBait]` /
+/// `[() => nestBait]` are the checker's `number[]` / `(() => number)[]`
+/// — the locals and the parameter, exactly. They stay in this suite as the
+/// rows that prove the frame binding WINS rather than merely blocking an
+/// answer: an owner-scope resolution of the same names reads
+/// `"OUTERCOND" | 2`, `{ a: "OUTERSPREAD"; x: number }`, `"OUTERARR"[]`
+/// and `(() => "OUTERNEST")[]`.
 ///
 /// Mutation recipe: dropping the gate's answer half republishes every one
 /// of these as the bait value, cleanly and warm.
@@ -383,12 +385,48 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
         "gateStaticMemberOnLocalClass",
         "gateMethodCallOnLocal",
         "gateStaticMemberOnParam",
-        "gateArrayElement",
-        "gateNestedArrowInArray",
         "gateTypeSpaceLocalClass",
     ] {
         assert_fails_closed(&host, name);
     }
+
+    // The array element resolves to the frame's own local — its fresh
+    // `1` widened at the element — never the owner-scope bait.
+    assert_clean_warm(
+        &host,
+        "gateArrayElement",
+        TypeExpr::Array {
+            element: std::sync::Arc::new(number()),
+            readonly: false,
+        },
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = r6_key(dispatch, "gateNestedArrowInArray");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("gateNestedArrowInArray must produce a value");
+        };
+        assert_eq!(result.degradation(), None);
+        let graph = dispatch.graph();
+        let element = match graph.node_data(result.return_type()).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => *element,
+            other => panic!("gateNestedArrowInArray is an array, got {other:?}"),
+        };
+        match graph.node_data(element).as_deref() {
+            Some(SemanticNodeData::Signature { return_type, .. }) => assert!(
+                matches!(
+                    graph.node_data(*return_type).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                ),
+                "the closure reads the frame's local: {:?}",
+                graph.node_data(*return_type)
+            ),
+            other => panic!("the element is the closure's signature, got {other:?}"),
+        }
+    });
 
     // The conditional arm RESOLVES — to the frame's own binding, never
     // the owner-scope bait.

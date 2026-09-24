@@ -2555,6 +2555,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         span: param.span,
                     })
                     .collect();
+                // A body-derived return carries the predicate the checker infers
+                // from the body beside it.
+                let mut inferred_predicate = None;
                 let (return_type, return_carrier) = match &func.flow_return {
                     // A body-derived return is demanded from the
                     // whole-function producer through the sealed helper:
@@ -2591,6 +2594,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     scope_canonical.as_ref(),
                                 ) {
                                     super::flow_return::FunctionReturnNode::Flow(result) => {
+                                        inferred_predicate = result.inferred_predicate();
                                         result.return_type()
                                     }
                                     _ => self.opaque(QueryError::Miss),
@@ -2675,22 +2679,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect();
                 // The predicate target lowers under the signature's own
                 // binders, exactly like the return it rides beside.
-                let predicate = func.predicate.as_deref().and_then(|predicate| {
-                    let target = predicate.ty.as_deref().map(|target| {
-                        self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            target,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
+                let predicate = func
+                    .predicate
+                    .as_deref()
+                    .and_then(|predicate| {
+                        let target = predicate.ty.as_deref().map(|target| {
+                            self.lower_type_expr_with_infer_factory(
+                                infer_binders,
+                                target,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        });
+                        crate::semantic_query::SignaturePredicate::resolve(
+                            predicate, &params, target,
                         )
-                    });
-                    crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
-                });
+                    })
+                    .or(inferred_predicate);
                 let kind = match expr {
                     TypeExpr::ConstructorType(_) => crate::semantic_query::SignatureKind::Construct,
                     _ => crate::semantic_query::SignatureKind::Call,

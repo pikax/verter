@@ -20,12 +20,12 @@ mod substitution;
 
 #[allow(unused_imports)]
 pub use discovery::{
-    append_signatures, intersection_signatures, publish_signature, set_from_candidates,
-    signatures_identical, union_signatures, BinderInput, DiscoveryError, DiscoveryTypes,
-    MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
+    append_signatures, heritage_signatures, intersection_signatures, publish_signature,
+    set_from_candidates, signatures_identical, union_signatures, BinderInput, DiscoveryError,
+    DiscoveryTypes, ForcedResult, MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
-pub use lifetime::{SignatureStore, StoreError};
+pub use lifetime::{SignatureStore, StoreError, EPOCH_RECORD_CAP};
 #[allow(unused_imports)]
 pub use positional::{
     MinArityFlags, PositionalMode, PositionalShape, ProjectedElement, ProjectedKind,

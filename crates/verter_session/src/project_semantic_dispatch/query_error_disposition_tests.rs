@@ -1,6 +1,6 @@
 //! Per-variant coverage of the single [`QueryError`] disposition authority.
 //!
-//! Every one of the 15 variants appears in [`every_variant`], and the suite
+//! Every one of the 16 variants appears in [`every_variant`], and the suite
 //! asserts each variant's disposition, its published reason, and the derived
 //! predicates. The inventory is anti-vacuity-checked: a duplicate or a changed
 //! variant count fails `every_variant_is_covered_exactly_once`.
@@ -11,7 +11,10 @@ use verter_type_expr::{ClosedLiteralDomainUnresolvedReason, ReactiveWrapperUnres
 
 use super::{classify_query_error, query_error_disposition, QueryErrorDisposition};
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
-use crate::semantic_query::{QueryError, SemanticQueryValueTag};
+use crate::semantic_query::{
+    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
+    SemanticQueryValueTag,
+};
 
 fn budget_failure() -> BudgetExceededFailure {
     BudgetExceededFailure {
@@ -54,7 +57,16 @@ fn every_variant() -> Vec<QueryError> {
         QueryError::RaiseMiss,
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
+        QueryError::CheckerRecovery(recursive_fulfillment()),
     ]
+}
+
+/// The TS1062 recovery an `await` of a recursive thenable continues with.
+fn recursive_fulfillment() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+        operation: CheckerDiagnosticOperation::AwaitOperand,
+    }
 }
 
 #[test]
@@ -72,12 +84,12 @@ fn every_variant_is_covered_exactly_once() {
         before,
         "the fixture inventory lists a variant twice"
     );
-    // The table has exactly 15 rows. A new variant must be added here AND
+    // The table has exactly 16 rows. A new variant must be added here AND
     // given a disposition; this pins the count so neither is silently skipped.
     assert_eq!(
         rows.len(),
-        15,
-        "expected the 15-row QueryError disposition table; update this fixture AND \
+        16,
+        "expected the 16-row QueryError disposition table; update this fixture AND \
          classify_query_error together"
     );
 }
@@ -256,6 +268,20 @@ fn genuine_failures_are_the_error_type() {
     }
 }
 
+/// A checker recovery is the §22 error type — it dominates the absorbers and
+/// relates like `any` — and at the same time a complete answer: it raises as
+/// its recovery rather than as a failure shell, and the type it stands for is
+/// known.
+#[test]
+fn checker_recovery_is_a_complete_error_type() {
+    let err = QueryError::CheckerRecovery(recursive_fulfillment());
+    let class = classify_query_error(&err);
+    assert_eq!(class.disposition, QueryErrorDisposition::CheckerRecovery);
+    assert!(class.disposition.is_error_type());
+    assert!(!class.disposition.is_unknown_materializing());
+    assert!(!err.means_type_is_not_yet_known());
+}
+
 /// The two unsupported-surface sentinels keep their own class and their
 /// existing `Unsupported` output reason.
 #[test]
@@ -279,8 +305,9 @@ fn unsupported_surface_sentinels_keep_their_output_semantics() {
     }
 }
 
-/// The §22 error-type predicate is EXACTLY the `Failure` disposition — the
-/// derivation `QueryError::is_error_type` now routes through.
+/// The §22 error-type predicate is EXACTLY the `Failure` and
+/// `CheckerRecovery` dispositions — the derivation `QueryError::is_error_type`
+/// routes through.
 #[test]
 fn error_type_predicate_is_exactly_the_failure_disposition() {
     for err in every_variant() {
@@ -289,6 +316,7 @@ fn error_type_predicate_is_exactly_the_failure_disposition() {
             QueryError::Other(_)
                 | QueryError::UnsupportedIntrinsic { .. }
                 | QueryError::ValueDomainMismatch { .. }
+                | QueryError::CheckerRecovery(_)
         );
         assert_eq!(
             query_error_disposition(&err).is_error_type(),
@@ -298,14 +326,16 @@ fn error_type_predicate_is_exactly_the_failure_disposition() {
     }
 }
 
-/// The unknown-materializing predicate excludes EXACTLY the two publishable
-/// carriers — the rule `node_is_unknown_materializing_failure` now derives.
+/// The unknown-materializing predicate excludes EXACTLY the publishable
+/// carriers — the rule `node_is_unknown_materializing_failure` derives.
 #[test]
-fn unknown_materializing_excludes_exactly_the_two_publishable_carriers() {
+fn unknown_materializing_excludes_exactly_the_publishable_carriers() {
     for err in every_variant() {
         let publishable = matches!(
             err,
-            QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. }
+            QueryError::RecursiveRef { .. }
+                | QueryError::DeclPlaceholder { .. }
+                | QueryError::CheckerRecovery(_)
         );
         assert_eq!(
             query_error_disposition(&err).is_unknown_materializing(),

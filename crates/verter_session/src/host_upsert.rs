@@ -970,6 +970,13 @@ impl VerterHost {
         // lazily on read through its own `fact_dep_signature` check (R3).
         self.register_facts_for_new_content(&canonical_id);
         crate::host_manage::push_cache_drained_at_upsert("semantic_invalidate", &canonical_id);
+        // A content change is the signature kernel's reclamation point: past
+        // its record cap the kernel retires its epoch, and a warm read of a
+        // retired-epoch value misses and recomputes.
+        let _ = self
+            .project_type_store
+            .semantic_graph()
+            .compact_signature_store_if_over_cap();
 
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
 

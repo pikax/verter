@@ -4821,10 +4821,85 @@ fn infer_expression_type_ctx_with_read_root(
                 Ok(call_return_carrier(callee_type))
             }
         }
+        // An equality, relational, `instanceof` or `in` comparison is
+        // `boolean` whatever its operands are: neither operand provides the
+        // comparison's value.
+        Expression::BinaryExpression(binary) if binary_operator_is_comparison(binary.operator) => {
+            Ok(TypeExpr::Primitive(PrimitiveName::Boolean))
+        }
+        // `!operand`, and `a && b` / `a || b`, over `boolean` operands are
+        // `boolean`. Any other operand keeps the unmodeled fallback: the
+        // result then depends on the operand's truthiness facts (`!` over an
+        // always-truthy operand is `false`) or is the operand's own value.
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            let operand = infer_expression_type_ctx(
+                &unary.argument,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(boolean_or_unmodeled(&[operand], budget))
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(
+                logical.operator,
+                oxc_ast::ast::LogicalOperator::And | oxc_ast::ast::LogicalOperator::Or
+            ) =>
+        {
+            let left = infer_expression_type_ctx(
+                &logical.left,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            let right = infer_expression_type_ctx(
+                &logical.right,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(boolean_or_unmodeled(&[left, right], budget))
+        }
         _ => {
             budget.used_unmodeled_fallback = true;
             Ok(TypeExpr::Primitive(PrimitiveName::Any))
         }
+    }
+}
+
+/// Whether a binary operator is a comparison — the operators whose result
+/// the checker types `boolean` whatever the operands: equality (strict and
+/// loose), relational, `instanceof` and `in`.
+fn binary_operator_is_comparison(operator: BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Equality
+            | BinaryOperator::Inequality
+            | BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality
+            | BinaryOperator::LessThan
+            | BinaryOperator::LessEqualThan
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterEqualThan
+            | BinaryOperator::Instanceof
+            | BinaryOperator::In
+    )
+}
+
+/// `boolean` when every operand is exactly `boolean`; otherwise the
+/// unmodeled fallback.
+fn boolean_or_unmodeled(operands: &[TypeExpr], budget: &mut InferenceBudget) -> TypeExpr {
+    if operands
+        .iter()
+        .all(|operand| matches!(operand, TypeExpr::Primitive(PrimitiveName::Boolean)))
+    {
+        TypeExpr::Primitive(PrimitiveName::Boolean)
+    } else {
+        budget.used_unmodeled_fallback = true;
+        TypeExpr::Primitive(PrimitiveName::Any)
     }
 }
 

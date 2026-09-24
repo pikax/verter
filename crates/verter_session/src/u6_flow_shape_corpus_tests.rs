@@ -1372,8 +1372,16 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "c641157ff36c975ad319a9643cbbf6f2e1e6f9a31a0c5dc09122d66502bdf4a3",
     ),
     (
+        "N44_typeof_over_unknown",
+        "6da5b651557dd09d8a5026ca7abfb57506570447559e5de5e4675c9109694eb2",
+    ),
+    (
         "N45_destructured_parameter_discriminant",
         "a80e5dc02aaf92fc332064af44e9debe551db7e7e0cfbbaf6cf917f279c5330e",
+    ),
+    (
+        "N46_typeof_over_any",
+        "789109d5d44af0ccaca4dbb6d68a61b4743d596611a77da7de289567965c47ae",
     ),
     (
         "N49_closure_narrows_own_parameter",
@@ -1672,6 +1680,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "efdc012efc005f13011543f60358f17e89b529cd7cd29701231e972d01b1f111",
     ),
     (
+        "N84_let_aliased_condition_does_not_narrow",
+        "f58d5cbca34eded7bd90ba09f8218cfff4d335899be8a1957f4f070c3b761a33",
+    ),
+    (
         "X89_never_returning_call_terminates_branch",
         "9a4b4247b867ee52ca9b88aeeb0d0699ba0600899668f133f4f5ade8977d2ffa",
     ),
@@ -1684,12 +1696,20 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "d7b616ee9e42758ab6c958c3f50839790cbd088d0441663fa5c4a7c6d64ac479",
     ),
     (
+        "X94_evolving_let_one_branch_keeps_undefined",
+        "bcc20072aa44a2ef81dc8f9807fffa538a5623d081de18d3d237b86d71135f8a",
+    ),
+    (
         "X95_evolving_let_both_branches_join",
         "7f27ccc7b5bbe32c1600e75488c6bd1d9ba20c285fe253808bc3ffbfd7514ff0",
     ),
     (
         "X96_evolving_let_explicit_undefined_initializer",
         "d9b0fe4086b5f843feae02f14f3bafd6778fc07268f7a4da0895193396903f95",
+    ),
+    (
+        "X97_evolving_let_switch_without_default_keeps_undefined",
+        "f729379bc5e66e7f775532e5842cd18a1bd2008d386f5b049f2373072d407ef8",
     ),
     (
         "X99_nested_try_finally_collects_every_return",
@@ -3190,6 +3210,11 @@ mod corpus_suite {
                  `{ v: Union(string | number) }`",
             ),
             (
+                "N84_let_aliased_condition_does_not_narrow",
+                "checker prints `{ v: string | number; }`; the renderer spells \
+                 `{ v: Union(string | number) }`",
+            ),
+            (
                 "N127_typeof_non_null_asserted_subject",
                 "checker prints `{ v: string | number; }`; the renderer spells the \
                  same node `{ v: Union(string | number) }`",
@@ -3243,11 +3268,15 @@ mod corpus_suite {
             ),
             (
                 "N44_typeof_over_unknown",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(unknown | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N46_typeof_over_any",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(any | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N47_correlated_tuple_discriminant",
@@ -3374,11 +3403,11 @@ mod corpus_suite {
             ),
             (
                 "X94_evolving_let_one_branch_keeps_undefined",
-                "the renderer spells the (KnownOwed-divergent) node `{ v: \"q\" }` where the checker prints `{ v: \"q\" | undefined; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"q\" | undefined; }`; the renderer spells the same node `{ v: Union(\"q\" | undefined) }` — union spelling and member terminators differ",
             ),
             (
                 "X97_evolving_let_switch_without_default_keeps_undefined",
-                "the renderer spells the (KnownOwed-divergent) node `{ v: Union(\"s\" | 3) }` where the checker prints `{ v: \"s\" | 3 | undefined; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: \"s\" | 3 | undefined; }`; the renderer spells the same node `{ v: Union(\"s\" | undefined | 3) }` — union spelling, arm order, and member terminators differ",
             ),
             (
                 "X99_nested_try_finally_collects_every_return",
@@ -3652,7 +3681,7 @@ mod corpus_suite {
             ),
             (
                 "X19_generator_yield",
-                "checker prints `Generator<{ label: string; }, void, unknown>`; the renderer spells the flow surface `void` — print syntax AND semantics differ; the KnownOwed divergence is held by the semantic test",
+                "checker prints `Generator<{ label: string; }, void, unknown>`; the renderer spells the flow surface `Opaque(UnmodeledPosition)` — print syntax AND semantics differ; the KnownOwed divergence is held by the semantic test",
             ),
             (
                 "X27_finally_fallthrough_break_override",
@@ -5033,11 +5062,6 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowTypeof,
         "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
-    (
-        "N84_let_aliased_condition_does_not_narrow",
-        Owner::U6NarrowTypeof,
-        "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
-    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
@@ -5063,7 +5087,7 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// undeclared-call rows, whose members spell the typed marker and so need no
 /// shallow entry.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 77;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 76;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -5131,8 +5155,9 @@ const OPEN_DEBTS: &[&str] = &[
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
-    // The macro lane correctly rejects a generator return, but the TSX lane
-    // faults with the same code — the consumer-reach debt class.
+    // A generator return: the generator wrap has no lib `Generator` head to
+    // resolve in this standalone environment, so the return is the typed
+    // unmodelled-position marker.
     "X19_generator_yield",
     // A return-bearing loop remains outside the value-inference surface. The
     // NoValue refusal is honest until loop-owned break/return joining exists.
@@ -5171,8 +5196,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N41_instanceof_member_expression_constructor",
     "N42_comma_sequence_guard",
     "N43_boolean_wrapped_guard",
-    "N44_typeof_over_unknown",
-    "N46_typeof_over_any",
     "N47_correlated_tuple_discriminant",
     "N48_closure_narrows_captured_binding",
     "N50_sequence_discriminant_test",
@@ -5203,13 +5226,10 @@ const OPEN_DEBTS: &[&str] = &[
     "N79_equality_against_const_literal_binding",
     "N80_equality_against_const_literal_target_narrows",
     "N81_equality_against_let_widened_target_does_not_narrow",
-    "N84_let_aliased_condition_does_not_narrow",
     // Evolving `let` bindings, the `never`-default switch admission, the
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.
     "X91_assert_never_default_arm_contributes_nothing",
-    "X94_evolving_let_one_branch_keeps_undefined",
-    "X97_evolving_let_switch_without_default_keeps_undefined",
     "X101_optional_chain_nullish_coalesce",
     "X105_closure_captures_narrowed_binding_in_guarded_arm",
     "X108_record_index_read_has_no_undefined",
@@ -5253,8 +5273,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // owner at 93 rows, 80 matching and 10 parked on the merged tree. A
     // free `undefined` read as the `undefined` type moves X96 — the
     // evolving `let` with an explicit `= undefined` initializer — to
-    // MatchesChecker: 81 matching, 9 parked.
-    (Owner::U6ValueInference, 93, 81, 9),
+    // MatchesChecker: 81 matching, 9 parked. An initializer-less evolving
+    // `let` holding `undefined` until its first write moves X94 and X97 —
+    // the one-branch and default-less-switch joins that keep `undefined` —
+    // to MatchesChecker: 83 matching, 7 parked.
+    (Owner::U6ValueInference, 93, 83, 7),
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     // B10's `as const` spread-modifier debt moved to the value-inference
@@ -5267,7 +5290,10 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // call. An accessor reads as its value type, so X12's class getter read
     // through the constructed instance matches too.
     (Owner::U6FlowReturnSubstrate, 67, 55, 2),
-    (Owner::U6NarrowTypeof, 48, 29, 19),
+    // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
+    // implied type (N44, N46), and a comparison value is `boolean`, so the
+    // `let`-aliased condition control (N84) publishes complete: 32 match.
+    (Owner::U6NarrowTypeof, 48, 32, 16),
     // The `instanceof` arm rule: derivation decided by class heritage on
     // both edges (the subclass arm survives, the base arm downcasts, the
     // negated edge drops the tested class's family) with nullish
@@ -5428,7 +5454,8 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     // the checker's union normal form carries `?: undefined` cross
     // members the composed spread alternatives omit.
     "H02_union_spread_source",
-    // The generator-return shape: the macro lane's rejection is correct, the
-    // TSX lane fault is not.
+    // The generator-return shape: the macro lane's rejection and the TSX
+    // projection are both correct; the return wrap's lib head is not
+    // resolvable in this environment.
     "X19_generator_yield",
 ];

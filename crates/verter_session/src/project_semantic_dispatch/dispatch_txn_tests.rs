@@ -220,6 +220,7 @@ fn flow_return_key() -> FlowReturnKey {
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy {
                 nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                no_implicit_any: true,
             },
         },
         result_contract: super::super::flow_solve::flow_return_result_contract_id(),
@@ -744,6 +745,7 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy {
                 nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                no_implicit_any: true,
             },
         },
         result_contract: super::super::flow_solve::flow_return_result_contract_id(),
@@ -994,6 +996,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
+                no_implicit_any: true,
             },
         },
         demand: ReturnProjectionDemand::whole_return(),
@@ -1107,6 +1110,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
+                no_implicit_any: true,
             },
         },
         demand: ReturnProjectionDemand::whole_return(),

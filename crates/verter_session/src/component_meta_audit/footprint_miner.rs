@@ -568,10 +568,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             base.decl_name,
             args.len()
         )),
-        SemanticNodeData::ClassExpressionInstance { identity, .. } => Arc::from(format!(
-            "ClassExpressionInstance({})",
-            identity.printed_name()
-        )),
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
+            Arc::from(format!("ClassExpressionInstance({})", identity.name))
+        }
         SemanticNodeData::MergedDecl { contributors } => {
             Arc::from(format!("MergedDecl[{}]", contributors.len()))
         }
