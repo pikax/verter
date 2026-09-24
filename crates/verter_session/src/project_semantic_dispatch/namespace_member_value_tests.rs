@@ -267,6 +267,7 @@ fn a_global_declared_in_several_files_merges_them() {
         let project = ProbeProject {
             files: &files,
             compiler_options: None,
+            ambient_lib: None,
         };
         let rows = global_rows(script, module);
         let rows: Vec<(&str, &str)> = rows

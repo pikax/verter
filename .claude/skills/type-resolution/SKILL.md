@@ -1281,7 +1281,18 @@ non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at
 (`flow_return_callee.rs` → `reduce_instantiated_return`) where the checker's
 `getIntersectionType` performs it. An AUTHORED `T & {}` keeps both constituents;
 "definitely non-nullish" is a node-SHAPE fact (a literal, or a non-nullish
-primitive), not a relation question.
+primitive), not a relation question. The canonical intersection applies the
+same `getIntersectionType` rules to concrete arms: redundant supertypes drop
+(`{} & "x"` is `"x"`, `string & "a"` is `"a"`; a written `string & {}` keeps
+both, as the checker keeps that pair), and an intersection distributes over
+its union arms (`1 & (1 | 2)` is `1`) unless the distributed union keeps an
+intersection constituent and grows, where the checker prints the
+undistributed origin (`(QA | QB) & Z`). A canonical union reduces an
+authored intersection arm the same way. The authored shell itself stays the
+display form; the relation engine reads a shell whose canonical intersection
+differs as that type (`reduced_authored_intersection`: `(number & string)
+extends never` holds), and a projected read ending at an intersection with a
+scalar arm returns that intersection, never a one-level surface of it.
 
 Acceptance: `flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both`,
 `flow_return_reunion_keeps_the_surviving_arms_in_source_order`,

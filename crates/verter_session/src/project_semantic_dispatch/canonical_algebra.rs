@@ -839,12 +839,49 @@ fn canonicalize(
     is_union: bool,
     nullability: NullabilityPolicy,
 ) -> CanonicalComposite {
+    canonicalize_with(
+        graph,
+        members,
+        is_union,
+        nullability,
+        SupertypeReduction::ExceptPrimitiveOverEmptyObject,
+    )
+}
+
+/// Whether an intersection drops its redundant supertypes
+/// ([`remove_redundant_supertypes`]) in every shape, or keeps the one
+/// shape the checker keeps as written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SupertypeReduction {
+    /// Every shape — an intersection the construction itself produced
+    /// (a constituent of a distributed intersection).
+    Always,
+    /// Every shape but exactly `string & {}` (`number`, `bigint`): the
+    /// checker keeps that written pair (`NoSupertypeReduction`), the
+    /// idiom that keeps a literal union's suggestions open.
+    ExceptPrimitiveOverEmptyObject,
+}
+
+fn canonicalize_with(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+    is_union: bool,
+    nullability: NullabilityPolicy,
+    supertype_reduction: SupertypeReduction,
+) -> CanonicalComposite {
     let mut evidence = CanonicalEvidence::default();
 
     // 1. Recursive same-kind flattening: a union is never an arm of a union,
     //    an intersection never an arm of an intersection (mirrors the
     //    checker's own `getUnionType` flattening). Source order preserved.
     let flat = flatten_members(graph, members, is_union, &mut evidence);
+    // A union's constituents are types as the checker holds them: an
+    // authored intersection the checker reduces is that reduced type.
+    let flat = if is_union {
+        reduce_authored_intersection_arms(graph, flat, nullability, &mut evidence)
+    } else {
+        flat
+    };
 
     // 1a. Singleton normalization returns its retained member UNCHANGED —
     //     with that member's own scope — BEFORE the absorbers run: a
@@ -1175,6 +1212,19 @@ fn canonicalize(
         };
     }
 
+    // 5a. Intersection redundant supertypes and union distribution — the
+    //     checker's `getIntersectionType` over what is left.
+    if !is_union {
+        remove_redundant_supertypes(graph, &mut kept, supertype_reduction);
+        if let Some(distributed) = distribute_over_unions(graph, &kept, nullability, &mut evidence)
+        {
+            return CanonicalComposite {
+                node: distributed,
+                evidence,
+            };
+        }
+    }
+
     // 6. Folds + interning. Empty ⇒ `Primitive(Never)`; singleton ⇒ the
     //    retained member unchanged (that member's own scope); a derived
     //    multi-arm composite sorts deterministically and interns under
@@ -1230,6 +1280,273 @@ fn canonicalize(
         }
     };
     CanonicalComposite { node, evidence }
+}
+
+/// The checker's `removeRedundantSupertypes` over an intersection's arms:
+/// a primitive beside a literal of it adds no constraint (`string & "a"` is
+/// `"a"`, `boolean & true` is `true`), nor does `void` beside
+/// `undefined`, `symbol` beside a `unique symbol`, or an empty object
+/// `{}` beside an arm that is provably never `null` or `undefined` (`{} &
+/// 1` is `1`). A written `string & {}` keeps both arms when
+/// `supertype_reduction` says so.
+fn remove_redundant_supertypes(
+    graph: &SemanticGraphStore,
+    arms: &mut Vec<SemanticNodeId>,
+    supertype_reduction: SupertypeReduction,
+) {
+    let data: Vec<Option<Arc<SemanticNodeData>>> =
+        arms.iter().map(|arm| graph.node_data(*arm)).collect();
+    let is_empty_object = |d: &SemanticNodeData| matches!(d, SemanticNodeData::Object(view) if view.closed().is_empty());
+    let present = |test: &dyn Fn(&SemanticNodeData) -> bool| data.iter().flatten().any(|d| test(d));
+    let string_literal = present(&|d| {
+        matches!(
+            d,
+            SemanticNodeData::Literal(LiteralValue::String(_))
+                | SemanticNodeData::TemplateLiteral { .. }
+        )
+    });
+    let number_literal =
+        present(&|d| matches!(d, SemanticNodeData::Literal(LiteralValue::Number(_))));
+    let bigint_literal =
+        present(&|d| matches!(d, SemanticNodeData::Literal(LiteralValue::BigInt(_))));
+    let boolean_literal =
+        present(&|d| matches!(d, SemanticNodeData::Literal(LiteralValue::Boolean(_))));
+    let unique_symbol = present(&|d| matches!(d, SemanticNodeData::TypeOfNominal(_)));
+    let undefined =
+        present(&|d| matches!(d, SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+    let definitely_non_nullable = present(&|d| {
+        !is_empty_object(d)
+            && matches!(
+                d,
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::TemplateLiteral { .. }
+                    | SemanticNodeData::TypeOfNominal(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Tuple { .. }
+                    | SemanticNodeData::Signature { .. }
+                    | SemanticNodeData::Primitive(
+                        PrimitiveKind::String
+                            | PrimitiveKind::Number
+                            | PrimitiveKind::BigInt
+                            | PrimitiveKind::Boolean
+                            | PrimitiveKind::Symbol
+                            | PrimitiveKind::Object
+                    )
+            )
+    });
+    let written_pair_kept = supertype_reduction
+        == SupertypeReduction::ExceptPrimitiveOverEmptyObject
+        && matches!(
+            data.as_slice(),
+            [Some(first), Some(second)]
+                if matches!(
+                    first.as_ref(),
+                    SemanticNodeData::Primitive(
+                        PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::BigInt
+                    )
+                ) && is_empty_object(second)
+        );
+    if written_pair_kept {
+        return;
+    }
+    let mut position = 0usize;
+    arms.retain(|_| {
+        let redundant = match data[position].as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => string_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => number_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => bigint_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => boolean_literal,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => unique_symbol,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Void)) => undefined,
+            Some(d) if is_empty_object(d) => definitely_non_nullable,
+            _ => false,
+        };
+        position += 1;
+        !redundant
+    });
+}
+
+/// A union's AUTHORED intersection arms as the checker holds them: an arm
+/// whose canonical intersection reduces (`1 & (1 | 2)` is `1`, `number &
+/// string` is `never`, `QA & QA` is `QA`) is replaced by the reduced type,
+/// a distributed union spliced into the arms. An arm the canonical
+/// intersection keeps as it is stays the authored node; the canonical
+/// intersection keeps its arms in their written order.
+fn reduce_authored_intersection_arms(
+    graph: &SemanticGraphStore,
+    arms: Vec<SemanticNodeId>,
+    nullability: NullabilityPolicy,
+    evidence: &mut CanonicalEvidence,
+) -> Vec<SemanticNodeId> {
+    if !arms
+        .iter()
+        .any(|arm| authored_intersection_members(graph, *arm).is_some())
+    {
+        return arms;
+    }
+    let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let Some(reduced) = reduce_authored_intersection(graph, arm, nullability) else {
+            out.push(arm);
+            continue;
+        };
+        evidence.absorb(reduced.evidence);
+        match graph.node_data(reduced.node).as_deref() {
+            Some(SemanticNodeData::Union(constituents)) => out.extend(constituents.iter().copied()),
+            _ => out.push(reduced.node),
+        }
+    }
+    out
+}
+
+/// The members of `node` when it is an AUTHORED intersection shell.
+fn authored_intersection_members(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<Vec<SemanticNodeId>> {
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Intersection(members))
+            if members.origin_category()
+                == crate::semantic_query::composite::CompositeOriginCategory::AuthoredShell =>
+        {
+            Some(members.iter().copied().collect())
+        }
+        _ => None,
+    }
+}
+
+/// The canonical intersection of an AUTHORED intersection shell when it
+/// differs from the shell as written; `None` for any other node and for a
+/// shell the canonical intersection keeps as it is.
+fn reduce_authored_intersection(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+    nullability: NullabilityPolicy,
+) -> Option<CanonicalComposite> {
+    let members = authored_intersection_members(graph, node)?;
+    let reduced = canonicalize(graph, &members, false, nullability);
+    let kept_as_written = match graph.node_data(reduced.node).as_deref() {
+        Some(SemanticNodeData::Intersection(kept)) => kept.iter().eq(members.iter()),
+        _ => false,
+    };
+    (!kept_as_written).then_some(reduced)
+}
+
+/// The type the checker constructs from an AUTHORED intersection shell
+/// (`getIntersectionType`), when it differs from the shell as written:
+/// `string & ("a" | 1)` is `"a"` and `number & string` is `never`. `None`
+/// for any other node and for a shell the canonical intersection keeps as
+/// written (`QA & QB`). The shell itself stays the authored display form;
+/// a consumer that DECIDES on the type reads this.
+pub(super) fn reduced_authored_intersection(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+    nullability: NullabilityPolicy,
+) -> Option<SemanticNodeId> {
+    reduce_authored_intersection(graph, node, nullability).map(|reduced| reduced.node)
+}
+
+/// The most constituents a distributed intersection may have; a wider
+/// cross product keeps the intersection.
+const MAX_DISTRIBUTED_CONSTITUENTS: usize = 64;
+
+/// The checker's distribution of an intersection over its union arms
+/// (`getIntersectionType`): `X & (A | B)` is `(X & A) | (X & B)`, each
+/// constituent an intersection reduced on its own, so `1 & (1 | 2)` is
+/// `1` and `string & ("a" | 1)` is `"a"`. `None` when no arm is a union
+/// or the distributed union keeps an intersection constituent and has more
+/// constituents than the intersection has: the checker then keeps the
+/// intersection as the type's printed origin (`(QA | QB) & Z`), and both
+/// forms denote one type.
+fn distribute_over_unions(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    nullability: NullabilityPolicy,
+    evidence: &mut CanonicalEvidence,
+) -> Option<SemanticNodeId> {
+    let choices: Vec<Vec<SemanticNodeId>> = arms
+        .iter()
+        .map(|arm| match graph.node_data(*arm).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![*arm],
+        })
+        .collect();
+    if choices.iter().all(|choice| choice.len() < 2) {
+        return None;
+    }
+    let width = choices
+        .iter()
+        .try_fold(1usize, |width, choice| width.checked_mul(choice.len()))?;
+    if width > MAX_DISTRIBUTED_CONSTITUENTS {
+        return None;
+    }
+    let mut constituents: Vec<SemanticNodeId> = Vec::with_capacity(width);
+    let mut term_evidence = CanonicalEvidence::default();
+    let mut positions = vec![0usize; choices.len()];
+    'product: loop {
+        let term: Vec<SemanticNodeId> = choices
+            .iter()
+            .zip(&positions)
+            .map(|(choice, &position)| choice[position])
+            .collect();
+        let reduced =
+            canonicalize_with(graph, &term, false, nullability, SupertypeReduction::Always);
+        term_evidence.absorb(reduced.evidence);
+        if !matches!(
+            graph.node_data(reduced.node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        ) {
+            constituents.push(reduced.node);
+        }
+        let mut digit = choices.len();
+        loop {
+            if digit == 0 {
+                break 'product;
+            }
+            digit -= 1;
+            positions[digit] += 1;
+            if positions[digit] < choices[digit].len() {
+                continue 'product;
+            }
+            positions[digit] = 0;
+        }
+    }
+    let keeps_intersection = constituents.iter().any(|node| {
+        matches!(
+            graph.node_data(*node).as_deref(),
+            Some(SemanticNodeData::Intersection(_))
+        )
+    });
+    if keeps_intersection
+        && constituent_count(graph, &constituents, 0) > constituent_count(graph, arms, 0)
+    {
+        return None;
+    }
+    evidence.absorb(term_evidence);
+    let union = canonicalize(graph, &constituents, true, nullability);
+    evidence.absorb(union.evidence);
+    Some(union.node)
+}
+
+/// The checker's constituent count of a type list: a union or an
+/// intersection counts its constituents, anything else counts one.
+fn constituent_count(graph: &SemanticGraphStore, nodes: &[SemanticNodeId], depth: usize) -> usize {
+    const MAX_NESTING: usize = 8;
+    nodes
+        .iter()
+        .map(|node| match graph.node_data(*node).as_deref() {
+            Some(SemanticNodeData::Union(members)) if depth < MAX_NESTING => {
+                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
+                constituent_count(graph, &members, depth + 1)
+            }
+            Some(SemanticNodeData::Intersection(members)) if depth < MAX_NESTING => {
+                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
+                constituent_count(graph, &members, depth + 1)
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 /// Iterative recursive same-kind flattening. Preserves source order; records

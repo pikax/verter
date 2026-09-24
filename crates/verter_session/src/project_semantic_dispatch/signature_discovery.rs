@@ -526,40 +526,10 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
     /// resolved global population of the request's project. An absent global
     /// (`noLib`) is the checker's empty apparent type: a complete negative.
     fn apparent(&mut self, name: &str, args: &[SemanticNodeId]) -> Found {
-        let d = self.dispatch();
-        let Some(canonical) = crate::request_context::current_request_canonical()
-            .or_else(|| d.lexical_demand_scope.borrow().last().cloned())
-        else {
-            return unsettled();
-        };
-        let Some(project) = d.project_stable_key_for_canonical(canonical.as_ref()) else {
-            return unsettled();
-        };
-        let Some(hit) = d.ctx.lookup_ambient_symbol(project, name) else {
-            return Ok(Vec::new());
-        };
-        d.ctx
-            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
-        let slot = d.type_slot_for(
-            Arc::clone(&hit.virtual_id),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
-        );
-        let surface = d.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(args.to_vec().into_boxed_slice()),
-                d.instantiate_context_for(
-                    hit.virtual_id.as_ref(),
-                    ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
-                    ),
-                ),
-            ),
-        ));
-        match surface.value {
-            crate::semantic_query::QueryResult::Value(surface) => self.discover(surface),
-            _ => unsettled(),
+        match self.dispatch().global_wrapper_surface(name, args) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
+            super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
+            super::apparent_type::GlobalWrapper::Unsettled => unsettled(),
         }
     }
 

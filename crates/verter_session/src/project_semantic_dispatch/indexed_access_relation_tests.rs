@@ -141,10 +141,12 @@ fn an_access_reading_an_optional_property_reads_its_undefined() {
     let loose = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+        ambient_lib: None,
     };
     let exact = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "exactOptionalPropertyTypes": true }"#),
+        ambient_lib: None,
     };
     for (project, strict_null_checks) in [(strict, true), (loose, false), (exact, true)] {
         let read = |on: &'static str, off: &'static str| if strict_null_checks { on } else { off };
@@ -210,6 +212,7 @@ fn an_intersection_member_read_distributes_its_nullish_arms() {
     let loose = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+        ambient_lib: None,
     };
     for (project, strict_null_checks) in [(strict, true), (loose, false)] {
         let read = |on: &'static str, off: &'static str| if strict_null_checks { on } else { off };
@@ -334,6 +337,7 @@ fn a_narrow_over_a_member_read_through_an_indexed_access_decides_as_the_checker(
     let loose = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+        ambient_lib: None,
     };
     for project in [ProbeProject::default(), loose] {
         let failures = mismatches_in(
