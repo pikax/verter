@@ -4328,22 +4328,28 @@ mod expectation_controls {
                     accepts(
                         dispatch,
                         node,
-                        "{ label: string; m: number; } | { m: number; n: number; }"
+                        "{ label: string; n?: undefined; m: number; } | { label?: undefined; \
+                         n: number; m: number; }"
                     ),
-                    "precondition: the two composed alternatives accept their exact union \
-                     print (measured {})",
+                    "precondition: the two composed alternatives accept H02's checker print, \
+                     normal-form `?: undefined` cross members included (measured {})",
                     render_node(dispatch, node, 0)
                 );
                 assert!(
                     accepts(
                         dispatch,
                         node,
-                        "{ m: number; n: number; } | { label: string; m: number; }"
+                        "{ label?: undefined; n: number; m: number; } | { label: string; n?: \
+                         undefined; m: number; }"
                     ),
                     "the alternative set is ORDER-INSENSITIVE"
                 );
                 assert!(
-                    !accepts(dispatch, node, "{ label: string; m: number; }"),
+                    !accepts(
+                        dispatch,
+                        node,
+                        "{ label: string; n?: undefined; m: number; }"
+                    ),
                     "a SINGLE-object print against a two-alternative formula must be rejected \
                      — the alternative-count clause"
                 );
@@ -4351,7 +4357,7 @@ mod expectation_controls {
                     !accepts(
                         dispatch,
                         node,
-                        "{ label: string; m: number; } | { m: number; }"
+                        "{ label: string; n?: undefined; m: number; } | { m: number; }"
                     ),
                     "a SUBSET arm must be rejected — alternatives compare as exact member sets"
                 );
@@ -4359,11 +4365,10 @@ mod expectation_controls {
                     !accepts(
                         dispatch,
                         node,
-                        "{ label: string; n?: undefined; m: number; } | { label?: undefined; \
-                         n: number; m: number; }"
+                        "{ label: string; m: number; } | { m: number; n: number; }"
                     ),
-                    "H02's recorded checker (with the normal-form `?: undefined` cross \
-                     members) must be REJECTED — that divergence is the KnownOwed pin itself"
+                    "the print WITHOUT the normal-form cross members must be REJECTED — each \
+                     alternative's member set is exact"
                 );
             },
         );
@@ -4582,14 +4587,29 @@ mod expectation_controls {
             kind: None,
             value: ExpectedNode::Primitive(PrimitiveKind::Number),
         };
+        // The normal-form cross members each alternative carries.
+        const LABEL_UNDEFINED: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "label",
+            optional: true,
+            readonly: false,
+            kind: None,
+            value: ExpectedNode::Primitive(PrimitiveKind::Undefined),
+        };
+        const N_UNDEFINED: ExpectedSpreadMember = ExpectedSpreadMember {
+            name: "n",
+            optional: true,
+            readonly: false,
+            kind: None,
+            value: ExpectedNode::Primitive(PrimitiveKind::Undefined),
+        };
         const H02_ARMS: &[ExpectedSpreadArm] = &[
             ExpectedSpreadArm {
                 closed_domain: true,
-                members: &[LABEL, M_NUM],
+                members: &[LABEL, M_NUM, N_UNDEFINED],
             },
             ExpectedSpreadArm {
                 closed_domain: true,
-                members: &[M_NUM, N_NUM],
+                members: &[LABEL_UNDEFINED, M_NUM, N_NUM],
             },
         ];
         with_flow_node(

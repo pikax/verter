@@ -1284,8 +1284,9 @@ non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at
 primitive), not a relation question. The canonical intersection applies the
 same `getIntersectionType` rules to concrete arms: redundant supertypes drop
 (`{} & "x"` is `"x"`, `string & "a"` is `"a"`; a written `string & {}` keeps
-both, as the checker keeps that pair), and an intersection distributes over
-its union arms (`1 & (1 | 2)` is `1`) unless the distributed union keeps an
+both, as the checker keeps that pair, while an instantiated one is `string`),
+`null` or `undefined` beside an object type is `never` (so `(string | null) &
+{}` is `string`), and an intersection distributes over its union arms (`1 & (1 | 2)` is `1`) unless the distributed union keeps an
 intersection constituent and grows, where the checker prints the
 undistributed origin (`(QA | QB) & Z`). A canonical union reduces an
 authored intersection arm the same way. The authored shell itself stays the

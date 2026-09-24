@@ -7426,7 +7426,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Mapped { source, mapper } => {
                     let (source, mapper) = (*source, mapper.clone());
                     drop(data);
-                    match self.identity_mapped_object_for_relation(source, &mapper) {
+                    match self
+                        .identity_mapped_object_for_relation(source, &mapper)
+                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
+                    {
                         Some(object) if object != current => {
                             current = object;
                             continue;
@@ -7595,6 +7598,133 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     produced,
                     Some(mapper.key_space),
                 ))),
+        )
+    }
+
+    /// The object a mapped type over a settled key domain that holds an
+    /// INDEX key resolves to (the checker's `resolveMappedTypeMembers`):
+    /// `Record<string, V>` IS `{ [x: string]: V }`, and
+    /// `{ [K in "a" | number]: V }` IS `{ a: V; [x: number]: V }`. Each
+    /// constituent of the key domain contributes the member the checker
+    /// adds for it: a string literal a property, `string` /
+    /// `number` / `symbol` an index signature of that key, each valued by
+    /// the template with the binder bound to that key and carrying the
+    /// mapper's modifiers (a `?` modifier makes a property optional and an
+    /// index signature's value `undefined`-able under `strictNullChecks`).
+    ///
+    /// `None` (the operand stays the carrier it is, undecided) for a key
+    /// remap, a key domain that does not settle to such constituents (a
+    /// numeric literal or a template key among them), one without an
+    /// index key (an enumerable key domain is the mapped build's own), and
+    /// a template the binder substitution cannot read.
+    /// The object is interned for the relation only.
+    fn index_key_mapped_object_for_relation(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if mapper.name_remap.is_some() {
+            return None;
+        }
+        let graph = self.graph();
+        let key_domain = self
+            .evaluate_deferred_semantic_node_with_context(mapper.key_space, transit)
+            .into_active_query_build_node(self);
+        let constituents: Vec<SemanticNodeId> = match graph.node_data(key_domain).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            Some(_) => vec![key_domain],
+            None => return None,
+        };
+        let optional = matches!(
+            mapper.optionality,
+            crate::semantic_query::OptionalityMod::Add
+        );
+        let readonly = matches!(mapper.readonly, crate::semantic_query::ReadonlyMod::Add);
+        // A `?` modifier makes an index signature's value `undefined`-able
+        // under `strictNullChecks` (the checker's `addOptionality`).
+        let optional_undefined = optional
+            && self
+                .dispatch_txn
+                .borrow()
+                .relation
+                .strict
+                .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                .strict_null_checks;
+        let value_for = |key: SemanticNodeId| -> Option<SemanticNodeId> {
+            let substituted =
+                self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key);
+            let value = self
+                .evaluate_deferred_semantic_node_with_context(substituted, transit)
+                .into_active_query_build_node(self);
+            (!matches!(
+                graph.node_data(value).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ))
+            .then_some(value)
+        };
+        let mut members: Vec<crate::semantic_query::SurfaceMember> = Vec::new();
+        let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+        for key in constituents {
+            let data = graph.node_data(key)?;
+            match &*data {
+                SemanticNodeData::Literal(LiteralValue::String(text)) => {
+                    let property =
+                        crate::semantic_query::PropertyKey::String(Arc::from(text.as_str()));
+                    drop(data);
+                    members.push(crate::semantic_query::SurfaceMember {
+                        key: crate::semantic_query::AuthoredPropertyKey::from_known(property),
+                        value: value_for(key)?,
+                        optional,
+                        readonly,
+                        method_kind: None,
+                        has_implementation_body: false,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        declared_in_macro_type_arg:
+                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                        spans: verter_type_expr::MemberSpans::default(),
+                        declaration_origin: None,
+                    });
+                }
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::Symbol,
+                ) => {
+                    drop(data);
+                    let mut value = value_for(key)?;
+                    if optional_undefined {
+                        let undefined = graph
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                        value =
+                            self.intern_normalized_union_or_intersection(&[value, undefined], true);
+                    }
+                    index_signatures.push(crate::semantic_query::IndexSignature {
+                        key_type: key,
+                        value_type: value,
+                        readonly,
+                        spans: verter_type_expr::IndexSignatureSpans::default(),
+                        declaration_origin: None,
+                    });
+                }
+                _ => return None,
+            }
+        }
+        if index_signatures.is_empty() {
+            return None;
+        }
+        let entries: Vec<crate::semantic_query::SurfaceEntry> = members
+            .into_iter()
+            .map(crate::semantic_query::SurfaceEntry::Member)
+            .chain(
+                index_signatures
+                    .into_iter()
+                    .map(crate::semantic_query::SurfaceEntry::IndexSignature),
+            )
+            .collect();
+        Some(
+            graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                entries, None, true,
+            ))),
         )
     }
 
@@ -7945,6 +8075,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         let closed_target = target.closed();
+
+        // The subtype relations admit into an object LITERAL's type no
+        // source with a property the literal lacks, unless that property
+        // is `undefined` (the checker's `propertiesRelatedTo`): nested
+        // literals compare as the top-level ones do, so `{ o: { a: 1, b: 2
+        // } }` is not below `{ o: { a: 1 } }`.
+        if self.subtype_mode() && surface_is_object_literal(target) {
+            let lists_unknown = source.positive_members().iter().any(|member| {
+                let Some(key) = member.key.cloned_known() else {
+                    return false;
+                };
+                matches!(
+                    target.project_known_key(&key),
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                ) && !matches!(
+                    self.graph().node_data(member.value).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                )
+            });
+            if lists_unknown {
+                return RelationResult::NotAssignable;
+            }
+        }
 
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),

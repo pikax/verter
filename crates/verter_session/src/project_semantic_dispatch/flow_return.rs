@@ -2371,6 +2371,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let arms: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
         let joined = self.intern_normalized_union(&arms, nullability);
+        let joined = self.normalize_widened_object_literals(joined, nullability);
         if widening_nullish_only && is_nullable_node(graph, joined) {
             return (
                 Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))),
@@ -4999,6 +5000,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         let mut evaluator = FlowEvaluator {
             dispatch: self,
+            call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
             canonical,
             owner,
@@ -5691,10 +5693,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return false;
         };
-        let (SemanticNodeData::Object(source_surface), SemanticNodeData::Object(target_surface)) =
-            (&*source_data, &*target_data)
-        else {
+        let SemanticNodeData::Object(target_surface) = &*target_data else {
             return false;
+        };
+        // A spread-built source lists the members its construction
+        // program surfaces (`{ ...s, a: 2 }` over `s: { z: number }` lists
+        // `z`, which a literal `{ a: 1 }` lacks).
+        let source_surface = match &*source_data {
+            SemanticNodeData::Object(surface) => surface.clone(),
+            SemanticNodeData::ObjectSpreadProgram(_) if target_literal => {
+                match self.resolve_typeinfo_surface_view(
+                    source,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ) {
+                    Some(surface) => surface,
+                    None => return false,
+                }
+            }
+            _ => return false,
         };
         let admits_through_index = !target_literal
             && (!target_surface.index_signatures.is_empty()
@@ -6146,6 +6162,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         let mut return_type = self.intern_normalized_union(&arms, nullability);
+        // The checker widens the reduced join: its object literals are
+        // normalised against one another.
+        return_type = self.normalize_widened_object_literals(return_type, nullability);
         // `strictNullChecks` off: a return of widening `null` / `undefined`
         // values alone is the widening nullable type, and the checker's
         // return widening turns it into `any` (a declared `null` read
@@ -6302,6 +6321,41 @@ fn collect_expression_write_spans(
         if let crate::flow_slice_content::SliceExpr::Assignment { span, .. } = write {
             out.insert(*span);
         }
+    }
+}
+
+/// Whether a lowered expression reads this frame: a parameter or local, a
+/// leaf naming a frame binding, or a call through a frame binding or a
+/// same-file function this frame reaches with its own arguments.
+fn slice_expr_reads_frame(expr: &crate::flow_slice_content::SliceExpr) -> bool {
+    use crate::flow_slice_content::{SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry};
+    match expr {
+        SliceExpr::Param { .. } | SliceExpr::Local { .. } | SliceExpr::FrameShadowed { .. } => true,
+        SliceExpr::Call(call, _) => match call {
+            SliceCall::OnBinding { .. } | SliceCall::Direct(_) | SliceCall::DirectSelf => true,
+            SliceCall::Symbolic(_, root) => root.is_some(),
+            SliceCall::Nested(inner)
+            | SliceCall::Construct(inner)
+            | SliceCall::TaggedTemplate(inner) => slice_expr_reads_frame(inner),
+            SliceCall::LocalFunctionShadow | SliceCall::OnHeritage { .. } => false,
+        },
+        SliceExpr::Object { entries } => entries.iter().any(|entry| match entry {
+            SliceObjectEntry::Spread { source } => slice_expr_reads_frame(source),
+            SliceObjectEntry::Member(member) => slice_expr_reads_frame(&member.value),
+        }),
+        SliceExpr::Array { elements, .. } => elements.iter().any(|element| match element {
+            SliceArrayElement::Value { value, .. } => slice_expr_reads_frame(value),
+            SliceArrayElement::Spread { source } => slice_expr_reads_frame(source),
+            SliceArrayElement::Elision => false,
+        }),
+        SliceExpr::Union { arms, .. } => arms.iter().any(slice_expr_reads_frame),
+        SliceExpr::Satisfies { operand, .. }
+        | SliceExpr::Void { operand, .. }
+        | SliceExpr::Awaited { operand } => slice_expr_reads_frame(operand),
+        SliceExpr::OptionalAnyChain { root } | SliceExpr::OptionalMember { root, .. } => {
+            slice_expr_reads_frame(root)
+        }
+        _ => false,
     }
 }
 
@@ -7094,6 +7148,10 @@ pub(super) mod schedule;
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
+    /// The frame-lowered argument values of each call, by the call's span
+    /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
+    call_arguments:
+        Arc<rustc_hash::FxHashMap<verter_span::Span, Arc<[crate::flow_slice_content::SliceExpr]>>>,
     /// The flow slot THIS frame evaluates — the identity a same-slot
     /// recursive call holds on.
     ///
@@ -16324,6 +16382,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             content.declared_return.as_ref(),
             content.declared_predicate.as_ref(),
             &content.body,
+            &content.call_arguments,
             content.can_fall_through,
             content.empty_completion,
             &content.bindings,
@@ -16419,6 +16478,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         body: &crate::flow_slice_content::SliceRegion,
+        call_arguments: &Arc<
+            rustc_hash::FxHashMap<verter_span::Span, Arc<[crate::flow_slice_content::SliceExpr]>>,
+        >,
         can_fall_through: NormalCompletion,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
         bindings: &Arc<FlowBindingMap>,
@@ -16798,6 +16860,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let (contributors, nested_body_falls_through) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
+                call_arguments: Arc::clone(call_arguments),
                 self_slot: None,
                 canonical: self.canonical,
                 owner: self.owner,
@@ -17693,6 +17756,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         false
     }
 
+    /// The value of one frame-lowered call argument
+    /// ([`Self::call_arguments`]), or `None` when this frame cannot give
+    /// it (the caller then reads the indexed argument). A write inside the
+    /// argument is applied by the statement's own evaluation order, never
+    /// here, and a callee hold met inside it is not the argument's value,
+    /// so neither form is read from the frame.
+    fn eval_frame_call_argument(
+        &mut self,
+        expr: &crate::flow_slice_content::SliceExpr,
+    ) -> Option<SemanticNodeId> {
+        // An argument that reads nothing of this frame is the indexed
+        // program's own value, typed where the parameter's context (a
+        // `const` type parameter's tuple, a literal context) reaches it —
+        // except a branch join, whose arms the checker types each as its
+        // own fresh literal (`c ? { a: 1 } : { a: 2 }` passes `{ a: number
+        // }`), where the indexed program keeps the arms' member literals.
+        let branch_join = matches!(expr, crate::flow_slice_content::SliceExpr::Union { .. });
+        if !expression_write_tree(expr).is_empty() || !(branch_join || slice_expr_reads_frame(expr))
+        {
+            return None;
+        }
+        let holds_before = self.holds.len();
+        let degradation_before = self.degradation;
+        let outcome = self.eval_expr(expr);
+        self.holds.truncate(holds_before);
+        match outcome {
+            Positional::Value(node) => Some(node),
+            // The indexed argument answers instead, so an attempt this
+            // frame could not finish leaves no degradation of its own.
+            Positional::Hold | Positional::Unmodeled => {
+                self.degradation = degradation_before;
+                None
+            }
+        }
+    }
+
     /// Evaluate one argument in this frame. Ordinary value reads and authored
     /// whole-root type queries consume the current type of their own exact
     /// subjects. Free roots and other indexed values use owner-scope lowering.
@@ -17815,13 +17914,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return Some(self.degraded_unrepresentable_callee());
         };
         let call = &indexed.call;
+        let frame_arguments = self.call_arguments.get(&site.span()).cloned();
         let mut args = Vec::with_capacity(call.args.len());
         for (ordinal, argument) in call.args.iter().enumerate() {
             let Some(root) = indexed.argument_roots.get(ordinal) else {
                 return Some(self.degraded_unrepresentable_callee());
             };
             let binding = self.indexed_argument_binding(*root);
-            let Some(ty) = self.eval_indexed_call_argument(&argument.expression, &binding) else {
+            // An argument that is no bare binding read is a value THIS
+            // frame computes (`c ? a : b`, `twin(c)`, `[twin(c)]`): its
+            // frame lowering reads the frame's own bindings, which the
+            // indexed program resolves in owner scope and cannot.
+            let frame_value = match (&binding, frame_arguments.as_deref()) {
+                (FlowIndexedArgumentBinding::NonBindingExpression, Some(frame_arguments)) => {
+                    frame_arguments
+                        .get(ordinal)
+                        .and_then(|expr| self.eval_frame_call_argument(expr))
+                }
+                _ => None,
+            };
+            let Some(ty) = frame_value
+                .or_else(|| self.eval_indexed_call_argument(&argument.expression, &binding))
+            else {
                 // An argument this substrate cannot type leaves
                 // applicability without its evidence: the executor
                 // refuses as surely, and degrading here is the same

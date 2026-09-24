@@ -2240,6 +2240,120 @@ fn conditional_applications_decide_under_the_functions_own_algebra() {
     );
 }
 
+/// User aliases whose body intersects its parameter with `{}` or `unknown`,
+/// applied to unions with `null` and to single types.
+const USER_INTERSECTION_ALIAS_SOURCE: &str = r#"
+type NN<T> = T & {};
+type NU<T> = T & unknown;
+declare function nn<T>(v: T): NN<T>;
+export function nnParam(v: NN<string | null>) { return v; }
+export function nnUndef(v: NN<string | undefined | null>) { return v; }
+export function nnNum(v: NN<number | string | null>) { return v; }
+export function nnObj(v: NN<{ a: string } | null>) { return v; }
+export function nnLit(v: NN<"a" | null>) { return v; }
+export function nnNull(v: NN<null>) { return v; }
+export function nnUnknown(v: NN<unknown>) { return v; }
+export function nnAny(v: NN<any>) { return v; }
+export function nuParam(v: NU<string | null>) { return v; }
+export function nnCall(v: string | null) { return nn(v); }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`USER_INTERSECTION_ALIAS_SOURCE`], read at the
+/// checker's print altitude; the TypeScript 7.0.2 `.d.ts` print follows
+/// each row.
+const USER_INTERSECTION_ALIAS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string / string / string / string
+    ("nnParam", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("nnUndef", "string", "string", "string", "string"),
+    // NN<string | number | null> / NN<string | number> (twice each)
+    (
+        "nnNum",
+        "NN<null | number | string>",
+        "NN<number | string>",
+        "NN<null | number | string>",
+        "NN<number | string>",
+    ),
+    // { a: string; } / { a: string; } / { a: string; } / { a: string; }
+    (
+        "nnObj",
+        "{ a: string }",
+        "{ a: string }",
+        "{ a: string }",
+        "{ a: string }",
+    ),
+    // "a" / "a" / "a" / "a"
+    ("nnLit", "\"a\"", "\"a\"", "\"a\"", "\"a\""),
+    // never / never / never / never
+    ("nnNull", "never", "never", "never", "never"),
+    // {} / {} / {} / {}
+    ("nnUnknown", "{  }", "{  }", "{  }", "{  }"),
+    // any / any / any / any
+    ("nnAny", "any", "any", "any", "any"),
+    // string | null / string / string | null / string
+    (
+        "nuParam",
+        "null | string",
+        "string",
+        "null | string",
+        "string",
+    ),
+    // string / string / string / string
+    ("nnCall", "string", "string", "string", "string"),
+];
+
+/// An application of a user alias whose body is an intersection is the
+/// intersection the checker constructs from the substituted arms: a union
+/// argument distributes, `null & {}` and `undefined & {}` are `never`, and
+/// `{}` beside a type that is never `null` or `undefined` drops — the
+/// written `string & {}` the checker keeps is the authored pair, not an
+/// instantiated one. `NN<string | null>` (`type NN<T> = T & {}`) is
+/// therefore `string` with and without `strictNullChecks`, and the checker
+/// names the alias only for an intersection or distributed union it
+/// constructs (`NN<string | number | null>`), printing a reduced
+/// constituent (`{ a: string; }`) or an argument returned as it is
+/// (`string | null` for `type NU<T> = T & unknown`) as itself. Each cell
+/// is its project's TypeScript 7.0.2 answer at the print altitude.
+#[test]
+fn user_intersection_aliases_reduce_their_applications() {
+    let host = four_policy_host();
+    let roots = [
+        STRICT_ROOT,
+        LOOSE_ROOT,
+        STRICT_IMPLICIT_ROOT,
+        LOOSE_IMPLICIT_ROOT,
+    ];
+    for root in roots {
+        upsert(
+            &host,
+            &format!("{root}/user-aliases.ts"),
+            USER_INTERSECTION_ALIAS_SOURCE,
+        );
+    }
+    let mut mismatches = Vec::new();
+    for (symbol, strict, loose, strict_implicit, loose_implicit) in USER_INTERSECTION_ALIAS_TABLE {
+        for (root, expected) in
+            roots
+                .into_iter()
+                .zip([strict, loose, strict_implicit, loose_implicit])
+        {
+            let canonical = format!("{root}/user-aliases.ts");
+            let observed = observe_at_checker_altitude(&host, &canonical, symbol);
+            if observed != *expected {
+                mismatches.push(format!(
+                    "{canonical} `{symbol}`: expected `{expected}`, observed `{observed}`"
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 prints:\n{}",
+        mismatches.join("\n")
+    );
+}
+
 /// Returns, array elements and yields joining two DECLARED object types,
 /// an object literal beside a declared type, object and tuple literals
 /// holding a bare `null` / `undefined` member or element, and declared
@@ -5091,6 +5205,632 @@ fn index_signatures_and_any_relate_by_the_checkers_rules() {
         "index-and-any-relations.ts",
         INDEX_AND_ANY_RELATION_SOURCE,
         INDEX_AND_ANY_RELATION_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Mapped types over a key domain holding an index key (`Record<string,
+/// V>`, `{ [K in string]: K }`, `Record<"a" | number, V>`) against named
+/// members, index signatures and a record.
+const MAPPED_INDEX_RELATION_SOURCE: &str = r#"
+declare const __v_recToReq: (Record<string, string>) extends ({ a: string }) ? "y" : "n";
+export function recToReq() { return __v_recToReq; }
+declare const __v_recToOpt: (Record<string, string>) extends ({ a?: string }) ? "y" : "n";
+export function recToOpt() { return __v_recToOpt; }
+declare const __v_recToOptBad: (Record<string, number>) extends ({ a?: string }) ? "y" : "n";
+export function recToOptBad() { return __v_recToOptBad; }
+declare const __v_recNumToReq: (Record<number, string>) extends ({ 0: string }) ? "y" : "n";
+export function recNumToReq() { return __v_recNumToReq; }
+declare const __v_recToIndex: (Record<string, string>) extends ({ [k: string]: string }) ? "y" : "n";
+export function recToIndex() { return __v_recToIndex; }
+declare const __v_recToIndexBad: (Record<string, number>) extends ({ [k: string]: string }) ? "y" : "n";
+export function recToIndexBad() { return __v_recToIndexBad; }
+declare const __v_recToRecord: (Record<string, string>) extends (Record<string, unknown>) ? "y" : "n";
+export function recToRecord() { return __v_recToRecord; }
+declare const __v_recMixedToReq: (Record<"a" | number, string>) extends ({ a: string }) ? "y" : "n";
+export function recMixedToReq() { return __v_recMixedToReq; }
+declare const __v_recMixedToMissing: (Record<"a" | number, string>) extends ({ b: string }) ? "y" : "n";
+export function recMixedToMissing() { return __v_recMixedToMissing; }
+declare const __v_recMixedBadValue: (Record<"a" | number, number>) extends ({ a: string }) ? "y" : "n";
+export function recMixedBadValue() { return __v_recMixedBadValue; }
+declare const __v_mappedStrToReq: ({ [K in string]: K }) extends ({ a: string }) ? "y" : "n";
+export function mappedStrToReq() { return __v_mappedStrToReq; }
+declare const __v_mappedStrToIndex: ({ [K in string]: K }) extends ({ [k: string]: string }) ? "y" : "n";
+export function mappedStrToIndex() { return __v_mappedStrToIndex; }
+declare const __v_recToEmpty: (Record<string, string>) extends ({}) ? "y" : "n";
+export function recToEmpty() { return __v_recToEmpty; }
+declare const __v_optMappedToReq: ({ [K in string]?: string }) extends ({ a: string }) ? "y" : "n";
+export function optMappedToReq() { return __v_optMappedToReq; }
+declare const __v_optMappedToIndex: ({ [K in string]?: number }) extends ({ [k: string]: number }) ? "y" : "n";
+export function optMappedToIndex() { return __v_optMappedToIndex; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`MAPPED_INDEX_RELATION_SOURCE`], each the lane's
+/// spelling of the checker's TypeScript 7.0.2 answer (the checker's
+/// prints follow each row).
+const MAPPED_INDEX_RELATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "n" / "n" / "n" / "n"
+    ("recToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("recToOpt", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("recToOptBad", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("recNumToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("recToIndex", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("recToIndexBad", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("recToRecord", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("recMixedToReq", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("recMixedToMissing", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("recMixedBadValue", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "n" / "n" / "n"
+    ("mappedStrToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "y" / "y" / "y" / "y"
+    ("mappedStrToIndex", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "y" / "y" / "y" / "y"
+    ("recToEmpty", "\"y\"", "\"y\"", "\"y\"", "\"y\""),
+    // "n" / "n" / "n" / "n"
+    ("optMappedToReq", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // "n" / "y" / "n" / "y"
+    ("optMappedToIndex", "\"n\"", "\"y\"", "\"n\"", "\"y\""),
+];
+
+/// A mapped type whose key domain holds an index key relates as the
+/// object the checker resolves it to (`resolveMappedTypeMembers`): a
+/// string literal key a property, `string` / `number` an index signature,
+/// each valued by the template at that key. So its index signature never
+/// satisfies a REQUIRED named target member (`Record<string, string>
+/// extends { a: string }` is `"n"`), an OPTIONAL one is satisfied without
+/// relating the index value (`Record<string, number> extends { a?: string
+/// }` is `"y"`), and a `?` modifier makes the index value `undefined`-able
+/// under `strictNullChecks` alone (`{ [K in string]?: number }` against `{
+/// [k: string]: number }` is `"n"` strict, `"y"` without it). Measured as
+/// `S extends T ? "y" : "n"` on TypeScript 7.0.2 in the four projects.
+#[test]
+fn mapped_sources_relate_through_their_index_signatures() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "mapped-index-relations.ts",
+        MAPPED_INDEX_RELATION_SOURCE,
+        MAPPED_INDEX_RELATION_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Unions of object literals joined by returns, conditional expressions,
+/// arrays, yields and bindings, nested literals at each depth, and a
+/// declared type beside a literal.
+const OBJECT_LITERAL_NORMALIZATION_SOURCE: &str = r#"
+interface Generator<T, TReturn, TNext> {}
+export function ternRet(c: boolean) { return c ? { a: 1 } : { a: 1, b: 2 }; }
+export function ifRet(c: boolean) { if (c) return { a: 1 }; return { a: 1, b: 2 }; }
+export function constDecl(c: boolean) { const x = c ? { a: 1 } : { a: 1, b: 2 }; return x; }
+export function three(c: number) { return c === 0 ? { a: 1 } : c === 1 ? { b: "s" } : { c: true }; }
+export function ternInTern(c: boolean, d: boolean) { return c ? { k: 1 } : d ? { a: 1 } : { a: 1, b: 2 }; }
+export function arr(c: boolean) { return [{ a: 1 }, { a: 1, b: 2 }]; }
+export function* gen() { yield { a: 1 }; yield { b: 2 }; }
+export function nested(c: boolean) { return { o: c ? { a: 1 } : { a: 1, b: 2 } }; }
+export function nestedDeep(c: boolean) { return c ? { o: { a: 1 } } : { o: { a: 1, b: 2 } }; }
+export function deep3(c: boolean) { return c ? { o: { p: { a: 1 } } } : { o: { p: { a: 1, b: 2 } } }; }
+export function mixedDeep(c: boolean) { return c ? { o: { a: 1 } } : { o: { b: 1 }, q: 2 }; }
+export function arrDeep(c: boolean) { return [{ o: { a: 1 } }, { o: { b: 2 } }]; }
+export function joinNested(c: boolean, d: boolean) { if (c) return { o: d ? { a: 1 } : { a: 1, b: 2 } }; return { o: d ? { a: 1 } : { a: 1, b: 2 } }; }
+export function joinSibling(c: boolean, d: boolean) { if (c) return { o: { z: 1 } }; return { o: d ? { a: 1 } : { a: 1, b: 2 } }; }
+export function depthTwo(c: boolean) { return { o: { p: c ? { a: 1 } : { a: 1, b: 2 } } }; }
+export function arrayResets(c: boolean) { return { o: [c ? { a: 1 } : { a: 1, b: 2 }] }; }
+export function methodArm(c: boolean) { return c ? { m() { return 1; } } : { a: 1 }; }
+export function asConst(c: boolean) { return c ? ({ a: 1 } as const) : ({ a: 1, b: 2 } as const); }
+export function nullArm(c: boolean) { return c ? { a: null } : { b: 1 }; }
+export function vsDecl(c: boolean, d: { a: number; b: number }) { return c ? { a: 1 } : d; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`OBJECT_LITERAL_NORMALIZATION_SOURCE`], each the
+/// lane's spelling of the checker's TypeScript 7.0.2 answer (read from a
+/// `ReturnType<typeof f>` message; the checker's print follows each row,
+/// once when the four projects agree).
+const OBJECT_LITERAL_NORMALIZATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // { a: number; b?: undefined; } | { a: number; b: number; }
+    (
+        "ternRet",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+    ),
+    // { b?: undefined; a: number; } | { a: number; b: number; }
+    (
+        "ifRet",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+    ),
+    // { b?: undefined; a: number; } | { a: number; b: number; }
+    (
+        "constDecl",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+    ),
+    // { b?: undefined; a: number; c?: undefined; } | { a?: undefined; b: string; c?: undefined; } | { b?: undefined; a?: undefined; c: boolean; }
+    (
+        "three",
+        "{ a: number; c?: undefined; b?: undefined } | { b: string; c?: undefined; a?: undefined } | { c: boolean; a?: undefined; b?: undefined }",
+        "{ a: number; c?: undefined; b?: undefined } | { b: string; c?: undefined; a?: undefined } | { c: boolean; a?: undefined; b?: undefined }",
+        "{ a: number; c?: undefined; b?: undefined } | { b: string; c?: undefined; a?: undefined } | { c: boolean; a?: undefined; b?: undefined }",
+        "{ a: number; c?: undefined; b?: undefined } | { b: string; c?: undefined; a?: undefined } | { c: boolean; a?: undefined; b?: undefined }",
+    ),
+    // { b?: undefined; a?: undefined; k: number; } | { b?: undefined; k?: undefined; a: number; } | { k?: undefined; a: number; b: number; }
+    (
+        "ternInTern",
+        "{ a: number; b: number; k?: undefined } | { a: number; b?: undefined; k?: undefined } | { k: number; a?: undefined; b?: undefined }",
+        "{ a: number; b: number; k?: undefined } | { a: number; b?: undefined; k?: undefined } | { k: number; a?: undefined; b?: undefined }",
+        "{ a: number; b: number; k?: undefined } | { a: number; b?: undefined; k?: undefined } | { k: number; a?: undefined; b?: undefined }",
+        "{ a: number; b: number; k?: undefined } | { a: number; b?: undefined; k?: undefined } | { k: number; a?: undefined; b?: undefined }",
+    ),
+    // ({ b?: undefined; a: number; } | { a: number; b: number; })[]
+    (
+        "arr",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+    ),
+    // Generator<{ b?: undefined; a: number; } | { a?: undefined; b: number; }, void, unknown>
+    (
+        "gen",
+        "Generator<{ a: number; b?: undefined } | { b: number; a?: undefined }, void, unknown>",
+        "Generator<{ a: number; b?: undefined } | { b: number; a?: undefined }, void, unknown>",
+        "Generator<{ a: number; b?: undefined } | { b: number; a?: undefined }, void, unknown>",
+        "Generator<{ a: number; b?: undefined } | { b: number; a?: undefined }, void, unknown>",
+    ),
+    // { o: { a: number; b?: undefined; } | { a: number; b: number; }; }
+    (
+        "nested",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+    ),
+    // { o: { b?: undefined; a: number; }; } | { o: { a: number; b: number; }; }
+    (
+        "nestedDeep",
+        "{ o: { a: number; b: number } } | { o: { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } } | { o: { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } } | { o: { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } } | { o: { a: number; b?: undefined } }",
+    ),
+    // { o: { p: { b?: undefined; a: number; }; }; } | { o: { p: { a: number; b: number; }; }; }
+    (
+        "deep3",
+        "{ o: { p: { a: number; b: number } } } | { o: { p: { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } } } | { o: { p: { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } } } | { o: { p: { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } } } | { o: { p: { a: number; b?: undefined } } }",
+    ),
+    // { o: { b?: undefined; a: number; }; q?: undefined; } | { o: { a?: undefined; b: number; }; q: number; }
+    (
+        "mixedDeep",
+        "{ o: { a: number; b?: undefined }; q?: undefined } | { o: { b: number; a?: undefined }; q: number }",
+        "{ o: { a: number; b?: undefined }; q?: undefined } | { o: { b: number; a?: undefined }; q: number }",
+        "{ o: { a: number; b?: undefined }; q?: undefined } | { o: { b: number; a?: undefined }; q: number }",
+        "{ o: { a: number; b?: undefined }; q?: undefined } | { o: { b: number; a?: undefined }; q: number }",
+    ),
+    // ({ o: { b?: undefined; a: number; }; } | { o: { a?: undefined; b: number; }; })[]
+    (
+        "arrDeep",
+        "({ o: { a: number; b?: undefined } } | { o: { b: number; a?: undefined } })[]",
+        "({ o: { a: number; b?: undefined } } | { o: { b: number; a?: undefined } })[]",
+        "({ o: { a: number; b?: undefined } } | { o: { b: number; a?: undefined } })[]",
+        "({ o: { a: number; b?: undefined } } | { o: { b: number; a?: undefined } })[]",
+    ),
+    // { o: { b?: undefined; a: number; } | { a: number; b: number; }; }
+    (
+        "joinNested",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+        "{ o: { a: number; b: number } | { a: number; b?: undefined } }",
+    ),
+    // { o: { b?: undefined; z: number; a?: undefined; }; } | { o: { b?: undefined; z?: undefined; a: number; } | { z?: undefined; a: number; b: number; }; }
+    (
+        "joinSibling",
+        "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
+        "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
+        "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
+        "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
+    ),
+    // { o: { p: { a: number; } | { a: number; b: number; }; }; }
+    (
+        "depthTwo",
+        "{ o: { p: { a: number } | { a: number; b: number } } }",
+        "{ o: { p: { a: number } | { a: number; b: number } } }",
+        "{ o: { p: { a: number } | { a: number; b: number } } }",
+        "{ o: { p: { a: number } | { a: number; b: number } } }",
+    ),
+    // { o: ({ b?: undefined; a: number; } | { a: number; b: number; })[]; }
+    (
+        "arrayResets",
+        "{ o: ({ a: number; b: number } | { a: number; b?: undefined })[] }",
+        "{ o: ({ a: number; b: number } | { a: number; b?: undefined })[] }",
+        "{ o: ({ a: number; b: number } | { a: number; b?: undefined })[] }",
+        "{ o: ({ a: number; b: number } | { a: number; b?: undefined })[] }",
+    ),
+    // { a?: undefined; m(): number; } | { m?: undefined; a: number; }
+    (
+        "methodArm",
+        "{ a: number; m?: undefined } | { m: () => number; a?: undefined }",
+        "{ a: number; m?: undefined } | { m: () => number; a?: undefined }",
+        "{ a: number; m?: undefined } | { m: () => number; a?: undefined }",
+        "{ a: number; m?: undefined } | { m: () => number; a?: undefined }",
+    ),
+    // { b?: undefined; readonly a: 1; } | { readonly a: 1; readonly b: 2; }
+    (
+        "asConst",
+        "{ readonly a: 1; b?: undefined } | { readonly a: 1; readonly b: 2 }",
+        "{ readonly a: 1; b?: undefined } | { readonly a: 1; readonly b: 2 }",
+        "{ readonly a: 1; b?: undefined } | { readonly a: 1; readonly b: 2 }",
+        "{ readonly a: 1; b?: undefined } | { readonly a: 1; readonly b: 2 }",
+    ),
+    // { a: null; b?: undefined; } | { a?: undefined; b: number; } / { a: any; b?: undefined; } | { a?: undefined; b: number; } (twice each)
+    (
+        "nullArm",
+        "{ a: null; b?: undefined } | { b: number; a?: undefined }",
+        "{ a: any; b?: undefined } | { b: number; a?: undefined }",
+        "{ a: null; b?: undefined } | { b: number; a?: undefined }",
+        "{ a: any; b?: undefined } | { b: number; a?: undefined }",
+    ),
+    // { a: number; b: number; } | { a: number; }
+    (
+        "vsDecl",
+        "{ a: number } | { a: number; b: number }",
+        "{ a: number } | { a: number; b: number }",
+        "{ a: number } | { a: number; b: number }",
+        "{ a: number } | { a: number; b: number }",
+    ),
+];
+
+/// The checker widens the value a return, a yield, a binding and an
+/// array literal hold, and widening a union of object literals gives each
+/// literal the properties its object-literal siblings name and it lacks,
+/// as optional `undefined` members (`getWidenedTypeWithContext`): `c ? {
+/// a: 1 } : { a: 1, b: 2 }` is `{ a: number; b?: undefined } | { a:
+/// number; b: number }`. A literal widened in such a context widens each
+/// property in the context of the same property of its siblings, so the
+/// normalisation reaches nested literals (`nestedDeep`, `deep3`,
+/// `mixedDeep`, `arrDeep`, `joinSibling`); a lone literal normalises a
+/// union-valued property (`nested`, `joinNested`) but, on TypeScript
+/// 7.0.2, not a union two literal properties down (`depthTwo`), and an
+/// array widens its element as a whole (`arrayResets`). A declared object
+/// type neither names nor receives a property (`vsDecl`), and the added
+/// member is `undefined` without `strictNullChecks` too (`nullArm`). The
+/// nested literals relate by the checker's subtype rule for an object
+/// literal target (a source property the literal lacks is not below it
+/// unless `undefined`), so `{ o: { a: 1, b: 2 } }` is not absorbed into
+/// `{ o: { a: 1 } }`. The rows spell members in the lane's order (own
+/// members, then the added ones in sibling order); the checker's print
+/// order is its property table's, which is not stable even across one
+/// construction (`ternRet` and `ifRet` print `b?` last and first). Each
+/// cell matches its own project's TypeScript 7.0.2 answer.
+#[test]
+fn widened_object_literal_unions_take_their_siblings_properties() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "object-literal-normalization.ts",
+        OBJECT_LITERAL_NORMALIZATION_SOURCE,
+        OBJECT_LITERAL_NORMALIZATION_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// The normalised join and the declared union the checker prints for it
+/// are one type: each is assignable to the other through the relation
+/// authority, in every project. A spread-built literal receives the
+/// properties it lacks too (`c ? { a: 1, q: 1 } : { ...s, a: 2 }` gives
+/// the spread arm `q?: undefined` on TypeScript 7.0.2).
+#[test]
+fn a_normalized_object_literal_join_is_the_checkers_type() {
+    const SOURCE: &str = r#"
+export function ternRet(c: boolean) { return c ? { a: 1 } : { a: 1, b: 2 }; }
+export function declared(v: { b?: undefined; a: number } | { a: number; b: number }) { return v; }
+export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 1 } : { ...s, a: 2 }; }
+"#;
+    let host = four_policy_host();
+    for root in [
+        STRICT_ROOT,
+        LOOSE_ROOT,
+        STRICT_IMPLICIT_ROOT,
+        LOOSE_IMPLICIT_ROOT,
+    ] {
+        let canonical = format!("{root}/normalized-join.ts");
+        upsert(&host, &canonical, SOURCE);
+        let node_of = |symbol: &str| {
+            host.get_flow_return_type_with_audit(
+                &identity(&canonical, symbol),
+                ReturnProjectionDemand::whole_return(),
+            )
+            .as_result()
+            .map(|result| result.return_type())
+            .unwrap_or_else(|_| panic!("`{symbol}` answers a value"))
+        };
+        let join = node_of("ternRet");
+        let declared = node_of("declared");
+        let spread = node_of("spreadArm");
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        for (source, target) in [(join, declared), (declared, join)] {
+            assert!(
+                matches!(
+                    dispatch.execute_relate_pair(source, target),
+                    super::dispatch_txn::RelationStep::Assignable { .. }
+                ),
+                "{root}: the normalised join and the checker's declared union are assignable \
+                 each to the other"
+            );
+        }
+        let graph = dispatch.graph();
+        let Some(SemanticNodeData::Union(arms)) = graph.node_data(spread).as_deref().cloned()
+        else {
+            panic!("{root}: the spread join keeps both arms");
+        };
+        let program = arms
+            .iter()
+            .copied()
+            .find(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::ObjectSpreadProgram(_))
+                )
+            })
+            .unwrap_or_else(|| panic!("{root}: one arm is the spread-built literal"));
+        let surface = dispatch
+            .resolve_typeinfo_surface_view(
+                program,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .unwrap_or_else(|| panic!("{root}: the spread arm has a surface"));
+        let q = surface
+            .positive_members()
+            .iter()
+            .find(|member| member.key.as_string() == Some("q"))
+            .unwrap_or_else(|| panic!("{root}: the spread arm receives `q`"));
+        assert!(q.optional, "{root}: the received `q` is optional");
+        assert!(
+            matches!(
+                graph.node_data(q.value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+            ),
+            "{root}: the received `q` is `undefined`"
+        );
+    }
+}
+
+/// Values a generic or overloaded call consumes, computed in the frame:
+/// conditional arguments over parameters, literals and calls, calls of a
+/// flow-inferred function passed to an overload set and a generic
+/// callee, member reads of such calls, and `in` tests of their values.
+const CALL_CONSUMER_SOURCE: &str = r#"
+declare function id<T>(v: T): T;
+declare function first<T>(xs: T[]): T;
+declare function pick(v: { a: string }): "s";
+declare function pick(v: { a: number }): "n";
+declare function pick(v: unknown): "u";
+export function twin(c: boolean) { if (c) return { a: null }; return { a: undefined }; }
+export function one(c: boolean) { if (c) return { a: 1 }; return { a: 2 }; }
+function local(c: boolean) { if (c) return { a: null }; return { a: undefined }; }
+export function ternArg(c: boolean, a: { x: string }, b: { x: string; y: number }) { return id(c ? a : b); }
+export function ternArgRev(c: boolean, a: { x: string; y: number }, b: { x: string }) { return id(c ? a : b); }
+export function ternArgLit(c: boolean) { return id(c ? "a" : "b"); }
+export function ternArgNull(c: boolean, a: { x: string }) { return id(c ? a : null); }
+export function ternArgUnrelated(c: boolean, a: { x: string }, b: { y: number }) { return id(c ? a : b); }
+export function ternArgObjLit(c: boolean) { return id(c ? { a: 1 } : { a: 1, b: 2 }); }
+export function ternArgSameShape(c: boolean) { return id(c ? { a: 1 } : { a: 2 }); }
+export function arrArgLit() { return id([{ a: 1 }, { a: 1, b: 2 }]); }
+export function memberRead(c: boolean) { return twin(c).a; }
+export function memberReadOne(c: boolean) { return one(c).a; }
+export function memberReadLocal(c: boolean) { return local(c).a; }
+export function viaPick(c: boolean) { return pick(twin(c)); }
+export function viaPickOne(c: boolean) { return pick(one(c)); }
+export function viaFirst(c: boolean) { return first([twin(c)]); }
+export function viaFirstOne(c: boolean) { return first([one(c)]); }
+export function viaIn(c: boolean) { const v = twin(c); if ("a" in v) return v; return 0; }
+export function viaInOne(c: boolean) { const v = one(c); if ("a" in v) return v; return 0; }
+export function viaInLocal(c: boolean) { const v = local(c); if ("a" in v) return v; return 0; }
+export function viaInDirectLocal(c: boolean) { if ("a" in local(c)) return 1; return "x"; }
+"#;
+
+/// `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` for [`CALL_CONSUMER_SOURCE`], each the lane's spelling
+/// of the checker's TypeScript 7.0.2 answer (the checker's print follows
+/// each row, once when the four projects agree).
+const CALL_CONSUMER_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // { x: string; }
+    (
+        "ternArg",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // { x: string; }
+    (
+        "ternArgRev",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+        "{ x: string }",
+    ),
+    // "a" | "b"
+    (
+        "ternArgLit",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+        "\"a\" | \"b\"",
+    ),
+    // { x: string; } | null / { x: string; } (twice each)
+    (
+        "ternArgNull",
+        "null | { x: string }",
+        "{ x: string }",
+        "null | { x: string }",
+        "{ x: string }",
+    ),
+    // { x: string; } | { y: number; }
+    (
+        "ternArgUnrelated",
+        "{ x: string } | { y: number }",
+        "{ x: string } | { y: number }",
+        "{ x: string } | { y: number }",
+        "{ x: string } | { y: number }",
+    ),
+    // { a: number; b?: undefined; } | { a: number; b: number; }
+    (
+        "ternArgObjLit",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+        "{ a: number; b: number } | { a: number; b?: undefined }",
+    ),
+    // { a: number; }
+    (
+        "ternArgSameShape",
+        "{ a: number }",
+        "{ a: number }",
+        "{ a: number }",
+        "{ a: number }",
+    ),
+    // ({ b?: undefined; a: number; } | { a: number; b: number; })[]
+    (
+        "arrArgLit",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+        "({ a: number; b: number } | { a: number; b?: undefined })[]",
+    ),
+    // null | undefined / any (twice each)
+    (
+        "memberRead",
+        "null | undefined",
+        "any",
+        "null | undefined",
+        "any",
+    ),
+    // number
+    ("memberReadOne", "number", "number", "number", "number"),
+    // null | undefined / any (twice each)
+    (
+        "memberReadLocal",
+        "null | undefined",
+        "any",
+        "null | undefined",
+        "any",
+    ),
+    // "u"
+    ("viaPick", "\"u\"", "\"u\"", "\"u\"", "\"u\""),
+    // "n"
+    ("viaPickOne", "\"n\"", "\"n\"", "\"n\"", "\"n\""),
+    // { a: null; } | { a: undefined; } / { a: any; } | { a: any; } (twice each)
+    (
+        "viaFirst",
+        "{ a: null } | { a: undefined }",
+        "{ a: any }",
+        "{ a: null } | { a: undefined }",
+        "{ a: any }",
+    ),
+    // { a: number; }
+    (
+        "viaFirstOne",
+        "{ a: number }",
+        "{ a: number }",
+        "{ a: number }",
+        "{ a: number }",
+    ),
+    // 0 | { a: null; } | { a: undefined; } / 0 | { a: any; } (twice each)
+    (
+        "viaIn",
+        "0 | { a: null } | { a: undefined }",
+        "0 | { a: any }",
+        "0 | { a: null } | { a: undefined }",
+        "0 | { a: any }",
+    ),
+    // 0 | { a: number; }
+    (
+        "viaInOne",
+        "0 | { a: number }",
+        "0 | { a: number }",
+        "0 | { a: number }",
+        "0 | { a: number }",
+    ),
+    // 0 | { a: null; } | { a: undefined; } / 0 | { a: any; } (twice each)
+    (
+        "viaInLocal",
+        "0 | { a: null } | { a: undefined }",
+        "0 | { a: any }",
+        "0 | { a: null } | { a: undefined }",
+        "0 | { a: any }",
+    ),
+    // "x" | 1
+    (
+        "viaInDirectLocal",
+        "\"x\" | 1",
+        "\"x\" | 1",
+        "\"x\" | 1",
+        "\"x\" | 1",
+    ),
+];
+
+/// A call's arguments are values of the calling frame: `id(c ? a : b)`
+/// over `declare function id<T>(v: T): T` infers `T` from the
+/// subtype-reduced conditional (`{ x: string }`), a flow-inferred call
+/// passes its return (`pick(twin(c))`, `first([twin(c)])`), and the
+/// conditional's arms are each a fresh literal (`id(c ? { a: 1 } : { a:
+/// 2 })` is `{ a: number }`). An overloaded callee is tried under the
+/// SUBTYPE relation before assignability, as the checker's `resolveCall`
+/// does: `twin(c)` is `{ a: any }` without `strictNullChecks`, which is
+/// only assignable to `(v: { a: string })`, so `pick` selects `(v:
+/// unknown)` and answers `"u"`. A static member read off a call's value
+/// reads the member of its return (`twin(c).a`), and `"a" in v` narrows
+/// the call's value held by a `const` — the checker narrows only the
+/// reference an `in` test names, so the local initialised from a call
+/// carries no fact the test leaves unmentioned — and an `in` operand that
+/// is a call of a closed same-file function is no predicate position.
+/// Every row is clean; each cell matches its own project's TypeScript
+/// 7.0.2 answer (`viaFirst` without `strictNullChecks` is the structural
+/// twin of SDL-28's print, `{ a: any; } | { a: any; }` on the checker).
+#[test]
+fn call_consumers_read_the_frames_values() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "call-consumers.ts",
+        CALL_CONSUMER_SOURCE,
+        CALL_CONSUMER_TABLE,
     );
     assert!(
         mismatches.is_empty(),

@@ -150,6 +150,7 @@ mod flow_return_tagged_template_tests;
 pub(crate) mod flow_return_tests;
 #[cfg(test)]
 mod flow_return_type_argument_default_tests;
+mod flow_return_widening;
 // The completeness-proof layer for flow-bearing operations: production-live
 // (the flow evaluator's demand preparation installs demands from here and
 // the component close finalizes through it), and the `FlowReturnKey`

@@ -2184,6 +2184,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "41baf142492e8d5ee16af8ede53eed028fb9d2ce07c0f8851d42a9fa82a17699",
     ),
     (
+        "E02_spread_index_signature",
+        "960d72b092800067340f3f1b7376cd11f44de9c8fa99c713638b036f7983709e",
+    ),
+    (
         "G07_emits_tagged_spread",
         "e211bc306e0c4ddd199f847077c17ce96a250b23c1ca729e889d38ac629ee6a9",
     ),
@@ -3716,11 +3720,11 @@ mod corpus_suite {
             ),
             (
                 "H02_union_spread_source",
-                "checker prints `{ label: string; n?: undefined; m: number; } | { label?: undefined; n: number; m: number; }`; the renderer prints `ObjectSpreadProgram` — the composed alternatives omit the normal-form cross members the KnownOwed arm pins",
+                "checker prints `{ label: string; n?: undefined; m: number; } | { label?: undefined; n: number; m: number; }`; the renderer prints `ObjectSpreadProgram` — the semantic comparison composes the program, cross members included",
             ),
             (
                 "X10_destructured_default_conditional",
-                "checker prints `{ label: string; n: number; } | { n?: undefined; label: string; }`; the renderer spells the same union `Union({ label: string, n: number } | { label: string })` — union spelling, member terminators, and the normal-form `n?: undefined` cross member differ",
+                "checker prints `{ label: string; n: number; } | { n?: undefined; label: string; }`; the renderer spells the same union `Union({ label: string, n: number } | { label: string, n: undefined })` — union spelling, member terminators and the optional marker differ",
             ),
             (
                 "X14_accessor_pair",
@@ -3736,7 +3740,7 @@ mod corpus_suite {
             ),
             (
                 "X27_finally_fallthrough_break_override",
-                "checker prints `{ one: number; s?: undefined; } | { one?: undefined; s: string; }`; the renderer spells the same union `Union({ one: number } | { s: string })` — union spelling, member terminators, and the normal-form cross members differ",
+                "checker prints `{ one: number; s?: undefined; } | { one?: undefined; s: string; }`; the renderer spells the same union `Union({ s: string, one: undefined } | { one: number, s: undefined })` — union spelling, member terminators and the optional markers differ",
             ),
             (
                 "CC03_as_const_plain_return",
@@ -3883,6 +3887,12 @@ mod corpus_suite {
                         ));
                     }
                 }
+                // A Degraded row's claim is its runtime erasure (`type:
+                // null`), which the verdict column test corroborates; the
+                // flow type under it may equal the checker's (a `T |
+                // undefined` member of the checker's own type has no single
+                // runtime constructor) or not.
+                Verdict::Degraded(_) => {}
                 _ => {
                     if matches {
                         failures.push(format!(
@@ -5156,7 +5166,6 @@ const OPEN_DEBTS: &[&str] = &[
     "D19_callee_undeclared_spread_key",
     "G08_emits_undeclared_spread",
     "E01_spread_any",
-    "E02_spread_index_signature",
     "E03_spread_array",
     // ── `as const` SPREAD MODIFIER LOSS (D14 deep pins) ─────────────────
     // The enclosing `as const` reaches the fresh members but is lost on
@@ -5165,14 +5174,6 @@ const OPEN_DEBTS: &[&str] = &[
     "B03_as_const_call",
     "B04_as_const_spread_only",
     "B10_as_const_ident",
-    // ── UNION NORMAL-FORM CROSS MEMBERS (D14 deep pins) ────────────────
-    // The checker's union-of-objects arms carry `x?: undefined` cross
-    // members the published arms omit (extensionally equal); the
-    // full-depth pins flip when the composed/published unions grow the
-    // normal-form members.
-    "H02_union_spread_source",
-    "X10_destructured_default_conditional",
-    "X27_finally_fallthrough_break_override",
     // ── NARROWING ────────────────────────────────────────────────────
     // The narrowing blocks landed: every seeded narrowing row now matches
     // the checker except N09_narrow_then_write, whose remaining debt is
@@ -5308,8 +5309,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // the one-branch and default-less-switch joins that keep `undefined` —
     // to MatchesChecker: 83 matching, 7 parked. The satisfies target
     // contextually typing its operand moves X21 to MatchesChecker: 84
-    // matching, 6 parked.
-    (Owner::U6ValueInference, 93, 84, 6),
+    // matching, 6 parked. The return join's object literals take the
+    // checker's union normal-form cross members, so X10 and X27 publish the
+    // checker's type, degraded only by the `type: null` their `T |
+    // undefined` members take: 84 matching, 4 parked.
+    (Owner::U6ValueInference, 93, 84, 4),
     // Loops iterate to the checker's fixed point: D05's return-bearing loop
     // is the substrate's, and the N52–N54 downstream narrows and X82's
     // loop break crossing an abrupt finally match the checker.
@@ -5353,15 +5357,15 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // drops the erroneous clause too), and the dropped-arm debt rides C26
     // and C30.
     (Owner::SharedTypeResolution, 24, 20, 2),
-    // H02's D14 deep pin re-labelled the row KnownOwed: the checker's
-    // union normal form carries `?: undefined` cross members the composed
-    // spread alternatives omit (extensionally equal), so matching drops
-    // to zero and every row here is parked.
     // D10 and D11 construct their spread source, and their tagged-template
     // twins D14 and D15 call a tag for it: all four match the checker. The
     // TSX-fault debt rides the undeclared-call spreads D17, D18, D19 and G08
-    // beside E01-E03.
-    (Owner::SharedCompilePipeline, 14, 4, 10),
+    // beside E01 and E03. A mapped source read through its index signature
+    // spreads `Record<string, string>` as the checker does, so E02 matches;
+    // H02's composed alternatives carry the union normal-form cross members
+    // and the row publishes the checker's type, degraded only by the
+    // `type: null` its `T | undefined` members take.
+    (Owner::SharedCompilePipeline, 14, 5, 8),
     // C06 constructs its member and its twin C20 calls a tag for it: both
     // match. C27 keeps the degraded member over an undeclared call.
     (Owner::FrameworkOnly, 9, 7, 0),
@@ -5484,14 +5488,9 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     "D18_callee_undeclared_spread_only",
     "D19_callee_undeclared_spread_key",
     "E01_spread_any",
-    "E02_spread_index_signature",
     "E03_spread_array",
     "E05_scalar_flow_answer_keeps_tsx_surface",
     "G08_emits_undeclared_spread",
-    // H02's D14 deep pin re-labelled the row KnownOwed under this owner:
-    // the checker's union normal form carries `?: undefined` cross
-    // members the composed spread alternatives omit.
-    "H02_union_spread_source",
     // The generator-return shape: the macro lane's rejection and the TSX
     // projection are both correct; the return wrap's lib head is not
     // resolvable in this environment.

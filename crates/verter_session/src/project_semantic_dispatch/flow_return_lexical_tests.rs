@@ -5436,7 +5436,12 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // as the checker publishes it: the arms differ only in where they
         // were written, and source coordinates are not constituent identity.
         ("ctObjBoth", "{a:number}"),
-        ("ctObjDisjoint", "{a:number}|{b:number}"),
+        // The checker widens the join: each literal arm takes the other's
+        // property as `?: undefined` (this shape prints no optionality).
+        (
+            "ctObjDisjoint",
+            "{b:number,a:undefined}|{a:number,b:undefined}",
+        ),
         ("ctObjLocalRead", "{a:number}|2"),
         ("ctObjMethod", "{m():number}|2"),
         ("ctObjNested", "{a:{b:number}}|2"),
@@ -5797,7 +5802,9 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// tnAmbLogical       "TA" | true       fails closed ← composes a call
 /// tnAmbNullish       "TA"              fails closed ← composes a call
 /// tnGenericLogical   string | true     fails closed ← composes a call
-/// tnGenericMember    string            fails closed ← composes a call
+/// tnGenericMember    string            string       ← exact: the member
+///                                                     is read off the
+///                                                     call's value
 /// tnAmbSequence      "TA"              "TA"         ← D7: the sequence's
 ///                                                     value operand IS
 ///                                                     the call, so it
@@ -5820,7 +5827,7 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// ```
 ///
 /// Mutation recipe: dropping the `embeds_any && composes` half of
-/// `leaf_answer_is_fabricated_at_a_call_position` flips the four
+/// `leaf_answer_is_fabricated_at_a_call_position` flips the three
 /// composing rows back to a warm `Primitive(Any)` with `degradation:
 /// None`; dropping `SequenceExpression` / the type-carrier recursion
 /// from `value_is_unmodeled_call` flips the `tnAmbNonNull` call-position
@@ -5836,12 +5843,7 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
 
     // The COMPOSING forms: a join / projection over a call the substrate
     // has no arm for. The pass fabricated an `any`; it is not published.
-    for name in [
-        "tnAmbLogical",
-        "tnAmbNullish",
-        "tnGenericLogical",
-        "tnGenericMember",
-    ] {
+    for name in ["tnAmbLogical", "tnAmbNullish", "tnGenericLogical"] {
         assert_fails_closed(&host, name);
     }
 
@@ -5884,6 +5886,13 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     assert_clean_warm(
         &host,
         "tnGenericBare",
+        TypeExpr::Primitive(PrimitiveName::String),
+    );
+    // A static member read off a call's value is the member of the
+    // resolved call's return.
+    assert_clean_warm(
+        &host,
+        "tnGenericMember",
         TypeExpr::Primitive(PrimitiveName::String),
     );
 }

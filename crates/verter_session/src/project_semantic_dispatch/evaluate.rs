@@ -29,6 +29,14 @@ enum PrintedDeclaration {
     /// An alias the checker prints by name when its application settles
     /// on the type the alias constructs.
     AliasNamed,
+    /// An alias whose body is an intersection: the checker names only the
+    /// intersection or the distributed union its application constructs
+    /// (`type NN<T> = T & {}` prints `NN<string | number | null>`), never
+    /// a constituent the intersection reduced to (`NN<{ a: string } |
+    /// null>` prints `{ a: string; }`, `NN<unknown>` prints `{}`) nor an
+    /// argument it returned as it is (`type NU<T> = T & unknown` prints
+    /// `NU<string | null>` as `string | null`).
+    AliasNamedIntersection,
     /// An alias the checker prints as the application its body writes: a
     /// reference to a non-generic declaration (`type ToFace = Face` prints
     /// `Face`) or a homomorphic mapped application (`type P<T> =
@@ -673,7 +681,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The declaration-keeping mode's OUTERMOST alias application the
         // checker names, recorded as the chain resolves through it and
         // printed when the chain settles on a type that alias names.
-        let mut named_alias_application: Option<SemanticNodeId> = None;
+        // An intersection-bodied alias also keeps its application's
+        // arguments: an argument the construction returns as it is was not
+        // constructed by the alias.
+        let mut named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)> =
+            None;
         // The loop's own exit classification: `None` = a stable (Complete)
         // stop; `Some(reasons)` = an operational truncation/fault.
         let exit_reasons: Option<PartialReasonSet> = loop {
@@ -738,9 +750,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     PrintedDeclaration::Named => {
                         n = self.declared_application(n, identity, args, context);
                     }
-                    PrintedDeclaration::AliasNamed if named_alias_application.is_none() => {
-                        named_alias_application =
-                            Some(self.declared_application(n, identity, args, context));
+                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasNamedIntersection
+                        if named_alias_application.is_none() =>
+                    {
+                        let intersection_arguments =
+                            (*kind == PrintedDeclaration::AliasNamedIntersection).then(|| {
+                                args.iter()
+                                    .flat_map(|arg| {
+                                        [*arg, self.evaluate_deferred_outcome(*arg, context).node]
+                                    })
+                                    .collect()
+                            });
+                        named_alias_application = Some((
+                            self.declared_application(n, identity, args, context),
+                            intersection_arguments,
+                        ));
                     }
                     // The application the alias's body writes, substituted
                     // and still unreduced — classified in turn.
@@ -781,7 +805,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                         }
                     }
-                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasTransparent => {}
+                    PrintedDeclaration::AliasNamed
+                    | PrintedDeclaration::AliasNamedIntersection
+                    | PrintedDeclaration::AliasTransparent => {}
                 }
             }
             if !is_residual {
@@ -910,8 +936,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // that type is one the alias itself constructs; a union that
         // collapsed to one member (`type U<T> = T | string` at `string`) or
         // an intersection reduced to `never` is printed as itself.
-        if let Some(named) = named_alias_application {
-            if self.alias_names_settled_type(n) {
+        if let Some((named, intersection_arguments)) = named_alias_application {
+            let named_by_alias = if let Some(arguments) = intersection_arguments {
+                matches!(
+                    self.graph().node_data(n).as_deref(),
+                    Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+                ) && !arguments.contains(&n)
+            } else {
+                self.alias_names_settled_type(n)
+            };
+            if named_by_alias {
                 n = named;
             }
         }
@@ -1000,9 +1034,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Union(_)
-                | SemanticNodeData::Intersection(_),
+                | SemanticNodeData::Union(_),
             ) => PrintedDeclaration::AliasNamed,
+            Some(SemanticNodeData::Intersection(_)) => PrintedDeclaration::AliasNamedIntersection,
             Some(SemanticNodeData::DeclRef { identity: target }) => {
                 self.printed_alias_reference(target, &[], visited)
             }
