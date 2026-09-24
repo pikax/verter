@@ -2921,8 +2921,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let typeof_context = self.context;
                     let typeof_key = self.dispatch.typeof_key_with_path(
-                        value_root,
-                        typeof_path,
+                        value_root.clone(),
+                        Arc::clone(&typeof_path),
                         typeof_context,
                     );
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
@@ -2942,8 +2942,37 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     #[cfg(test)]
                     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(Some(resolved)));
                     if resolved == current {
-                        results.push(current);
-                        return;
+                        // A carrier that stays deferred (the global object,
+                        // whose whole surface is not enumerated) reads a
+                        // pending MEMBER through its own root: `(typeof x).m`
+                        // is `typeof x.m`.
+                        let member = match segment {
+                            PathSegment::Member(key) if type_args.is_empty() => {
+                                key.as_string().map(Arc::<str>::from)
+                            }
+                            _ => None,
+                        };
+                        let Some(member) = member else {
+                            results.push(current);
+                            return;
+                        };
+                        let mut extended = typeof_path.to_vec();
+                        extended.push(member);
+                        let member_key = self.dispatch.typeof_key_with_path(
+                            value_root,
+                            Arc::from(extended.into_boxed_slice()),
+                            typeof_context,
+                        );
+                        current = match self.execute_read_folding_partial(member_key) {
+                            QueryResult::Value(id) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                        index += 1;
+                        self.intermediate_nodes.push(Some(current));
+                        continue;
                     }
                     current = resolved;
                 }

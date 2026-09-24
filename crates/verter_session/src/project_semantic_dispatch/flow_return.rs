@@ -15289,28 +15289,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // evaluates unchanged: its own typed miss carrier is the
                 // honest answer, exactly as for any other unresolved
                 // reference.
-                if shadowed
-                    .iter()
-                    .any(|name| self.owner_scope_answers_name(name))
-                {
-                    return Positional::Unmodeled;
-                }
-                // The owner scope answers NOTHING — but the FRAME may.
+                //
                 // A member path rooted at one of the frame's own bindings
                 // (`x.a.b` over parameter `x`, `node.props.value` over a
-                // reaching local) resolves its root through the frame's
-                // substitution and projects the tail segments through the
-                // one shared path projection, exactly as the owner-scope
-                // lowering projects a free root's tail. Only when the
-                // frame carries no such root does the leaf evaluate
-                // unchanged: its own typed miss carrier is the honest
-                // answer, exactly as for any other unresolved reference.
+                // reaching local) never reads the owner scope at all: its
+                // root is the ONLY name the answer references, it resolves
+                // through the frame's substitution, and the tail projects
+                // through the one shared path projection. So whatever the
+                // owner scope answers for the same name, the frame's read
+                // is the answer.
                 if let crate::flow_slice_content::SliceExpr::Type(leaf) = inner.as_ref() {
                     if let Some(node) =
                         self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
                     {
                         return node;
                     }
+                }
+                if shadowed
+                    .iter()
+                    .any(|name| self.owner_scope_answers_name(name))
+                {
+                    return Positional::Unmodeled;
                 }
                 self.eval_expr(inner)
             }

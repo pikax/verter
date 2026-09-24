@@ -708,9 +708,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
         });
 
-        if !(has_value || has_import_local || has_type_symbol || has_namespace_prefix) {
-            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-        }
+        // A name no scope declares or imports is read in the program's GLOBAL
+        // scope: `globalThis` is the global object, and any other name its
+        // global value declaration. The global root replaces the bare-name
+        // resolution below; the segments `globalThis` consumed leave `path`.
+        let mut global_via_global_this = false;
+        let (global_root, path) =
+            if has_value || has_import_local || has_type_symbol || has_namespace_prefix {
+                (None, path)
+            } else if value_root.name.as_ref() == "globalThis" {
+                // Every leading `globalThis` segment is the global object again.
+                let mut rest = path;
+                while rest
+                    .first()
+                    .is_some_and(|segment| segment.as_ref() == "globalThis")
+                {
+                    rest = &rest[1..];
+                }
+                // The whole global object spans every global of the program
+                // AND of its libs, which this lane does not enumerate: it
+                // stays the deferred `typeof globalThis` carrier, whose
+                // members a projection reads through this same root.
+                let Some((member, rest)) = rest.split_first() else {
+                    let scope = NodeScopeId::File {
+                        canonical_id: Arc::clone(&value_root.scope.canonical_id),
+                        owner: value_root.scope.owner,
+                        whole_hash: observed_hash,
+                        local_scope: value_root.scope.local_scope,
+                    };
+                    let carrier = self.graph().intern_node_with_scope(
+                        SemanticNodeData::new_typeof(
+                            value_root.clone(),
+                            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        ),
+                        scope,
+                    );
+                    return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(carrier),
+                        self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
+                    ))
+                    .with_observed_self_roots([(
+                        Arc::clone(&value_root.scope.canonical_id),
+                        observed_hash,
+                    )]);
+                };
+                // Only a `var` and a function are properties of the global
+                // object; `let`, `const`, `class` and `enum` are global by
+                // name alone (the checker's TS2339 on `globalThis.x`).
+                use verter_semantic::analysis::type_eval::ValueDeclKind;
+                match self.global_value_declaration(member) {
+                    Some((
+                        identity,
+                        ValueDeclKind::Var | ValueDeclKind::Function | ValueDeclKind::AsyncFunction,
+                    )) => {
+                        global_via_global_this = true;
+                        (Some(identity), rest)
+                    }
+                    _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                }
+            } else {
+                match self.global_value_declaration(value_root.name.as_ref()) {
+                    Some((identity, _)) => (Some(identity), path),
+                    None => {
+                        return (QueryResult::Error(QueryError::Miss), empty_signature()).into()
+                    }
+                }
+            };
 
         // Same scope-recording rule as `build_resolve_decl` — the value
         // binding's origin scope is the owning canonical so dispatch
@@ -736,85 +800,88 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );
-        let root_identity =
-            match crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        let resolved_root = match global_root {
+            Some(global) => Some(global),
+            None => crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 self.ctx,
                 value_root.scope.canonical_id.as_ref(),
                 value_root.scope.owner,
                 scope_payload.as_ref(),
                 value_root.name.as_ref(),
-            ) {
-                Some(identity) => identity,
-                None => {
-                    // `typeof name` where `name` is an IMPORT whose specifier
-                    // does not (yet) resolve — `import theme from './theme'`
-                    // before `/theme.ts` exists. The miss is a MissingDependency
-                    // result: it MUST invalidate the moment the dependency
-                    // appears. The build-layer fence (`WholeHash` /
-                    // `RouteGeneration` / `ProjectGeneration`) carries NO
-                    // import-route rail — the only rail that moves when a
-                    // known-miss specifier resolves (a synthetic
-                    // project-generation dep is the wrong correctness rail, per
-                    // the architecture ruling). So when the name is
-                    // import-backed we OBSERVE the owner's import-route
-                    // RESOLUTION WITNESS into the active tracer (the sealed
-                    // transaction's exhausted probe set for the miss, which the
-                    // dependency's appearance advances) — bubbling it into the
-                    // outer
-                    // component-meta result signature so the warm read misses
-                    // after the dependency is added. When the route fact cannot
-                    // be produced (no import-route surface to root on), the
-                    // miss is unrootable and MUST be cache-suppressed
-                    // (`ReturnOnly`): the value still flows, but no warm entry
-                    // publishes, so the next request recomputes cold and
-                    // recovers. A non-import miss (a genuinely absent LOCAL
-                    // symbol) stays the ordinary unrooted Miss.
-                    let is_import_backed = has_import_local
-                        || has_namespace_prefix
-                        || scope_payload.as_ref().is_some_and(|p| {
-                            p.import_bindings().contains_key(value_root.name.as_ref())
-                        });
-                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-                    if is_import_backed {
-                        let owner_canonical = value_root.scope.canonical_id.as_ref();
-                        // Best-effort: observe the owner's import-route
-                        // resolution witness into the active tracer so any
-                        // consumer cache whose validity rail consults
-                        // import-route facts re-validates when the specifier
-                        // resolves.
-                        self.ctx
-                            .host_for_fact_tracer_install()
-                            .observe_owner_import_route_witness(owner_canonical);
-                        // The build-layer fence cannot carry the import-route
-                        // rail (no `DepVersion` variant expresses a resolution
-                        // witness) and a value-import known-miss may not even surface
-                        // in the owner's type-import route table — so the route
-                        // fact above is NOT a guaranteed invalidation rail for
-                        // EVERY consuming memo (the `TypeOf` memo, the
-                        // `evaluate_deferred` memo, the field-materialize memo, the
-                        // resolved-meta result cache). A `typeof <unresolved
-                        // import>` is a genuine `MissingDependency` PARTIAL: the
-                        // resolution is structurally incomplete because a dependency
-                        // is absent. Marking it `result_is_partial` makes EVERY
-                        // consuming cache refuse warm admission (the no-poison
-                        // invariant — `result_is_partial` folds through every
-                        // nested read and the finalisation boundary forces
-                        // `cache_suppress`), so the next request after the
-                        // dependency appears recomputes cold and recovers. Also
-                        // mark the request-scoped materialization suppress sticky
-                        // (which OR-folds into the resolved-meta result's
-                        // `synthesis_should_suppress` gate) for the no-`RequestContext`
-                        // belt-and-braces. (Per the architecture ruling: when the
-                        // route fact cannot guarantee invalidation, the degraded
-                        // MissingDependency result is `ReturnOnly`.)
-                        output.result_is_partial = true;
-                        output.cache_suppress = true;
-                        crate::request_context::mark_request_result_partial();
-                    }
-                    return output;
+            ),
+        };
+        let root_identity = match resolved_root {
+            Some(identity) => identity,
+            None => {
+                // `typeof name` where `name` is an IMPORT whose specifier
+                // does not (yet) resolve — `import theme from './theme'`
+                // before `/theme.ts` exists. The miss is a MissingDependency
+                // result: it MUST invalidate the moment the dependency
+                // appears. The build-layer fence (`WholeHash` /
+                // `RouteGeneration` / `ProjectGeneration`) carries NO
+                // import-route rail — the only rail that moves when a
+                // known-miss specifier resolves (a synthetic
+                // project-generation dep is the wrong correctness rail, per
+                // the architecture ruling). So when the name is
+                // import-backed we OBSERVE the owner's import-route
+                // RESOLUTION WITNESS into the active tracer (the sealed
+                // transaction's exhausted probe set for the miss, which the
+                // dependency's appearance advances) — bubbling it into the
+                // outer
+                // component-meta result signature so the warm read misses
+                // after the dependency is added. When the route fact cannot
+                // be produced (no import-route surface to root on), the
+                // miss is unrootable and MUST be cache-suppressed
+                // (`ReturnOnly`): the value still flows, but no warm entry
+                // publishes, so the next request recomputes cold and
+                // recovers. A non-import miss (a genuinely absent LOCAL
+                // symbol) stays the ordinary unrooted Miss.
+                let is_import_backed = has_import_local
+                    || has_namespace_prefix
+                    || scope_payload.as_ref().is_some_and(|p| {
+                        p.import_bindings().contains_key(value_root.name.as_ref())
+                    });
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                    (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                if is_import_backed {
+                    let owner_canonical = value_root.scope.canonical_id.as_ref();
+                    // Best-effort: observe the owner's import-route
+                    // resolution witness into the active tracer so any
+                    // consumer cache whose validity rail consults
+                    // import-route facts re-validates when the specifier
+                    // resolves.
+                    self.ctx
+                        .host_for_fact_tracer_install()
+                        .observe_owner_import_route_witness(owner_canonical);
+                    // The build-layer fence cannot carry the import-route
+                    // rail (no `DepVersion` variant expresses a resolution
+                    // witness) and a value-import known-miss may not even surface
+                    // in the owner's type-import route table — so the route
+                    // fact above is NOT a guaranteed invalidation rail for
+                    // EVERY consuming memo (the `TypeOf` memo, the
+                    // `evaluate_deferred` memo, the field-materialize memo, the
+                    // resolved-meta result cache). A `typeof <unresolved
+                    // import>` is a genuine `MissingDependency` PARTIAL: the
+                    // resolution is structurally incomplete because a dependency
+                    // is absent. Marking it `result_is_partial` makes EVERY
+                    // consuming cache refuse warm admission (the no-poison
+                    // invariant — `result_is_partial` folds through every
+                    // nested read and the finalisation boundary forces
+                    // `cache_suppress`), so the next request after the
+                    // dependency appears recomputes cold and recovers. Also
+                    // mark the request-scoped materialization suppress sticky
+                    // (which OR-folds into the resolved-meta result's
+                    // `synthesis_should_suppress` gate) for the no-`RequestContext`
+                    // belt-and-braces. (Per the architecture ruling: when the
+                    // route fact cannot guarantee invalidation, the degraded
+                    // MissingDependency result is `ReturnOnly`.)
+                    output.result_is_partial = true;
+                    output.cache_suppress = true;
+                    crate::request_context::mark_request_result_partial();
                 }
-            };
+                return output;
+            }
+        };
         // Effective post-fallback identity: when the resolved root names a
         // re-exporting canonical with no local prepared VALUE decl, the
         // export-target walk yields the DECLARING decl — every downstream
@@ -829,6 +896,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
+        // A nominal carrier's head is the asked root, and `globalThis` is not
+        // the declaration a `globalThis.x` carrier would have to name.
+        if global_via_global_this && prepared.type_annotation.is_unique_symbol {
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+        }
         // A `unique symbol` value is TypeScript's one NOMINAL type, and its
         // widened inhabitant — the bare `symbol` primitive — is interned ONCE
         // per graph. Lowering the annotation here would therefore hand every
@@ -902,6 +974,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(nominal) =
             self.member_nominal_typeof(value_root, path, &effective_root, Some(scope.clone()))
         {
+            if global_via_global_this {
+                return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+            }
             return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                 QueryResult::Value(nominal),
                 self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
@@ -4012,7 +4087,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let population_hit = artifact_store.global_contributor_index().snapshot().lookup(
+        let population = artifact_store.global_contributor_index().snapshot();
+        let population_hit = population.lookup(
             &target,
             decl_name,
             overlay_discriminator,
@@ -4026,7 +4102,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &target, decl_name,
                     ),
                     lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: population_hit.fingerprint,
+                    expected_hash: population.observation_fingerprint(
+                        &target,
+                        decl_name,
+                        overlay_discriminator,
+                    ),
                 },
             ),
         );
@@ -4687,22 +4767,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(merged)
     }
 
-    /// The identity of the program's merged GLOBAL declaration named
-    /// `name`: its FIRST declaration in declaration precedence order (the
-    /// configured file sequence, then the canonical path) among every
-    /// module's `declare global` contribution and every script's file-scope
-    /// interface. `None` when the program declares no such global type.
-    ///
-    /// A `declare global` block in a SCRIPT is an error that binds nothing,
-    /// and an automatic lib's declarations are the lib's own (reached
-    /// through the lib environment, never through this lookup). The global
-    /// contributor population is observed onto the active fact tracer, so
-    /// a contributor added, removed or reordered misses every warm read
-    /// that named the global through this identity — including a read that
-    /// found none.
-    pub(super) fn first_global_declaration(&self, name: &str) -> Option<ResolvedRootIdentity> {
+    /// The program's contributors to the global `name` in `space`, with the
+    /// global contributor population observed onto the active fact tracer:
+    /// a contributor added, removed or reordered misses every warm read that
+    /// named the global through them — including a read that found none.
+    fn global_contributors_in(
+        &self,
+        name: &str,
+        space: verter_semantic::facts::SymbolSpace,
+    ) -> crate::global_contributors::SymbolContributors {
         use crate::file_artifact_store::AugmentationTargetKind;
-        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
         let host = self.ctx.host_for_fact_tracer_install();
         host.ingest_program_ambient_roots();
         let (_, overlay_discriminator) =
@@ -4713,24 +4787,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .project_type_store()
             .indexed()
             .global_contributor_index()
-            .snapshot()
-            .lookup_in_space(
-                &target,
-                name,
-                overlay_discriminator,
-                true,
-                verter_semantic::facts::SymbolSpace::Type,
-            );
+            .snapshot();
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
                     canonical_id: String::new(),
                     key: crate::global_contributors::population_contributor_fact_key(&target, name),
                     lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: population.fingerprint,
+                    expected_hash: population.observation_fingerprint(
+                        &target,
+                        name,
+                        overlay_discriminator,
+                    ),
                 },
             ),
         );
+        population.lookup_in_space(&target, name, overlay_discriminator, true, space)
+    }
+
+    /// The identity of the program's merged GLOBAL declaration named
+    /// `name`: its FIRST declaration in declaration precedence order (the
+    /// configured file sequence, then the canonical path) among every
+    /// module's `declare global` contribution and every script's file-scope
+    /// interface. `None` when the program declares no such global type.
+    ///
+    /// A `declare global` block in a SCRIPT is an error that binds nothing,
+    /// and an automatic lib's declarations are the lib's own (reached
+    /// through the lib environment, never through this lookup).
+    pub(super) fn first_global_declaration(&self, name: &str) -> Option<ResolvedRootIdentity> {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population =
+            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Type);
         let first = population
             .entries
             .iter()
@@ -4742,6 +4830,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         ContributorOrigin::FileScopeInterface => true,
                         ContributorOrigin::FileScopeNamespace
+                        | ContributorOrigin::FileScopeValue
                         | ContributorOrigin::ModuleAugmentation => false,
                     }
             })
@@ -4760,6 +4849,101 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
             name,
+        ))
+    }
+
+    /// The program's GLOBAL value declaration named `name` — a module's
+    /// `declare global { var / let / const / function / class }` member or
+    /// a script's file-scope value — with its declaration kind. A `var`
+    /// declared in several files is ONE variable whose type is its first
+    /// declaration's, in declaration precedence order (the checker requires
+    /// every later declaration to repeat it, TS2403). `None` when the
+    /// program declares no such global value, or when this lane cannot
+    /// address it:
+    ///
+    /// - another kind of declaration spans more than one file: merging a
+    ///   function's overloads across files is not modelled, and a
+    ///   block-scoped global declared twice is the checker's TS2451;
+    /// - a declaring module also declares a module-scope value of the same
+    ///   name, which the identity `(module, name)` addresses instead.
+    ///
+    /// A `declare global` block in a SCRIPT binds nothing, and an automatic
+    /// lib's values are the lib environment's own.
+    pub(super) fn global_value_declaration(
+        &self,
+        name: &str,
+    ) -> Option<(
+        ResolvedRootIdentity,
+        verter_semantic::analysis::type_eval::ValueDeclKind,
+    )> {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        use verter_semantic::analysis::type_eval::ValueDeclKind;
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population =
+            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Value);
+        let mut declarations: Vec<(&crate::global_contributors::ContributorEntry, ValueDeclKind)> =
+            Vec::new();
+        for entry in population.entries.iter() {
+            let declares = !entry.is_automatic_lib
+                && match entry.origin {
+                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+                    ContributorOrigin::FileScopeValue => true,
+                    ContributorOrigin::FileScopeInterface
+                    | ContributorOrigin::FileScopeNamespace
+                    | ContributorOrigin::ModuleAugmentation => false,
+                };
+            if !declares {
+                continue;
+            }
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(&entry.artifact_key.canonical)?
+                .indexed;
+            let headers = indexed.shallow_state.decl_bodies().header_index();
+            let kind = if entry.origin == ContributorOrigin::FileScopeValue {
+                headers.value_header_in(entry.owner, name)?.kind
+            } else {
+                if indexed.shallow_state.has_value_symbol_in(entry.owner, name) {
+                    return None;
+                }
+                headers
+                    .augmentation_value_header_in(
+                        &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                        entry.owner,
+                        name,
+                    )?
+                    .kind
+            };
+            declarations.push((entry, kind));
+        }
+        let (first, kind) = *declarations.iter().min_by(|(left, _), (right, _)| {
+            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                .then_with(|| {
+                    left.artifact_key
+                        .canonical
+                        .as_ref()
+                        .cmp(right.artifact_key.canonical.as_ref())
+                })
+                .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
+        })?;
+        let spans_files = declarations
+            .iter()
+            .any(|(entry, _)| entry.artifact_key.canonical != first.artifact_key.canonical);
+        if spans_files
+            && !declarations
+                .iter()
+                .all(|(_, kind)| *kind == ValueDeclKind::Var)
+        {
+            return None;
+        }
+        Some((
+            ResolvedRootIdentity::new_in_owner(
+                Arc::clone(&first.artifact_key.canonical),
+                first.owner,
+                name,
+            ),
+            kind,
         ))
     }
 

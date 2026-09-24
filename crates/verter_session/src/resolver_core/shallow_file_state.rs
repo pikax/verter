@@ -1758,6 +1758,26 @@ impl ShallowFileState {
             .augmentation_type_decl_outcome_in(scope, owner, name)
     }
 
+    /// Lease-aware value-space counterpart of
+    /// [`Self::augmentation_type_decl_outcome_in`].
+    pub(crate) fn augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        if self
+            .decl_bodies
+            .header_index()
+            .augmentation_value_header_in(scope, owner, name)
+            .is_none()
+        {
+            return DemandOutcome::Ready(None);
+        }
+        self.decl_bodies
+            .augmentation_value_decl_outcome_in(scope, owner, name)
+    }
+
     /// Value-space counterpart of [`Self::augmentation_type_decl`].
     pub fn augmentation_value_decl(
         &self,

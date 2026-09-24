@@ -366,7 +366,11 @@ fn string_lit(value: &str) -> TypeExpr {
 ///
 /// A CONDITIONAL expression, an object SPREAD and an ARRAY literal are not
 /// fail-closed rows: each has a structural arm, so their operands resolve
-/// through the frame's own lexical authority.
+/// through the frame's own lexical authority. Nor is a member path rooted
+/// at a frame binding: its root is the only name the answer
+/// references, so it reads through the frame whatever the owner scope
+/// answers — `paramBait.s` is the parameter's `number`, the checker's
+/// answer.
 /// `c ? condBait : 2` is the checker's `1 | 2`, `{ ...spreadBait, x: 1 }`
 /// is the checker's `{ a: number; x: number }`, and `[arrBait]` /
 /// `[() => nestBait]` are the checker's `number[]` / `(() => number)[]`
@@ -384,11 +388,12 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
     for name in [
         "gateStaticMemberOnLocalClass",
         "gateMethodCallOnLocal",
-        "gateStaticMemberOnParam",
         "gateTypeSpaceLocalClass",
     ] {
         assert_fails_closed(&host, name);
     }
+    // A member path rooted at the frame's parameter reads through the frame.
+    assert_clean_warm(&host, "gateStaticMemberOnParam", number());
 
     // The array element resolves to the frame's own local — its fresh
     // `1` widened at the element — never the owner-scope bait.
