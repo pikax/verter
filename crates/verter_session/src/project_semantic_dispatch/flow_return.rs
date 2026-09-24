@@ -40,6 +40,7 @@ use super::flow_products::{
 };
 use super::flow_return_callee::{
     CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
+    UtilityClause,
 };
 use super::flow_return_products::{
     FlowBindingLayer, FlowFrameProducts as FlowProductStore, FlowWriteObservation,
@@ -650,7 +651,8 @@ enum FlowFramePop {
 impl<'a> ProjectSemanticDispatch<'a> {
     /// The full `FlowReturnContext` for a demand rooted at `canonical`:
     /// the live `P R T L J` env, the empty type-only substitution, and
-    /// the empty policy. The ONE context derivation point — every
+    /// the policy of the project owning `canonical` — the function's OWN
+    /// file, never the request's. The ONE context derivation point — every
     /// `FlowReturnKey` construction routes through here.
     pub(crate) fn flow_return_context_for(
         &self,
@@ -666,8 +668,281 @@ impl<'a> ProjectSemanticDispatch<'a> {
             project_identity: host.host_view_project_identity().0,
             result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-            policy: crate::semantic_query::FlowReturnPolicy {},
+            policy: crate::semantic_query::FlowReturnPolicy::from_compiler_options(
+                &host.semantic_compiler_options_for(canonical),
+            ),
         }
+    }
+
+    /// The `null` / `undefined` algebra of the project owning `canonical`
+    /// — the policy a value typed in that file is joined under.
+    pub(super) fn nullability_for(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::NullabilityPolicy {
+        crate::semantic_query::NullabilityPolicy::from_strict_null_checks(
+            self.ctx
+                .host_for_fact_tracer_install()
+                .semantic_compiler_options_for(canonical)
+                .strict_null_checks,
+        )
+    }
+
+    /// A type entering a flow evaluation under `nullability`. Declared
+    /// unions lower as authored shells, never through the canonical
+    /// algebra, so a `string | null` annotation still names `null` — at
+    /// the top level or nested in an inline object, array or tuple type
+    /// (`{ a: string | null }`, `(string | null)[]`). With
+    /// `strictNullChecks` off the checker built every one of those unions
+    /// without the nullable member, so the value the evaluation reads is
+    /// the erased structure: `{ a: string }`, `string[]`. Every node under
+    /// the strict algebra, and every structure with no nullable union
+    /// member, passes through unchanged.
+    ///
+    /// A generic application is a type the checker built under the same
+    /// algebra: its type ARGUMENTS are erased (`Box<string | null>` is
+    /// `Box<string>`, so a conditional distributes over `string` alone and
+    /// `Record<"k", string | null>` is `Record<"k", string>`), and an
+    /// application whose one-level instantiation is a union naming `null`
+    /// / `undefined` is that union erased (`Opt<string>` over `type Opt<T>
+    /// = T | undefined` is `string`, which the checker prints without the
+    /// alias). Any other application keeps its carrier, as the checker
+    /// keeps its name, and a declaration reference is not unfolded: its
+    /// members erase where a read projects them into the flow.
+    pub(super) fn erase_nullable_members(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        if nullability.is_strict() {
+            return node;
+        }
+        let mut erased = rustc_hash::FxHashMap::default();
+        self.erase_nullable_members_within(node, nullability, &mut erased)
+    }
+
+    /// The structural walk behind [`Self::erase_nullable_members`]:
+    /// unions, arrays, tuples, object member values, function types and
+    /// generic applications, memoized per walk — every node is rebuilt at
+    /// most once, and a node revisited while in flight answers itself (so
+    /// a recursive alias terminates). The walk never unfolds a declaration
+    /// reference.
+    fn erase_nullable_members_within(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+        erased: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> SemanticNodeId {
+        if let Some(done) = erased.get(&node) {
+            return *done;
+        }
+        erased.insert(node, node);
+        let graph = self.graph();
+        let result = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                let rebuilt: Vec<SemanticNodeId> = members
+                    .iter()
+                    .map(|member| self.erase_nullable_members_within(*member, nullability, erased))
+                    .collect();
+                if rebuilt.as_slice() == members.as_ref()
+                    && !members
+                        .iter()
+                        .any(|member| is_nullable_node(graph, *member))
+                {
+                    node
+                } else {
+                    self.intern_normalized_union(&rebuilt, nullability)
+                }
+            }
+            Some(SemanticNodeData::Array { element, readonly }) => {
+                let rebuilt = self.erase_nullable_members_within(*element, nullability, erased);
+                if rebuilt == *element {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Array {
+                            element: rebuilt,
+                            readonly: *readonly,
+                        },
+                    )
+                }
+            }
+            Some(SemanticNodeData::Tuple { elements, readonly }) => {
+                let mut rebuilt = elements.to_vec();
+                let mut changed = false;
+                for element in &mut rebuilt {
+                    let value =
+                        self.erase_nullable_members_within(element.value, nullability, erased);
+                    changed |= value != element.value;
+                    element.value = value;
+                }
+                if changed {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Tuple {
+                            elements: Arc::from(rebuilt.into_boxed_slice()),
+                            readonly: *readonly,
+                        },
+                    )
+                } else {
+                    node
+                }
+            }
+            Some(SemanticNodeData::Object(surface)) => {
+                let mut members = surface.positive_members().to_vec();
+                let mut changed = false;
+                for member in &mut members {
+                    let value =
+                        self.erase_nullable_members_within(member.value, nullability, erased);
+                    changed |= value != member.value;
+                    member.value = value;
+                }
+                if changed {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Object(
+                            surface
+                                .clone()
+                                .with_positive_members(Arc::from(members.into_boxed_slice())),
+                        ),
+                    )
+                } else {
+                    node
+                }
+            }
+            // A function type's parameter and return positions are unions
+            // the checker built too (`(x: string | null) => void` is
+            // `(x: string) => void`). The rebuilt signature keeps its
+            // occurrence, clause and spans — the same callable, as an
+            // instantiation keeps them.
+            Some(SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier,
+                signature_span,
+                return_type_span,
+                predicate,
+            }) => {
+                let mut rebuilt_params = params.to_vec();
+                let mut changed = false;
+                for param in &mut rebuilt_params {
+                    let ty = self.erase_nullable_members_within(param.ty, nullability, erased);
+                    changed |= ty != param.ty;
+                    param.ty = ty;
+                }
+                let rebuilt_return =
+                    self.erase_nullable_members_within(*return_type, nullability, erased);
+                changed |= rebuilt_return != *return_type;
+                // A type predicate's target is a type the checker built under
+                // the same policy (`x is string | null` guards `string`).
+                let rebuilt_predicate = predicate.map(|mut predicate| {
+                    if let Some(target) = predicate.ty {
+                        let erased_target =
+                            self.erase_nullable_members_within(target, nullability, erased);
+                        changed |= erased_target != target;
+                        predicate.ty = Some(erased_target);
+                    }
+                    predicate
+                });
+                if changed {
+                    let return_carrier = match return_carrier {
+                        crate::semantic_query::SignatureReturnCarrier::Declared(declared)
+                            if declared == return_type =>
+                        {
+                            crate::semantic_query::SignatureReturnCarrier::Declared(rebuilt_return)
+                        }
+                        other => other.clone(),
+                    };
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Signature {
+                            kind: *kind,
+                            params: Arc::from(rebuilt_params.into_boxed_slice()),
+                            return_type: rebuilt_return,
+                            type_parameters: Arc::clone(type_parameters),
+                            occurrence: occurrence.clone(),
+                            return_carrier,
+                            signature_span: *signature_span,
+                            return_type_span: *return_type_span,
+                            predicate: rebuilt_predicate,
+                        },
+                    )
+                } else {
+                    node
+                }
+            }
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                let rebuilt: Vec<SemanticNodeId> = args
+                    .iter()
+                    .map(|arg| self.erase_nullable_members_within(*arg, nullability, erased))
+                    .collect();
+                let carrier = if rebuilt.as_slice() == args.as_ref() {
+                    node
+                } else {
+                    graph.intern_preserving_scope(
+                        node,
+                        SemanticNodeData::InstantiationRef {
+                            base: base.clone(),
+                            args: Arc::from(rebuilt.into_boxed_slice()),
+                        },
+                    )
+                };
+                match self.expand_alias_instantiation_one_level(carrier) {
+                    Some(expanded)
+                        if matches!(
+                            graph.node_data(expanded).as_deref(),
+                            Some(SemanticNodeData::Union(members))
+                                if members.iter().any(|member| is_nullable_node(graph, *member))
+                        ) =>
+                    {
+                        // The checker keeps the alias on a union that still
+                        // has several members once its nullable ones are
+                        // gone — unless those members are exactly one type
+                        // argument's own union, which it returns as is
+                        // (`Opt<string | number>` prints `string | number`,
+                        // `OptNum<string>` over `T | undefined | number`
+                        // prints `OptNum<string>`) — and drops it on a single
+                        // survivor.
+                        let collapsed =
+                            self.erase_nullable_members_within(expanded, nullability, erased);
+                        match graph.node_data(collapsed).as_deref() {
+                            Some(SemanticNodeData::Union(members)) => {
+                                let is_argument_union = |arg: &SemanticNodeId| {
+                                    matches!(
+                                        graph.node_data(*arg).as_deref(),
+                                        Some(SemanticNodeData::Union(arg_members))
+                                            if arg_members.len() == members.len()
+                                                && arg_members
+                                                    .iter()
+                                                    .all(|member| members.contains(member))
+                                    )
+                                };
+                                let args = match graph.node_data(carrier).as_deref() {
+                                    Some(SemanticNodeData::InstantiationRef { args, .. }) => {
+                                        args.to_vec()
+                                    }
+                                    _ => Vec::new(),
+                                };
+                                if args.iter().any(is_argument_union) {
+                                    collapsed
+                                } else {
+                                    carrier
+                                }
+                            }
+                            _ => collapsed,
+                        }
+                    }
+                    _ => carrier,
+                }
+            }
+            _ => node,
+        };
+        erased.insert(node, result);
+        result
     }
 
     /// The env-bearing function slot identity for one served function
@@ -885,6 +1160,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             IndexedValueExpression::UnsupportedCall { .. } => {
                 crate::request_context::mark_request_result_partial();
                 None
+            }
+            IndexedValueExpression::TemplateStrings { .. } => {
+                self.global_template_strings_array(canonical, owner)
             }
             IndexedValueExpression::Call(call) => {
                 let callee = self.evaluate_indexed_value_expression_node_inner(
@@ -1233,12 +1511,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             FlowReturnStep::Complete(result) if result.degradation().is_none() => {
                 // `ReturnType<…>` is a signature UTILITY, not a call: it
                 // has no call site to be argument-free at, so every free
-                // clause parameter instantiates at `unknown` and a
-                // declared default never applies (`ReturnType<typeof
+                // clause parameter instantiates at its BASE constraint and
+                // a declared default never applies (`ReturnType<typeof
                 // id>` over `id<T = number>(x: T)` is `{ … unknown … }`,
-                // not `number`). That is precisely the policy the
-                // WHOLE-return route applies through
-                // `instantiate_free_signature_params_at_unknown`; this
+                // not `number`; over `id<T extends { k: number }>` it
+                // reads `T` as `{ k: number }`). That is precisely the
+                // policy the WHOLE-return route applies through
+                // `instantiate_signature_params_at_base_constraints`; this
                 // route is the same utility over the same callee one
                 // path segment longer, so it applies the same policy —
                 // returning the flow return's raw member position would
@@ -1246,13 +1525,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // value, and the two routes would disagree about one
                 // callee.
                 //
-                // The clause NAMES come from the shallow function-program
-                // fact rather than from composing the callee's signature,
-                // so the member demand stays as narrow as it was: a
-                // whole-signature composition here would materialise
-                // exactly the sibling members this rail exists to leave
-                // cold.
-                self.instantiate_callee_clause_at_unknown(&identity, result.return_type())
+                // The clause comes from the shallow function-program
+                // fact and its lowered constraints rather than from
+                // composing the callee's signature, so the member demand
+                // stays as narrow as it was: a whole-signature
+                // composition here would materialise exactly the sibling
+                // members this rail exists to leave cold.
+                self.instantiate_callee_clause_at_base_constraints(&identity, result.return_type())
             }
             // Degraded success / typed failure / in-flight hold: the
             // generic unwrap route decides (it already owns these
@@ -1261,49 +1540,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Instantiate the served callee's OWN type-parameter clause at
-    /// `unknown` over a value taken from its body-derived return — the
-    /// signature-UTILITY policy, applied without composing a signature.
+    /// Instantiate the served callee's OWN type-parameter clause at its
+    /// base constraints over a value taken from its body-derived return —
+    /// the signature-UTILITY policy, applied without composing a
+    /// signature.
     ///
     /// A clause the route could not READ is a MISS (`None`), never "the
-    /// callee declares none". The two were the same value here — a
-    /// failed read returned the callee's return UNTOUCHED, its own
-    /// binders intact and warm-admissible — while the CALL-site route
-    /// degraded on the identical miss. The clause reader is now shared
-    /// (both take a `FunctionProgramEntry` witness) and both states are
-    /// distinct, so the asymmetry has no spelling.
-    fn instantiate_callee_clause_at_unknown(
+    /// callee declares none" — a failed read must not return the callee's
+    /// return UNTOUCHED, its own binders intact and warm-admissible, while
+    /// the CALL-site route degrades on the identical miss. Both readers
+    /// take a `FunctionProgramEntry` witness and both states are distinct,
+    /// so that asymmetry has no spelling.
+    fn instantiate_callee_clause_at_base_constraints(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let clause = self.served_callee_clause(identity)?;
-        if clause.is_empty() {
-            return Some(node);
-        }
-        // A body-derived return is evaluated with the callee's clause
-        // BOUND, so its parameters spell as binders (and, for a
-        // still-deferred head, as a bare name) — never as a resolved
-        // same-named file-scope declaration, which would be a different
-        // symbol.
-        Some(self.instantiate_named_params_at_unknown(
-            clause.param_names(),
-            node,
-            crate::semantic_query::ClauseSpelling::WithDeferredHeads,
-        ))
+        Some(self.served_callee_clause(identity)?.instantiate(self, node))
     }
 
-    /// The OWN clause of a served function position, read from the
-    /// shallow per-file function-program index.
+    /// The OWN clause of a served function position under the
+    /// signature-utility policy: its parameters from the shallow per-file
+    /// function-program index and, for a generic callee, their
+    /// constraints from the lowered clause.
     ///
     /// `None` is a READ FAILURE (the file is not served at this version,
-    /// or the position is not indexed) — never an empty clause. The
-    /// clause itself is built by its owning module from the index entry,
-    /// so this route cannot assemble one either.
+    /// the position is not indexed, or an authored constraint could not be
+    /// recovered) — never an empty or unconstrained clause. The clause
+    /// itself is built by its owning module from the index entry, so this
+    /// route cannot assemble one either.
     fn served_callee_clause(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
-    ) -> Option<CalleeClause> {
+    ) -> Option<UtilityClause> {
         let canonical = identity.anchor.canonical_id.as_ref();
         let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
@@ -1318,7 +1587,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let index = decl_bodies.function_program_index();
         let matched = index.get(&key)?;
-        Some(CalleeClause::read_from_program_entry_at_unknown(matched))
+        let entry = matched.entry();
+        // The lowered clause is demanded at most once, and only for a
+        // generic callee.
+        let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
+        UtilityClause::read_from_program_entry(matched, |ordinal, param| {
+            let clause =
+                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(entry));
+            // Matched by ORDINAL with the name as a cross-check, exactly as
+            // the call-site route matches a declared default: a
+            // disagreement means the two views are not the same clause,
+            // which is a miss, not a best guess.
+            let slice = clause.as_ref()?.get(ordinal)?;
+            if slice.name != param.name {
+                return None;
+            }
+            match slice.constraint.as_ref() {
+                None => Some(None),
+                Some(gated) => self
+                    .lower_type_expr_in_owner_scope_with_context(
+                        canonical,
+                        identity.anchor.owner,
+                        gated.ty(),
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    )
+                    .map(Some),
+            }
+        })
     }
 
     /// The whole-function `FlowReturn` authority. Every whole-function
@@ -1330,7 +1625,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    return the `Hold` sentinel.
     /// 2. **Warm read** — a validated published `Complete` result
     ///    (carrier-validated).
-    /// 3. **Cold compute** — the machinery ROOT goes through the family
+    /// 3. **Transaction reuse** — the key already closed on this
+    ///    transaction as a proven inline SCC root whose reads were recorded
+    ///    clean; they are replayed into the scopes live now (see
+    ///    [`Self::reusable_completed_flow_member`]).
+    /// 4. **Cold compute** — the machinery ROOT goes through the family
     ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
     ///    nested flow evaluation computes INLINE on the transaction (its
     ///    publish is batched at its SCC's close and drained by the root).
@@ -1364,7 +1663,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(result) = self.graph().get_flow_return_result(self.ctx, &key) {
             return FlowReturnStep::Complete(result);
         }
-        // (3) Cold compute. Root versus inline is decided by the generic
+        // (3) Transaction reuse.
+        if let Some(result) = self.reusable_completed_flow_member(&key) {
+            return FlowReturnStep::Complete(result);
+        }
+        // (4) Cold compute. Root versus inline is decided by the generic
         // obligation transaction: any open frame — of any domain — makes
         // this evaluation inline.
         if self.dispatch_txn.borrow().obligations.decides_root() {
@@ -1372,6 +1675,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             self.execute_flow_return_inline(key)
         }
+    }
+
+    /// The proven value of `key` when it already closed on this transaction
+    /// as a reusable inline member, after replaying what its evaluation
+    /// read into the scopes live now.
+    ///
+    /// Such a member is proven but not yet published: its publish is
+    /// batched behind the machinery root, so the warm read cannot see it,
+    /// and without this every later demand re-evaluated the body. A body
+    /// whose callee is demanded both generically and under a call's
+    /// instantiation — each of which re-demands both forms of ITS callee —
+    /// then doubled per level: a generic call chain was exponential in its
+    /// length, and ran out of connected-work budget at eleven levels.
+    ///
+    /// Reuse is as sound as re-evaluating. The value is the member's
+    /// proof, the one its batched publish will admit, and the one its
+    /// first caller received. A re-evaluation's effect on the enclosing
+    /// builds is its reads: the replay fans the recorded facts into the
+    /// live tracers, re-deposits the canonical self-roots on the live
+    /// build frame, and advances the canonical-evidence epoch when the
+    /// evaluation did. Only a CLEAN evaluation is reusable, so it had no
+    /// partial, cache-suppressing or non-cacheable rail to replay.
+    fn reusable_completed_flow_member(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
+        let (value, reuse) = {
+            let txn = self.dispatch_txn.borrow();
+            let member = txn
+                .flow
+                .completed_members
+                .iter()
+                .rev()
+                .find(|member| &member.key == key)?;
+            let reuse = member.reuse.clone()?;
+            (member.result.value().clone(), reuse)
+        };
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&reuse.reads.facts);
+        self.deposit_operand_self_roots(&reuse.observed_self_roots);
+        if reuse.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        Some(value)
     }
 
     /// The machinery ROOT path: the full family singleflight. After a
@@ -1485,10 +1829,89 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
             ));
         }
-        let idx = self.flow_frame_open(&key);
-        self.prepare_flow_return_demand(&key, idx);
-        let evaluated = self.evaluate_flow_return(&key);
-        self.flow_frame_close(idx, evaluated)
+        let run = || {
+            let idx = self.flow_frame_open(&key);
+            self.prepare_flow_return_demand(&key, idx);
+            let evaluated = self.evaluate_flow_return(&key);
+            self.flow_frame_close(idx, evaluated)
+        };
+        // A recording is only replayable when every channel an enclosing
+        // build observes is observable here: a live tracer (a producer
+        // skips deriving an observation without one), a live build-local
+        // frame (so the capture frame below leaves `is_empty` unchanged),
+        // and a cold-compute completeness that can show a partial fold.
+        // Anything else runs exactly as before and is never reused.
+        let completeness_scope_active =
+            crate::request_context::cold_compute_completeness_scope_active();
+        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+            && !self.build_local_taint.borrow().is_empty()
+            && !(completeness_scope_active
+                && crate::request_context::current_cold_compute_completeness().is_partial());
+        if !recordable {
+            return run();
+        }
+        // Completeness: a live scope that is still complete turns partial on
+        // any partial fold (the merge is monotone), so it is read in place —
+        // a nested scope would change which reason a reason-less fold adds
+        // to it. With no scope live, a fold is observable by nobody; a
+        // private scope makes it visible here and is discarded unbubbled,
+        // so nothing outside sees a difference.
+        let private_completeness = (!completeness_scope_active)
+            .then(crate::request_context::ColdComputeCompletenessScope::enter);
+        let evidence_epoch = self.canonical_evidence_epoch.get();
+        let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        // The frame's rails reach the enclosing build exactly as if they had
+        // folded there directly: OR, union and deduplicated roots commute.
+        self.fold_observed_frame_into_top(&observed);
+        let clean = matches!(step, FlowReturnStep::Complete(_))
+            && !reads.non_cacheable
+            && !observed.result_is_partial
+            && !observed.cache_suppress
+            && !folded_partial;
+        if clean {
+            self.offer_flow_member_reuse(
+                &key,
+                queued_before,
+                super::dispatch_txn::FlowMemberReuse {
+                    reads,
+                    observed_self_roots: observed.observed_self_roots,
+                    canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                        != evidence_epoch,
+                },
+            );
+        }
+        step
+    }
+
+    /// Mark the member `key` just closed as reusable on this transaction —
+    /// only if THIS evaluation queued it, i.e. it closed as its own proven
+    /// inline SCC root. A frame that closed provisionally queued nothing
+    /// yet, and an older member under the same key was produced by a
+    /// different evaluation than the one recorded. Members queued at or
+    /// after `queued_before` are this evaluation's: no machinery root can
+    /// drain the queue while an inline frame is open, and a nested frame
+    /// cannot share its key (the re-entry intercept holds it).
+    fn offer_flow_member_reuse(
+        &self,
+        key: &FlowReturnKey,
+        queued_before: usize,
+        reuse: super::dispatch_txn::FlowMemberReuse,
+    ) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let Some(queued) = txn.flow.completed_members.get_mut(queued_before..) else {
+            return;
+        };
+        if let Some(member) = queued.iter_mut().rev().find(|member| &member.key == key) {
+            member.reuse = Some(reuse);
+        }
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
@@ -1695,10 +2118,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return result;
         }
         let substituted = self.substitute_canonical(result.return_type(), substitution);
-        if substituted == result.return_type() {
+        // An inferred predicate's target is in the same binder space as
+        // the return it stands beside.
+        let predicate = result.inferred_predicate().map(|predicate| {
+            predicate.map_type(|target| self.substitute_canonical(target, substitution))
+        });
+        let result = if substituted == result.return_type() {
+            result
+        } else {
+            result.with_return_type(self.graph().as_ref(), substituted)
+        };
+        match predicate {
+            Some(predicate) => result.with_inferred_predicate(predicate),
+            None => result,
+        }
+    }
+
+    /// Attach the type predicate a frame's single return established
+    /// ([`FlowEvaluator::infer_return_predicate`]) to the frame's joined
+    /// result — only when the whole return is exactly `boolean` and the
+    /// body's end point is unreachable. The checker infers a predicate
+    /// only for a `boolean` function with no implicit return: an implicit
+    /// return makes the function `boolean | undefined`, and with
+    /// `strictNullChecks` off, where that join erases to `boolean`, the
+    /// checker still refuses to infer one.
+    fn attach_inferred_predicate(
+        &self,
+        result: FlowReturnResult,
+        predicate: Option<crate::semantic_query::SignaturePredicate>,
+    ) -> FlowReturnResult {
+        let Some(predicate) = predicate else {
+            return result;
+        };
+        let returns_boolean = matches!(
+            self.graph().node_data(result.return_type()).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+        );
+        if !returns_boolean
+            || result
+                .can_fall_through
+                .reaches_end(CompletionDischarge::PublishedResult)
+        {
             return result;
         }
-        result.with_return_type(self.graph().as_ref(), substituted)
+        result.with_inferred_predicate(predicate)
     }
 
     /// The final IDEMPOTENT pre-seal closure of a flow result: one
@@ -1751,7 +2214,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// disposition funnel: inspected file self-roots reach the enclosing
     /// build's memo entry, and an `Incomplete` comparison suppresses
     /// warm admission (ReturnOnly) without altering the value.
-    pub(super) fn close_flow_result_pre_seal(&self, result: FlowReturnResult) -> FlowReturnResult {
+    ///
+    /// The closure runs `nullability` — the `null` / `undefined` algebra of
+    /// the key being sealed — so a top proven canonical under the other
+    /// algebra is re-closed rather than skipped.
+    pub(super) fn close_flow_result_pre_seal(
+        &self,
+        result: FlowReturnResult,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> FlowReturnResult {
         let node = result.return_type();
         let Some(data) = self.graph().node_data(node) else {
             return result;
@@ -1760,7 +2231,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return result;
         };
         if members.origin_category()
-            == crate::semantic_query::composite::CompositeOriginCategory::Canonical
+            == crate::semantic_query::composite::CompositeOriginCategory::Canonical(nullability)
         {
             // O(1) canonicality: a canonical-minted list is canonical form;
             // re-closing it is the idempotence no-op — skip the pipeline.
@@ -1768,7 +2239,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let members: Vec<crate::semantic_query::SemanticNodeId> = members.iter().copied().collect();
         drop(data);
-        let closed = self.intern_normalized_union_or_intersection(&members, true);
+        let closed = self.intern_normalized_union(&members, nullability);
         if closed == node {
             return result;
         }
@@ -1792,18 +2263,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         result: FlowReturnResult,
         kind: verter_semantic::analysis::flow::FunctionBodyKind,
-        yield_contributions: &[(SemanticNodeId, bool)],
+        yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> FlowReturnResult {
         use verter_semantic::analysis::flow::FunctionBodyKind;
         if kind == FunctionBodyKind::Plain {
             return result;
         }
-        let yield_join = match kind {
+        let (yield_join, undecided) = match kind {
             FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
-                self.join_yield_contributions(yield_contributions)
+                self.join_yield_contributions(yield_contributions, nullability)
             }
-            FunctionBodyKind::Async | FunctionBodyKind::Plain => None,
+            FunctionBodyKind::Async | FunctionBodyKind::Plain => (None, false),
+        };
+        // An UNDECIDED yield reduction keeps every arm behind the typed
+        // relation gap, as the return join does (the body's own reason
+        // wins when it has one).
+        let result = if undecided && result.degradation().is_none() {
+            FlowReturnResult::new_with_fresh_literal_arms(
+                self.graph().as_ref(),
+                result.return_type(),
+                result.can_fall_through,
+                Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::NominalRelation,
+                )),
+                result.fresh_literal_arms(),
+            )
+        } else {
+            result
         };
         let generator_head = match kind {
             FunctionBodyKind::Generator => self.resolve_lib_head_for_wrap("Generator", binder_env),
@@ -1820,29 +2308,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Join a generator's yielded-expression types into the wrap's yield
-    /// parameter — the return join's own arm rules (dedupe, then widen a
-    /// lone FRESH literal: `yield 1` widens to `number`, `yield 1; yield
-    /// 2` keeps `1 | 2`). An empty contribution set is `None`: the wrap
-    /// publishes the empty union (`never`).
+    /// parameter — the return join's own arm rules (dedupe, widen a lone
+    /// FRESH literal: `yield 1` widens to `number`, `yield 1; yield 2`
+    /// keeps `1 | 2`; then reduce to supertypes, the second value of the
+    /// pair `true` when that reduction could not decide). An empty
+    /// contribution set is `None`: the wrap publishes the empty union
+    /// (`never`).
+    ///
+    /// Under `strictNullChecks` off the yield type is widened exactly as
+    /// the return type is: a nullable contribution beside any other
+    /// vanishes before the lone-fresh-literal rule reads the aggregate
+    /// (`yield null; yield "s"` is `string`), and a yield type made only
+    /// of widening `null` / `undefined` values is `any` (TypeScript
+    /// 7.0.2: `function* g() { yield null; }` is `Generator<any, void,
+    /// unknown>`).
     fn join_yield_contributions(
         &self,
-        contributions: &[(SemanticNodeId, bool)],
-    ) -> Option<SemanticNodeId> {
+        contributions: &[YieldContribution],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> (Option<SemanticNodeId>, bool) {
         if contributions.is_empty() {
-            return None;
+            return (None, false);
+        }
+        let graph = self.graph();
+        let mut contributions: Vec<&YieldContribution> = contributions.iter().collect();
+        let mut widening_nullish_only = false;
+        if !nullability.is_strict() {
+            if contributions
+                .iter()
+                .any(|contribution| !is_nullable_node(graph, contribution.node))
+            {
+                contributions.retain(|contribution| !is_nullable_node(graph, contribution.node));
+            } else {
+                widening_nullish_only = contributions
+                    .iter()
+                    .all(|contribution| contribution.widening_nullish);
+            }
         }
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributions.len());
+        let mut views: Vec<SemanticNodeId> = Vec::with_capacity(contributions.len());
         let mut all_fresh = true;
-        for &(node, fresh) in contributions {
-            all_fresh &= fresh;
-            if !arms.contains(&node) {
-                arms.push(node);
+        for contribution in &contributions {
+            all_fresh &= contribution.fresh;
+            if !arms.contains(&contribution.node) {
+                arms.push(contribution.node);
+                views.push(contribution.unwidened.unwrap_or(contribution.node));
             }
         }
         if arms.len() == 1 && all_fresh {
             arms[0] = widen_literal_node(self, arms[0]);
         }
-        Some(self.intern_normalized_union_or_intersection(&arms, true))
+        // The yield type's union is subtype-reduced exactly as the return
+        // join's is (`getUnionType(yieldTypes, UnionReduction.Subtype)`).
+        let mut undecided = false;
+        if arms.len() >= 2 {
+            match self.reduce_arms_to_supertypes_by(&arms, &views, nullability) {
+                ReunionReduction::Reduced(reduced) => arms = reduced,
+                ReunionReduction::Undecided => undecided = true,
+            }
+        }
+        let joined = self.intern_normalized_union(&arms, nullability);
+        if widening_nullish_only && is_nullable_node(graph, joined) {
+            return (
+                Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))),
+                undecided,
+            );
+        }
+        (Some(joined), undecided)
     }
 
     /// Resolve a wrap's lib generic head (`Generator` /
@@ -1890,7 +2422,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// there is no second classifier here to drift from it.
     ///
     /// `None` is the family's honest refusal; the caller publishes the typed
-    /// gap rather than a fabricated answer.
+    /// gap rather than a fabricated answer. A recursive thenable is not a
+    /// refusal: the family answers the checker's TS1062 recovery, the error
+    /// type an `await` continues with.
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         match self
             .execute_read(SemanticQueryKey::AwaitedNormalize {
@@ -2012,12 +2546,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `AsyncGenerator<Awaited<p>, Awaited<q>, unknown>`). A
                 // SYNC generator awaits neither — it publishes what the
                 // body yielded and returned verbatim.
+                // A join the relation FAILS on (TS1062) has no defined
+                // recovery here: tsc 7.0.2 publishes `never` for one such
+                // yield and crashes on two, so it stays the typed gap.
                 let (yield_join, body) = if wrap.kind == FunctionBodyKind::AsyncGenerator {
                     match (
                         self.awaited_normalize_for_flow(yield_join),
                         self.awaited_normalize_for_flow(body),
                     ) {
-                        (Some(yielded), Some(returned)) => (yielded, returned),
+                        (Some(yielded), Some(returned))
+                            if !self.awaited_normalize_failed_on(yield_join, yielded)
+                                && !self.awaited_normalize_failed_on(body, returned) =>
+                        {
+                            (yielded, returned)
+                        }
                         _ => return self.materialize_wrap_typed_gap(result),
                     }
                 } else {
@@ -3326,7 +3868,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // The final idempotent pre-seal closure: after fixed
                 // point, widening and substitution, before the seal — the
                 // proof and both publish channels see the closed value.
-                let result = self.close_flow_result_pre_seal(result);
+                let result =
+                    self.close_flow_result_pre_seal(result, root_key.context.policy.nullability);
                 // The function-kind wrap materializes LAST — the sealed
                 // value, the proof, and both publish channels see the
                 // WRAPPED return, so warm and replay carry it verbatim.
@@ -3390,6 +3933,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     inline_flight,
                                     self_roots,
                                     materialized,
+                                    // Attached by the inline executor once
+                                    // it knows what the evaluation read.
+                                    reuse: None,
                                 },
                             );
                         }
@@ -3574,7 +4120,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .unwrap_or_default();
                 let mut next = FlowReturnResult::new_with_fresh_literal_arms(
                     graph,
-                    self.intern_normalized_union_or_intersection(&flat, true),
+                    // Each member joins under its OWN function's null
+                    // algebra — a component may span projects.
+                    self.intern_normalized_union(&flat, entries[i].key.context.policy.nullability),
                     NormalCompletion::minted(
                         current[i].as_ref().is_some_and(|result| {
                             result
@@ -3596,6 +4144,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .and_then(|result| result.function_wrap().copied())
                 {
                     next = next.with_function_wrap(wrap);
+                }
+                // So is a predicate inferred from the entry's own single
+                // return.
+                if let Some(predicate) = current[i]
+                    .as_ref()
+                    .and_then(FlowReturnResult::inferred_predicate)
+                {
+                    next = next.with_inferred_predicate(predicate);
                 }
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
@@ -3971,8 +4527,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// On an evaluated value the outcome carries the typed discharge
     /// report of the frame's installed demand.
     ///
+    /// Every relation the evaluation opens is decided under the options of
+    /// the function's OWN project — the program that infers this return —
+    /// whichever request demanded it, and whether or not a request context
+    /// is installed at all.
+    ///
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
+        self.with_relation_environment_of(&key.function.declaration_slot.defining_canonical, || {
+            self.evaluate_flow_return_in_own_environment(key)
+        })
+    }
+
+    /// [`Self::evaluate_flow_return`] once the function's own relation
+    /// environment is in force.
+    fn evaluate_flow_return_in_own_environment(
+        &self,
+        key: &FlowReturnKey,
+    ) -> FlowEvaluationOutcome {
         verter_audit::attribute_scope!(FlowSliceCompute);
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
         // The frame's installed demand carrier (installed by
@@ -4150,11 +4722,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(bound) = flow_slice.bound_graph_for(&slice_key_function) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
-        let Some(ir) = indexed
-            .shallow_state
-            .decl_bodies()
-            .flow_slice_content(entry, selection, &bound)
-        else {
+        let Some(ir) = indexed.shallow_state.decl_bodies().flow_slice_content(
+            entry,
+            selection,
+            &bound,
+            key.context.policy.nullability,
+        ) else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
         // The frame anchor the skeleton's call footprint was rebased onto
@@ -4321,7 +4894,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &mut substitutions,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             );
-            params.push(node);
+            params.push(self.erase_nullable_members(node, key.context.policy.nullability));
         }
         // Execution authority is separate from proof expansion. A refused
         // obligation plan retains its validated selection; a later successful
@@ -4402,6 +4975,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self_slot: Some(key),
             canonical,
             owner,
+            nullability: key.context.policy.nullability,
+            no_implicit_any: key.context.policy.no_implicit_any,
             params: &params,
             param_names: &ir.params,
             binder_env: &binder_env,
@@ -4427,6 +5002,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .then_some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition)
                 }),
             pending_statement_gap: None,
+            auto_typed_locals: rustc_hash::FxHashSet::default(),
+            unwidened_views: rustc_hash::FxHashMap::default(),
             conditional_arm_nesting: 0,
             call_fresh_literal_returns: Vec::new(),
             break_exits: Vec::new(),
@@ -4439,6 +5016,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             capture_write_lookahead: rustc_hash::FxHashMap::default(),
             executed_walk: ExecutedSliceWalk::default(),
             heritage_self_roots: Vec::new(),
+            inferred_predicate: None,
+            declared_reads: false,
         };
         let holds;
         let yield_contributions;
@@ -4450,10 +5029,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let frame_product_evidence;
         let frame_bindings;
         let frame_products;
+        let inferred_predicate;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
+            inferred_predicate = evaluator.inferred_predicate;
             holds = std::mem::take(&mut evaluator.holds);
             yield_contributions = std::mem::take(&mut evaluator.yield_contributions);
             observations = evaluator.observations;
@@ -4644,6 +5225,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &holds,
             degradation,
             ir.empty_completion,
+            key.context.policy.nullability,
         ) {
             Ok(joined) => {
                 // Attach the function-kind wrap to the BODY join — deferred
@@ -4652,12 +5234,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // whole return), so the wrap attaches only on the
                 // whole-return point.
                 let (result, fresh_seed) = joined;
+                let result = self.attach_inferred_predicate(result, inferred_predicate);
                 let result = if whole_return_point {
                     self.attach_function_kind_wrap(
                         result,
                         skeleton.kind,
                         &yield_contributions,
                         &binder_env,
+                        key.context.policy.nullability,
                     )
                 } else {
                     result
@@ -4733,16 +5317,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// WHOLE reduction ([`ReunionReduction::Undecided`]): the caller keeps
     /// every arm behind a typed relation gap rather than publishing a
     /// partially-reduced list no single judgement supports.
-    fn reduce_return_arms_to_supertypes(&self, arms: &[SemanticNodeId]) -> ReunionReduction {
+    ///
+    /// Each arm is judged through its `views` entry — the arm before its
+    /// nested widening nullable values widened (the arm itself when none
+    /// did), the type the checker's reduction compares — and the arms
+    /// themselves are what survive.
+    ///
+    /// The checker's discriminant shortcut runs first: the FIRST property
+    /// of an arm whose type is a unit type (a literal, `null` or
+    /// `undefined`) keys it, and a peer whose same property is a
+    /// DIFFERENT unit type is never its supertype, whatever the relation
+    /// would say. That changes an answer only where two distinct unit
+    /// types relate — `null` / `undefined` beside a literal with
+    /// `strictNullChecks` off: `[null] as const` beside `["s"] as const`
+    /// keeps both (`readonly [any] | readonly ["s"]`) where `{ a: null }`
+    /// beside `{ a: "s" }`, whose `a` widened to `string`, is absorbed.
+    fn reduce_arms_to_supertypes_by(
+        &self,
+        arms: &[SemanticNodeId],
+        views: &[SemanticNodeId],
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> ReunionReduction {
         let mut kept: Vec<bool> = vec![true; arms.len()];
         let mut decided: rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool> =
             rustc_hash::FxHashMap::default();
         for index in (0..arms.len()).rev() {
+            let key = self
+                .unit_typed_properties(views[index], nullability)
+                .into_iter()
+                .find_map(|(key, unit)| unit.map(|unit| (key, unit)));
             for other in 0..arms.len() {
-                if other == index || !kept[other] || arms[other] == arms[index] {
+                if other == index || !kept[other] || views[other] == views[index] {
                     continue;
                 }
-                match self.arm_is_strict_subtype(arms[index], arms[other], &mut decided) {
+                if let Some((key, unit)) = &key {
+                    let peer_unit = self
+                        .unit_typed_properties(views[other], nullability)
+                        .into_iter()
+                        .find(|(peer_key, _)| peer_key.element_access_collides(key))
+                        .and_then(|(_, peer_unit)| peer_unit);
+                    if peer_unit.is_some_and(|peer_unit| {
+                        self.graph().node_data(peer_unit) != self.graph().node_data(*unit)
+                    }) {
+                        continue;
+                    }
+                }
+                match self.arm_is_strict_subtype(views[index], views[other], &mut decided) {
                     StrictSubtype::Yes => {
                         kept[index] = false;
                         break;
@@ -4758,6 +5378,83 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .filter_map(|(index, arm)| kept[index].then_some(*arm))
                 .collect(),
         )
+    }
+
+    /// The properties of an object or tuple type in the checker's order,
+    /// each with its type when that type is a UNIT type (`None` when it is
+    /// not): an object's members, a tuple's elements then its `length`
+    /// (the literal arity when the tuple has no optional or rest element).
+    /// An optional property is `T | undefined` under `strictNullChecks`,
+    /// a unit type only when `T` is `undefined`. A declared type is read
+    /// through its resolved structure; any other type lists nothing.
+    fn unit_typed_properties(
+        &self,
+        node: SemanticNodeId,
+        nullability: crate::semantic_query::NullabilityPolicy,
+    ) -> Vec<(crate::semantic_query::PropertyKey, Option<SemanticNodeId>)> {
+        let graph = self.graph();
+        let node = match graph.node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. },
+            ) => match self.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(resolved) => resolved,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return Vec::new(),
+            },
+            _ => node,
+        };
+        let unit_of = |value: SemanticNodeId, optional: bool| {
+            let unit = match graph.node_data(value).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => true,
+                Some(
+                    SemanticNodeData::Literal(_) | SemanticNodeData::Primitive(PrimitiveKind::Null),
+                ) => !(optional && nullability.is_strict()),
+                _ => false,
+            };
+            unit.then_some(value)
+        };
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => surface
+                .closed()
+                .complete_members()
+                .iter()
+                .filter_map(|member| {
+                    let key = member.key.cloned_known()?;
+                    let unit = if member.method_kind.is_some() {
+                        None
+                    } else {
+                        unit_of(member.value, member.optional)
+                    };
+                    Some((key, unit))
+                })
+                .collect(),
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                let mut properties = Vec::with_capacity(elements.len() + 1);
+                let mut fixed = true;
+                for (index, element) in elements.iter().enumerate() {
+                    fixed &= !element.optional && !element.rest;
+                    if element.rest {
+                        continue;
+                    }
+                    properties.push((
+                        crate::semantic_query::PropertyKey::from_js_number(index as f64),
+                        unit_of(element.value, element.optional),
+                    ));
+                }
+                let length = fixed.then(|| {
+                    graph.intern_node(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Number(elements.len() as f64),
+                    ))
+                });
+                properties.push((
+                    crate::semantic_query::PropertyKey::identifier("length"),
+                    length,
+                ));
+                properties
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Whether `arm` is a STRICT subtype of `peer`: assignable one way and
@@ -4819,6 +5516,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Scoped to surfaces whose key domain IS the member list: a call,
     /// construct or index signature on either side makes "the keys it
     /// lists" the wrong question, and those pairs go to the relation.
+    /// Scoped as well to pairs where at least one side IS an object
+    /// literal: two declared object types are never normalized, and the
+    /// checker's reduction absorbs the one with more members into the
+    /// other (`{ x: string }` beside `{ x: string; y: number }` from two
+    /// parameters is `{ x: string }`), so those pairs go to the relation.
     fn return_arms_have_disjoint_key_domains(
         &self,
         arm: SemanticNodeId,
@@ -4836,6 +5538,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         if !is_plain_key_listing_surface(arm_surface) || !is_plain_key_listing_surface(peer_surface)
         {
+            return false;
+        }
+        if !is_object_literal_surface(arm_surface) && !is_object_literal_surface(peer_surface) {
             return false;
         }
         let arm_members = arm_surface.closed().complete_members();
@@ -4894,6 +5599,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// hold (a throw-only body) is `never`; a HOLD-only body with no
     /// fallthrough is the empty recursive cycle — a typed failure, never
     /// `never`.
+    ///
+    /// `nullability` is the function's own `strictNullChecks` algebra.
+    /// With it off the checker adds no `undefined` for a bare return or a
+    /// fall-through, and a `null` / `undefined` contribution beside any
+    /// other contribution vanishes from the aggregate BEFORE the
+    /// single-contributor widening rule reads it — `if (c) return "a";
+    /// return null` is the lone fresh `"a"` and widens to `string`. A
+    /// return made only of bare `null` / `undefined` values is the
+    /// checker's widening nullable type, which widens to `any`.
+    #[allow(clippy::too_many_arguments)]
     fn join_flow_return_contributors(
         &self,
         contributors: Vec<FlowContribution>,
@@ -4902,8 +5617,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
+        // `strictNullChecks` off: a nullable contribution adds nothing to
+        // an aggregate that holds anything else. When no other value
+        // contribution remains the nullable contributions ARE this frame's
+        // seed — a recursive hold's value joins them at the component
+        // close, whose erased union drops them there — and, with no hold,
+        // whether every one of them is a widening bare `null` /
+        // `undefined` value decides the `any` widening below.
+        let mut contributors = contributors;
+        let mut widening_nullish_only = false;
+        if !nullability.is_strict() {
+            let (nullable, other): (Vec<FlowContribution>, Vec<FlowContribution>) = contributors
+                .into_iter()
+                .partition(|contribution| is_nullable_node(graph, contribution.node));
+            if other.is_empty() {
+                widening_nullish_only = holds.is_empty()
+                    && !nullable.is_empty()
+                    && nullable
+                        .iter()
+                        .all(|contribution| contribution.widening_nullish);
+                contributors = nullable;
+            } else {
+                contributors = other;
+            }
+        }
         // Literal widening is a SINGLE-contributor rule (tsc aggregates
         // the return-expression types with `pushIfUnique`, then widens
         // only when the aggregate is one type): `return 1` is `number`,
@@ -4953,7 +5693,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .collect();
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
         let mut all_fresh = true;
-        for contribution in contributors {
+        for contribution in &contributors {
             // Fold freshness over EVERY contributor, including the ones
             // deduplication drops. `1` and `1 as const` intern to the SAME
             // node — that is precisely why the second dedupes — but only
@@ -5016,9 +5756,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // two arms and stay pinned). Deferring is also what makes the
         // decision demand-ORDER-independent — the fixed point is
         // computed once per component, not per entry order.
+        //
+        // With `strictNullChecks` off a bare return and a fall-through
+        // contribute no arm (the checker adds their `undefined` only under
+        // the strict algebra), so they never block the widening.
         let fresh_seed = all_fresh
-            && !observations.contributes_arm()
-            && !can_fall_through.reaches_end(CompletionDischarge::FreshLiteralWidening);
+            && (!nullability.is_strict()
+                || (!observations.contributes_arm()
+                    && !can_fall_through.reaches_end(CompletionDischarge::FreshLiteralWidening)));
         if fresh_seed && arms.len() == 1 && holds.is_empty() {
             arms[0] = widen_literal_node(self, arms[0]);
         }
@@ -5028,7 +5773,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // returns (a bare-only body is also the concrete `void` seed of
         // a recursive component). Alongside VALUE returns, a bare
         // return contributes `undefined` (`if (c) return 1; return;`
-        // is `1 | undefined`).
+        // is `1 | undefined`) — under the strict algebra only.
         if observations.bare_return() {
             if arms.is_empty() {
                 let return_type =
@@ -5038,15 +5783,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     false,
                 ));
             }
-            arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+            if nullability.is_strict() {
+                arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+            }
         }
-        if observations.implicit_undefined() {
+        if observations.implicit_undefined() && nullability.is_strict() {
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
         }
         if can_fall_through.reaches_end(CompletionDischarge::ReturnJoin) {
             if arms.is_empty() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)));
-            } else {
+            } else if nullability.is_strict() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
             }
         } else if arms.is_empty() {
@@ -5090,7 +5837,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `ReturnOnly` rather than a guessed absorption promoted warm.
         let mut degradation = degradation;
         if arms.len() >= 2 {
-            match self.reduce_return_arms_to_supertypes(&arms) {
+            let views: Vec<SemanticNodeId> = arms
+                .iter()
+                .map(|arm| {
+                    contributors
+                        .iter()
+                        .find(|contribution| contribution.node == *arm)
+                        .and_then(|contribution| contribution.unwidened)
+                        .unwrap_or(*arm)
+                })
+                .collect();
+            match self.reduce_arms_to_supertypes_by(&arms, &views, nullability) {
                 ReunionReduction::Reduced(reduced) => arms = reduced,
                 ReunionReduction::Undecided => {
                     degradation.get_or_insert(FlowReturnDegradation::FlowGap(
@@ -5099,7 +5856,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        let return_type = self.intern_normalized_union_or_intersection(&arms, true);
+        let mut return_type = self.intern_normalized_union(&arms, nullability);
+        // `strictNullChecks` off: a return of widening `null` / `undefined`
+        // values alone is the widening nullable type, and the checker's
+        // return widening turns it into `any` (a declared `null` read
+        // keeps `null`).
+        if widening_nullish_only && is_nullable_node(graph, return_type) {
+            return_type = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        }
         Ok((
             FlowReturnResult::new_with_fresh_literal_arms(
                 graph,
@@ -5237,7 +6001,9 @@ fn collect_expression_write_spans(
 fn expression_write_tree(
     expr: &crate::flow_slice_content::SliceExpr,
 ) -> Vec<&crate::flow_slice_content::SliceExpr> {
-    use crate::flow_slice_content::{SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey};
+    use crate::flow_slice_content::{
+        SliceArrayElement, SliceCall, SliceExpr, SliceObjectEntry, SliceObjectKey,
+    };
     let mut out = Vec::new();
     fn walk<'e>(expr: &'e SliceExpr, out: &mut Vec<&'e SliceExpr>) {
         match expr {
@@ -5263,6 +6029,15 @@ fn expression_write_tree(
                     }
                 }
             }
+            SliceExpr::Array { elements, .. } => {
+                for element in elements.iter() {
+                    match element {
+                        SliceArrayElement::Value { value, .. } => walk(value, out),
+                        SliceArrayElement::Spread { source } => walk(source, out),
+                        SliceArrayElement::Elision => {}
+                    }
+                }
+            }
             SliceExpr::Union { arms, .. } => {
                 for arm in arms.iter() {
                     walk(arm, out);
@@ -5270,6 +6045,12 @@ fn expression_write_tree(
             }
             SliceExpr::Call(SliceCall::Nested(function_value), _) => {
                 walk(function_value, out);
+            }
+            SliceExpr::Call(
+                SliceCall::Construct(callee) | SliceCall::TaggedTemplate(callee),
+                _,
+            ) => {
+                walk(callee, out);
             }
             _ => {}
         }
@@ -5319,6 +6100,7 @@ enum FlowIndexedArgumentBinding {
 fn widen_fresh_read_node(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
+    nullability: crate::semantic_query::NullabilityPolicy,
 ) -> SemanticNodeId {
     let graph = dispatch.graph();
     if let Some(SemanticNodeData::Union(members)) = graph.node_data(node).as_deref() {
@@ -5329,7 +6111,7 @@ fn widen_fresh_read_node(
         if widened.as_slice() == members.as_ref() {
             return node;
         }
-        return dispatch.intern_normalized_union_or_intersection(&widened, true);
+        return dispatch.intern_normalized_union(&widened, nullability);
     }
     widen_literal_node(dispatch, node)
 }
@@ -5342,6 +6124,7 @@ fn widen_values_within(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     values: &[SemanticNodeId],
+    nullability: crate::semantic_query::NullabilityPolicy,
 ) -> SemanticNodeId {
     if values.contains(&node) {
         return widen_literal_node(dispatch, node);
@@ -5361,9 +6144,22 @@ fn widen_values_within(
         if widened.as_slice() == members.as_ref() {
             return node;
         }
-        return dispatch.intern_normalized_union_or_intersection(&widened, true);
+        return dispatch.intern_normalized_union(&widened, nullability);
     }
     node
+}
+
+/// Whether `node` is the `null` or the `undefined` type.
+fn is_nullable_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> bool {
+    matches!(
+        graph.node_data(node).as_deref(),
+        Some(SemanticNodeData::Primitive(
+            PrimitiveKind::Null | PrimitiveKind::Undefined
+        ))
+    )
 }
 
 /// The top-level LITERAL constituents of one value node — the shared
@@ -5728,6 +6524,18 @@ enum ArmGuardClass {
     Unclassified,
 }
 
+/// A top arm's (`unknown` / `any`) reading on one `typeof` edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopTypeofEdge {
+    /// The arm stays whole on the edge.
+    Kept,
+    /// The checker substitutes this implied type for the arm.
+    Implied(SemanticNodeId),
+    /// The checker's reading is not modeled: the arm stays possible and
+    /// the narrow degrades.
+    Unmodeled,
+}
+
 /// One union arm's key-presence verdict for a `"key" in subject` test.
 /// The `in` guard needs one more state than [`ArmGuardClass`] because an
 /// OPTIONAL member is its own proof shape: the arm provably stays on
@@ -5937,6 +6745,9 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
     }
 }
 
+#[path = "flow_return_class.rs"]
+mod class_expression;
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
@@ -5950,6 +6761,13 @@ struct FlowEvaluator<'d, 'b> {
     self_slot: Option<&'b FlowReturnKey>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
+    /// The `null` / `undefined` algebra of the function's own project
+    /// (its key's policy; a nested function value inherits its enclosing
+    /// frame's). Every union the evaluation builds runs it, and every
+    /// `undefined` the evaluation would add by itself — an optional member
+    /// read, an optional chain, an optional destructured element — is
+    /// added only under the strict algebra.
+    nullability: crate::semantic_query::NullabilityPolicy,
     params: &'b [SemanticNodeId],
     /// The frame's formal parameters in the SAME order as `params` —
     /// their names are the closure-capture key: a nested function value
@@ -6003,7 +6821,7 @@ struct FlowEvaluator<'d, 'b> {
     /// yield join widens a lone fresh literal exactly as the return join
     /// does). Read by the function-kind wrap at the join; a generator
     /// without yields joins the empty union (`never`).
-    yield_contributions: Vec<(SemanticNodeId, bool)>,
+    yield_contributions: Vec<YieldContribution>,
     /// The member-projection demand filter, when this evaluation serves
     /// a single-named-member `ReturnProjectionDemand` (`ReturnType<typeof
     /// f>['b']`). Return sites evaluate ONLY the demanded member of a
@@ -6019,6 +6837,23 @@ struct FlowEvaluator<'d, 'b> {
     /// modeled-`any` substitution for a value it could not model). Rides
     /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
     degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    /// `noImplicitAny` of the function's own project — whether an
+    /// unannotated `let` / `var` of the auto-typed form is auto-typed or
+    /// declared as its initializer's widened type.
+    no_implicit_any: bool,
+    /// The checker's AUTO-TYPED locals (`noImplicitAny` on, an unannotated
+    /// `let` / `var` with no initializer or a bare `null` / free
+    /// `undefined` one), by canonical subject — a fact of the declaration.
+    /// Whether one's value is currently the widening nullable type is a
+    /// fact of the paths reaching a read, carried on its reaching-type
+    /// product ([`Self::reads_widening_nullish_local`]).
+    auto_typed_locals: rustc_hash::FxHashSet<FlowProductSubject>,
+    /// Under `strictNullChecks` off: each object or array literal value
+    /// this evaluation built with a widening `null` / `undefined` member
+    /// or element (widened to `any`), mapped to the same literal UNWIDENED.
+    /// A join compares those unwidened views, as the checker's subtype
+    /// reduction runs before its widening ([`Self::literal_view`]).
+    unwidened_views: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
     /// The first statement-level gap observed in source order. A statement
     /// gap is a fallback diagnosis; a concrete degradation found during the
     /// evaluation takes precedence. Expression gaps remain immediate because
@@ -6116,6 +6951,16 @@ struct FlowEvaluator<'d, 'b> {
     /// root and instead marks the whole walk undecided, so the narrow it
     /// feeds degrades and never reaches the warm slot unrooted.
     heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The type predicate the function's single return establishes, read
+    /// at that return ([`Self::infer_return_predicate`]). The frame's
+    /// result carries it only when the whole return joins to `boolean`.
+    inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
+    /// Whether a read of a parameter or local answers its DECLARED type
+    /// rather than its narrowed reaching value — on while a class
+    /// expression's property initializer evaluates: a property
+    /// declaration is its own flow container, so no narrowing of the
+    /// enclosing frame reaches it (measured on 7.0.2).
+    declared_reads: bool,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -6219,6 +7064,16 @@ struct FlowExecutionWitness<'w> {
     products: &'w FlowProductStore,
 }
 
+/// Whether a surface is an object literal's: a member the literal itself
+/// authored (a spread-carried one included) marks it, where a declared
+/// object type's members are all non-literal.
+fn is_object_literal_surface(surface: &crate::semantic_query::SurfaceView) -> bool {
+    surface
+        .positive_members()
+        .iter()
+        .any(|member| member.excess_origin != verter_type_expr::ExcessPropertyOrigin::NonLiteral)
+}
+
 /// Whether a surface's key domain IS the list of members it names: no
 /// call, construct or index signature widens it.
 fn is_plain_key_listing_surface(surface: &crate::semantic_query::SurfaceView) -> bool {
@@ -6265,6 +7120,10 @@ enum ReunionReduction {
 struct FlowContribution {
     /// The evaluated contributor node.
     node: SemanticNodeId,
+    /// The contributor before the widening of its nested widening
+    /// nullable values, when it differs (`FlowEvaluator::unwidened_views`):
+    /// the join's subtype reduction compares this view.
+    unwidened: Option<SemanticNodeId>,
     /// The contributor is a fresh (widening) literal source.
     fresh_literal: bool,
     /// The FRESH literal values this contribution carries into the join,
@@ -6276,6 +7135,26 @@ struct FlowContribution {
     /// affect the join's own widening decision (`fresh_literal` owns
     /// that, unchanged).
     fresh_values: Vec<SemanticNodeId>,
+    /// The contributor is a bare `null` / `undefined` / `void` value —
+    /// the checker's widening nullable type, which the join widens to
+    /// `any` when the function's `strictNullChecks` is off and nothing
+    /// else contributes.
+    widening_nullish: bool,
+}
+
+/// One evaluated `yield` of a generator body, for the yield join.
+struct YieldContribution {
+    /// The yielded value.
+    node: SemanticNodeId,
+    /// The yielded value before the widening of its nested widening
+    /// nullable values, when it differs.
+    unwidened: Option<SemanticNodeId>,
+    /// The value is a fresh (widening) literal source.
+    fresh: bool,
+    /// The value is a bare `null` / `undefined` / `void` (or a read of
+    /// an auto-typed local holding one): the checker's widening nullable
+    /// type.
+    widening_nullish: bool,
 }
 
 /// One evaluated arm of a mixed value position (a ternary initializer,
@@ -6672,6 +7551,13 @@ enum NullishStrip {
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
+    /// The canonical union of `members` under this frame's null algebra —
+    /// the one union construction of the evaluation.
+    fn union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
+        self.dispatch
+            .intern_normalized_union(members, self.nullability)
+    }
+
     /// Promote the first statement-level gap only when evaluation found no
     /// concrete degradation.
     fn promote_pending_statement_gap(&mut self) {
@@ -6775,6 +7661,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         assignment_fresh: bool,
     ) -> Positional<SemanticNodeId> {
         let mut surface_members = Vec::with_capacity(entries.len());
+        // The same members with every widening nullable value UNWIDENED
+        // (`Self::unwidened_views`), when any member differs.
+        let mut unwidened_members = Vec::with_capacity(entries.len());
+        let mut unwidened_differs = false;
         let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
         let mut spread_seen = false;
         for entry in entries.iter() {
@@ -6846,7 +7736,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let Some(key) = self.eval_object_member_key(&member.key) else {
                 return Positional::Unmodeled;
             };
-            surface_members.push(crate::semantic_query::SurfaceMember {
+            let unwidened = match &member.unwidened {
+                Some(expr) => match self.eval_expr(expr) {
+                    Positional::Value(node) => node,
+                    Positional::Hold | Positional::Unmodeled => value,
+                },
+                None => self.literal_view(member_value, value).unwrap_or(value),
+            };
+            unwidened_differs |= unwidened != value;
+            let surface_member = crate::semantic_query::SurfaceMember {
                 key,
                 value,
                 optional: false,
@@ -6859,7 +7757,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 declaration_origin: Some(Arc::from(self.canonical)),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
                 merge_role: crate::semantic_query::MergeRoleStamp::default(),
+            };
+            unwidened_members.push(crate::semantic_query::SurfaceMember {
+                value: unwidened,
+                ..surface_member.clone()
             });
+            surface_members.push(surface_member);
         }
         if spread_seen {
             effects.extend(surface_members.drain(..).map(|member| {
@@ -6872,16 +7775,295 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.binder_env.scope.clone(),
             ));
         }
-        Positional::Value(self.dispatch.graph().intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
-                members: Arc::from(surface_members.into_boxed_slice()),
-                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                keyspace: None,
-                has_index_signature: false,
-            },
-        )))
+        let intern = |members: Vec<crate::semantic_query::SurfaceMember>| {
+            self.dispatch.graph().intern_node(SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from(members.into_boxed_slice()),
+                    call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
+                },
+            ))
+        };
+        let node = intern(surface_members);
+        if unwidened_differs {
+            let unwidened = intern(unwidened_members);
+            self.unwidened_views.insert(node, unwidened);
+        }
+        Positional::Value(node)
+    }
+
+    /// The UNWIDENED view of the value an object or array literal
+    /// expression just built ([`Self::unwidened_views`]). A value read
+    /// through a binding, or produced by any other expression, has none:
+    /// the checker widened it where it was declared.
+    fn literal_view(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        match expr {
+            crate::flow_slice_content::SliceExpr::Object { .. }
+            | crate::flow_slice_content::SliceExpr::Array { .. } => {
+                self.unwidened_views.get(&node).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate one STRUCTURAL array literal by the checker's array-literal
+    /// rule (measured on TypeScript 7.0.2).
+    ///
+    /// Without a const assertion the value is `E[]`: `E` is the union of
+    /// the element values under the return join's subtype reduction, each
+    /// value read at a mutable location (a fresh literal or a read of a
+    /// widening-literal local widens), a spread contributing its source's
+    /// element type and a hole the widening `undefined`. An empty literal
+    /// is `never[]` under `strictNullChecks` and the widening `undefined[]`
+    /// — `any[]` once widened — without it. With `strictNullChecks` off a
+    /// widening `null` / `undefined` element vanishes beside any other
+    /// element, and an element union made only of them is `any`.
+    ///
+    /// Under `as const` the value is the readonly tuple of the element
+    /// values, literals kept, a spread splicing its source in; a widening
+    /// nullish element is `any` with `strictNullChecks` off.
+    ///
+    /// A spread whose source this frame cannot read the elements of fails
+    /// the literal closed: the element type would miss what it provides.
+    fn eval_array_literal(
+        &mut self,
+        elements: &[crate::flow_slice_content::SliceArrayElement],
+        const_asserted: bool,
+    ) -> Positional<SemanticNodeId> {
+        use crate::flow_slice_content::SliceArrayElement;
+        let graph = self.dispatch.graph();
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        // `(value, unwidened view, widening_nullish)` per element position
+        // of the join, or the tuple element lists (as published and
+        // unwidened) under `as const`.
+        let mut parts: Vec<(SemanticNodeId, SemanticNodeId, bool)> =
+            Vec::with_capacity(elements.len());
+        let mut tuple: Vec<crate::semantic_query::TupleElement> = Vec::new();
+        let mut tuple_view: Vec<crate::semantic_query::TupleElement> = Vec::new();
+        for element in elements.iter() {
+            match element {
+                SliceArrayElement::Value { value, freshness } => {
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(value);
+                    let node = self.settle_composite_part(outcome, holds_before);
+                    let widening_nullish = self.widening_nullish_value(value, freshness);
+                    if const_asserted {
+                        let element = crate::semantic_query::TupleElement {
+                            label: None,
+                            value: if widening_nullish { any } else { node },
+                            optional: false,
+                            rest: false,
+                        };
+                        tuple_view.push(crate::semantic_query::TupleElement {
+                            value: if widening_nullish {
+                                node
+                            } else {
+                                self.literal_view(value, node).unwrap_or(node)
+                            },
+                            ..element.clone()
+                        });
+                        tuple.push(element);
+                    } else if widening_nullish {
+                        parts.push((node, node, true));
+                    } else {
+                        let read = self.widen_value_position_read(value, node);
+                        parts.push((read, self.literal_view(value, read).unwrap_or(read), false));
+                    }
+                }
+                SliceArrayElement::Elision => {
+                    if const_asserted {
+                        let element = crate::semantic_query::TupleElement {
+                            label: None,
+                            value: if self.nullability.is_strict() {
+                                undefined
+                            } else {
+                                any
+                            },
+                            optional: false,
+                            rest: false,
+                        };
+                        tuple_view.push(crate::semantic_query::TupleElement {
+                            value: undefined,
+                            ..element.clone()
+                        });
+                        tuple.push(element);
+                    } else {
+                        parts.push((undefined, undefined, true));
+                    }
+                }
+                SliceArrayElement::Spread { source } => {
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(source);
+                    self.holds.truncate(holds_before);
+                    let Positional::Value(source) = outcome else {
+                        return Positional::Unmodeled;
+                    };
+                    if const_asserted {
+                        // A tuple source splices its elements in, labels
+                        // and optionality kept; an optional one reads
+                        // `| undefined` under `strictNullChecks` (the
+                        // checker's `readonly [string, (number |
+                        // undefined)?]`). An array source is the rest.
+                        match graph.node_data(source).as_deref() {
+                            Some(SemanticNodeData::Array { .. }) => {
+                                let element = crate::semantic_query::TupleElement {
+                                    label: None,
+                                    value: source,
+                                    optional: false,
+                                    rest: true,
+                                };
+                                tuple_view.push(element.clone());
+                                tuple.push(element);
+                            }
+                            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                                for element in elements.iter() {
+                                    let mut element = element.clone();
+                                    if element.optional && self.nullability.is_strict() {
+                                        element.value = self.union(&[element.value, undefined]);
+                                    }
+                                    tuple_view.push(element.clone());
+                                    tuple.push(element);
+                                }
+                            }
+                            _ => return Positional::Unmodeled,
+                        }
+                        continue;
+                    }
+                    let Some(spread) = self.spread_element_types(source) else {
+                        return Positional::Unmodeled;
+                    };
+                    parts.extend(spread.into_iter().map(|node| (node, node, false)));
+                }
+            }
+        }
+        if const_asserted {
+            let intern_tuple = |elements: &[crate::semantic_query::TupleElement]| match self
+                .dispatch
+                .normalize_tuple_spread(elements, true)
+            {
+                super::build::NormalizedTupleShape::Array(array) => array,
+                super::build::NormalizedTupleShape::Tuple(elements) => {
+                    graph.intern_node(SemanticNodeData::Tuple {
+                        elements: Arc::from(elements.into_boxed_slice()),
+                        readonly: true,
+                    })
+                }
+            };
+            let node = intern_tuple(&tuple);
+            let view = intern_tuple(&tuple_view);
+            if view != node {
+                self.unwidened_views.insert(node, view);
+            }
+            return Positional::Value(node);
+        }
+        let (element, view) = if parts.is_empty() {
+            if self.nullability.is_strict() {
+                let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                (never, never)
+            } else {
+                (any, undefined)
+            }
+        } else {
+            if !self.nullability.is_strict() {
+                if parts
+                    .iter()
+                    .any(|(node, _, _)| !is_nullable_node(graph, *node))
+                {
+                    parts.retain(|(node, _, _)| !is_nullable_node(graph, *node));
+                } else if parts.iter().all(|(_, _, widening)| *widening) {
+                    let nullable: Vec<SemanticNodeId> =
+                        parts.iter().map(|(node, _, _)| *node).collect();
+                    let view = self.union(&nullable);
+                    parts.clear();
+                    parts.push((any, view, false));
+                }
+            }
+            let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(parts.len());
+            let mut views: Vec<SemanticNodeId> = Vec::with_capacity(parts.len());
+            for (node, view, _) in parts {
+                if !arms.contains(&node) {
+                    arms.push(node);
+                    views.push(view);
+                }
+            }
+            if arms.len() >= 2 {
+                match self
+                    .dispatch
+                    .reduce_arms_to_supertypes_by(&arms, &views, self.nullability)
+                {
+                    ReunionReduction::Reduced(reduced) => {
+                        views = arms
+                            .iter()
+                            .zip(views.iter())
+                            .filter(|(arm, _)| reduced.contains(arm))
+                            .map(|(_, view)| *view)
+                            .collect();
+                        arms = reduced;
+                    }
+                    ReunionReduction::Undecided => {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::NominalRelation,
+                        ))
+                    }
+                }
+            }
+            (self.union(&arms), self.union(&views))
+        };
+        let node = graph.intern_node(SemanticNodeData::Array {
+            element,
+            readonly: false,
+        });
+        if view != element {
+            let view = graph.intern_node(SemanticNodeData::Array {
+                element: view,
+                readonly: false,
+            });
+            self.unwidened_views.insert(node, view);
+        }
+        Positional::Value(node)
+    }
+
+    /// The element types one spread SOURCE contributes to a non-const
+    /// array literal: an array's element, a tuple's elements (an optional
+    /// one with `undefined` under `strictNullChecks`, a rest one with its
+    /// array's element), `any` for `any`, and `string` for a string's
+    /// characters. `None` for a source whose elements this frame cannot
+    /// read.
+    fn spread_element_types(&self, source: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        let graph = self.dispatch.graph();
+        match graph.node_data(source).as_deref()? {
+            SemanticNodeData::Array { element, .. } => Some(vec![*element]),
+            SemanticNodeData::Tuple { elements, .. } => {
+                let undefined =
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                let mut out = Vec::with_capacity(elements.len());
+                for element in elements.iter() {
+                    if element.rest {
+                        match graph.node_data(element.value).as_deref()? {
+                            SemanticNodeData::Array { element, .. } => out.push(*element),
+                            _ => return None,
+                        }
+                    } else if element.optional && self.nullability.is_strict() {
+                        out.push(self.union(&[element.value, undefined]));
+                    } else {
+                        out.push(element.value);
+                    }
+                }
+                Some(out)
+            }
+            SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::String) => {
+                Some(vec![source])
+            }
+            _ => None,
+        }
     }
 
     /// Evaluate a right-hand side under assignment context. Object literals
@@ -6979,7 +8161,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.expression_write_nodes.insert(*span, outcome.clone());
             self.holds.truncate(holds_base);
             if let Positional::Value(node) = outcome {
-                let written = self.apply_write(target, node, false, *definition);
+                let widening_nullish = self.widening_nullish_value(value, freshness);
+                let written = self.apply_write(target, node, false, *definition, widening_nullish);
                 let subject = match &target.root {
                     crate::flow_slice_content::SliceNarrowRoot::Param { binding, .. } => {
                         FlowProductSubject::Local(*binding)
@@ -6991,9 +8174,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let subject = self.canonical_runtime_subject(&subject);
                 match self.capture_write_lookahead.get(&subject) {
                     Some(&earlier) => {
-                        let joined = self
-                            .dispatch
-                            .intern_normalized_union_or_intersection(&[earlier, written], true);
+                        let joined = self.union(&[earlier, written]);
                         self.capture_write_lookahead.insert(subject, joined);
                     }
                     None => {
@@ -7325,9 +8506,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
         let first = incoming.first().expect("a continuation has a predecessor");
+        let frame_algebra = super::flow_products::DispatchFlowAlgebra {
+            dispatch: self.dispatch,
+            nullability: self.nullability,
+        };
         if incoming.len() == 1 {
             return FlowLayerState {
-                products: FlowProductStore::join(&[&first.products], observation, self.dispatch),
+                products: FlowProductStore::join(&[&first.products], observation, &frame_algebra),
                 write_observation: self.products.observe_writes(),
             };
         }
@@ -7340,7 +8525,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .observe_product_joins
             .load(std::sync::atomic::Ordering::Relaxed)
             .then(|| ObservedFlowAlgebra {
-                delegate: self.dispatch,
+                delegate: &frame_algebra,
                 observation: std::cell::RefCell::new(FlowJoinObservation {
                     predecessors: incoming.len(),
                     ..Default::default()
@@ -7350,9 +8535,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let algebra: &dyn super::flow_products::FlowSemanticAlgebra = observed
             .as_ref()
             .map(|value| value as _)
-            .unwrap_or(self.dispatch);
+            .unwrap_or(&frame_algebra);
         #[cfg(not(test))]
-        let algebra = self.dispatch;
+        let algebra = &frame_algebra;
         let products: smallvec::SmallVec<[&FlowProductStore; 4]> =
             incoming.iter().map(|state| &state.products).collect();
         #[cfg(test)]
@@ -7396,6 +8581,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         widening: Option<WideningMembership>,
         degraded: bool,
     ) {
+        self.bind_local_value(binding, kind, node, widening, degraded, false);
+    }
+
+    /// [`Self::bind_local`] for a value that may be the checker's widening
+    /// nullable type — an auto-typed local's bare `null` / `undefined`
+    /// initializer.
+    fn bind_local_value(
+        &mut self,
+        binding: &FlowProductSubject,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        node: SemanticNodeId,
+        widening: Option<WideningMembership>,
+        degraded: bool,
+        widening_nullish: bool,
+    ) {
         let definition = match binding {
             FlowProductSubject::Local(binding) => Some(
                 self.skeleton
@@ -7414,15 +8614,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             self.products.assignment(binding).single_path()
         };
-        self.bind_local_at(binding, single_path, node, widening, degraded, definition);
+        self.bind_local_at(
+            binding,
+            single_path,
+            ReachingTypeProduct::of(node)
+                .with_widening(widening)
+                .with_widening_nullish(widening_nullish),
+            degraded,
+            definition,
+        );
     }
 
     fn bind_local_at(
         &mut self,
         binding: &FlowProductSubject,
         single_path: bool,
-        node: SemanticNodeId,
-        widening: Option<WideningMembership>,
+        reaching: ReachingTypeProduct,
         degraded: bool,
         definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
     ) {
@@ -7431,7 +8638,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             DefiniteAssignmentProduct::assigned()
                 .with_single_path(single_path)
                 .with_failed_initializer(degraded),
-            ReachingTypeProduct::of(node).with_widening(widening),
+            reaching,
             definition,
         );
         self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
@@ -7563,21 +8770,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .into_iter()
                 .map(|part| {
                     if part.fresh {
-                        widen_fresh_read_node(self.dispatch, part.node)
+                        widen_fresh_read_node(self.dispatch, part.node, self.nullability)
                     } else {
                         // The arm keeps its own shape, but a fresh value
                         // it CARRIES (a call's kept deposit or authored
                         // fresh arm) still widens at this write position
                         // — unless a sibling arm pinned the same value.
                         let values = self.uncancelled_fresh_values(&part.fresh_values, &pinned);
-                        widen_values_within(self.dispatch, part.node, &values)
+                        widen_values_within(self.dispatch, part.node, &values, self.nullability)
                     }
                 })
                 .collect();
-            return Positional::Value(
-                self.dispatch
-                    .intern_normalized_union_or_intersection(&nodes, true),
-            );
+            return Positional::Value(self.union(&nodes));
         }
         let outcome = self.eval_expr(expr);
         let Positional::Value(node) = outcome else {
@@ -7585,7 +8789,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh);
         Positional::Value(if fresh {
-            widen_fresh_read_node(self.dispatch, node)
+            widen_fresh_read_node(self.dispatch, node, self.nullability)
         } else {
             // A non-fresh spelling may still carry read-side widening
             // provenance: a widening-membership local, or a completed
@@ -7782,13 +8986,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// guard just established (`if (typeof v === "string") { v = … }`
     /// reads the WRITTEN value after the statement, not the narrow).
     /// Returns the node the target now holds (the assignment-reduced
-    /// value — the expression twin's own value).
+    /// value — the expression twin's own value). `widening_nullish` says
+    /// the written value is the checker's widening nullable type; an
+    /// auto-typed local keeps that fact on the value it now holds.
     fn apply_write(
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
         definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        widening_nullish: bool,
     ) -> SemanticNodeId {
         // A failed RHS carries the explicit unmodelled-position marker. It
         // cannot select a declared constituent; preserving the marker keeps
@@ -7831,11 +9038,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `bind_local` itself clears the narrow facts about the
                 // replaced value (the invalidation cannot be forgotten at
                 // one of the two write sites).
+                let widening_nullish = widening_nullish
+                    && self
+                        .auto_typed_locals
+                        .contains(&self.canonical_runtime_subject(binding));
                 self.bind_local_at(
                     binding,
                     single_path,
-                    node,
-                    None,
+                    ReachingTypeProduct::of(node).with_widening_nullish(widening_nullish),
                     degraded,
                     Some(self.flow_graph.expr_site_node(definition)),
                 );
@@ -7919,12 +9129,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 match never_assigned_declared {
                     Some(Some(declared)) => {
                         let folded = match joined.products.reaching(&subject) {
-                            Some(reaching) => {
-                                self.dispatch.intern_normalized_union_or_intersection(
-                                    &[reaching, declared],
-                                    true,
-                                )
-                            }
+                            Some(reaching) => self.union(&[reaching, declared]),
                             None => declared,
                         };
                         joined
@@ -8396,22 +9601,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if kept.is_empty() || kept.len() == arms.len() {
                         value
                     } else {
-                        self.dispatch
-                            .intern_normalized_union_or_intersection(&kept, true)
+                        self.union(&kept)
                     }
                 }
                 _ => value,
             });
         }
-        if member.optional {
+        // An optional member's element reads `undefined` for an absent key
+        // under `strictNullChecks`; with it off the checker adds nothing.
+        if member.optional && self.nullability.is_strict() {
             let undefined = self
                 .dispatch
                 .graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-            return Some(
-                self.dispatch
-                    .intern_normalized_union_or_intersection(&[value, undefined], true),
-            );
+            return Some(self.union(&[value, undefined]));
         }
         Some(value)
     }
@@ -8646,8 +9849,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
         }
-        self.dispatch
-            .intern_normalized_union_or_intersection(&survivors, true)
+        self.union(&survivors)
     }
 
     // ── Guard narrowing ─────────────────────────────────────────────
@@ -8916,8 +10118,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Union the absent-key `undefined` into an optional member's read
     /// value. `any` / `unknown` absorb it, and a value that already
     /// carries an `undefined` arm (the member's own explicit
-    /// `| undefined`) gains no duplicate.
+    /// `| undefined`) gains no duplicate. With `strictNullChecks` off the
+    /// checker adds no `undefined` at all.
     fn fold_optional_read_undefined(&mut self, value: SemanticNodeId) -> SemanticNodeId {
+        if !self.nullability.is_strict() {
+            return value;
+        }
         let data = self.dispatch.graph().node_data(value);
         match data.as_deref() {
             Some(SemanticNodeData::Primitive(
@@ -8939,8 +10145,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .dispatch
             .graph()
             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-        self.dispatch
-            .intern_normalized_union_or_intersection(&[value, undefined], true)
+        self.union(&[value, undefined])
     }
 
     /// `a` is assignable to `b`, through the crate's SOLE relation
@@ -9142,11 +10347,101 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .map(|(_, node)| *node)
                 })
                 .collect();
-            let node = self
-                .dispatch
-                .intern_normalized_union_or_intersection(&nodes, true);
+            let node = self.union(&nodes);
             self.push_narrowing(&subject, node);
         }
+    }
+
+    /// Read the type predicate the function's single return establishes
+    /// ([`crate::flow_slice_content::ReturnPredicateTest`]) once the
+    /// returned expression evaluated to `returned`: the checker's
+    /// `getTypePredicateFromBody`. Only a `boolean` return infers one. For
+    /// each candidate parameter in order, the parameter's type on the
+    /// test's TRUE edge must differ from its declared type, and the test's
+    /// FALSE edge must narrow that true-edge type to `never` — `x is T`
+    /// means `x` is NOT `T` whenever the call returns `false`. The first
+    /// parameter that passes names the predicate. Both edges start from
+    /// the state the return is reached in, so a narrow the body already
+    /// established before the return counts. An unexpressible test over a
+    /// `boolean` return degrades: the checker may infer a predicate this
+    /// substrate cannot compute.
+    fn infer_return_predicate(
+        &mut self,
+        test: &crate::flow_slice_content::ReturnPredicateTest,
+        returned: SemanticNodeId,
+    ) {
+        use crate::flow_slice_content::{ReturnPredicateTest, SliceNarrowRoot, SliceNarrowSubject};
+        let is_primitive = |dispatch: &ProjectSemanticDispatch<'_>, node, kind| {
+            dispatch.graph().node_data(node).as_deref() == Some(&SemanticNodeData::Primitive(kind))
+        };
+        if !is_primitive(self.dispatch, returned, PrimitiveKind::Boolean) {
+            return;
+        }
+        let (guard, parameters) = match test {
+            ReturnPredicateTest::Unexpressible => {
+                self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return;
+            }
+            ReturnPredicateTest::Guard { guard, parameters } => (guard, parameters),
+        };
+        for &ordinal in parameters.iter() {
+            let Some(declared) = self.params.get(ordinal as usize).copied() else {
+                continue;
+            };
+            // Refining a `boolean` parameter to `true` / `false` is not a
+            // predicate the checker infers.
+            if is_primitive(self.dispatch, declared, PrimitiveKind::Boolean) {
+                continue;
+            }
+            let Some(binding) = self
+                .param_names
+                .get(ordinal as usize)
+                .and_then(|param| param.binding)
+            else {
+                continue;
+            };
+            let subject = SliceNarrowSubject {
+                root: SliceNarrowRoot::Param { ordinal, binding },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            let mark = self.narrowing_snapshot();
+            self.apply_guard_scoped(guard, true);
+            let true_edge = self.subject_current_node(&subject);
+            self.restore_narrowings(mark);
+            let Some(true_edge) = true_edge else {
+                continue;
+            };
+            // The checker compares TYPE identity: a union narrowed back to
+            // every one of its arms is the declared union itself, in
+            // whatever order the narrow rebuilt it.
+            if true_edge == declared || self.same_union_arms(true_edge, declared) {
+                continue;
+            }
+            let mark = self.narrowing_snapshot();
+            self.push_narrowing(&subject, true_edge);
+            self.apply_guard_scoped(guard, false);
+            let false_edge = self.subject_current_node(&subject);
+            self.restore_narrowings(mark);
+            if false_edge
+                .is_some_and(|node| is_primitive(self.dispatch, node, PrimitiveKind::Never))
+            {
+                self.inferred_predicate = Some(crate::semantic_query::SignaturePredicate {
+                    subject: crate::semantic_query::PredicateSubject::Parameter(ordinal),
+                    asserts: false,
+                    ty: Some(true_edge),
+                });
+                return;
+            }
+        }
+    }
+
+    /// Whether two nodes enumerate the same set of union arms.
+    fn same_union_arms(&mut self, left: SemanticNodeId, right: SemanticNodeId) -> bool {
+        let left = self.enumerated_union_arms_or_self(left);
+        let right = self.enumerated_union_arms_or_self(right);
+        left.len() == right.len() && left.iter().all(|arm| right.contains(arm))
     }
 
     /// Filter `subject`'s arms by a per-arm predicate, joining the
@@ -9178,9 +10473,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if survivors.len() == arms.len() {
             return ArmFilter::Unchanged;
         }
-        let node = self
-            .dispatch
-            .intern_normalized_union_or_intersection(&survivors, true);
+        let node = self.union(&survivors);
         ArmFilter::Narrowed(node)
     }
 
@@ -9241,6 +10534,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 continue;
             }
+            if let Some(top) = self.top_arm_typeof_edge(*arm, kind, negated) {
+                match top {
+                    TopTypeofEdge::Kept => out.push(*arm),
+                    TopTypeofEdge::Implied(node) => {
+                        out.push(node);
+                        changed = true;
+                    }
+                    TopTypeofEdge::Unmodeled => {
+                        out.push(*arm);
+                        unclassified = true;
+                    }
+                }
+                continue;
+            }
             match self.arm_typeof_class(*arm, kind) {
                 ArmGuardClass::Match => {
                     if negated {
@@ -9275,9 +10582,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if !changed && out.len() == arms.len() {
             return GuardNarrowing::Unchanged;
         }
-        let node = self
-            .dispatch
-            .intern_normalized_union_or_intersection(&out, true);
+        let node = self.union(&out);
         GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
@@ -9303,14 +10608,100 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         )
     }
 
+    /// The `typeof` edge of a TOP arm (`unknown` / `any`), which no
+    /// runtime kind classifies: `None` for every other arm.
+    ///
+    /// The checker's `narrowTypeByTypeName` SUBSTITUTES the kind's implied
+    /// type on the positive edge, because that type is a subtype of the
+    /// top arm: `unknown` and `any` read `string` inside `typeof x ===
+    /// "string"`, `unknown` reads `object | null` under `"object"` and the
+    /// global `Function` under `"function"`, while `any` stays `any` under
+    /// those two. The negated edge keeps `any` and keeps `unknown` too,
+    /// except under `"undefined"` / `"object"` with `strictNullChecks`
+    /// on, where the checker splits `unknown` into `{} | null |
+    /// undefined` and removes the tested kind (`{} | null`, `{} |
+    /// undefined`).
+    fn top_arm_typeof_edge(
+        &mut self,
+        arm: SemanticNodeId,
+        kind: crate::flow_slice_content::SliceTypeofKind,
+        negated: bool,
+    ) -> Option<TopTypeofEdge> {
+        use crate::flow_slice_content::SliceTypeofKind;
+        let is_any = match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => true,
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => false,
+            _ => return None,
+        };
+        let primitive = |this: &Self, kind| {
+            this.dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(kind))
+        };
+        if negated {
+            let removed = match kind {
+                SliceTypeofKind::Undefined => PrimitiveKind::Undefined,
+                SliceTypeofKind::Object => PrimitiveKind::Null,
+                _ => return Some(TopTypeofEdge::Kept),
+            };
+            if is_any || !self.nullability.is_strict() {
+                return Some(TopTypeofEdge::Kept);
+            }
+            let kept = match removed {
+                PrimitiveKind::Undefined => PrimitiveKind::Null,
+                _ => PrimitiveKind::Undefined,
+            };
+            let members = [
+                self.dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view())),
+                primitive(self, kept),
+            ];
+            return Some(TopTypeofEdge::Implied(self.union(&members)));
+        }
+        Some(match kind {
+            SliceTypeofKind::String => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::String))
+            }
+            SliceTypeofKind::Number => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Number))
+            }
+            SliceTypeofKind::BigInt => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::BigInt))
+            }
+            SliceTypeofKind::Boolean => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Boolean))
+            }
+            SliceTypeofKind::Symbol => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Symbol))
+            }
+            SliceTypeofKind::Undefined => {
+                TopTypeofEdge::Implied(primitive(self, PrimitiveKind::Undefined))
+            }
+            SliceTypeofKind::Object | SliceTypeofKind::Function if is_any => TopTypeofEdge::Kept,
+            SliceTypeofKind::Object => {
+                let members = [
+                    primitive(self, PrimitiveKind::Object),
+                    primitive(self, PrimitiveKind::Null),
+                ];
+                TopTypeofEdge::Implied(self.union(&members))
+            }
+            SliceTypeofKind::Function => match self.lower_global_function_surface() {
+                Some(function) => TopTypeofEdge::Implied(function),
+                None => TopTypeofEdge::Unmodeled,
+            },
+        })
+    }
+
     /// One union arm's verdict against the runtime type a `typeof`
     /// comparison names. A primitive is its own kind (`null` is the
     /// operator's `"object"` quirk); a literal its primitive's; objects,
     /// arrays, tuples and spread programs are `"object"`, signatures
     /// `"function"`; `never` is uninhabited, off both edges. Anything
-    /// the graph cannot place under exactly one runtime kind — `any`,
-    /// `unknown`, a memberless `{}` surface (primitives inhabit it), an
-    /// unresolved carrier — is `Unclassified`: `NoMatch` means PROVED
+    /// the graph cannot place under exactly one runtime kind — a memberless
+    /// `{}` surface (primitives inhabit it), an unresolved carrier — is
+    /// `Unclassified` (a top arm, `any` / `unknown`, is read by
+    /// [`Self::top_arm_typeof_edge`] before this classification): `NoMatch` means PROVED
     /// non-inhabitance of the tested edge, never "unrecognized". The one
     /// dual-kind value domain — the non-primitive `object`, which also
     /// inhabits `"function"` — is intercepted by [`Self::narrow_typeof`]
@@ -9570,9 +10961,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return GuardNarrowing::Narrowed(subject.clone(), self.never_node());
                 }
                 ArmFilter::Narrowed(node) => {
+                    let node = self.refine_arms_by_literal(node, literal, negated);
                     return GuardNarrowing::Narrowed(subject.clone(), node);
                 }
                 ArmFilter::Unchanged => {}
+            }
+            if let Some(current) = self.subject_current_node(subject) {
+                let refined = self.refine_arms_by_literal(current, literal, negated);
+                if refined != current {
+                    return GuardNarrowing::Narrowed(subject.clone(), refined);
+                }
             }
             if !negated {
                 // No arm was filtered. The literal can still be a STRICT
@@ -9653,7 +11051,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // identically in every arm, is never discriminated — the
                 // checker keeps its declared type — so no fact lands.
                 ArmFilter::NoSurvivor => {
-                    if projected.len() > 1 && projected.windows(2).any(|pair| pair[0] != pair[1]) {
+                    let discriminated = (projected.len() > 1
+                        && projected.windows(2).any(|pair| pair[0] != pair[1]))
+                        || self.declared_parent_discriminates(&parent_subject, &last);
+                    if discriminated {
                         GuardNarrowing::Narrowed(parent_subject, self.never_node())
                     } else {
                         GuardNarrowing::Unchanged
@@ -9663,6 +11064,103 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ArmFilter::Unchanged => GuardNarrowing::Unchanged,
             }
         }
+    }
+
+    /// The surviving arms of an equality narrow against a literal, with
+    /// the checker's `replacePrimitivesWithLiterals` applied: on the
+    /// positive edge a `string` / `number` / `bigint` / `boolean` arm the
+    /// literal inhabits IS the literal (`x: string | number` reads `1`
+    /// inside `x === 1`, `x: boolean | string` reads `true` inside `x ===
+    /// true`); on the negated edge a `boolean` arm — `true | false` —
+    /// loses the compared literal (`x !== true` reads `false`). Every
+    /// other arm stays as it is.
+    fn refine_arms_by_literal(
+        &mut self,
+        node: SemanticNodeId,
+        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        negated: bool,
+    ) -> SemanticNodeId {
+        use crate::flow_slice_content::SliceGuardLiteral;
+        let base = match literal {
+            SliceGuardLiteral::String(_) => PrimitiveKind::String,
+            SliceGuardLiteral::Number(_) => PrimitiveKind::Number,
+            SliceGuardLiteral::Boolean(_) => PrimitiveKind::Boolean,
+            SliceGuardLiteral::Null | SliceGuardLiteral::Undefined => return node,
+        };
+        let replacement = match (literal, negated) {
+            (_, false) => guard_literal_type_expr(literal),
+            (SliceGuardLiteral::Boolean(value), true) => {
+                Some(verter_type_expr::TypeExpr::boolean_literal(!*value))
+            }
+            (_, true) => None,
+        };
+        let Some(replacement) = replacement else {
+            return node;
+        };
+        let arms = self.enumerated_union_arms_or_self(node);
+        // A template-literal arm is a pattern of strings the string
+        // literal inhabits, replaced exactly like `string`.
+        let is_base = |this: &Self, arm: SemanticNodeId| match this
+            .dispatch
+            .graph()
+            .node_data(arm)
+            .as_deref()
+        {
+            Some(SemanticNodeData::Primitive(kind)) => *kind == base,
+            Some(SemanticNodeData::TemplateLiteral { .. }) => {
+                !negated && base == PrimitiveKind::String
+            }
+            _ => false,
+        };
+        if !arms.iter().any(|arm| is_base(self, *arm)) {
+            return node;
+        }
+        let replacement = self.lower_body_type(&replacement);
+        let refined: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|arm| {
+                if is_base(self, *arm) {
+                    replacement
+                } else {
+                    *arm
+                }
+            })
+            .collect();
+        self.union(&refined)
+    }
+
+    /// Whether a PARAMETER's declared type is a union whose arms project
+    /// `member` to different types — the checker's discriminant-property
+    /// precondition, which it reads off the reference's DECLARED type. It
+    /// still holds once an earlier narrow left a single arm: a parameter
+    /// `x: Foo | Bar` already narrowed to `Foo` reads `never` under
+    /// `x.kind !== "foo"`.
+    fn declared_parent_discriminates(
+        &mut self,
+        parent: &crate::flow_slice_content::SliceNarrowSubject,
+        member: &[Arc<str>],
+    ) -> bool {
+        let crate::flow_slice_content::SliceNarrowRoot::Param { ordinal, .. } = &parent.root else {
+            return false;
+        };
+        if !parent.path.is_empty() {
+            return false;
+        }
+        let Some(declared) = self.params.get(*ordinal as usize).copied() else {
+            return false;
+        };
+        let arms = self.enumerated_union_arms_or_self(declared);
+        if arms.len() < 2 {
+            return false;
+        }
+        let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match self.project_segments_navigate(arm, member) {
+                Some(node) => projected.push(node),
+                None => return false,
+            }
+        }
+        projected.windows(2).any(|pair| pair[0] != pair[1])
     }
 
     /// Bake a narrow verdict into a state SNAPSHOT's reaching-definition
@@ -9694,13 +11192,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return;
         }
         // A whole-binding fact rides the reaching-TYPE product, keeping
-        // the binding's own literal-widening provenance: a narrow
-        // replaces the value, never the freshness the value carries.
+        // the binding's own literal- and nullish-widening provenance: a
+        // narrow replaces the value, never the freshness the value carries.
         let rebind = |products: &mut FlowProductStore, target: &FlowProductSubject| {
             let widening = products.widening(target).cloned();
+            let widening_nullish = products
+                .reaching_type(target)
+                .is_some_and(ReachingTypeProduct::widening_nullish);
             products.set_reaching_type(
                 target,
-                ReachingTypeProduct::of(node).with_widening(widening),
+                ReachingTypeProduct::of(node)
+                    .with_widening(widening)
+                    .with_widening_nullish(widening_nullish),
             );
         };
         let target = match &subject.root {
@@ -10216,9 +11719,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if !changed && survivors.len() == arms.len() {
                 return GuardNarrowing::Unchanged;
             }
-            let node = self
-                .dispatch
-                .intern_normalized_union_or_intersection(&survivors, true);
+            let node = self.union(&survivors);
             return GuardNarrowing::Narrowed(subject.clone(), node);
         }
         if remainder.is_empty() {
@@ -10247,8 +11748,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let subject_node = if remainder.len() == arms.len() {
             current
         } else {
-            self.dispatch
-                .intern_normalized_union_or_intersection(&remainder, true)
+            self.union(&remainder)
         };
         if every_arm_into_instance {
             // The remaining subject is assignable to the instance type:
@@ -10440,9 +11940,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             } else if survivors.len() == arms.len() {
                 GuardNarrowing::Unchanged
             } else {
-                let node = self
-                    .dispatch
-                    .intern_normalized_union_or_intersection(&survivors, true);
+                let node = self.union(&survivors);
                 GuardNarrowing::Narrowed(subject.clone(), node)
             }
         } else if !negated {
@@ -10605,9 +12103,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         crate::semantic_query::SurfaceKeyProjection::AbsentProven => {}
                     }
                 }
-                _ => {
-                    any_unknown = true;
-                }
+                // Anything else may still DENOTE a surface it has not been
+                // reduced to: a deferred mapped shell, a utility or alias
+                // application, a declaration reference. `Partial<{ a: 1 }>`
+                // declares `a` optional, but only in the mapped surface it
+                // evaluates to. Reduce it through the ONE structural-fact
+                // demand — bounded, cycle detected, fail-closed — and
+                // examine what it denotes. Without this a synthesized
+                // optional member is unproven, the read never gains its
+                // absent-key `undefined`, and one shape answers differently
+                // by origin: an authored `{ a?: 1 }` reads `1 | undefined`
+                // and `Partial<{ a: 1 }>` read `1`. A node the demand cannot
+                // reduce comes back as itself, and a `Partial` demand
+                // answers nothing, so both stay unknown and the fold stays
+                // proof-gated.
+                _ => match self
+                    .dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        concrete,
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    )
+                    .into_complete_node()
+                {
+                    Some(resolved) if resolved != concrete && !seen.contains(&resolved) => {
+                        pending.push(resolved);
+                    }
+                    _ => any_unknown = true,
+                },
             }
         }
         if any_required {
@@ -10671,9 +12195,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if survivors.len() == arms.len() {
                 return (None, Consumption::Decided);
             }
-            let node = self
-                .dispatch
-                .intern_normalized_union_or_intersection(&survivors, true);
+            let node = self.union(&survivors);
             return (Some(node), Consumption::Decided);
         }
         let reverse = self.assignable(candidate, current);
@@ -10912,6 +12434,66 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Whether `expr` reads an auto-typed local whose value is the
+    /// widening nullable type of its bare `null` / `undefined`
+    /// initializer or writes — which a return, a yield or a value position
+    /// widens to `any` under `strictNullChecks` off. Always false under the
+    /// strict algebra.
+    ///
+    /// The fact is read off the reaching-type product, so it follows the
+    /// PATHS reaching the read: where a widening path and a path holding a
+    /// declared nullable (or the initializer-less `undefined`) meet, the
+    /// value is the non-widening one, as the checker's union keeps it.
+    fn reads_widening_nullish_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
+        if self.nullability.is_strict() {
+            return false;
+        }
+        let crate::flow_slice_content::SliceExpr::Local {
+            binding,
+            captured: false,
+            ..
+        } = expr
+        else {
+            return false;
+        };
+        self.products
+            .reaching_type(binding)
+            .is_some_and(ReachingTypeProduct::widening_nullish)
+    }
+
+    /// Whether the value `expr` evaluates to is the widening nullable
+    /// type under `strictNullChecks` off: a bare `null` / `undefined` /
+    /// `void` (the lowering's freshness mirror says so), a read of an
+    /// auto-typed local still holding one, or a conditional whose every
+    /// arm is one of those. Always false under the strict algebra.
+    fn widening_nullish_value(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> bool {
+        use crate::flow_slice_content::{SliceExpr, SliceFreshness};
+        if self.nullability.is_strict() {
+            return false;
+        }
+        match (expr, freshness) {
+            (_, SliceFreshness::WideningNullish) => true,
+            (SliceExpr::Union { arms, .. }, SliceFreshness::PerArm(facts))
+                if arms.len() == facts.len() =>
+            {
+                arms.iter()
+                    .zip(facts.iter())
+                    .all(|(arm, fact)| self.widening_nullish_value(arm, fact))
+            }
+            (SliceExpr::Union { arms, .. }, SliceFreshness::Pinned) => {
+                !arms.is_empty()
+                    && arms
+                        .iter()
+                        .all(|arm| self.widening_nullish_value(arm, &SliceFreshness::Pinned))
+            }
+            _ => self.reads_widening_nullish_local(expr),
+        }
+    }
+
     /// Whether `expr` is a read of a WIDENING-literal local (`const b =
     /// 1` — unannotated, no const assertion). `as const` / annotated
     /// literals, parameters, and non-local reads are never widening.
@@ -10959,19 +12541,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
+        // `strictNullChecks` off: a read of an auto-typed local still
+        // holding its widening nullable value widens to `any` at a value
+        // position, exactly as the bare `null` / `undefined` it came from.
+        if self.reads_widening_nullish_local(expr) && is_nullable_node(self.dispatch.graph(), node)
+        {
+            return self
+                .dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        }
         if let Some(call) = self.fresh_call_return_for(expr, node) {
             if call.values.contains(&node) {
-                return widen_fresh_read_node(self.dispatch, node);
+                return widen_fresh_read_node(self.dispatch, node, self.nullability);
             }
-            return widen_values_within(self.dispatch, node, &call.values);
+            return widen_values_within(self.dispatch, node, &call.values, self.nullability);
         }
         if let crate::flow_slice_content::SliceExpr::Local { binding, .. } = expr {
             match self.membership_of(binding) {
                 Some(WideningMembership::All) => {
-                    return widen_fresh_read_node(self.dispatch, node);
+                    return widen_fresh_read_node(self.dispatch, node, self.nullability);
                 }
                 Some(WideningMembership::Partial(values)) => {
-                    return widen_values_within(self.dispatch, node, &values);
+                    return widen_values_within(self.dispatch, node, &values, self.nullability);
                 }
                 None => {}
             }
@@ -11134,7 +12726,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             || self
                                                 .fresh_call_return_for(expr, node)
                                                 .is_some_and(|call| call.values.contains(&node));
-                                        self.yield_contributions.push((node, fresh));
+                                        self.yield_contributions.push(YieldContribution {
+                                            node,
+                                            unwidened: self.literal_view(expr, node),
+                                            fresh,
+                                            widening_nullish: self
+                                                .widening_nullish_value(expr, freshness),
+                                        });
                                     }
                                     None => {
                                         self.record_degradation(
@@ -11144,14 +12742,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 }
                             }
                             None => {
-                                // A bare `yield;` yields `undefined`.
+                                // A bare `yield;` yields the widening
+                                // `undefined` a bare `undefined` would.
                                 let graph = self.dispatch.graph();
-                                self.yield_contributions.push((
-                                    graph.intern_node(SemanticNodeData::Primitive(
+                                self.yield_contributions.push(YieldContribution {
+                                    node: graph.intern_node(SemanticNodeData::Primitive(
                                         PrimitiveKind::Undefined,
                                     )),
-                                    false,
-                                ));
+                                    unwidened: None,
+                                    fresh: false,
+                                    widening_nullish: true,
+                                });
                             }
                         }
                     }
@@ -11159,6 +12760,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::flow_slice_content::SliceStatement::Return {
                     argument,
                     freshness,
+                    predicate_test,
                 } => {
                     path_alive = false;
                     self.prescan_statement_value_writes(argument.as_ref());
@@ -11168,8 +12770,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         match self.eval_member_projected_return(argument.as_ref()) {
                             Ok(Some(node)) => contributors.push(FlowContribution {
                                 node,
+                                unwidened: None,
                                 fresh_literal: false,
                                 fresh_values: Vec::new(),
+                                widening_nullish: false,
                             }),
                             Ok(None) => {}
                             Err(failure) => {
@@ -11223,9 +12827,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.collect_evolving_parts(expr, freshness, &mut parts);
                                     let nodes: Vec<SemanticNodeId> =
                                         parts.iter().map(|part| part.node).collect();
-                                    let node = self
-                                        .dispatch
-                                        .intern_normalized_union_or_intersection(&nodes, true);
+                                    let node = self.union(&nodes);
                                     // Pinned wins per literal VALUE: a
                                     // sibling arm's authored pin of the
                                     // same literal cancels the freshness.
@@ -11240,6 +12842,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     }
                                     let fresh_values =
                                         self.uncancelled_fresh_values(&fresh_values, &pinned);
+                                    // Arms that collapse to ONE literal every
+                                    // occurrence of which is fresh are a
+                                    // fresh literal contribution, as a bare
+                                    // literal is: `c ? "a" : "a"` — and, once
+                                    // `strictNullChecks` off erases the
+                                    // nullable arm, `c ? "a" : null` — is the
+                                    // lone fresh `"a"` (TypeScript 7.0.2:
+                                    // `string`).
+                                    fresh_literal |= fresh_values.contains(&node)
+                                        && matches!(
+                                            self.dispatch.graph().node_data(node).as_deref(),
+                                            Some(SemanticNodeData::Literal(_))
+                                        );
                                     Some((node, fresh_values))
                                 }
                                 _ => {
@@ -11266,10 +12881,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 fresh_literal |= self
                                     .fresh_call_return_for(expr, node)
                                     .is_some_and(|call| call.values.contains(&node));
+                                if let Some(test) = predicate_test {
+                                    self.infer_return_predicate(test, node);
+                                }
                                 contributors.push(FlowContribution {
                                     node,
+                                    unwidened: self.literal_view(expr, node),
                                     fresh_literal,
                                     fresh_values,
+                                    widening_nullish: self.widening_nullish_value(expr, freshness),
                                 });
                             }
                         }
@@ -11523,11 +13143,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             // falls through nowhere.
                                             dead_dispatch = true;
                                         } else if remainder.len() < total {
-                                            let node = self
-                                                .dispatch
-                                                .intern_normalized_union_or_intersection(
-                                                    &remainder, true,
-                                                );
+                                            let node = self.union(&remainder);
                                             // The remainder's arms are the
                                             // PARENT reference's, so the
                                             // fact lands there — the root
@@ -12133,7 +13749,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     init,
                     declared,
                     freshness,
-                    ..
+                    auto_typed_form,
                 } => {
                     // A lexical declaration shadows any outer same-named
                     // binding for the extent of its block scope: record
@@ -12263,6 +13879,92 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                     self.set_declared_local(&FlowProductSubject::Local(*binding), *kind, None);
+                    let subject = FlowProductSubject::Local(*binding);
+                    let canonical_subject = self.canonical_runtime_subject(&subject);
+                    let widening_nullish_init = init
+                        .as_ref()
+                        .is_some_and(|init| self.widening_nullish_value(init, freshness));
+                    let mutable = *kind != crate::flow_slice_content::SliceBindingKind::Const;
+                    // The checker's AUTO-TYPED variable (TypeScript 7.0.2,
+                    // `noImplicitAny` on): an unannotated `let` / `var` with
+                    // no initializer or a bare `null` / `undefined` one. Its
+                    // type follows its assignments: it holds `undefined` or
+                    // its initializer's value until a write retypes it.
+                    let auto_typed = mutable && *auto_typed_form && self.no_implicit_any;
+                    if auto_typed {
+                        self.auto_typed_locals.insert(canonical_subject);
+                    } else {
+                        self.auto_typed_locals.remove(&canonical_subject);
+                    }
+                    let any = self
+                        .dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                    // `strictNullChecks` off: a `const` initialised to a bare
+                    // `null` / `undefined` / `void` value (or to a read of an
+                    // auto-typed local holding one) is DECLARED as that
+                    // value's widened type, `any` (`const y = null; return y`
+                    // is `any`).
+                    if !mutable && widening_nullish_init {
+                        self.bind_local(&subject, *kind, any, None, false);
+                        continue;
+                    }
+                    // Every other `let` / `var` with no initializer or an
+                    // initializer that is only nullable is DECLARED as its
+                    // initializer's widened type: `any` with no initializer
+                    // (`noImplicitAny` off), and the initializer's own
+                    // nullable type — `any` with `strictNullChecks` off —
+                    // otherwise (`let x = null` with `noImplicitAny` off,
+                    // `let x = void 0`, `let x = c ? null : undefined`).
+                    // A write never retypes it past that declared type:
+                    // `let x = null; if (c) x = "s"; return x` is `null`,
+                    // and `any` with both options off.
+                    if mutable
+                        && !auto_typed
+                        && (init.is_none() || freshness.all_widening_nullish())
+                    {
+                        let declared = match init {
+                            Some(init) if self.nullability.is_strict() => {
+                                self.prescan_statement_value_writes(Some(init));
+                                let holds_before = self.holds.len();
+                                let outcome = self.eval_expr(init);
+                                self.holds.truncate(holds_before);
+                                match outcome {
+                                    Positional::Value(node) => Some(node),
+                                    Positional::Hold => None,
+                                    Positional::Unmodeled => Some(self.unmodeled_position()),
+                                }
+                            }
+                            _ => Some(any),
+                        };
+                        if let Some(declared) = declared {
+                            self.set_declared_local(&subject, *kind, Some(declared));
+                            let redeclares_reaching_var = init.is_none()
+                                && *kind == crate::flow_slice_content::SliceBindingKind::Var
+                                && self.local_value(&subject).is_some();
+                            if !redeclares_reaching_var {
+                                self.bind_local(&subject, *kind, declared, None, false);
+                            }
+                        }
+                        continue;
+                    }
+                    // An auto-typed variable with no initializer holds the
+                    // (non-widening) `undefined` until its first write, so a
+                    // path that never writes it joins as `undefined`: `let
+                    // x; if (c) x = "s"; return x` is `string | undefined`.
+                    if auto_typed && init.is_none() {
+                        let redeclares_reaching_var = *kind
+                            == crate::flow_slice_content::SliceBindingKind::Var
+                            && self.local_value(&subject).is_some();
+                        if !redeclares_reaching_var {
+                            let undefined = self
+                                .dispatch
+                                .graph()
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                            self.bind_local(&subject, *kind, undefined, None, false);
+                        }
+                        continue;
+                    }
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
                     // the whole declaration, so nothing here can observe
@@ -12284,6 +13986,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         {
                             let mut parts: Vec<EvolvingPart> = Vec::new();
                             self.collect_evolving_parts(init, freshness, &mut parts);
+                            // Under `strictNullChecks` off a nullable arm
+                            // beside another arm is erased from the
+                            // initializer's union, so it neither pins nor
+                            // blocks the surviving arms' freshness
+                            // (`const y = c ? null : 1` is the fresh `1`).
+                            if !self.nullability.is_strict() {
+                                let graph = self.dispatch.graph();
+                                if parts.iter().any(|part| !is_nullable_node(graph, part.node)) {
+                                    parts.retain(|part| !is_nullable_node(graph, part.node));
+                                }
+                            }
                             let pinned = self.pinned_literal_blockers(&parts);
                             let mut merged: Vec<EvolvingPart> = Vec::new();
                             for part in parts {
@@ -12300,9 +14013,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                             let nodes: Vec<SemanticNodeId> =
                                 merged.iter().map(|part| part.node).collect();
-                            let value = self
-                                .dispatch
-                                .intern_normalized_union_or_intersection(&nodes, true);
+                            let value = self.union(&nodes);
                             let all_fresh = merged.iter().all(|part| part.fresh);
                             let mut fresh_values: Vec<SemanticNodeId> = Vec::new();
                             for part in &merged {
@@ -12359,20 +14070,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     crate::flow_slice_content::SliceBindingKind::Let
                                     | crate::flow_slice_content::SliceBindingKind::Var => {
                                         let node = match &membership {
-                                            Some(WideningMembership::All) => {
-                                                widen_fresh_read_node(self.dispatch, node)
-                                            }
+                                            Some(WideningMembership::All) => widen_fresh_read_node(
+                                                self.dispatch,
+                                                node,
+                                                self.nullability,
+                                            ),
                                             Some(WideningMembership::Partial(values)) => {
-                                                widen_values_within(self.dispatch, node, values)
+                                                widen_values_within(
+                                                    self.dispatch,
+                                                    node,
+                                                    values,
+                                                    self.nullability,
+                                                )
                                             }
                                             None => node,
                                         };
-                                        self.bind_local(
+                                        // An auto-typed variable's bare
+                                        // `null` / `undefined` initializer
+                                        // is the checker's widening
+                                        // nullable value.
+                                        self.bind_local_value(
                                             &FlowProductSubject::Local(*binding),
                                             *kind,
                                             node,
                                             None,
                                             false,
+                                            auto_typed && widening_nullish_init,
                                         );
                                     }
                                 }
@@ -12424,11 +14147,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // takes the freshness-directed widening.
                     self.prescan_statement_value_writes(Some(value));
                     let holds_before = self.holds.len();
+                    let widening_nullish = self.widening_nullish_value(value, freshness);
                     let outcome = self.eval_write_rhs(target, value, freshness);
                     match outcome {
                         Positional::Value(node) => {
                             self.holds.truncate(holds_before);
-                            self.apply_write(target, node, false, *definition);
+                            self.apply_write(target, node, false, *definition, widening_nullish);
                         }
                         Positional::Hold => {
                             self.holds.truncate(holds_before);
@@ -12437,7 +14161,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             self.holds.truncate(holds_before);
                             let marker =
                                 super::flow_return_callee::unmodeled_position_marker(self.dispatch);
-                            self.apply_write(target, marker, true, *definition);
+                            self.apply_write(target, marker, true, *definition, false);
                         }
                     }
                 }
@@ -12591,6 +14315,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         function: &verter_semantic::analysis::function_program::FunctionProgramKey,
         context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         has_declared_return: bool,
+        outer_env: &FlowBinderEnv,
     ) -> SemanticNodeId {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -12650,6 +14375,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .map(|(_, selection)| selection.clone()),
                     &bound,
                     Some(Arc::clone(context)),
+                    self.nullability,
                 )?;
             Some((
                 content,
@@ -12674,6 +14400,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &content.type_parameters,
             context,
             content.declared_return.as_ref(),
+            content.declared_predicate.as_ref(),
             &content.body,
             content.can_fall_through,
             content.empty_completion,
@@ -12683,6 +14410,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             planned.as_deref(),
             anchor,
             &key,
+            outer_env,
         )
     }
 
@@ -12767,6 +14495,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
         declared_return: Option<&crate::flow_slice_content::GatedType>,
+        declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: NormalCompletion,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
@@ -12776,18 +14505,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         planned: Option<&crate::cache_runtime::flow_slice_node::PlannedFlowSlice>,
         anchor: u32,
         key: &FlowReturnKey,
+        outer_env: &FlowBinderEnv,
     ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
         // for the parameter / return lowering (a `<T>(x: T) => x` keeps
-        // `<T>`), COMPOSED over the enclosing frame's environment: the
-        // nested signature sits inside that frame, so every binder in
-        // scope there is in scope here too.
+        // `<T>`), COMPOSED over the environment it sits in — the enclosing
+        // frame's, or a class expression's over it for a class member: the
+        // nested signature sits inside that scope, so every binder in scope
+        // there is in scope here too.
         let binder_env = self.dispatch.flow_binder_env(
             self.canonical,
             self.owner,
             type_parameters,
-            Some(self.binder_env),
+            Some(outer_env),
         );
         // The SAME signature gate the root evaluation takes. A nested
         // signature sits inside the enclosing frame's body, so its
@@ -12836,6 +14567,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     optional: param.optional,
                     rest: param.rest,
                     span: None,
+                    declared_literal: crate::semantic_query::declares_literal_type(param.ty.ty()),
                 });
                 continue;
             }
@@ -12850,6 +14582,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 &mut substitutions,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             );
+            let node = self.dispatch.erase_nullable_members(node, self.nullability);
             params.push(node);
             signature_params.push(crate::semantic_query::FunctionParam {
                 name: param.name.clone(),
@@ -12857,6 +14590,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 optional: param.optional,
                 rest: param.rest,
                 span: None,
+                declared_literal: crate::semantic_query::declares_literal_type(param.ty.ty()),
             });
         }
         // A DECLARED return annotation wins over the body join, full stop:
@@ -12887,6 +14621,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         crate::semantic_query::ProjectionReductionContext::structural_transit(),
                     )
                 };
+            // The predicate target takes the same frame gate and binder
+            // environment as the return it stands beside.
+            let predicate = declared_predicate.and_then(|declared| {
+                let target = declared.target().map(|target| {
+                    if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, target) {
+                        self.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                        );
+                        self.unmodeled_position()
+                    } else {
+                        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                        self.dispatch.shallow_lower_type_expr_with_context(
+                            target.ty(),
+                            &binder_env.env,
+                            &binder_env.scope,
+                            &binder_env.name_resolution,
+                            binder_env.scope_payload.as_ref(),
+                            &binder_env.shadowing,
+                            &mut substitutions,
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        )
+                    }
+                });
+                crate::semantic_query::SignaturePredicate::resolve(
+                    declared.predicate(),
+                    &signature_params,
+                    target,
+                )
+            });
             return graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params: Arc::from(signature_params.into_boxed_slice()),
@@ -12899,6 +14662,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
                     return_type,
                 ),
+                predicate,
             });
         }
         let Some(planned) = planned else {
@@ -13108,12 +14872,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let nested_degradation;
         let nested_observations;
         let nested_yield_contributions;
+        let nested_inferred_predicate;
         let (contributors, nested_body_falls_through) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
                 self_slot: None,
                 canonical: self.canonical,
                 owner: self.owner,
+                nullability: self.nullability,
+                no_implicit_any: self.no_implicit_any,
                 params: &params,
                 param_names: nested_params,
                 binder_env: &binder_env,
@@ -13135,6 +14902,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 yield_contributions: Vec::new(),
                 degradation: None,
                 pending_statement_gap: None,
+                auto_typed_locals: rustc_hash::FxHashSet::default(),
+                unwidened_views: rustc_hash::FxHashMap::default(),
                 conditional_arm_nesting: 0,
                 call_fresh_literal_returns: Vec::new(),
                 break_exits: Vec::new(),
@@ -13147,11 +14916,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
                 heritage_self_roots: Vec::new(),
+                inferred_predicate: None,
+                declared_reads: false,
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
             nested_evaluator.promote_pending_statement_gap();
             nested_yield_contributions = std::mem::take(&mut nested_evaluator.yield_contributions);
+            nested_inferred_predicate = nested_evaluator.inferred_predicate;
             #[cfg(test)]
             if self
                 .dispatch
@@ -13265,6 +15037,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A nested function value's body is its own join; its holds ride
         // the OUTER frame's component, so no fixed point closes here and
         // the freshness bit has no later consumer.
+        let mut predicate = None;
         let return_type = match contributors.and_then(|contributors| {
             self.dispatch.join_flow_return_contributors(
                 contributors,
@@ -13277,20 +15050,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 &nested_holds,
                 nested_degradation,
                 empty_completion,
+                self.nullability,
             )
         }) {
             // The nested signature's return IS the function-kind-wrapped
             // body join (an async arrow's type is `() => Promise<T>`), so
             // the wrap attaches and MATERIALIZES here — the nested body has
             // no equation fixed point of its own ("no fixed point closes
-            // here"), and the signature consumes the node directly.
+            // here"), and the signature consumes the node directly. A
+            // predicate inferred from the body rides beside that return.
             Ok((result, _fresh_seed)) => {
+                let result = self
+                    .dispatch
+                    .attach_inferred_predicate(result, nested_inferred_predicate);
+                predicate = result.inferred_predicate();
                 let wrapped = self.dispatch.materialize_flow_return_wrap(
                     self.dispatch.attach_function_kind_wrap(
                         result,
                         skeleton.kind,
                         &nested_yield_contributions,
                         &binder_env,
+                        self.nullability,
                     ),
                 );
                 wrapped.return_type()
@@ -13309,6 +15089,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // return carrier is the interned node itself.
             occurrence: None,
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+            predicate,
         })
     }
 
@@ -13463,7 +15244,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// [`Positional`] — so this function cannot report a FRAME failure at
     /// all. Every condition it meets is a fact about the POSITION it is
     /// standing on, and the type says so.
+    ///
+    /// Every value leaves under the frame's null algebra: with
+    /// `strictNullChecks` off, no expression's type carries `null` /
+    /// `undefined` beside another member, so a DECLARED type read at this
+    /// position — a member read (`o.q` over `q: string | null`), a call's
+    /// declared return, a module-level declaration — enters the flow erased
+    /// ([`ProjectSemanticDispatch::erase_nullable_members`]).
     fn eval_expr(
+        &mut self,
+        expr: &crate::flow_slice_content::SliceExpr,
+    ) -> Positional<SemanticNodeId> {
+        match self.eval_expr_unerased(expr) {
+            Positional::Value(node) => {
+                Positional::Value(self.dispatch.erase_nullable_members(node, self.nullability))
+            }
+            other => other,
+        }
+    }
+
+    /// [`Self::eval_expr`] before the frame's null algebra is applied to
+    /// the value.
+    fn eval_expr_unerased(
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
     ) -> Positional<SemanticNodeId> {
@@ -13489,28 +15291,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // evaluates unchanged: its own typed miss carrier is the
                 // honest answer, exactly as for any other unresolved
                 // reference.
-                if shadowed
-                    .iter()
-                    .any(|name| self.owner_scope_answers_name(name))
-                {
-                    return Positional::Unmodeled;
-                }
-                // The owner scope answers NOTHING — but the FRAME may.
+                //
                 // A member path rooted at one of the frame's own bindings
                 // (`x.a.b` over parameter `x`, `node.props.value` over a
-                // reaching local) resolves its root through the frame's
-                // substitution and projects the tail segments through the
-                // one shared path projection, exactly as the owner-scope
-                // lowering projects a free root's tail. Only when the
-                // frame carries no such root does the leaf evaluate
-                // unchanged: its own typed miss carrier is the honest
-                // answer, exactly as for any other unresolved reference.
+                // reaching local) never reads the owner scope at all: its
+                // root is the ONLY name the answer references, it resolves
+                // through the frame's substitution, and the tail projects
+                // through the one shared path projection. So whatever the
+                // owner scope answers for the same name, the frame's read
+                // is the answer.
                 if let crate::flow_slice_content::SliceExpr::Type(leaf) = inner.as_ref() {
                     if let Some(node) =
                         self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
                     {
                         return node;
                     }
+                }
+                if shadowed
+                    .iter()
+                    .any(|name| self.owner_scope_answers_name(name))
+                {
+                    return Positional::Unmodeled;
                 }
                 self.eval_expr(inner)
             }
@@ -13519,6 +15320,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
             crate::flow_slice_content::SliceExpr::Param { ordinal, binding } => {
+                if self.declared_reads {
+                    return match self.params.get(*ordinal as usize).copied() {
+                        Some(node) => Positional::Value(node),
+                        None => Positional::Unmodeled,
+                    };
+                }
                 // A guard narrow (or an applied write) substitutes the
                 // parameter's CURRENT value positionally.
                 let subject = crate::flow_slice_content::SliceNarrowSubject {
@@ -13627,15 +15434,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         member
                     };
                 }
-                if adds_undefined {
-                    current = self.dispatch.intern_normalized_union_or_intersection(
-                        &[
-                            current,
-                            graph
-                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
-                        ],
-                        true,
-                    );
+                // The short-circuit's `undefined` is a strict-null fact: with
+                // `strictNullChecks` off the chain reads the member type.
+                if adds_undefined && self.nullability.is_strict() {
+                    current = self.union(&[
+                        current,
+                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                    ]);
                 }
                 Positional::Value(current)
             }
@@ -13651,7 +15456,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // reference) stays the undegraded implicit-`any`, EXCEPT
                 // when the binding redeclares a parameter — then the
                 // parameter is still the reaching value.
-                if !captured {
+                // A declared read answers an annotated binding's annotation
+                // and an unannotated one's reaching value, never a narrow.
+                if self.declared_reads {
+                    if let Some(node) = self.declared_local_read(binding) {
+                        return Positional::Value(node);
+                    }
+                } else if !captured {
                     let subject = crate::flow_slice_content::SliceNarrowSubject {
                         root: crate::flow_slice_content::SliceNarrowRoot::Local {
                             name: Arc::clone(name),
@@ -13686,6 +15497,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::Object { entries } => {
                 self.eval_object_literal(entries, false)
             }
+            crate::flow_slice_content::SliceExpr::Array {
+                elements,
+                const_asserted,
+            } => self.eval_array_literal(elements, *const_asserted),
             crate::flow_slice_content::SliceExpr::Assignment {
                 target,
                 value,
@@ -13705,6 +15520,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // side never evaluates twice. The expression's own value is
                 // the written (assignment-reduced) node.
                 let holds_before = self.holds.len();
+                let widening_nullish = self.widening_nullish_value(value, freshness);
                 let memo = self.expression_write_nodes.remove(span);
                 let outcome = match memo {
                     Some(outcome) => outcome,
@@ -13713,7 +15529,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 match outcome {
                     Positional::Value(node) => {
                         self.holds.truncate(holds_before);
-                        Positional::Value(self.apply_write(target, node, false, *definition))
+                        Positional::Value(self.apply_write(
+                            target,
+                            node,
+                            false,
+                            *definition,
+                            widening_nullish,
+                        ))
                     }
                     Positional::Hold => {
                         self.holds.truncate(holds_before);
@@ -13723,7 +15545,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         self.holds.truncate(holds_before);
                         let marker =
                             super::flow_return_callee::unmodeled_position_marker(self.dispatch);
-                        Positional::Value(self.apply_write(target, marker, true, *definition))
+                        Positional::Value(self.apply_write(
+                            target,
+                            marker,
+                            true,
+                            *definition,
+                            false,
+                        ))
                     }
                 }
             }
@@ -13736,12 +15564,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if let Some(gap) = gap {
                     self.record_degradation(FlowReturnDegradation::FlowGap(*gap));
                 }
+                let outer_env = self.binder_env;
                 Positional::Value(self.eval_nested_function(
                     function,
                     context,
                     *has_declared_return,
+                    outer_env,
                 ))
             }
+            crate::flow_slice_content::SliceExpr::Class(class) => self.eval_class_value(class),
 
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own
@@ -13821,10 +15652,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.restore_narrowings(mark);
                     nodes.push(self.settle_composite_part(outcome, holds_before));
                 }
-                Positional::Value(
-                    self.dispatch
-                        .intern_normalized_union_or_intersection(&nodes, true),
-                )
+                Positional::Value(self.union(&nodes))
             }
             // A call the content half could not route through the call
             // carrier: the only answer available was the shallow pass's
@@ -13876,10 +15704,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else if kept.is_empty() {
             NullishStrip::AllNullish
         } else {
-            NullishStrip::Stripped(
-                self.dispatch
-                    .intern_normalized_union_or_intersection(&kept, true),
-            )
+            NullishStrip::Stripped(self.union(&kept))
         }
     }
 
@@ -14004,11 +15829,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             })
     }
 
-    /// The call-executor route of one authored call: overload selection
-    /// and argument-driven clause inference are the executor's
-    /// applicability machinery, so this rail re-reads the authored call
-    /// from the retained snapshot (argument expressions and explicit type
-    /// arguments are parse facts, never re-derived), mints the
+    /// The call-executor route of one authored call or `new` expression:
+    /// overload selection and argument-driven clause inference are the
+    /// executor's applicability machinery, so this rail re-reads the
+    /// authored call from the retained snapshot (argument expressions,
+    /// explicit type arguments and the call/construct form are parse
+    /// facts, never re-derived), mints the
     /// content-free key, and folds the typed outcome back into the
     /// frame's vocabulary — a completed, already-instantiated return
     /// through the callee gate's named no-transfer constructor, an
@@ -14101,7 +15927,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 offset: call.point,
             },
             callee,
-            kind: crate::semantic_query::CallKind::Call,
+            kind: match call.kind {
+                verter_type_expr::IndexedValueCallKind::Call => {
+                    crate::semantic_query::CallKind::Call
+                }
+                verter_type_expr::IndexedValueCallKind::Construct => {
+                    crate::semantic_query::CallKind::Construct
+                }
+            },
             receiver,
             args: Arc::from(args.into_boxed_slice()),
             explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
@@ -14751,6 +16584,49 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
                 self.call_return_of_callee_node(callee_node, site)
+            }
+            crate::flow_slice_content::SliceCall::Construct(constructor) => {
+                // `new C(…)` — the checker's `resolveNewExpression`: the
+                // constructor's construct signatures, from the shared
+                // signature list, resolved by the call executor exactly as
+                // a call resolves over its call signatures (overload
+                // choice, argument inference and explicit type arguments
+                // included). There is no lone-signature read to fall back
+                // to, so an undecided executor degrades the position.
+                let constructor = match self.eval_expr(constructor) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                self.eval_call_via_resolve_call(constructor, site)
+                    .unwrap_or_else(|| self.degraded_unrepresentable_callee())
+            }
+            crate::flow_slice_content::SliceCall::TaggedTemplate(tag) => {
+                // `` tag`a${x}b` `` — the checker's
+                // `resolveTaggedTemplateExpression`: a call of the tag whose
+                // first argument is the template strings. It takes the
+                // routes an ordinary call over a resolved callee takes: an
+                // overloaded or inference-bearing tag resolves through the
+                // executor, a lone signature through the one call sink.
+                let tag = match self.eval_expr(tag) {
+                    Positional::Value(node) => node,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
+                };
+                if self.call_group_needs_executor(tag, site) {
+                    let overloaded = matches!(
+                        self.dispatch.shared_signature_buckets(tag),
+                        Ok((call_sigs, construct_sigs))
+                            if call_sigs.len() + construct_sigs.len() > 1
+                    );
+                    if let Some(value) = self.eval_call_via_resolve_call(tag, site) {
+                        return value;
+                    }
+                    if overloaded {
+                        return self.degraded_unrepresentable_callee();
+                    }
+                }
+                self.call_return_of_callee_node(tag, site)
             }
         }
     }

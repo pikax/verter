@@ -165,6 +165,7 @@ fn rootless_signature(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId 
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     })
 }
 

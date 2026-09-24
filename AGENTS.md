@@ -8,6 +8,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 
 - `CLAUDE.md` — canonical high-level reference: architecture principles, critical invariants, build commands, testing rules, agent implementation rules, commit conventions.
 - `.claude/skills/type-resolution/SKILL.md` — type solver, ShallowFileState, ExternalTypeFrontier, canonical cache rules, macro traversal, prepared declarations.
+- `.claude/skills/signature-kernel/SKILL.md` — signature records, epoch-safe storage and retirement, positional matching, call substitution, ordered union/intersection reduction, `VerterStableV1` ordering, observation corpus, determinism matrix.
 - `.claude/skills/type-cache-architecture/SKILL.md` — fact-based cache architecture, 5-way env hash split (R21), `FileArtifactStore`, R1–R31 rules, module augmentation, multi-candidate storage, `parse_stable_hash`.
 - `.claude/skills/component-meta/SKILL.md` — component-meta native/compat boundary, fallthrough/root inheritance, resolver rules, cache-owned hydration.
 - `.claude/skills/compiler-codegen/SKILL.md` — Rust compiler pipeline, template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing, CompileTarget.
@@ -53,6 +54,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 
 - Architecture principles or ownership questions: start with `CLAUDE.md`.
 - Type resolution, solver, cross-file types, macro traversal: `/type-resolution`.
+- Callable signatures, union/intersection reduction, semantic ordering, determinism or the observation corpus: `/signature-kernel`.
 - Cache layer keys, env hash split, fact-based cache rules, `FileArtifactStore`, module augmentation: `/type-cache-architecture`.
 - Component-meta, fallthrough, compat layer: `/component-meta`.
 - Compiler, codegen, template, style, CodeTransform: `/compiler-codegen`.

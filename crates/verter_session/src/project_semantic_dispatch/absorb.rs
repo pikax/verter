@@ -76,7 +76,7 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     /// Intern a bare primitive node.
-    fn primitive_node(&self, kind: PrimitiveKind) -> SemanticNodeId {
+    pub(super) fn primitive_node(&self, kind: PrimitiveKind) -> SemanticNodeId {
         self.graph().intern_node(SemanticNodeData::Primitive(kind))
     }
 
@@ -90,7 +90,7 @@ impl ProjectSemanticDispatch<'_> {
 
     /// `{}` — the empty object surface (`keyof unknown = never` mapped, mapped
     /// over `never`).
-    fn empty_object(&self) -> SemanticNodeId {
+    pub(super) fn empty_object(&self) -> SemanticNodeId {
         self.graph()
             .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view()))
     }
@@ -147,10 +147,10 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     // Canonical semantic union / intersection construction owns the §22
-    // absorption arms inside `canonical_algebra::canonical_union` /
+    // absorption arms inside `canonical_algebra::intern_ordered_union` /
     // `canonical_algebra::intern_ordered_intersection`; the former per-reducer `absorb_union` /
     // `absorb_intersection` entry hooks are deleted. Raw structural carriers
-    // remain intentional: the `NormalizeUnion` / `ReduceIntersection`
+    // remain intentional: the `ReduceUnion` / `ReduceIntersection`
     // query-key nodes, the arity-1 key-domain carrier in `mod.rs`, and the
     // structural rebuilds in `walk.rs` intern their ordered payloads directly.
 
@@ -242,7 +242,7 @@ impl ProjectSemanticDispatch<'_> {
     /// 2. `any extends T ? X : Y` ⇒ `X | Y` — the union of BOTH branches,
     ///    mode-INDEPENDENT (distributive and non-distributive alike). Built
     ///    via [`intern_normalized_union_or_intersection`](Self::intern_normalized_union_or_intersection)
-    ///    (the `NormalizeUnion` intern) so `X | X` folds to `X` with canonical
+    ///    (the `ReduceUnion` intern) so `X | X` folds to `X` with canonical
     ///    dedup/order — NOT a raw `Union`. The relation engine would instead
     ///    pick the TRUE branch for an `any` check, so this row MUST live here.
     ///    SKIPPED when `extends` is an `infer` pattern: the true branch would
@@ -500,6 +500,7 @@ impl ProjectSemanticDispatch<'_> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     stack.extend(params.iter().map(|p| p.ty));
@@ -508,6 +509,7 @@ impl ProjectSemanticDispatch<'_> {
                         stack.extend(tp.constraint);
                         stack.extend(tp.default);
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
@@ -539,6 +541,9 @@ impl ProjectSemanticDispatch<'_> {
                 // raw-fallback / synthetic-binding carriers hold no
                 // infer-bearing child node id.
                 | SemanticNodeData::DeclRef { .. }
+                // A class expression's instance is produced from a class body,
+                // never authored inside a conditional's `extends` clause.
+                | SemanticNodeData::ClassExpressionInstance { .. }
                 | SemanticNodeData::RawFallback { .. }
                 // The sealed callable carrier never carries an `infer`
                 // placeholder: it is composed from an indexed function

@@ -1,7 +1,7 @@
 //! Record-level signature discovery: publishing candidates from neutral
 //! input, signature-equivalence comparison, union common-match then
-//! restricted synthesis, and intersection dedup with constructor/mixin
-//! composition.
+//! restricted synthesis, intersection dedup with constructor/mixin
+//! composition, and a declaration's heritage concatenation.
 //!
 //! Everything here works over V2 records and is independent of the
 //! semantic graph; the graph-facing subject walk lives with the dispatcher
@@ -20,8 +20,8 @@ use crate::semantic_query::{
 use super::lifetime::{SignatureStore, StoreError};
 use super::positional::{PositionalMode, PositionalShape, SlotTypeFacts, TypeAt};
 use super::provenance::{
-    ArmIdentity, ConstituentSequence, MappedConstituent, OriginRelation, OverloadOrder,
-    SignatureProvenance,
+    ArmIdentity, ConstituentSequence, DeclarationGroupId, DeclarationParentId, MappedConstituent,
+    OriginRelation, OverloadOrder, SignatureProvenance,
 };
 use super::read_view::{ReadError, SemanticReadView};
 use super::records::{
@@ -91,10 +91,21 @@ pub trait DiscoveryTypes: SlotTypeFacts {
     fn unknown(&self) -> Option<TypeToken>;
     fn any(&self) -> Option<TypeToken>;
     fn is_any(&self, ty: TypeToken) -> bool;
-    /// The return type a candidate's recipe denotes. This FORCES a body
-    /// recipe; discovery calls it only when comparison semantics need a
-    /// return (exact matching that includes returns).
-    fn forced_return(&self, candidate: &SignatureCandidate) -> Result<TypeToken, IncompleteReason>;
+    /// The result a candidate's recipe denotes: its return type and its
+    /// predicate effect. This FORCES a body recipe; discovery calls it
+    /// only when comparison semantics need a result (exact matching that
+    /// includes results).
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<ForcedResult, IncompleteReason>;
+}
+
+/// A candidate's forced result — see [`DiscoveryTypes::forced_result`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedResult {
+    pub return_type: TypeToken,
+    pub effects: Option<super::records::PredicateEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,7 +136,7 @@ pub struct BinderInput {
 pub enum ResultInput {
     Declared {
         return_type: SemanticNodeId,
-        predicate_or_assertion: Option<SemanticNodeId>,
+        predicate_or_assertion: Option<crate::semantic_query::SignaturePredicate>,
     },
     Body {
         locator: u64,
@@ -269,9 +280,17 @@ pub fn publish_signature(
             predicate_or_assertion,
         } => SignatureResultRecipe::Declared {
             return_type: store.intern_type_token(return_type, None)?,
-            predicate_or_assertion: predicate_or_assertion
-                .map(|node| store.intern_type_token(node, None))
-                .transpose()?,
+            predicate_or_assertion: match predicate_or_assertion {
+                Some(predicate) => Some(super::records::PredicateEffect {
+                    subject: predicate.subject,
+                    asserts: predicate.asserts,
+                    ty: predicate
+                        .ty
+                        .map(|node| store.intern_type_token(node, None))
+                        .transpose()?,
+                }),
+                None => None,
+            },
         },
         ResultInput::Body { locator } => SignatureResultRecipe::Body {
             return_obligation_key: ReturnObligationKey {
@@ -556,12 +575,30 @@ pub fn signatures_identical(
         );
         if !same_body {
             let a = types
-                .forced_return(&source)
+                .forced_result(&source)
                 .map_err(DiscoveryError::Incomplete)?;
             let b = types
-                .forced_return(&target)
+                .forced_result(&target)
                 .map_err(DiscoveryError::Incomplete)?;
-            if !ident(types, a, b, &corr)? {
+            // A predicate replaces the return in the comparison, as the
+            // checker's `compareTypePredicatesIdentical` does: two
+            // predicates of the same kind about the same subject with
+            // identical targets, or none on either side and identical
+            // returns.
+            let identical = match (a.effects, b.effects) {
+                (None, None) => ident(types, a.return_type, b.return_type, &corr)?,
+                (Some(a), Some(b)) => {
+                    a.subject == b.subject
+                        && a.asserts == b.asserts
+                        && match (a.ty, b.ty) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => ident(types, a, b, &corr)?,
+                            _ => false,
+                        }
+                }
+                _ => false,
+            };
+            if !identical {
                 return Ok(false);
             }
         }
@@ -586,8 +623,20 @@ fn find_matching(
     Ok(None)
 }
 
-/// Append `new` signatures to `existing`, skipping any signature-equivalent
+/// Append `new` signatures to `existing`, skipping any signature IDENTICAL
 /// to one already present (the first stays the representative).
+///
+/// Identity here INCLUDES the result: this is the checker's
+/// `appendSignatures`, which compares with `ignoreReturnTypes: false`. Two
+/// signatures that differ only in what they return are different overloads
+/// of the intersection and are both kept — `(() => A) & (() => B)` carries
+/// both, so conditional inference (`ReturnType`, `InstanceType`), which reads
+/// the LAST signature, answers `B`. Comparing parameters alone would collapse
+/// them onto the first and answer `A`. Signatures identical including the
+/// result still collapse.
+///
+/// Union synthesis is the opposite rule and deliberately does not use this:
+/// it matches arms by parameters and unions their results.
 pub fn append_signatures(
     store: &SignatureStore,
     types: &dyn DiscoveryTypes,
@@ -595,15 +644,7 @@ pub fn append_signatures(
     new: &[SignatureCandidate],
 ) -> Res<()> {
     for &sig in new {
-        if find_matching(
-            store,
-            types,
-            existing,
-            sig,
-            MatchOptions::EXACT_IGNORING_RETURNS,
-        )?
-        .is_none()
-        {
+        if find_matching(store, types, existing, sig, MatchOptions::EXACT)?.is_none() {
             existing.push(sig);
         }
     }
@@ -1109,6 +1150,10 @@ fn combine_union_signatures(
     Ok(Some(store.candidate(descriptor, left.provenance)?))
 }
 
+/// Whether a member's construct list is a MIXIN constructor: exactly one
+/// non-generic signature whose only parameter is an `any`-element array
+/// rest (`new (...args: any[]) => X`). A `this` receiver is not a
+/// parameter and does not take part (TypeScript's `isMixinConstructorType`).
 fn is_mixin_constructor(
     view: &SemanticReadView,
     types: &dyn DiscoveryTypes,
@@ -1116,20 +1161,154 @@ fn is_mixin_constructor(
 ) -> Res<bool> {
     let [only] = list else { return Ok(false) };
     let loaded = load(view, *only)?;
-    Ok(loaded.layout.parameters.is_empty()
-        && loaded.receiver.is_none()
+    Ok(loaded.space.binders.is_empty()
+        && loaded.layout.parameters.is_empty()
         && loaded.layout.rest.as_ref().is_some_and(|r| {
             r.kind == RestKind::Array && r.tail.is_empty() && types.is_any(r.slot.ty)
         }))
 }
 
+/// The signatures of one kind an interface or class declaration with
+/// `extends` heritage carries (TypeScript's `resolveObjectTypeMembers`).
+/// `members` are the per-member candidate lists of the declaration's body
+/// in body order — its bases in clause order, its own body LAST — and the
+/// answer is the own body's signatures first, then each base's, in clause
+/// order.
+///
+/// A declaration is not an intersection type, so nothing is dropped and
+/// nothing is composed ([`intersection_signatures`] does both): a
+/// signature identical to one already present stays, a base reached twice
+/// through a diamond contributes twice, and a mixin constructor base keeps
+/// its own construct signature. Call resolution therefore tries the own
+/// signatures first, and conditional inference (`ReturnType`,
+/// `InstanceType`), which reads the LAST signature, reads the last base's.
+#[must_use]
+pub fn heritage_signatures(members: &[Vec<SignatureCandidate>]) -> Vec<SignatureCandidate> {
+    let Some((own, bases)) = members.split_last() else {
+        return Vec::new();
+    };
+    own.iter().chain(bases.iter().flatten()).copied().collect()
+}
+
+/// The signatures of one symbol declared by several declarations —
+/// interface declarations merged into one, a class and an interface of the
+/// same name, a method overloaded across them. `declarations` are the
+/// per-declaration candidate lists in declaration order, and the answer is
+/// their concatenation (TypeScript's `getSignaturesOfSymbol` keeps every
+/// declaration's signatures, identical ones included), each candidate
+/// attributed to ONE declaration group — the merged symbol — and to its own
+/// declaration inside it. Call resolution orders a merged symbol's
+/// candidates by those identities ([`resolution_order`]).
+pub fn merged_declaration_signatures(
+    store: &SignatureStore,
+    declarations: &[Vec<SignatureCandidate>],
+) -> Res<Vec<SignatureCandidate>> {
+    let view = SemanticReadView::pin(store);
+    let Some(first) = declarations.iter().flatten().next() else {
+        return Ok(Vec::new());
+    };
+    // The symbol's group derives from its first signature's own group, so
+    // it is as schedule-independent as that group, and never equal to it.
+    let seed = view.provenance(first.provenance)?.declaration_group;
+    let group = DeclarationGroupId::from_raw(merged_group_of(seed));
+    let mut out = Vec::with_capacity(declarations.iter().map(Vec::len).sum());
+    for (ordinal, list) in declarations.iter().enumerate() {
+        let parent = DeclarationParentId::from_raw(ordinal as u64);
+        for &candidate in list {
+            let base = *view.provenance(candidate.provenance)?;
+            let provenance = store.intern_provenance(
+                SignatureProvenance {
+                    declaration_group: group,
+                    declaration_parent: parent,
+                    effective_overload_order: OverloadOrder {
+                        group,
+                        ordinal: base.overload_ordinal,
+                    },
+                    ..base
+                },
+                None,
+            )?;
+            out.push(store.candidate(candidate.signature, provenance)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The declaration group of a merged symbol whose first signature's group
+/// is `seed` (a fixed mix of it, distinct from it).
+fn merged_group_of(seed: DeclarationGroupId) -> u64 {
+    (seed.as_u64() ^ 0x6D65_7267_6564_5F73).rotate_left(29)
+}
+
+/// The order call resolution tries `candidates` in — TypeScript's
+/// `reorderCandidates`, as a permutation of candidate positions.
+///
+/// Consecutive candidates of one declaration group (one symbol) whose
+/// declaration changes start a new run at the front of that symbol's
+/// candidates, so a later declaration of a merged symbol is tried first
+/// while each declaration keeps its own order; a candidate of another
+/// symbol starts after everything placed so far. A candidate that declares
+/// a parameter of a literal type (`LITERAL_SPECIALIZATION`) is tried
+/// before every non-specialized one, whatever its symbol. The candidate
+/// list itself — the list conditional inference reads the LAST signature
+/// of — keeps declaration order.
+pub fn resolution_order(
+    view: &SemanticReadView,
+    candidates: &[SignatureCandidate],
+) -> Res<Vec<usize>> {
+    let mut order: Vec<usize> = Vec::with_capacity(candidates.len());
+    let mut last_group: Option<DeclarationGroupId> = None;
+    let mut last_parent: Option<DeclarationParentId> = None;
+    let mut cutoff = 0usize;
+    let mut index = 0usize;
+    let mut specialized = 0usize;
+    for (position, candidate) in candidates.iter().enumerate() {
+        let provenance = view.provenance(candidate.provenance)?;
+        let (group, parent) = (provenance.declaration_group, provenance.declaration_parent);
+        if last_group.is_none() || last_group == Some(group) {
+            if last_parent == Some(parent) {
+                index += 1;
+            } else {
+                last_parent = Some(parent);
+                index = cutoff;
+            }
+        } else {
+            cutoff = order.len();
+            index = cutoff;
+            last_parent = Some(parent);
+        }
+        last_group = Some(group);
+        let descriptor = view.descriptor(candidate.signature)?;
+        let template = view.template(descriptor.template)?;
+        let flags = view.shape(template.input_shape)?.signature_semantic_flags;
+        let splice = if flags.contains(SignatureSemanticFlags::LITERAL_SPECIALIZATION) {
+            specialized += 1;
+            cutoff += 1;
+            specialized - 1
+        } else {
+            index
+        };
+        order.insert(splice.min(order.len()), position);
+    }
+    Ok(order)
+}
+
 /// Intersection signatures for one kind. `members` are the per-member
 /// candidate lists in authored order.
 ///
-/// Call signatures concatenate with signature-equivalence dedup. Construct
-/// signatures do the same, except that when any member is a mixin
-/// constructor (`new (...args: any[]) => X`) every other member's construct
-/// signature is composed with the mixin returns (`IntersectionConstruct`).
+/// Call signatures concatenate, dropping only a signature IDENTICAL to one
+/// already present — result included ([`append_signatures`]); signatures
+/// that differ only in their result are distinct overloads and both stay.
+///
+/// Construct signatures follow TypeScript's mixin rule
+/// (`resolveIntersectionTypeMembers`): a member that is a mixin constructor
+/// (`new (...args: any[]) => X`) contributes NO construct signature of its
+/// own — its instance type is mixed into every other member's construct
+/// result instead (`IntersectionConstruct`, the results intersected in
+/// member order). When every constructor member is a mixin, the first one
+/// is not counted as a mixin, so it keeps its signature and the others mix
+/// into it: `typeof CtorB & typeof MixA` constructs `B & A` from `CtorB`'s
+/// parameters, and two mixins construct from the first one's.
 pub fn intersection_signatures(
     store: &SignatureStore,
     types: &dyn DiscoveryTypes,
@@ -1142,11 +1321,18 @@ pub fn intersection_signatures(
         for (i, list) in members.iter().enumerate() {
             mixin_flags[i] = is_mixin_constructor(&view, types, list)?;
         }
+        let constructor_count = members.iter().filter(|list| !list.is_empty()).count();
+        let mixins = mixin_flags.iter().filter(|f| **f).count();
+        if constructor_count > 0 && constructor_count == mixins {
+            if let Some(first) = mixin_flags.iter().position(|f| *f) {
+                mixin_flags[first] = false;
+            }
+        }
     }
     let mixin_count = mixin_flags.iter().filter(|f| **f).count();
     let mut out: Vec<SignatureCandidate> = Vec::new();
     for (index, list) in members.iter().enumerate() {
-        if list.is_empty() {
+        if list.is_empty() || mixin_flags[index] {
             continue;
         }
         let mapped: Vec<SignatureCandidate> = if mixin_count > 0 {

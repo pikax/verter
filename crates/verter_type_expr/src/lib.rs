@@ -1198,6 +1198,13 @@ pub struct FunctionExpr {
     /// at the lowering scope).
     #[serde(skip)]
     pub flow_return: Option<Box<crate::facts::FlowFunctionReturnIdentity>>,
+    /// The signature's type predicate (`x is T`, `asserts x is T`,
+    /// `asserts x`, `this is T`, …), carried BESIDE the return exactly as
+    /// TypeScript's checker models a predicate signature: `return_type` is
+    /// then `boolean` for a type predicate and `void` for an assertion, and
+    /// the predicate rides here. `None` for an ordinary signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<Arc<TypePredicate>>,
 }
 
 impl FunctionExpr {
@@ -1214,6 +1221,7 @@ impl FunctionExpr {
             type_parameters,
             spans: FunctionSpans::default(),
             flow_return: None,
+            predicate: None,
         }
     }
 
@@ -1231,8 +1239,58 @@ impl FunctionExpr {
             type_parameters,
             spans,
             flow_return: None,
+            predicate: None,
         }
     }
+
+    /// This function expression carrying `predicate` beside its return.
+    #[must_use]
+    pub fn with_predicate(mut self, predicate: Option<Arc<TypePredicate>>) -> Self {
+        self.predicate = predicate;
+        self
+    }
+}
+
+/// A signature's type predicate — the checker's `TypePredicate` record.
+///
+/// `x is T` narrows the parameter `x` to `T` where the call returns true;
+/// `asserts x is T` narrows it wherever the call returns; `asserts x`
+/// (no `ty`) narrows it by truthiness; `this is T` / `asserts this is T` /
+/// `asserts this` talk about the receiver instead of a parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypePredicate {
+    /// What the predicate talks about.
+    pub subject: TypePredicateSubject,
+    /// `asserts …` — an assertion signature (its return is `void`) rather
+    /// than a type predicate (its return is `boolean`).
+    pub asserts: bool,
+    /// The asserted / narrowed-to type; `None` only for the targetless
+    /// assertion spellings `asserts x` / `asserts this`.
+    pub ty: Option<Arc<TypeExpr>>,
+}
+
+impl TypePredicate {
+    /// The return type TypeScript gives a signature carrying this
+    /// predicate: `void` for an assertion, `boolean` for a type predicate.
+    #[must_use]
+    pub fn return_type(&self) -> TypeExpr {
+        TypeExpr::Primitive(if self.asserts {
+            PrimitiveName::Void
+        } else {
+            PrimitiveName::Boolean
+        })
+    }
+}
+
+/// The subject of a [`TypePredicate`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TypePredicateSubject {
+    /// The parameter with this authored name (`x is T`).
+    Parameter(Arc<str>),
+    /// The receiver (`this is T`).
+    This,
 }
 
 /// A function parameter.

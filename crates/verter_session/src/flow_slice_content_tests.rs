@@ -22,10 +22,10 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
-    FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry,
-    SliceObjectMember, SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind,
-    SliceUnsupported,
+    FlowSliceSelection, ReturnPredicateTest, SliceBindingKind, SliceCall, SliceCallSite,
+    SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral, SliceNarrowRoot,
+    SliceNarrowSubject, SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement,
+    SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -97,8 +97,13 @@ fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceCon
     let index = memo.function_program_index();
     let entry = entry_of(&index, name);
     let (selection, skeleton) = selection_for(&memo, entry, path);
-    memo.flow_slice_content(entry, selection, &skeleton)
-        .expect("slice content must build for an indexed function")
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        crate::semantic_query::NullabilityPolicy::Strict,
+    )
+    .expect("slice content must build for an indexed function")
 }
 
 fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
@@ -221,6 +226,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
                 None,
                 &changed_bound,
                 Some(Arc::clone(context)),
+                crate::semantic_query::NullabilityPolicy::Strict
             )
             .is_none(),
         "signature-only lowering must reject an older linked lexical gate too"
@@ -293,7 +299,14 @@ fn runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups() {
         let entry = entry_of(&index, "f");
         let (selection, bound) = selection_for(&memo, entry, &[]);
         memo.capture_lookup_work.store(0, Ordering::Relaxed);
-        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        let content = memo
+            .flow_slice_content(
+                entry,
+                selection,
+                &bound,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            )
+            .unwrap();
         assert!(matches!(
             content.body.statements.last(),
             Some(SliceStatement::Return {
@@ -550,15 +563,22 @@ fn optional_chain_with_nested_syntactic_effect_lowers_to_gap() {
         "function* makeProps(a: any) { return a?.b(yield 1) }",
     ] {
         let node = content_for(source, "makeProps");
+        // A nested `yield` also puts the body's unmodelled-yield gap ahead
+        // of the return; the return's own argument is what this pins.
+        let returned = node
+            .body
+            .statements
+            .iter()
+            .find(|statement| matches!(statement, SliceStatement::Return { .. }));
         assert!(
             matches!(
-                &node.body.statements[0],
-                SliceStatement::Return {
+                returned,
+                Some(SliceStatement::Return {
                     argument: Some(SliceExpr::Gap(
                         crate::semantic_query::FlowGap::UnmodeledExpression
                     )),
                     ..
-                }
+                })
             ),
             "discarding a nested assignment/update/delete/await/yield must fail closed: {source}"
         );
@@ -606,6 +626,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
                 freshness: SliceFreshness::Fresh,
+                predicate_test: None,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(_)))
         ),
         "a return argument PRESERVES its fresh literal and flags it: tsc \
@@ -624,6 +645,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
             SliceStatement::Return {
                 argument: Some(SliceExpr::Type(leaf)),
                 freshness: SliceFreshness::Fresh,
+                predicate_test: None,
             } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::String(_)))
         ),
         "the else arm likewise preserves its fresh literal"
@@ -676,6 +698,7 @@ fn bare_return_carries_no_argument() {
         &[SliceStatement::Return {
             argument: None,
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
     );
 }
@@ -1376,6 +1399,7 @@ fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> 
         Some(selection),
         &skeleton,
         Some(Arc::clone(context)),
+        crate::semantic_query::NullabilityPolicy::Strict,
     )
     .expect("selected child content")
 }
@@ -1913,9 +1937,9 @@ fn class_heritage_sequence_calls_are_never_blanket_certified() {
 /// control position: the checker binds a predicate call in a ternary test
 /// or a `&&` / `||` left operand into the branch narrowing even when the
 /// WHOLE form folds into one shallow-pass leaf answer (`[isString(x) ? x
-/// : false]` is `(string | boolean)[]` in the checker). Blanket-certifying
-/// that call decided-above dropped the narrowing while the unnarrowed
-/// superset completed clean. A call inside a leaf takes the SAME
+/// : false] as unknown`: a non-const `as` carrier lowers as one leaf).
+/// Blanket-certifying that call decided-above dropped the narrowing while
+/// the unnarrowed superset completed clean. A call inside a leaf takes the SAME
 /// per-callee certification the statement-level control arm applies:
 /// certified only when the callee provably establishes no narrowing,
 /// otherwise the enclosing statement takes the typed gap.
@@ -1925,7 +1949,7 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "a closed same-file predicate in a ternary test",
             "export {};\nfunction isString(x: unknown): x is string { return typeof x === \"string\" }\n\
-             function f(x: string | number) { return [isString(x) ? x : false] }",
+             function f(x: string | number) { return [isString(x) ? x : false] as unknown }",
         ),
         (
             "a closed same-file predicate in a `&&` left operand folded by a carrier",
@@ -1935,12 +1959,12 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "an imported callee in a ternary test",
             "import { isString } from \"./is\";\n\
-             function f(x: string | number) { return [isString(x) ? x : false] }",
+             function f(x: string | number) { return [isString(x) ? x : false] as unknown }",
         ),
         (
             "a closed UNANNOTATED same-file callee in a ternary test",
             "export {};\nfunction check(x: string | number) { return true }\n\
-             function f(x: string | number) { return [check(x) ? x : false] }",
+             function f(x: string | number) { return [check(x) ? x : false] as unknown }",
         ),
     ];
     for (case, source) in refused {
@@ -1960,7 +1984,7 @@ fn leaf_nested_control_position_calls_are_never_blanket_certified() {
         (
             "a closed non-predicate-annotated callee in a ternary test",
             "export {};\nfunction check(x: string | number): boolean { return true }\n\
-             function f(x: string | number) { return [check(x) ? x : false] }",
+             function f(x: string | number) { return [check(x) ? x : false] as unknown }",
         ),
         (
             "a closed non-predicate-annotated callee in a `&&` left operand folded by a carrier",
@@ -3153,7 +3177,12 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
     let entry = member_entry_of(&index, "C", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let brand = memo
-        .flow_slice_content(entry, selection, &skeleton)
+        .flow_slice_content(
+            entry,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .expect("the class member slice content must build");
     assert_eq!(
         guard_gap_count(&brand),
@@ -3685,6 +3714,22 @@ fn return_of_parameter_is_param_carrier() {
                 binding: node.params[0].binding.expect("parameter binding")
             }),
             freshness: SliceFreshness::Pinned,
+            // The single return of an unannotated function is also read as
+            // a test over its parameters: a returned parameter is its own
+            // truthiness test.
+            predicate_test: Some(ReturnPredicateTest::Guard {
+                guard: Box::new(SliceGuard::Truthy {
+                    subject: SliceNarrowSubject {
+                        root: SliceNarrowRoot::Param {
+                            ordinal: 0,
+                            binding: node.params[0].binding.expect("parameter binding"),
+                        },
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    negated: false,
+                }),
+                parameters: Arc::from(vec![0].into_boxed_slice()),
+            }),
         }],
     );
 }
@@ -3736,12 +3781,14 @@ fn local_reaching_definition_is_binding_and_local() {
         init,
         declared,
         freshness,
+        auto_typed_form,
     } = &node.body.statements[0]
     else {
         panic!("the first statement must be the const binding");
     };
     assert_eq!(name.as_ref(), "x");
     assert_eq!(*kind, SliceBindingKind::Const);
+    assert!(!auto_typed_form, "a `const` is never auto-typed");
     assert!(
         declared.is_none(),
         "an unannotated declarator carries no declared type"
@@ -3767,6 +3814,7 @@ fn local_reaching_definition_is_binding_and_local() {
                 captured: false,
             }),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         },
     );
 }
@@ -3783,6 +3831,7 @@ fn direct_self_call_is_recursion_hold() {
                 SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
             )),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
     );
 }
@@ -3822,13 +3871,19 @@ fn symbolic_and_unrepresentable_calls() {
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection, &skeleton)
+        .flow_slice_content(
+            entry,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
         "a `this` receiver is not modeled, so the call has no structural \
          arm and fails closed rather than fabricating `any`"
@@ -3868,13 +3923,19 @@ fn sequence_wrapped_call_rides_the_bare_calls_rail() {
     let entry = member_entry_of(&index, "Service", 1);
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection, &skeleton)
+        .flow_slice_content(
+            entry,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::UnreducedCallValue),
             freshness: SliceFreshness::Pinned,
+            predicate_test: None,
         }],
         "an unrepresentable callee fails closed through the sequence too"
     );
@@ -4074,6 +4135,12 @@ fn arrow_expression_body_is_single_return() {
                 crate::semantic_query::FlowGap::UnmodeledExpression
             )),
             freshness: SliceFreshness::Pinned,
+            // Arithmetic narrows nothing, so no parameter can be a
+            // predicate subject.
+            predicate_test: Some(ReturnPredicateTest::Guard {
+                guard: Box::new(SliceGuard::None),
+                parameters: Arc::from(vec![0].into_boxed_slice()),
+            }),
         }],
         "a binary expression is an unmodelled leaf, not semantic any"
     );
@@ -4167,8 +4234,13 @@ fn locator_miss_is_typed_none() {
     let mut missing_contributor = entry.clone();
     missing_contributor.locator.contributor.contributor_index = 9999;
     assert!(
-        memo.flow_slice_content(&missing_contributor, selection.clone(), &skeleton)
-            .is_none(),
+        memo.flow_slice_content(
+            &missing_contributor,
+            selection.clone(),
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict
+        )
+        .is_none(),
         "an out-of-range contributor is a typed miss"
     );
 
@@ -4177,8 +4249,13 @@ fn locator_miss_is_typed_none() {
         declarator_ordinal: 99,
     }]);
     assert!(
-        memo.flow_slice_content(&bad_descent, selection, &skeleton)
-            .is_none(),
+        memo.flow_slice_content(
+            &bad_descent,
+            selection,
+            &skeleton,
+            crate::semantic_query::NullabilityPolicy::Strict
+        )
+        .is_none(),
         "a mismatched descent is a typed miss"
     );
 }
@@ -4186,7 +4263,7 @@ fn locator_miss_is_typed_none() {
 /// The expression-statement fallthrough — every shape that is neither a
 /// modeled whole-binding write nor a bare assertion call — still EXECUTES
 /// at the statement: a discarded sequence operand (`(assertString(x),
-/// 0);`), a `void` operand, a template interpolation, a call's ARGUMENT
+/// 0);`), a comma operand inside a `void`, a template interpolation, a call's ARGUMENT
 /// (`touch((assertString(x), 0));`), and an assignment the modeled arm
 /// refused (a member target, or a right-hand side the slice did not
 /// select) can all carry an `asserts` narrowing of a frame-owned binding,
@@ -4194,7 +4271,11 @@ fn locator_miss_is_typed_none() {
 /// takes the fail-closed scan: an effect that could narrow a frame binding
 /// flags the typed `GuardNarrowing` gap. Ordinary value-neutral statements
 /// — a call whose callee is PROVEN and whose arguments carry no effect, a
-/// visible write the unapplied-write ledger already covers — stay silent.
+/// visible write the unapplied-write ledger already covers — stay silent,
+/// and so does a call that IS a `void` operand: the checker enters only a
+/// statement's own call or a comma operand into control flow, so it
+/// narrows nothing (TypeScript 7.0.2: `void assertString(x); return x` is
+/// `string | number`).
 #[test]
 fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     let gapped = [
@@ -4204,9 +4285,9 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
              function f(x: string | number) { (assertString(x), 0); return x }",
         ),
         (
-            "a `void` operand",
+            "a comma operand inside a `void` operand",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
-             function f(x: string | number) { void assertString(x); return x }",
+             function f(x: string | number) { void (assertString(x), 0); return x }",
         ),
         (
             "a template interpolation",
@@ -4291,6 +4372,11 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
         (
             "a compound write the ledger already covers",
             "export {};\nfunction f(x: number) { x += 1; return x }",
+        ),
+        (
+            "an assertion call that is a `void` operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { void assertString(x); return x }",
         ),
     ];
     for (case, source) in silent {
@@ -5195,7 +5281,14 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
         let (mut selection, bound) = selection_for(&memo, entry, &[]);
         let work = Arc::new(AtomicUsize::new(0));
         selection.assignment_lookup_work = Some(Arc::clone(&work));
-        let content = memo.flow_slice_content(entry, selection, &bound).unwrap();
+        let content = memo
+            .flow_slice_content(
+                entry,
+                selection,
+                &bound,
+                crate::semantic_query::NullabilityPolicy::Strict,
+            )
+            .unwrap();
         let definitions: Vec<_> = content
             .body
             .statements
@@ -5265,7 +5358,12 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     expressions.push(original.clone());
     ir.exprs = expressions.clone().into();
     let content = memo
-        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .flow_slice_content(
+            entry,
+            FlowSliceSelection::from_slice_ir(&ir),
+            &bound,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .unwrap();
     assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
     expressions.push(verter_semantic::analysis::flow::flow_ir::FlowExpr {
@@ -5274,7 +5372,12 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     });
     ir.exprs = expressions.into();
     let content = memo
-        .flow_slice_content(entry, FlowSliceSelection::from_slice_ir(&ir), &bound)
+        .flow_slice_content(
+            entry,
+            FlowSliceSelection::from_slice_ir(&ir),
+            &bound,
+            crate::semantic_query::NullabilityPolicy::Strict,
+        )
         .unwrap();
     assert!(
         !content

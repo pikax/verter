@@ -42,9 +42,10 @@ use verter_session::semantic_query::demand::{ProjectionPath, SurfaceFacet, Surfa
 use verter_session::semantic_query::{
     CanonicalTypeSubstitution, ContextualTypingKey, FlowFunctionSlotIdentity, FlowGap,
     FlowInputContext, FlowNarrowingKey, FlowReturnContext, FlowReturnKey, FlowReturnPolicy,
-    FlowReturnResult, PathSegment, PrimitiveKind, ProgramAnalysisContext, ProgramPointId,
-    PropertyKey, ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData,
-    SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
+    FlowReturnResult, NullabilityPolicy, PathSegment, PrimitiveKind, ProgramAnalysisContext,
+    ProgramPointId, PropertyKey, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
+    SemanticNodeData, SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace,
+    SubstitutionCanonicalHash,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -130,7 +131,10 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             project_identity: [env_tag; 16],
             result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
-            policy: FlowReturnPolicy {},
+            policy: FlowReturnPolicy {
+                nullability: NullabilityPolicy::Strict,
+                no_implicit_any: true,
+            },
         },
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
@@ -1685,8 +1689,9 @@ fn unused_flow_runtime_reserves_no_demand_storage() {
     let ordinary = {
         let graph = host.project_type_store().semantic_graph();
         let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        SemanticQueryKey::NormalizeUnion {
+        SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
+            nullability: verter_session::semantic_query::NullabilityPolicy::Strict,
         }
     };
     // The pending typed-gap roots.

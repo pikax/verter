@@ -94,6 +94,53 @@ pub(crate) struct IndexedFlowCallExpression {
         Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
 }
 
+/// Lower one call, `new` or tagged template through `lower` while
+/// collecting the read root of each of its `argument_count` arguments and
+/// of its receiver.
+///
+/// Absence of an observer result stays distinct from an explicit
+/// `NonBinding` disposition: an argument or receiver the lowering did not
+/// report exactly once is an invalid observation, and the whole call is
+/// then unavailable — no missing address may fall back to the file's
+/// same-spelled value.
+fn observed_indexed_call(
+    argument_count: usize,
+    lower: impl FnOnce(
+        &mut dyn FnMut(
+            verter_semantic::analysis::type_eval_build::IndexedCallReadSite,
+            verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
+        ),
+    ) -> verter_type_expr::IndexedValueCall,
+) -> Option<IndexedFlowCallExpression> {
+    use verter_semantic::analysis::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    let mut roots: Vec<Option<IndexedValueReadRoot>> = (0..argument_count).map(|_| None).collect();
+    let mut receiver_root = None;
+    let mut invalid_observation = false;
+    let call = lower(&mut |site, root| match site {
+        IndexedCallReadSite::Argument(ordinal) => match roots.get_mut(ordinal) {
+            Some(slot) => invalid_observation |= slot.replace(root).is_some(),
+            None => invalid_observation = true,
+        },
+        IndexedCallReadSite::Receiver => {
+            invalid_observation |= receiver_root.replace(root).is_some();
+        }
+    });
+    if invalid_observation {
+        return None;
+    }
+    let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
+    let receiver_root = match (call.receiver.is_some(), receiver_root) {
+        (true, Some(root)) => Some(root),
+        (false, None) => None,
+        _ => return None,
+    };
+    Some(IndexedFlowCallExpression {
+        call,
+        argument_roots,
+        receiver_root,
+    })
+}
+
 /// The committed value of one per-symbol demand cell.
 ///
 /// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
@@ -946,7 +993,7 @@ impl DeclBodyMemo {
             .into_option()
     }
 
-    fn augmentation_value_decl_outcome_in(
+    pub(crate) fn augmentation_value_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -1173,13 +1220,18 @@ impl DeclBodyMemo {
             .mint_bound_flow_graph(key, prepared)
     }
 
+    /// Lower the selected slice content of `entry`. `nullability` is the
+    /// function's own project's `strictNullChecks` algebra: the content
+    /// lowering types an optional parameter under it (the rest of the
+    /// content is policy-free syntax).
     pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
-        self.flow_slice_content_with_context(entry, Some(selection), bound, None)
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None, nullability)
     }
 
     pub(crate) fn flow_slice_content_with_context(
@@ -1188,6 +1240,7 @@ impl DeclBodyMemo {
         selection: Option<crate::flow_slice_content::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
+        nullability: crate::semantic_query::NullabilityPolicy,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
         if bound.key().function != entry.key
             || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
@@ -1231,6 +1284,7 @@ impl DeclBodyMemo {
                         carrier_module,
                         &snapshot,
                         context.as_deref(),
+                        nullability,
                     )
                 })
                 .flatten()
@@ -1428,64 +1482,48 @@ impl DeclBodyMemo {
         Some(Arc::new(node))
     }
 
-    /// Transient typed IR for one authored call expression, re-read from
-    /// the retained snapshot at `span`. The call's served-function entry
-    /// is found through the program index (a flow-selected call is inside
-    /// a served function by construction); no body `TypeExpr` is
-    /// memo-owned.
+    /// Transient typed IR for one authored call, `new` expression or tagged
+    /// template, re-read from the retained snapshot at `span`. The call's
+    /// served-function entry is found through the program index (a
+    /// flow-selected call is inside a served function by construction); no
+    /// body `TypeExpr` is memo-owned. The lowered call's `kind` says whether
+    /// it calls or constructs.
     pub(crate) fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
+        use verter_semantic::analysis::function_program::IndexedCallSite;
+        use verter_semantic::analysis::type_eval_build::{
+            lower_indexed_call_expression_with_read_roots,
+            lower_indexed_new_expression_with_read_roots,
+            lower_indexed_tagged_template_expression_with_read_roots,
+        };
         let service = self.service.as_ref()?;
         self.ensure_lease();
         let _index = self.function_program_index();
         let node = service.run_leased(&self.key, move |program| {
             program.and_then(|parsed| {
+                let source = parsed.source_str();
                 parsed
-                    .with_indexed_call(span, |call| {
-                        use verter_semantic::analysis::type_eval_build::{
-                            lower_indexed_call_expression_with_read_roots, IndexedCallReadSite,
-                            IndexedValueReadRoot,
-                        };
-                        // Keep absence of an observer result distinct from an
-                        // explicit NonBinding disposition. No missing address may
-                        // fall back to the file's same-spelled value.
-                        let mut roots: Vec<Option<IndexedValueReadRoot>> =
-                            (0..call.arguments.len()).map(|_| None).collect();
-                        let mut receiver_root = None;
-                        let mut invalid_observation = false;
-                        let call = lower_indexed_call_expression_with_read_roots(
-                            call,
-                            parsed.source_str(),
-                            &mut |site, root| match site {
-                                IndexedCallReadSite::Argument(ordinal) => {
-                                    match roots.get_mut(ordinal) {
-                                        Some(slot) => {
-                                            invalid_observation |= slot.replace(root).is_some()
-                                        }
-                                        None => invalid_observation = true,
-                                    }
-                                }
-                                IndexedCallReadSite::Receiver => {
-                                    invalid_observation |= receiver_root.replace(root).is_some();
-                                }
-                            },
-                        );
-                        if invalid_observation {
-                            return None;
+                    .with_indexed_call_site(span, |site| match site {
+                        IndexedCallSite::Call(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_call_expression_with_read_roots(call, source, observe)
+                            })
                         }
-                        let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
-                        let receiver_root = match (call.receiver.is_some(), receiver_root) {
-                            (true, Some(root)) => Some(root),
-                            (false, None) => None,
-                            _ => return None,
-                        };
-                        Some(IndexedFlowCallExpression {
-                            call,
-                            argument_roots,
-                            receiver_root,
-                        })
+                        IndexedCallSite::Construct(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_new_expression_with_read_roots(call, source, observe)
+                            })
+                        }
+                        // The template strings are the first argument.
+                        IndexedCallSite::TaggedTemplate(tagged) => {
+                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
+                                lower_indexed_tagged_template_expression_with_read_roots(
+                                    tagged, source, observe,
+                                )
+                            })
+                        }
                     })
                     .flatten()
             })
@@ -1675,7 +1713,15 @@ impl DeclBodyMemo {
             return DemandLower::Ready(None);
         };
         self.ensure_lease();
-        let contributors = contributors.to_vec();
+        // Several declarations in ONE statement (the overloads of a function
+        // inside one `declare global` block) share its anchor: the statement
+        // is lowered and registered once, which registers every one of them.
+        let mut lowered_statements = rustc_hash::FxHashSet::default();
+        let contributors: Vec<_> = contributors
+            .iter()
+            .filter(|contributor| lowered_statements.insert(contributor.anchor.contributor_index))
+            .cloned()
+            .collect();
         let key = key.clone();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let lens = self.shallow_lens();
@@ -2610,11 +2656,41 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
+        self.transient_value_parts_for(name, contributors, None)
+    }
+
+    /// Augmentation-scoped sibling of [`Self::transient_value_parts_in`].
+    pub(crate) fn transient_augmentation_value_parts_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientValueParts> {
+        let Some(contributors) = self
+            .header_index
+            .augmentation_value_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_value_parts_for(name, contributors, Some(scope))
+    }
+
+    /// Shared lease-only VALUE-body re-lowering over the demanded symbol's
+    /// contributing statements. `aug_scope` selects the augmentation-scoped
+    /// parts vector; `None` reads the file-scope parts.
+    fn transient_value_parts_for(
+        &self,
+        name: &str,
+        contributors: Vec<verter_semantic::analysis::decl_headers::DeclHeaderContributor>,
+        aug_scope: Option<&AugmentationScopeKind>,
+    ) -> DemandOutcome<TransientValueParts> {
         let Some(service) = self.service.as_ref() else {
             return DemandOutcome::Ready(None);
         };
         self.ensure_lease();
         let name = name.to_string();
+        let aug_scope = aug_scope.cloned();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -2622,7 +2698,14 @@ impl DeclBodyMemo {
             let program = program.borrow_dependent();
             let mut merged = TransientValueParts::default();
             let mut found = false;
+            // Several declarations in ONE statement (the overloads of a
+            // function inside one `declare global` block) share its anchor:
+            // the statement is lowered once and yields every one of them.
+            let mut lowered_statements = rustc_hash::FxHashSet::default();
             for contributor in &contributors {
+                if !lowered_statements.insert(contributor.anchor.contributor_index) {
+                    continue;
+                }
                 let Some(stmt) = program
                     .body
                     .get(contributor.anchor.contributor_index as usize)
@@ -2634,7 +2717,13 @@ impl DeclBodyMemo {
                 } else {
                     lower_statement_parts(stmt, source)
                 };
-                for decl in &parts.value_decls {
+                let value_decls = parts.value_decls.iter().filter(|_| aug_scope.is_none());
+                let aug_value_decls = parts
+                    .aug_value_decls
+                    .iter()
+                    .filter(|(part_scope, _)| Some(part_scope) == aug_scope.as_ref())
+                    .map(|(_, decl)| decl);
+                for decl in value_decls.chain(aug_value_decls) {
                     if decl.name != name {
                         continue;
                     }
@@ -2652,7 +2741,13 @@ impl DeclBodyMemo {
                 // `class K<T>` constructor shape references `T`) ride the
                 // SAME statements' type-side parts — union them first-seen
                 // by name so the deref binds the class's own binder shells.
-                for decl in &parts.type_decls {
+                let type_decls = parts.type_decls.iter().filter(|_| aug_scope.is_none());
+                let aug_type_decls = parts
+                    .aug_type_decls
+                    .iter()
+                    .filter(|(part_scope, _)| Some(part_scope) == aug_scope.as_ref())
+                    .map(|(_, decl)| decl);
+                for decl in type_decls.chain(aug_type_decls) {
                     if decl.name != name {
                         continue;
                     }

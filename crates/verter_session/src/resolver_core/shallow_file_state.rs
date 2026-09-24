@@ -1758,6 +1758,26 @@ impl ShallowFileState {
             .augmentation_type_decl_outcome_in(scope, owner, name)
     }
 
+    /// Lease-aware value-space counterpart of
+    /// [`Self::augmentation_type_decl_outcome_in`].
+    pub(crate) fn augmentation_value_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        if self
+            .decl_bodies
+            .header_index()
+            .augmentation_value_header_in(scope, owner, name)
+            .is_none()
+        {
+            return DemandOutcome::Ready(None);
+        }
+        self.decl_bodies
+            .augmentation_value_decl_outcome_in(scope, owner, name)
+    }
+
     /// Value-space counterpart of [`Self::augmentation_type_decl`].
     pub fn augmentation_value_decl(
         &self,
@@ -2706,6 +2726,13 @@ fn push_type_expr_children<'a>(expr: &'a TypeExpr, pending: &mut Vec<&'a TypeExp
         }
         if let Some(return_type) = function.return_type.as_deref() {
             pending.push(return_type);
+        }
+        if let Some(target) = function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref())
+        {
+            pending.push(target);
         }
         for parameter in &function.type_parameters {
             push_type_param(parameter, pending);

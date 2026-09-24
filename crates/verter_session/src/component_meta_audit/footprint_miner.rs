@@ -479,6 +479,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::InstantiationRef { .. } => SemanticNodeKind::Other {
             name: Arc::from("InstantiationRef"),
         },
+        SemanticNodeData::ClassExpressionInstance { .. } => SemanticNodeKind::Other {
+            name: Arc::from("ClassExpressionInstance"),
+        },
         SemanticNodeData::MergedDecl { .. } => SemanticNodeKind::Other {
             name: Arc::from("MergedDecl"),
         },
@@ -565,6 +568,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             base.decl_name,
             args.len()
         )),
+        SemanticNodeData::ClassExpressionInstance { identity, .. } => {
+            Arc::from(format!("ClassExpressionInstance({})", identity.name))
+        }
         SemanticNodeData::MergedDecl { contributors } => {
             Arc::from(format!("MergedDecl[{}]", contributors.len()))
         }
@@ -656,7 +662,7 @@ fn node_kind_discriminant(kind: &SemanticNodeKind) -> u32 {
         SemanticNodeKind::TypeOf => 14,
         SemanticNodeKind::Mapped => 15,
         SemanticNodeKind::TemplateLiteral => 16,
-        SemanticNodeKind::NormalizeUnion => 17,
+        SemanticNodeKind::ReduceUnion => 17,
         SemanticNodeKind::ReduceIntersection => 18,
         SemanticNodeKind::Other { .. } => 19,
         // `SemanticNodeKind` is `#[non_exhaustive]`; the catch-all

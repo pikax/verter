@@ -50,9 +50,9 @@ use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
     IndexSignatureSpans, IndexedValueLiteralMode, LiteralValue, MemberSpans, MemberVisibility,
     MethodSignature, ObjectExpr, ObjectMember, ObjectMethodKind, PrimitiveName, TopLevelOwnerId,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate, ValueRef,
 };
-use verter_type_expr_oxc::{lower_property_key, lower_ts_type};
+use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts_type};
 
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
@@ -82,7 +82,8 @@ pub enum IndexedCallReadSite {
 pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, base: u32) {
     match expression {
         IndexedValueExpression::Value(_) => {}
-        IndexedValueExpression::UnsupportedCall { point } => *point = point.saturating_add(base),
+        IndexedValueExpression::UnsupportedCall { point }
+        | IndexedValueExpression::TemplateStrings { point } => *point = point.saturating_add(base),
         IndexedValueExpression::Call(call) => {
             call.point = call.point.saturating_add(base);
             offset_indexed_value_expression(&mut call.callee, base);
@@ -286,6 +287,9 @@ pub struct LoweredSignatureParts {
     /// recovery). An unannotated function's return is body-derived and names
     /// its served function position instead — never a body scan.
     pub return_type: Option<TypeExpr>,
+    /// The authored return's type predicate (`x is T`, `asserts x`, …),
+    /// beside a `boolean` / `void` [`Self::return_type`].
+    pub predicate: Option<Arc<TypePredicate>>,
     pub type_parameters: Vec<TypeParam>,
     /// Whether this signature is backed by an implementation body (vs. a
     /// bodiless overload / ambient declaration). Projection-time overload
@@ -540,7 +544,7 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
             ));
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None);
+            collect_module_declaration(module, source, out, None, false);
         }
         Statement::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -739,7 +743,7 @@ fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut Lowe
             ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None);
+            collect_module_declaration(module, source, out, None, false);
         }
         Declaration::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -1068,6 +1072,7 @@ fn member_signature_fact(
     let sig = LoweredSignatureParts {
         parameters: function.parameters.clone(),
         return_type: function.return_type.as_deref().cloned(),
+        predicate: function.predicate.clone(),
         type_parameters: function.type_parameters.clone(),
         has_implementation_body,
         // A member signature's authored return position is part of the member
@@ -1155,6 +1160,7 @@ fn object_shape_fact(
                         let sig = LoweredSignatureParts {
                             parameters: function.parameters.clone(),
                             return_type: function.return_type.as_deref().cloned(),
+                            predicate: function.predicate.clone(),
                             type_parameters: function.type_parameters.clone(),
                             has_implementation_body: true,
                             has_authored_return: false,
@@ -1606,11 +1612,15 @@ fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) ->
         .collect()
 }
 
+/// `ambient` is whether an enclosing namespace is ambient: a `declare
+/// namespace` and every namespace inside one exports each member, written
+/// `export` or not.
 fn collect_module_declaration(
     decl: &TSModuleDeclaration<'_>,
     source: &str,
     out: &mut LoweredStatementParts,
     prefix: Option<&str>,
+    ambient: bool,
 ) {
     // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
     // NOT a file-scope namespace. Its inner declarations augment the surface of
@@ -1637,14 +1647,15 @@ fn collect_module_declaration(
     let Some(body) = decl.body.as_ref() else {
         return;
     };
+    let ambient = ambient || decl.declare;
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            collect_module_declaration(inner, source, out, Some(module_name.as_str()));
+            collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                collect_namespaced_statement(stmt, source, out, module_name.as_str());
+                collect_namespaced_statement(stmt, source, out, module_name.as_str(), ambient);
             }
         }
     }
@@ -1836,16 +1847,28 @@ fn collect_namespaced_statement_into_augmentation(
         Statement::TSModuleDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
-        // Namespace VALUE indexing is EXPORT-ONLY (mirrors
-        // `collect_namespaced_statement`): a non-exported `const hidden = …` is
-        // private to the namespace body, so a DIRECT `VariableDeclaration` is
-        // intentionally not indexed. Only the exported path registers a
-        // qualified value member such as `JSX.VERSION`.
+        // An augmentation block is ambient, so every member of a namespace
+        // inside it is exported, written `export` or not (an ambient namespace
+        // in `collect_namespaced_statement`).
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 collect_namespaced_declaration_into_augmentation(
                     decl, source, out, namespace, scope,
                 );
+            }
+        }
+        Statement::VariableDeclaration(var_decl) => {
+            for declarator in &var_decl.declarations {
+                if let Some(parts) =
+                    lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
+                {
+                    out.aug_value_decls.push((scope.clone(), parts));
+                }
+            }
+        }
+        Statement::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.aug_value_decls.push((scope.clone(), parts));
             }
         }
         _ => {}
@@ -1899,6 +1922,11 @@ fn collect_namespaced_declaration_into_augmentation(
                 }
             }
         }
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.aug_value_decls.push((scope.clone(), parts));
+            }
+        }
         _ => {}
     }
 }
@@ -1950,6 +1978,7 @@ fn collect_namespaced_statement(
     source: &str,
     out: &mut LoweredStatementParts,
     namespace: &str,
+    ambient: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -1977,18 +2006,33 @@ fn collect_namespaced_statement(
             }
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace), ambient);
         }
         // Namespace value indexing is EXPORT-ONLY: a non-exported
         // `namespace N { const hidden = … }` is private to the namespace body
         // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
-        // `Statement::VariableDeclaration` is intentionally NOT indexed under
-        // its qualified name. Only the exported path below
-        // (`export const VERSION = …` → `collect_namespaced_declaration`)
-        // registers a qualified value member such as `N.VERSION`.
+        // `Statement::VariableDeclaration` is NOT indexed under its qualified
+        // name. The exported path below (`export const VERSION = …` →
+        // `collect_namespaced_declaration`) registers a qualified value member
+        // such as `N.VERSION` — and in an AMBIENT namespace every member is
+        // exported, written `export` or not.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                collect_namespaced_declaration(decl, source, out, namespace);
+                collect_namespaced_declaration(decl, source, out, namespace, ambient);
+            }
+        }
+        Statement::VariableDeclaration(var_decl) if ambient => {
+            for declarator in &var_decl.declarations {
+                if let Some(parts) =
+                    lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
+                {
+                    out.value_decls.push(parts);
+                }
+            }
+        }
+        Statement::FunctionDeclaration(func) if ambient => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.value_decls.push(parts);
             }
         }
         _ => {}
@@ -2000,6 +2044,7 @@ fn collect_namespaced_declaration(
     source: &str,
     out: &mut LoweredStatementParts,
     namespace: &str,
+    ambient: bool,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
@@ -2027,10 +2072,11 @@ fn collect_namespaced_declaration(
             }
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace), ambient);
         }
-        // A namespaced value member (`namespace NS { export const M = … }`)
-        // registers under its QUALIFIED name `NS.M` so `typeof NS.M` binds.
+        // A namespaced value member (`namespace NS { export const M = … }`,
+        // `export function f()`) registers under its QUALIFIED name `NS.M`
+        // so `typeof NS.M` binds.
         Declaration::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
                 if let Some(parts) =
@@ -2038,6 +2084,11 @@ fn collect_namespaced_declaration(
                 {
                     out.value_decls.push(parts);
                 }
+            }
+        }
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
+                out.value_decls.push(parts);
             }
         }
         _ => {}
@@ -2426,7 +2477,8 @@ fn collect_named_class(
                         func.return_type.map(Arc::new),
                         func.type_parameters,
                         fn_spans,
-                    );
+                    )
+                    .with_predicate(func.predicate);
                     function_expr.flow_return = flow_identity.map(Box::new);
                     let mut signature = MethodSignature::with_key_visibility(
                         method_key,
@@ -2528,7 +2580,8 @@ fn collect_named_class(
                         func.return_type.map(Arc::new),
                         func.type_parameters,
                         fn_spans,
-                    );
+                    )
+                    .with_predicate(func.predicate);
                     function_expr.flow_return = flow_identity.map(Box::new);
                     let mut signature = MethodSignature::with_key_visibility(
                         lower_property_key(&method.key, source),
@@ -2607,6 +2660,7 @@ fn collect_named_class(
     let mut constructor_signature = ctor_sig.unwrap_or_else(|| LoweredSignatureParts {
         parameters: Vec::new(),
         return_type: Some(TypeExpr::named(name.clone())),
+        predicate: None,
         type_parameters: Vec::new(),
         has_implementation_body: true,
         has_authored_return: false,
@@ -2956,9 +3010,23 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
 }
 
 fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
+    lower_function_parts_in(func, source, None)
+}
+
+/// [`lower_function_parts`] for a function declared in `namespace`: it is
+/// added under its QUALIFIED name (`NS.f`), as a namespaced variable is.
+fn lower_function_parts_in(
+    func: &Function<'_>,
+    source: &str,
+    namespace: Option<&str>,
+) -> Option<LoweredValueDeclParts> {
     let (name, name_offset) = {
         let id = func.id.as_ref()?;
-        (id.name.to_string(), id.span.start)
+        let name = match namespace {
+            Some(ns) => qualified_name(ns, &id.name),
+            None => id.name.to_string(),
+        };
+        (name, id.span.start)
     };
 
     let mut sig = extract_function_signature(func, source);
@@ -3840,10 +3908,14 @@ fn extract_function_signature_with_budget(
     // The return carrier is AUTHORED-only: an unannotated function's return
     // is body-derived and names its served function position (the
     // whole-function producer answers it), never a body scan.
-    let return_type = func
-        .return_type
-        .as_ref()
-        .map(|return_type| lower_ts_type(&return_type.type_annotation, source));
+    let (return_type, predicate) = match func.return_type.as_ref() {
+        Some(return_type) => {
+            let (return_type, predicate) =
+                lower_return_annotation(&return_type.type_annotation, source);
+            (Some(return_type), predicate)
+        }
+        None => (None, None),
+    };
     let type_parameters = func
         .type_parameters
         .as_ref()
@@ -3853,6 +3925,7 @@ fn extract_function_signature_with_budget(
     Ok(LoweredSignatureParts {
         parameters,
         return_type,
+        predicate,
         type_parameters,
         has_implementation_body: func.body.is_some(),
         has_authored_return,
@@ -3898,8 +3971,12 @@ fn extract_arrow_signature_with_budget(
     // lowering answers it directly (there is no statement scan). A
     // block-bodied arrow's return is body-derived and names its served
     // function position instead.
+    let mut predicate = None;
     let return_type = if let Some(return_type) = &arrow.return_type {
-        Some(lower_ts_type(&return_type.type_annotation, source))
+        let (return_type, authored_predicate) =
+            lower_return_annotation(&return_type.type_annotation, source);
+        predicate = authored_predicate;
+        Some(return_type)
     } else if arrow.expression {
         arrow
             .body
@@ -3930,6 +4007,7 @@ fn extract_arrow_signature_with_budget(
     Ok(LoweredSignatureParts {
         parameters,
         return_type,
+        predicate,
         type_parameters,
         has_implementation_body: true,
         has_authored_return,
@@ -3949,6 +4027,7 @@ fn unavailable_function_signature(
     LoweredSignatureParts {
         parameters: lower_function_params_without_initializer_inference(params, this_param, source),
         return_type: None,
+        predicate: None,
         type_parameters,
         has_implementation_body,
         has_authored_return,
@@ -4003,7 +4082,8 @@ fn extract_object_literal(
                                     .as_ref()
                                     .map(|return_type| return_type.type_annotation.span().into()),
                             },
-                        ),
+                        )
+                        .with_predicate(signature.predicate),
                         false,
                         spans,
                     )
@@ -4104,6 +4184,10 @@ type InferenceResult<T> = Result<T, InferenceUnavailableReason>;
 struct InferenceBudget {
     remaining_work: usize,
     used_unmodeled_fallback: bool,
+    /// How a bare nullish value nested in an object- or array-literal
+    /// position is typed for this whole inference (see
+    /// [`NestedNullishLiterals`]).
+    nested_nullish: NestedNullishLiterals,
 }
 
 impl Default for InferenceBudget {
@@ -4111,7 +4195,54 @@ impl Default for InferenceBudget {
         Self {
             remaining_work: MAX_SEMANTIC_INFERENCE_WORK,
             used_unmodeled_fallback: false,
+            nested_nullish: NestedNullishLiterals::Keep,
         }
+    }
+}
+
+/// How a bare `null` / `undefined` / `void` value NESTED in an object
+/// member or an array element is typed — the program's `strictNullChecks`.
+///
+/// With `strictNullChecks` off such a value has the checker's WIDENING
+/// nullable type, and widening the enclosing literal's type (every
+/// position a flow evaluation publishes: a return, a yield, a variable's
+/// declared type, an inference candidate) turns it into `any`: `{ a: null
+/// }` is `{ a: any }`, `[null]` is `any[]`. An array's element union never
+/// keeps a nullable element beside another element (`[null, 1]` is
+/// `number[]`). A standalone top-level value is not a nested position and
+/// is never affected: its widening depends on the enclosing join, which
+/// only the consumer knows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NestedNullishLiterals {
+    /// `strictNullChecks` on: the value is `null` / `undefined`.
+    Keep,
+    /// `strictNullChecks` off: the value widens to `any`, and an element
+    /// union drops it beside any other element.
+    WidenToAny,
+}
+
+/// Whether a value expression is a bare `null` / `undefined` / `void`
+/// value, seen through parentheses and `satisfies` — the checker's
+/// WIDENING nullable type. A conditional is one when both arms are. A type
+/// assertion (`null as null`) and a read of a declared `null` binding are
+/// not: their nullable type is the regular one.
+#[must_use]
+pub fn expr_is_widening_nullish(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expr_is_widening_nullish(&parenthesized.expression)
+        }
+        Expression::TSSatisfiesExpression(satisfies) => {
+            expr_is_widening_nullish(&satisfies.expression)
+        }
+        Expression::ConditionalExpression(conditional) => {
+            expr_is_widening_nullish(&conditional.consequent)
+                && expr_is_widening_nullish(&conditional.alternate)
+        }
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name.as_str() == "undefined",
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
+        _ => false,
     }
 }
 
@@ -4241,7 +4372,27 @@ pub fn infer_declaration_expression_type_with_completeness(
     source: &str,
     policy: TopLevelLiteralPolicy,
 ) -> Result<DeclarationExpressionInference, InferenceUnavailableReason> {
-    let mut budget = InferenceBudget::default();
+    infer_declaration_expression_type_with_nested_nullish(
+        expr,
+        source,
+        policy,
+        NestedNullishLiterals::Keep,
+    )
+}
+
+/// [`infer_declaration_expression_type_with_completeness`] with the
+/// program's typing of nested bare nullish values
+/// ([`NestedNullishLiterals`]).
+pub fn infer_declaration_expression_type_with_nested_nullish(
+    expr: &Expression<'_>,
+    source: &str,
+    policy: TopLevelLiteralPolicy,
+    nested_nullish: NestedNullishLiterals,
+) -> Result<DeclarationExpressionInference, InferenceUnavailableReason> {
+    let mut budget = InferenceBudget {
+        nested_nullish,
+        ..InferenceBudget::default()
+    };
     let ty = infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)?;
     Ok(DeclarationExpressionInference {
         ty,
@@ -4311,6 +4462,16 @@ fn infer_declaration_expression_type_with_budget(
         Expression::ArrayExpression(array) => {
             let mut element_types = Vec::new();
             for element in &array.elements {
+                // `strictNullChecks` off: a bare nullish element is dropped
+                // beside another element; an array of nothing else widens
+                // its element to `any` (see [`NestedNullishLiterals`]).
+                if budget.nested_nullish == NestedNullishLiterals::WidenToAny
+                    && element
+                        .as_expression()
+                        .is_some_and(expr_is_widening_nullish)
+                {
+                    continue;
+                }
                 match element {
                     oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                         let spread_type = infer_declaration_expression_type_with_budget(
@@ -4432,6 +4593,15 @@ fn object_member_value(
     // VALUE to a literal but does NOT add the `readonly` modifier — TS leaves
     // `tag` mutable; only `{ … } as const` makes the properties `readonly`.
     let readonly = policy == MemberLiteralPolicy::ConstAssert;
+    // A bare nullish member value under `strictNullChecks` off widens to
+    // `any` whatever the member policy — an `as const` object keeps it
+    // `readonly` but not `null` (TypeScript 7.0.2: `{ a: null } as const`
+    // is `{ readonly a: any }`).
+    if budget.nested_nullish == NestedNullishLiterals::WidenToAny && expr_is_widening_nullish(value)
+    {
+        budget.visit(depth)?;
+        return Ok((TypeExpr::Primitive(PrimitiveName::Any), readonly));
+    }
     // The value (and its NESTED members) is inferred under a const context when
     // the whole object is `as const` OR this property carries its own `as const`,
     // so a nested object under a per-property `as const`
@@ -4555,6 +4725,10 @@ fn infer_expression_type_ctx_with_read_root(
         Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
         Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
         Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
+        // `void x` evaluates its operand and produces `undefined`.
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Void => {
+            Ok(TypeExpr::Primitive(PrimitiveName::Undefined))
+        }
         Expression::ConditionalExpression(cond) => Ok(TypeExpr::union(vec![
             // Both arms contribute to this composite; neither is its whole
             // identifier origin.
@@ -4573,15 +4747,21 @@ fn infer_expression_type_ctx_with_read_root(
                         | oxc_ast::ast::ArrayExpressionElement::Elision(_)
                 )
             });
+            let widen_nullish = budget.nested_nullish == NestedNullishLiterals::WidenToAny;
             if let (Some(readonly), true) = (policy.array_literal_is_tuple(), positional) {
                 let mut elements = Vec::with_capacity(arr.elements.len());
                 for element in &arr.elements {
                     let Some(expr) = element.as_expression() else {
                         continue;
                     };
+                    let ty = if widen_nullish && expr_is_widening_nullish(expr) {
+                        TypeExpr::Primitive(PrimitiveName::Any)
+                    } else {
+                        infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?
+                    };
                     elements.push(TupleElement {
                         label: None,
-                        ty: infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?,
+                        ty,
                         optional: false,
                         rest: false,
                     });
@@ -4592,7 +4772,17 @@ fn infer_expression_type_ctx_with_read_root(
                 });
             }
             let mut element_types = Vec::new();
+            // `strictNullChecks` off: a bare nullish element adds nothing to
+            // the element union beside another element, and an array of
+            // nothing else widens to `any[]` exactly as an empty one does.
             for element in &arr.elements {
+                if widen_nullish
+                    && element
+                        .as_expression()
+                        .is_some_and(expr_is_widening_nullish)
+                {
+                    continue;
+                }
                 match element {
                     oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
                         // A spread element contributes its source's element
@@ -4656,12 +4846,15 @@ fn infer_expression_type_ctx_with_read_root(
                     .as_ref()
                     .map(|rt| rt.type_annotation.span().into()),
             };
-            Ok(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-                sig.parameters,
-                sig.return_type.map(Arc::new),
-                sig.type_parameters,
-                fn_spans,
-            ))))
+            Ok(TypeExpr::Function(Arc::new(
+                FunctionExpr::with_spans(
+                    sig.parameters,
+                    sig.return_type.map(Arc::new),
+                    sig.type_parameters,
+                    fn_spans,
+                )
+                .with_predicate(sig.predicate),
+            )))
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)
@@ -4687,10 +4880,85 @@ fn infer_expression_type_ctx_with_read_root(
                 Ok(call_return_carrier(callee_type))
             }
         }
+        // An equality, relational, `instanceof` or `in` comparison is
+        // `boolean` whatever its operands are: neither operand provides the
+        // comparison's value.
+        Expression::BinaryExpression(binary) if binary_operator_is_comparison(binary.operator) => {
+            Ok(TypeExpr::Primitive(PrimitiveName::Boolean))
+        }
+        // `!operand`, and `a && b` / `a || b`, over `boolean` operands are
+        // `boolean`. Any other operand keeps the unmodeled fallback: the
+        // result then depends on the operand's truthiness facts (`!` over an
+        // always-truthy operand is `false`) or is the operand's own value.
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            let operand = infer_expression_type_ctx(
+                &unary.argument,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(boolean_or_unmodeled(&[operand], budget))
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(
+                logical.operator,
+                oxc_ast::ast::LogicalOperator::And | oxc_ast::ast::LogicalOperator::Or
+            ) =>
+        {
+            let left = infer_expression_type_ctx(
+                &logical.left,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            let right = infer_expression_type_ctx(
+                &logical.right,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(boolean_or_unmodeled(&[left, right], budget))
+        }
         _ => {
             budget.used_unmodeled_fallback = true;
             Ok(TypeExpr::Primitive(PrimitiveName::Any))
         }
+    }
+}
+
+/// Whether a binary operator is a comparison — the operators whose result
+/// the checker types `boolean` whatever the operands: equality (strict and
+/// loose), relational, `instanceof` and `in`.
+fn binary_operator_is_comparison(operator: BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Equality
+            | BinaryOperator::Inequality
+            | BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality
+            | BinaryOperator::LessThan
+            | BinaryOperator::LessEqualThan
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterEqualThan
+            | BinaryOperator::Instanceof
+            | BinaryOperator::In
+    )
+}
+
+/// `boolean` when every operand is exactly `boolean`; otherwise the
+/// unmodeled fallback.
+fn boolean_or_unmodeled(operands: &[TypeExpr], budget: &mut InferenceBudget) -> TypeExpr {
+    if operands
+        .iter()
+        .all(|operand| matches!(operand, TypeExpr::Primitive(PrimitiveName::Boolean)))
+    {
+        TypeExpr::Primitive(PrimitiveName::Boolean)
+    } else {
+        budget.used_unmodeled_fallback = true;
+        TypeExpr::Primitive(PrimitiveName::Any)
     }
 }
 
@@ -4860,19 +5128,26 @@ fn widen_literal_type_with_budget(
             }
             Ok(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
         }
-        TypeExpr::Function(function) => Ok(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-            function.parameters.clone(),
-            function
-                .return_type
-                .as_ref()
-                .map(|return_type| {
-                    widen_literal_type_with_budget(return_type.as_ref().clone(), budget, depth + 1)
+        TypeExpr::Function(function) => Ok(TypeExpr::Function(Arc::new(
+            FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| {
+                        widen_literal_type_with_budget(
+                            return_type.as_ref().clone(),
+                            budget,
+                            depth + 1,
+                        )
                         .map(Arc::new)
-                })
-                .transpose()?,
-            function.type_parameters.clone(),
-            function.spans,
-        )))),
+                    })
+                    .transpose()?,
+                function.type_parameters.clone(),
+                function.spans,
+            )
+            .with_predicate(function.predicate.clone()),
+        ))),
         // A bare constructor type (`new (...) => R`) carries the same
         // `FunctionExpr` payload as a function type, so its literal members
         // widen identically. Reconstruct as a `ConstructorType` so the
@@ -4897,7 +5172,8 @@ fn widen_literal_type_with_budget(
                     .transpose()?,
                 function.type_parameters.clone(),
                 function.spans,
-            ),
+            )
+            .with_predicate(function.predicate.clone()),
         ))),
         _ => Ok(expr),
     }
@@ -4926,8 +5202,8 @@ fn widen_object_member_with_budget(
                 widen_literal_type_with_budget(signature.value_type, budget, depth + 1)?;
             Ok(ObjectMember::IndexSignature(signature))
         }
-        ObjectMember::CallSignature(function) => {
-            Ok(ObjectMember::CallSignature(FunctionExpr::with_spans(
+        ObjectMember::CallSignature(function) => Ok(ObjectMember::CallSignature(
+            FunctionExpr::with_spans(
                 function.parameters,
                 function
                     .return_type
@@ -4943,10 +5219,11 @@ fn widen_object_member_with_budget(
                     .transpose()?,
                 function.type_parameters,
                 function.spans,
-            )))
-        }
-        ObjectMember::ConstructSignature(function) => {
-            Ok(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+            )
+            .with_predicate(function.predicate),
+        )),
+        ObjectMember::ConstructSignature(function) => Ok(ObjectMember::ConstructSignature(
+            FunctionExpr::with_spans(
                 function.parameters,
                 function
                     .return_type
@@ -4962,8 +5239,9 @@ fn widen_object_member_with_budget(
                     .transpose()?,
                 function.type_parameters,
                 function.spans,
-            )))
-        }
+            )
+            .with_predicate(function.predicate),
+        )),
         ObjectMember::Method(mut method) => {
             method.function = FunctionExpr::with_spans(
                 method.function.parameters,
@@ -4982,7 +5260,8 @@ fn widen_object_member_with_budget(
                     .transpose()?,
                 method.function.type_parameters,
                 method.function.spans,
-            );
+            )
+            .with_predicate(method.function.predicate);
             Ok(ObjectMember::Method(method))
         }
     }
@@ -5037,10 +5316,14 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             let key = lower_property_key(&method.key, source);
             let params =
                 lower_function_params(&method.params, method.this_param.as_deref(), source);
-            let return_type = method
-                .return_type
-                .as_ref()
-                .map(|rt| lower_ts_type(&rt.type_annotation, source));
+            let (return_type, predicate) = match method.return_type.as_ref() {
+                Some(rt) => {
+                    let (return_type, predicate) =
+                        lower_return_annotation(&rt.type_annotation, source);
+                    (Some(return_type), predicate)
+                }
+                None => (None, None),
+            };
             let type_parameters = method
                 .type_parameters
                 .as_ref()
@@ -5066,7 +5349,8 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                         return_type.map(Arc::new),
                         type_parameters,
                         fn_spans,
-                    ),
+                    )
+                    .with_predicate(predicate),
                     method.optional,
                     member_spans,
                 ),
@@ -5074,10 +5358,14 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let params = lower_function_params(&call.params, call.this_param.as_deref(), source);
-            let return_type = call
-                .return_type
-                .as_ref()
-                .map(|rt| lower_ts_type(&rt.type_annotation, source));
+            let (return_type, predicate) = match call.return_type.as_ref() {
+                Some(rt) => {
+                    let (return_type, predicate) =
+                        lower_return_annotation(&rt.type_annotation, source);
+                    (Some(return_type), predicate)
+                }
+                None => (None, None),
+            };
             let type_parameters = call
                 .type_parameters
                 .as_ref()
@@ -5090,12 +5378,15 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                     .as_ref()
                     .map(|rt| rt.type_annotation.span().into()),
             };
-            Some(ObjectMember::CallSignature(FunctionExpr::with_spans(
-                params,
-                return_type.map(Arc::new),
-                type_parameters,
-                fn_spans,
-            )))
+            Some(ObjectMember::CallSignature(
+                FunctionExpr::with_spans(
+                    params,
+                    return_type.map(Arc::new),
+                    type_parameters,
+                    fn_spans,
+                )
+                .with_predicate(predicate),
+            ))
         }
         TSSignature::TSIndexSignature(idx) => {
             let (key_name, key_type, key_span) = if let Some(param) = idx.parameters.first() {
@@ -6008,25 +6299,15 @@ fn lower_value_expression_with_read_root(
 
 /// Lower an already-parsed value expression into indexed typed IR.
 ///
-/// Direct calls and constructs are explicit records. A call-free expression
-/// keeps the established value-inference result. A compound that contains a
-/// call but is not itself a direct call fails typed — value-expression
-/// inference carries no call authority at all.
+/// Direct calls, constructs and tagged templates are explicit records. A
+/// call-free expression keeps the established value-inference result. A
+/// compound that contains a call but is not itself a direct call fails
+/// typed — value-expression inference carries no call authority at all.
 pub fn lower_indexed_value_expression(
     expr: &Expression<'_>,
     source: &str,
 ) -> IndexedValueExpression {
     lower_indexed_value_expression_with_policy(expr, source, MemberLiteralPolicy::Widen)
-}
-
-/// Lower one indexed CALL-ARGUMENT expression: the same indexed lowering in
-/// the call-argument position, so the authored literal form reaches
-/// applicability exactly as the flow IR's own call arguments do.
-fn lower_indexed_call_argument_expression(
-    expr: &Expression<'_>,
-    source: &str,
-) -> IndexedValueExpression {
-    lower_indexed_value_expression_with_policy(expr, source, MemberLiteralPolicy::Argument)
 }
 
 fn lower_indexed_value_expression_with_policy(
@@ -6064,20 +6345,26 @@ fn lower_indexed_value_expression_with_policy_and_read_root(
         Expression::NewExpression(call) => {
             IndexedValueExpression::Call(lower_indexed_new_expression(call, source))
         }
+        Expression::TaggedTemplateExpression(tagged) => {
+            IndexedValueExpression::Call(lower_indexed_tagged_template_expression(tagged, source))
+        }
         Expression::FunctionExpression(function) => {
             let signature = extract_function_signature(function, source);
-            IndexedValueExpression::Value(TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-                signature.parameters,
-                signature.return_type.map(Arc::new),
-                signature.type_parameters,
-                FunctionSpans {
-                    signature: Some(function.span.into()),
-                    return_type: function
-                        .return_type
-                        .as_ref()
-                        .map(|annotation| annotation.type_annotation.span().into()),
-                },
-            ))))
+            IndexedValueExpression::Value(TypeExpr::Function(Arc::new(
+                FunctionExpr::with_spans(
+                    signature.parameters,
+                    signature.return_type.map(Arc::new),
+                    signature.type_parameters,
+                    FunctionSpans {
+                        signature: Some(function.span.into()),
+                        return_type: function
+                            .return_type
+                            .as_ref()
+                            .map(|annotation| annotation.type_annotation.span().into()),
+                    },
+                )
+                .with_predicate(signature.predicate),
+            )))
         }
         unwrapped if value_type_derives_from_a_call(unwrapped) => {
             IndexedValueExpression::UnsupportedCall {
@@ -6203,72 +6490,16 @@ fn lower_indexed_call_expression_observed(
     mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
 ) -> IndexedValueCall {
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
-    let args = call
-        .arguments
-        .iter()
-        .enumerate()
-        .map(|(ordinal, argument)| {
-            let mut read_root = IndexedValueReadRoot::NonBinding;
-            let (expression, point, spread, literal_mode, context_sensitive) = match argument {
-                oxc_ast::ast::Argument::SpreadElement(spread) => (
-                    lower_indexed_value_expression_with_policy_and_read_root(
-                        &spread.argument,
-                        source,
-                        MemberLiteralPolicy::Argument,
-                        observe.as_ref().map(|_| &mut read_root),
-                    ),
-                    spread.argument.span().start,
-                    true,
-                    indexed_literal_mode(Some(&spread.argument)),
-                    indexed_context_sensitive(Some(&spread.argument)),
-                ),
-                argument => {
-                    let expression = argument.to_expression();
-                    (
-                        lower_indexed_value_expression_with_policy_and_read_root(
-                            expression,
-                            source,
-                            MemberLiteralPolicy::Argument,
-                            observe.as_ref().map(|_| &mut read_root),
-                        ),
-                        expression.span().start,
-                        false,
-                        indexed_literal_mode(Some(expression)),
-                        indexed_context_sensitive(Some(expression)),
-                    )
-                }
-            };
-            if let Some(observe) = observe.as_mut() {
-                observe(IndexedCallReadSite::Argument(ordinal), read_root);
-            }
-            IndexedValueCallArg {
-                expression,
-                point,
-                spread,
-                literal_mode,
-                context_sensitive,
-                function_return_source: None,
-            }
-        })
-        .collect::<Vec<_>>();
-    let explicit_type_args = call
-        .type_arguments
-        .as_ref()
-        .map(|arguments| {
-            arguments
-                .params
-                .iter()
-                .map(|argument| lower_ts_type(argument, source))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     IndexedValueCall {
         point: call.span.start,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
-        args: Arc::from(args.into_boxed_slice()),
-        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        explicit_type_args: lower_indexed_explicit_type_arguments(
+            call.type_arguments.as_deref(),
+            source,
+        ),
     }
 }
 
@@ -6276,42 +6507,163 @@ fn lower_indexed_new_expression(
     call: &oxc_ast::ast::NewExpression<'_>,
     source: &str,
 ) -> IndexedValueCall {
-    let args = call
-        .arguments
+    lower_indexed_new_expression_observed(call, source, None)
+}
+
+/// The construct twin of [`lower_indexed_call_expression_with_read_roots`]:
+/// a `new` expression reports its argument ordinals the same way. It has no
+/// receiver, so only arguments are reported.
+pub fn lower_indexed_new_expression_with_read_roots(
+    call: &oxc_ast::ast::NewExpression<'_>,
+    source: &str,
+    observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+) -> IndexedValueCall {
+    lower_indexed_new_expression_observed(call, source, Some(observe))
+}
+
+fn lower_indexed_new_expression_observed(
+    call: &oxc_ast::ast::NewExpression<'_>,
+    source: &str,
+    observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCall {
+    IndexedValueCall {
+        point: call.span.start,
+        kind: IndexedValueCallKind::Construct,
+        callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
+        receiver: None,
+        args: lower_indexed_call_arguments(&call.arguments, source, observe),
+        explicit_type_args: lower_indexed_explicit_type_arguments(
+            call.type_arguments.as_deref(),
+            source,
+        ),
+    }
+}
+
+fn lower_indexed_tagged_template_expression(
+    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    source: &str,
+) -> IndexedValueCall {
+    lower_indexed_tagged_template_expression_observed(tagged, source, None)
+}
+
+/// The tagged-template twin of
+/// [`lower_indexed_call_expression_with_read_roots`]: `` tag`a${x}b` `` is
+/// a call of `tag` whose first argument is the template strings (a
+/// non-binding read) and whose remaining arguments are the substitutions,
+/// in order. Every ordinal and the tag's receiver are reported exactly as
+/// a call's are.
+pub fn lower_indexed_tagged_template_expression_with_read_roots(
+    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    source: &str,
+    observe: &mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot),
+) -> IndexedValueCall {
+    lower_indexed_tagged_template_expression_observed(tagged, source, Some(observe))
+}
+
+fn lower_indexed_tagged_template_expression_observed(
+    tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    source: &str,
+    mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCall {
+    let (callee, receiver) = indexed_callee_and_receiver(&tagged.tag, source, &mut observe);
+    let mut args = Vec::with_capacity(tagged.quasi.expressions.len() + 1);
+    if let Some(observe) = observe.as_mut() {
+        observe(
+            IndexedCallReadSite::Argument(0),
+            IndexedValueReadRoot::NonBinding,
+        );
+    }
+    args.push(IndexedValueCallArg {
+        expression: IndexedValueExpression::TemplateStrings {
+            point: tagged.quasi.span.start,
+        },
+        point: tagged.quasi.span.start,
+        spread: false,
+        literal_mode: IndexedValueLiteralMode::Literal,
+        context_sensitive: false,
+        function_return_source: None,
+    });
+    for (index, expression) in tagged.quasi.expressions.iter().enumerate() {
+        args.push(lower_indexed_call_argument(
+            expression,
+            false,
+            index + 1,
+            source,
+            &mut observe,
+        ));
+    }
+    IndexedValueCall {
+        point: tagged.span.start,
+        kind: IndexedValueCallKind::Call,
+        callee: Box::new(callee),
+        receiver,
+        args: Arc::from(args.into_boxed_slice()),
+        explicit_type_args: lower_indexed_explicit_type_arguments(
+            tagged.type_arguments.as_deref(),
+            source,
+        ),
+    }
+}
+
+/// The argument list of one call or `new` expression, each ordinal
+/// (including a spread) reported to `observe` exactly once.
+fn lower_indexed_call_arguments(
+    arguments: &[oxc_ast::ast::Argument<'_>],
+    source: &str,
+    mut observe: Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> Arc<[IndexedValueCallArg]> {
+    let args = arguments
         .iter()
-        .map(|argument| {
-            let (expression, point, spread, literal_mode, context_sensitive) = match argument {
-                oxc_ast::ast::Argument::SpreadElement(spread) => (
-                    lower_indexed_call_argument_expression(&spread.argument, source),
-                    spread.argument.span().start,
-                    true,
-                    indexed_literal_mode(Some(&spread.argument)),
-                    indexed_context_sensitive(Some(&spread.argument)),
-                ),
-                argument => {
-                    let expression = argument.to_expression();
-                    (
-                        lower_indexed_call_argument_expression(expression, source),
-                        expression.span().start,
-                        false,
-                        indexed_literal_mode(Some(expression)),
-                        indexed_context_sensitive(Some(expression)),
-                    )
-                }
-            };
-            IndexedValueCallArg {
-                expression,
-                point,
-                spread,
-                literal_mode,
-                context_sensitive,
-                function_return_source: None,
+        .enumerate()
+        .map(|(ordinal, argument)| match argument {
+            oxc_ast::ast::Argument::SpreadElement(spread) => {
+                lower_indexed_call_argument(&spread.argument, true, ordinal, source, &mut observe)
             }
+            argument => lower_indexed_call_argument(
+                argument.to_expression(),
+                false,
+                ordinal,
+                source,
+                &mut observe,
+            ),
         })
         .collect::<Vec<_>>();
-    let explicit_type_args = call
-        .type_arguments
-        .as_ref()
+    Arc::from(args.into_boxed_slice())
+}
+
+/// One argument position, reported to `observe` at `ordinal` exactly once.
+fn lower_indexed_call_argument(
+    expression: &Expression<'_>,
+    spread: bool,
+    ordinal: usize,
+    source: &str,
+    observe: &mut Option<&mut dyn FnMut(IndexedCallReadSite, IndexedValueReadRoot)>,
+) -> IndexedValueCallArg {
+    let mut read_root = IndexedValueReadRoot::NonBinding;
+    let lowered = lower_indexed_value_expression_with_policy_and_read_root(
+        expression,
+        source,
+        MemberLiteralPolicy::Argument,
+        observe.as_ref().map(|_| &mut read_root),
+    );
+    if let Some(observe) = observe.as_mut() {
+        observe(IndexedCallReadSite::Argument(ordinal), read_root);
+    }
+    IndexedValueCallArg {
+        expression: lowered,
+        point: expression.span().start,
+        spread,
+        literal_mode: indexed_literal_mode(Some(expression)),
+        context_sensitive: indexed_context_sensitive(Some(expression)),
+        function_return_source: None,
+    }
+}
+
+fn lower_indexed_explicit_type_arguments(
+    type_arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>,
+    source: &str,
+) -> Arc<[TypeExpr]> {
+    let explicit_type_args = type_arguments
         .map(|arguments| {
             arguments
                 .params
@@ -6320,14 +6672,7 @@ fn lower_indexed_new_expression(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    IndexedValueCall {
-        point: call.span.start,
-        kind: IndexedValueCallKind::Construct,
-        callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
-        receiver: None,
-        args: Arc::from(args.into_boxed_slice()),
-        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-    }
+    Arc::from(explicit_type_args.into_boxed_slice())
 }
 
 /// Whether lowering `expr` as a VALUE would fabricate a type for a call it
@@ -6363,6 +6708,14 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
             self.0 = true;
         }
 
+        // A tagged template CALLS its tag: its type is the tag's return.
+        fn visit_tagged_template_expression(
+            &mut self,
+            _tagged: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+        ) {
+            self.0 = true;
+        }
+
         fn visit_function(
             &mut self,
             _function: &oxc_ast::ast::Function<'a>,
@@ -6378,10 +6731,7 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
 
         // A template literal is `string` whatever its interpolations
         // evaluate to (an EMPTY one is its own string literal), so an
-        // interpolated call contributes nothing to the answer. A TAGGED
-        // template's type comes from the tag's signature instead, and this
-        // lowering carries no arm for it at all — it answers `any`, the
-        // unrepresentable carrier, before this probe is consulted.
+        // interpolated call contributes nothing to the answer.
         fn visit_template_literal(&mut self, _template: &oxc_ast::ast::TemplateLiteral<'a>) {}
     }
 

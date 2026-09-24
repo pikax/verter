@@ -291,6 +291,16 @@ struct RaisedFunction {
     type_parameters: Vec<RaisedTypeParam>,
     signature_span: Option<Span>,
     return_type_span: Option<Span>,
+    predicate: Option<RaisedPredicate>,
+}
+
+/// Type-predicate mirror of [`verter_type_expr::TypePredicate`]: the raised
+/// key distinguishes exactly what the typed IR's equality distinguishes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RaisedPredicate {
+    subject: verter_type_expr::TypePredicateSubject,
+    asserts: bool,
+    ty: Option<RaisedShapeKey>,
 }
 
 /// Function-parameter mirror. It carries EXACTLY the fields

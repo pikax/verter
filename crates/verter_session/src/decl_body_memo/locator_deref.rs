@@ -78,9 +78,6 @@ pub(crate) enum LocatorBodyDerefError {
     /// Namespace bodies are not inventoried by the decl-body memo; a
     /// namespace anchor has no memo-backed authored body to deref.
     NamespaceBodyUnrouted,
-    /// No consumer demands an augmentation-scoped VALUE / namespace body
-    /// through a locator; the deref fails closed rather than fabricating one.
-    AugmentationBodySpaceUnrouted,
     /// The macro generic type argument belongs to the analyzer-macro hot
     /// mirror, and no disjoint framework script-fact provider recognized the
     /// locator's ordinal. This remains a typed unroutable result rather than a
@@ -423,11 +420,23 @@ impl DeclBodyMemo {
                         }
                         // The transient value-part service carries the SAME
                         // lease-miss / genuine-miss discrimination the demand
-                        // cells carry (header presence is checked inside).
-                        let parts = transient_outcome(self.transient_value_parts_in(
+                        // cells carry (header presence is checked inside). A
+                        // file-scope miss falls through to the GLOBAL ambient
+                        // inventory — the same file-scope-then-global order
+                        // the prepared value decl applies.
+                        let parts = match self.transient_value_parts_in(
                             slot.anchor.owner,
                             slot.anchor.symbol.as_ref(),
-                        ))?;
+                        ) {
+                            DemandOutcome::Ready(None) => self
+                                .transient_augmentation_value_parts_in(
+                                    &AugmentationScopeKind::Global,
+                                    slot.anchor.owner,
+                                    slot.anchor.symbol.as_ref(),
+                                ),
+                            outcome => outcome,
+                        };
+                        let parts = transient_outcome(parts)?;
                         let (expr, lexical_root) =
                             match navigate_value_parts(&parts, &slot.path, &slot.anchor) {
                                 Ok(selected) => selected,
@@ -525,8 +534,27 @@ impl DeclBodyMemo {
                             &aug.path,
                         )
                     }
-                    LocatorSymbolSpace::Value | LocatorSymbolSpace::Namespace => {
-                        Err(LocatorBodyDerefError::AugmentationBodySpaceUnrouted)
+                    LocatorSymbolSpace::Value => {
+                        // An augmentation-scoped value's annotation, object
+                        // shape or signature position, navigated like a
+                        // file-scope value's over the scope's own parts.
+                        let parts = transient_outcome(self.transient_augmentation_value_parts_in(
+                            &scope_kind,
+                            aug.anchor.owner,
+                            aug.anchor.symbol.as_ref(),
+                        ))?;
+                        let (expr, lexical_root) =
+                            navigate_value_parts(&parts, &aug.path, &aug.anchor)?;
+                        Ok(DerefedAuthoredBody {
+                            shape: DerefedBodyShape::Single(expr),
+                            lexical_root,
+                            type_parameters: parts.type_parameters.clone(),
+                            visibility: TypeParamVisibility::Body,
+                        })
+                    }
+                    // A namespace has no memo-backed body in any scope.
+                    LocatorSymbolSpace::Namespace => {
+                        Err(LocatorBodyDerefError::NamespaceBodyUnrouted)
                     }
                 }
             }
@@ -990,7 +1018,8 @@ fn navigate_signature_parts(
                 signature.parameters.clone(),
                 signature.return_type.clone().map(Arc::new),
                 signature.type_parameters.clone(),
-            );
+            )
+            .with_predicate(signature.predicate.clone());
             if signature.has_implementation_body
                 && !signature.has_authored_return
                 && !signature.jsdoc_return
@@ -1061,11 +1090,14 @@ fn signature_lexical_root(
         return None;
     }
     Some(DerefedLexicalRoot {
-        expr: TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-            signature.parameters.clone(),
-            signature.return_type.clone().map(Arc::new),
-            signature.type_parameters.clone(),
-        ))),
+        expr: TypeExpr::Function(Arc::new(
+            FunctionExpr::synthetic(
+                signature.parameters.clone(),
+                signature.return_type.clone().map(Arc::new),
+                signature.type_parameters.clone(),
+            )
+            .with_predicate(signature.predicate.clone()),
+        )),
         path: Arc::from(rest.to_vec().into_boxed_slice()),
     })
 }
@@ -1490,6 +1522,13 @@ fn push_function_infer_needles<'a>(function: &'a FunctionExpr, stack: &mut Vec<&
     );
     if let Some(return_type) = function.return_type.as_deref() {
         stack.push(peek_parenthesized(return_type));
+    }
+    if let Some(target) = function
+        .predicate
+        .as_deref()
+        .and_then(|predicate| predicate.ty.as_deref())
+    {
+        stack.push(peek_parenthesized(target));
     }
     for parameter in &function.type_parameters {
         if let Some(constraint) = parameter.constraint.as_deref() {

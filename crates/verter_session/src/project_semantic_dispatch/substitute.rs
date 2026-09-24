@@ -275,6 +275,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Instantiating a type parameter a class expression can see
+            // substitutes into the reference's type arguments and its
+            // instance surface; the class identity is unchanged.
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let mut any_changed = false;
+                let mut new_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments.iter() {
+                    let (sub, changed) =
+                        self.substitute_with_change_tracking(*argument, parameter_node, arg);
+                    any_changed |= changed;
+                    new_arguments.push(sub);
+                }
+                let (sub, changed) =
+                    self.substitute_with_change_tracking(*surface, parameter_node, arg);
+                if !changed && !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            type_arguments: Arc::from(new_arguments.into_boxed_slice()),
+                            surface: sub,
+                        },
+                    ),
+                    true,
+                )
+            }
             // Substitution is a composite CONSTRUCTION site (the ruling's
             // "substitution and post-substitution finalization" inclusion
             // arm): a CHANGED union routes through the canonical authority
@@ -325,16 +358,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                let rebuilt = if new_members.iter().any(|member| {
-                    crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
-                        self.graph(),
-                        *member,
-                    )
-                }) {
+                // A heritage body is a declaration, not an intersection type:
+                // its substitution stays a heritage body whatever it carries.
+                let category = members.origin_category();
+                let rebuilt = if category
+                    == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+                    || new_members.iter().any(|member| {
+                        crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
+                            self.graph(),
+                            *member,
+                        )
+                    }) {
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
                                 Arc::from(new_members.into_boxed_slice()),
                             ),
                         ),
@@ -696,6 +735,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // identity `T[K]` remains identity after the
                                 // type-parameter rewrite.
                                 kind: mapper.kind,
+                                // Substitution instantiates the type
+                                // variable; the mapping stays homomorphic
+                                // over its instantiation.
+                                over_type_variable: mapper.over_type_variable,
                             },
                         },
                     ),
@@ -891,6 +934,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => {
                 // Signature-local TypeParams need no spelling-based stop:
                 // legitimate outer references carry an exact InferRef;
@@ -906,13 +950,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ty: sub_ty,
                         optional: param.optional,
                         rest: param.rest,
-                        // Substitution preserves the parameter's OXC span.
+                        // Substitution preserves the parameter's OXC span
+                        // and its declaration facts.
                         span: param.span,
+                        declared_literal: param.declared_literal,
                     });
                 }
                 let (sub_return, return_changed) =
                     self.substitute_with_change_tracking(*return_type, parameter_node, arg);
                 any_changed |= return_changed;
+                // A generic predicate instantiates with the signature:
+                // `x is T` at `T := string` narrows to `string`.
+                let sub_predicate = predicate.map(|predicate| {
+                    predicate.map_type(|target| {
+                        let (sub, changed) =
+                            self.substitute_with_change_tracking(target, parameter_node, arg);
+                        any_changed |= changed;
+                        sub
+                    })
+                });
                 let mut new_type_parameters = Vec::with_capacity(type_parameters.len());
                 for tp in type_parameters.iter() {
                     let new_constraint = match tp.constraint {
@@ -997,6 +1053,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // Substitution preserves the signature's OXC spans.
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
+                            predicate: sub_predicate,
                         },
                     ),
                     true,
@@ -1068,6 +1125,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: param.optional,
                         rest: param.rest,
                         span: param.span,
+                        declared_literal: param.declared_literal,
                     });
                 }
                 let mut new_type_parameters = Vec::with_capacity(parts.type_parameters.len());
@@ -1219,6 +1277,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -1233,6 +1292,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     for arg in args.iter() {
@@ -1333,6 +1393,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::Alias(t) => {
                     stack.push(*t);
                 }
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let members = composite.composite_members().expect("composite arm");
                     for member in members.iter() {
@@ -1428,6 +1496,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     params,
                     return_type,
                     type_parameters,
+                    predicate,
                     ..
                 } => {
                     for param in params.iter() {
@@ -1442,6 +1511,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             stack.push(d);
                         }
                     }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
                 }
                 // Unresolved carriers (`BareRef` / `TypeOf` / `ImportType`)
                 // descend into their structural `type_args` exactly as

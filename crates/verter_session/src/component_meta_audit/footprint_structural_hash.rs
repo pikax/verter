@@ -522,6 +522,7 @@ impl StructuralEncoder<'_> {
                 self.push_str(&format!("{:?}", mapper.readonly));
                 self.encode_child_opt(mapper.name_remap, depth);
                 self.push_str(&format!("{:?}", mapper.kind));
+                self.push_str(&format!("{:?}", mapper.over_type_variable));
             }
             SemanticNodeData::TypeParam {
                 decl,
@@ -582,6 +583,7 @@ impl StructuralEncoder<'_> {
                 return_carrier,
                 signature_span,
                 return_type_span,
+                predicate,
             } => {
                 self.buf.push(SemanticNodeTag::Signature.stable_id());
                 self.buf.push(match kind {
@@ -617,6 +619,13 @@ impl StructuralEncoder<'_> {
                 self.push_str(&format!("{return_carrier:?}"));
                 self.push_str(&format!("{signature_span:?}"));
                 self.push_str(&format!("{return_type_span:?}"));
+                // Trailing, present only on a predicate signature, so every
+                // predicate-less signature keeps its hash.
+                if let Some(predicate) = predicate {
+                    self.push_str(&format!("{:?}", predicate.subject));
+                    self.buf.push(u8::from(predicate.asserts));
+                    self.encode_child_opt(predicate.ty, depth);
+                }
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 self.buf.push(SemanticNodeTag::InstantiationRef.stable_id());
@@ -735,6 +744,34 @@ impl StructuralEncoder<'_> {
             SemanticNodeData::DeclRef { identity } => {
                 self.buf.push(SemanticNodeTag::DeclRef.stable_id());
                 self.encode_decl_identity(identity);
+            }
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                self.buf
+                    .push(SemanticNodeTag::ClassExpressionInstance.stable_id());
+                self.push_str(&identity.canonical_id);
+                self.buf.push(match identity.owner.kind() {
+                    verter_type_expr::TopLevelOwnerKind::Module => 0,
+                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+                });
+                self.buf
+                    .extend_from_slice(&identity.owner.ordinal().to_le_bytes());
+                self.buf.extend_from_slice(&identity.offset.to_le_bytes());
+                self.push_str(&identity.name);
+                self.buf
+                    .extend_from_slice(&(identity.outer_clauses.len() as u64).to_le_bytes());
+                for clause in identity.outer_clauses.iter() {
+                    self.push_str(&clause.container);
+                    self.push_str_slice(&clause.parameters);
+                }
+                self.buf
+                    .extend_from_slice(&identity.own_arity.to_le_bytes());
+                self.encode_child_slice(type_arguments, depth);
+                self.encode_child(*surface, depth);
             }
             // The sealed callable carrier: its composed parts are readable
             // only by its two consumers, so the encoding is the tag alone.

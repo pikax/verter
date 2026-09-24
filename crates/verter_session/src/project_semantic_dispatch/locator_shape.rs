@@ -138,6 +138,18 @@ fn register_locator_function_children_alias(
     ) {
         infer_binders.register_equivalent_subtree(alias, original);
     }
+    if let (Some(alias), Some(original)) = (
+        alias_function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+        original
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
 }
 
 fn register_locator_object_member_alias(
@@ -674,9 +686,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                let mut over_type_variable = false;
                 let (source_node, key_space, base_infer_name) = match source.as_ref() {
                     TypeExpr::KeyOf(inner) => {
                         let inner_id = self.lower_locator_shape_node(inner, ctx);
+                        over_type_variable =
+                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
                         let key_space = graph.intern_node_with_scope(
                             SemanticNodeData::KeyOf { base: inner_id },
                             scope.clone(),
@@ -744,6 +759,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             readonly,
                             name_remap,
                             kind,
+                            over_type_variable,
                         },
                     },
                     scope.clone(),
@@ -1282,8 +1298,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional: p.optional,
                 rest: p.rest,
                 span: p.span,
+                declared_literal: crate::semantic_query::declares_literal_type(&p.ty),
             })
             .collect();
+        // A body-derived return carries the predicate the checker infers
+        // from the body beside it.
+        let mut inferred_predicate = None;
         let (return_type, return_carrier) = match &func.flow_return {
             // A body-derived return is demanded from the whole-function
             // producer through the sealed helper: the extractor marked the
@@ -1314,6 +1334,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope_canonical.as_ref(),
                         ) {
                             super::flow_return::FunctionReturnNode::Flow(result) => {
+                                inferred_predicate = result.inferred_predicate();
                                 result.return_type()
                             }
                             _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
@@ -1344,6 +1365,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
             },
         };
+        // The predicate target is a fixed authored shape under the
+        // signature's own binders, exactly like the return.
+        let predicate = func
+            .predicate
+            .as_deref()
+            .and_then(|predicate| {
+                let target = predicate
+                    .ty
+                    .as_deref()
+                    .map(|target| self.lower_locator_shape_node(target, &inner_ctx));
+                crate::semantic_query::SignaturePredicate::resolve(predicate, &params, target)
+            })
+            .or(inferred_predicate);
         graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
@@ -1357,6 +1391,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return_carrier,
                 signature_span: func.spans.signature,
                 return_type_span: func.spans.return_type,
+                predicate,
             },
             scope.clone(),
         )

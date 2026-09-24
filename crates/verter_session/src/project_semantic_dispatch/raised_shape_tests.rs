@@ -1140,6 +1140,7 @@ fn parity_deferred_operator_shells() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: tp,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: tp,
             key_space: keyspace,
             value_expr: value_tp,
@@ -1472,6 +1473,7 @@ fn parity_function_and_constructor_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert_classifier_parity(&host, func, "function-materialized");
     assert!(
@@ -1505,6 +1507,7 @@ fn parity_function_and_constructor_type() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert_classifier_parity(&host, func_miss_param, "function-miss-param");
     assert!(
@@ -2001,6 +2004,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     // The oracle shape the node raises to (param `has_ts_annotation: false`).
@@ -2386,6 +2390,7 @@ fn mapped_fixture(
     graph.intern_node(SemanticNodeData::Mapped {
         source,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: source,
             key_space,
             value_expr,
@@ -2557,6 +2562,7 @@ fn publication_score_corpus(
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
 
     vec![
@@ -2778,6 +2784,24 @@ fn publication_score_corpus(
                 value_node: foo.0,
             }),
         ),
+        (
+            "class_expression_instance",
+            graph.intern_node(SemanticNodeData::ClassExpressionInstance {
+                identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
+                    canonical_id: Arc::from("/w/m.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    offset: 42,
+                    name: Arc::from("(Anonymous class)"),
+                    outer_clauses: Arc::from([crate::semantic_query::ClassExpressionClause {
+                        container: Arc::from("Mixin"),
+                        parameters: Arc::from([Arc::from("S")]),
+                    }]),
+                    own_arity: 0,
+                }),
+                type_arguments: Arc::from([foo]),
+                surface: obj_a,
+            }),
+        ),
     ]
 }
 
@@ -2852,6 +2876,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::Signature { .. } => "function",
             SemanticNodeData::DeclRef { .. } => "decl_ref",
             SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
+            SemanticNodeData::ClassExpressionInstance { .. } => "class_expression_instance",
             SemanticNodeData::BareRef(_) => "bare_ref",
             SemanticNodeData::IntrinsicApplication { .. } => "intrinsic_application",
             SemanticNodeData::ImportType(_) => "import_type",
@@ -2891,6 +2916,7 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
         "raw_fallback",
         "constructor_type",
         "synthetic_binding",
+        "class_expression_instance",
     ];
 
     let host = host();
@@ -3097,6 +3123,7 @@ fn function_with_unraisable_return_fails_whole() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert!(
         !fold_raises(&host, node),
@@ -3126,6 +3153,7 @@ fn function_with_unraisable_parameter_fails_whole() {
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
+        predicate: None,
     });
     assert!(
         !fold_raises(&host, node),

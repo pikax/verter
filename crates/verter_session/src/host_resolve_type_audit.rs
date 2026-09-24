@@ -141,7 +141,10 @@ impl TypeResolutionRequestError {
             // flow rail already folded its own partial/ReturnOnly rails
             // at the consumer boundary, so it is not a request FAULT.
             | QueryError::UnmodeledPosition
-            | QueryError::UnrepresentableSurfaceMember => None,
+            | QueryError::UnrepresentableSurfaceMember
+            // The checker's recovered error type is its own answer after a
+            // diagnostic, never a request fault.
+            | QueryError::CheckerRecovery(_) => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),
             }),
@@ -505,7 +508,7 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::MappedType { .. }
         | SemanticQueryKey::Conditional { .. }
         | SemanticQueryKey::TypeOf { .. }
-        | SemanticQueryKey::NormalizeUnion { .. }
+        | SemanticQueryKey::ReduceUnion { .. }
         | SemanticQueryKey::ReduceIntersection { .. }
         | SemanticQueryKey::Relate { .. }
         | SemanticQueryKey::ResolveEnum { .. }

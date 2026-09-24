@@ -18,6 +18,51 @@ use crate::semantic_query::{
     ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
+/// How the checker prints an application of a named declaration — the
+/// altitude the declaration-keeping structural-fact demand stops at (see
+/// `ProjectSemanticDispatch::printed_declaration`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrintedDeclaration {
+    /// An interface or class, or a mapped utility application the checker
+    /// names (`Partial<Face>`): printed by its name.
+    Named,
+    /// An alias the checker prints by name when its application settles
+    /// on the type the alias constructs.
+    AliasNamed,
+    /// An alias the checker prints as the application its body writes: a
+    /// reference to a non-generic declaration (`type ToFace = Face` prints
+    /// `Face`) or a homomorphic mapped application (`type P<T> =
+    /// Partial<T>` prints `P<{ a: 1 }>` as `Partial<{ a: 1; }>`).
+    AliasThrough,
+    /// An alias the checker prints as what it resolves to.
+    AliasTransparent,
+}
+
+/// A builtin mapped utility, by whether its mapping is homomorphic (its
+/// keys are `keyof` its source).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltinMappedUtility {
+    /// `Partial` / `Required` / `Readonly`.
+    Homomorphic,
+    /// `Pick` / `Record` / `Omit`.
+    Keyed,
+}
+
+impl BuiltinMappedUtility {
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "Partial" | "Required" | "Readonly" => Some(Self::Homomorphic),
+            "Pick" | "Record" | "Omit" => Some(Self::Keyed),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `identity` names a builtin (lib) declaration.
+fn is_builtin(identity: &crate::semantic_query::DeclIdentity) -> bool {
+    identity.canonical_id.as_ref() == "__builtin__"
+}
+
 /// Map a residual-carrier resolution read's `QueryError` onto the demand
 /// loop's typed exit classification.
 ///
@@ -511,7 +556,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Full structural-fact demand: resolve BOTH residual carriers
         // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
-        self.resolve_structural_fact_demand(node, context, true)
+        self.resolve_structural_fact_demand(node, context, true, true)
     }
 
     /// Carrier-PRESERVING sibling of
@@ -549,21 +594,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> StructuralFactDemandOutcome {
         // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
         // `InstantiationRef` (do NOT instantiate — leave the args readable).
-        self.resolve_structural_fact_demand(node, context, false)
+        self.resolve_structural_fact_demand(node, context, false, true)
     }
 
-    /// Shared residual-carrier resolution loop backing both
-    /// [`Self::normalize_node_for_structural_fact_demand`]
-    /// (`instantiate_instantiation_refs = true`) and
-    /// [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
-    /// (`= false`). ONE loop, one resolver — the two entry points differ ONLY by
-    /// whether the `InstantiationRef` arm instantiates (there is no divergent
-    /// second implementation).
+    /// Declaration-KEEPING sibling of
+    /// [`Self::normalize_node_for_structural_fact_demand`]: resolves
+    /// residual carriers through the shared `ResolveDecl` / `Instantiate`
+    /// queries exactly as it does, but STOPS where the checker prints a
+    /// NAME instead of resolving it to the declaration's body.
+    ///
+    /// That is the altitude a type is PRINTED at: a utility or conditional
+    /// application (`InstanceType<…>`, `ReturnType<…>`, `Awaited<…>`) is
+    /// reduced, while a named interface is shown by its name, and so is an
+    /// alias application the checker names by its alias — each with its
+    /// omitted defaulted arguments filled (see
+    /// `ProjectSemanticDispatch::printed_declaration`). The checker's
+    /// printed answer to `InstanceType<typeof CtorA & typeof CtorB>` is `B`,
+    /// the interface — not `{ b: 2 }`, its body — and to a `WithDefault`
+    /// reference it is `WithDefault<string>`, so an evidence lane that
+    /// compares a live answer against a recorded print needs this stop, and
+    /// the fully resolving demand overshoots it by exactly one step.
+    ///
+    /// Same loop, same resolver, same bounds and typed `Partial` outcome as
+    /// its siblings; STRICTLY test-scoped because its only consumer is the
+    /// in-crate signature-corpus driver.
+    #[cfg(test)]
+    pub(crate) fn normalize_node_keeping_declaration_refs_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> StructuralFactDemandOutcome {
+        self.resolve_structural_fact_demand(node, context, true, false)
+    }
+
+    /// Shared residual-carrier resolution loop backing
+    /// [`Self::normalize_node_for_structural_fact_demand`] (both residual arms
+    /// resolve), [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
+    /// (`instantiate_instantiation_refs = false`) and, under test,
+    /// `normalize_node_keeping_declaration_refs_for_tests`
+    /// (`resolve_declaration_refs = false`). ONE loop, one resolver — the
+    /// entry points differ ONLY in which residual arm is allowed to resolve
+    /// (there is no divergent second implementation).
     fn resolve_structural_fact_demand(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         instantiate_instantiation_refs: bool,
+        resolve_declaration_refs: bool,
     ) -> StructuralFactDemandOutcome {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
@@ -593,6 +670,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `PROPAGATED`), so the completeness survives even with NO
         // `RequestContext` installed.
         let mut visited = rustc_hash::FxHashSet::default();
+        // The declaration-keeping mode's OUTERMOST alias application the
+        // checker names, recorded as the chain resolves through it and
+        // printed when the chain settles on a type that alias names.
+        let mut named_alias_application: Option<SemanticNodeId> = None;
         // The loop's own exit classification: `None` = a stable (Complete)
         // stop; `Some(reasons)` = an operational truncation/fault.
         let exit_reasons: Option<PartialReasonSet> = loop {
@@ -601,20 +682,114 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // cannot read.
                 break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
             };
+            // The declaration-keeping mode prints a named declaration the
+            // way the checker does: an interface or class by its name, an
+            // alias application by its alias when the alias names the type
+            // it resolves to — each with its omitted defaulted arguments
+            // filled — and every other alias by what it resolves to.
+            let printed = if resolve_declaration_refs {
+                None
+            } else {
+                match data.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => Some((identity.clone(), None)),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        Some((base.clone(), Some(Arc::clone(args))))
+                    }
+                    _ => None,
+                }
+            };
+            let printed = printed.map(|(identity, args)| {
+                let kind = if is_builtin(&identity) {
+                    self.printed_builtin_application(
+                        &identity,
+                        args.as_deref().unwrap_or_default(),
+                        context,
+                    )
+                } else {
+                    self.printed_declaration(&identity)
+                };
+                (identity, args, kind)
+            });
             // TERMINAL-BEFORE-FUSE: classify whether `n` is a residual
             // resolvable carrier BEFORE consulting the fuse, so a result that
             // reached its terminal structural body on exactly the last
             // permitted step is a stable stop, never a false partial. The
             // non-residual break also covers the peel's deliberate
-            // un-instantiated `InstantiationRef` stop.
-            let is_residual = match data.as_ref() {
-                SemanticNodeData::DeclRef { .. } => true,
-                SemanticNodeData::InstantiationRef { .. } => instantiate_instantiation_refs,
+            // un-instantiated `InstantiationRef` stop, and the
+            // declaration-keeping mode's stop at a declaration printed by
+            // its name or at a class-expression instance.
+            let is_residual = match (data.as_ref(), &printed) {
+                (_, Some((_, _, Some(PrintedDeclaration::Named)))) => false,
+                (_, Some((_, _, Some(_)))) => true,
+                (
+                    SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. },
+                    _,
+                ) => resolve_declaration_refs,
+                (SemanticNodeData::InstantiationRef { .. }, _) => instantiate_instantiation_refs,
                 _ => false,
             };
+            drop(data);
+            if let Some((identity, args, Some(kind))) = &printed {
+                let args = args.as_deref().unwrap_or_default();
+                match kind {
+                    // A builtin application is its own printed name.
+                    PrintedDeclaration::Named if is_builtin(identity) => {}
+                    PrintedDeclaration::Named => {
+                        n = self.declared_application(n, identity, args, context);
+                    }
+                    PrintedDeclaration::AliasNamed if named_alias_application.is_none() => {
+                        named_alias_application =
+                            Some(self.declared_application(n, identity, args, context));
+                    }
+                    // The application the alias's body writes, substituted
+                    // and still unreduced — classified in turn.
+                    PrintedDeclaration::AliasThrough => {
+                        let read = self.execute_read(SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                self.type_slot_for(
+                                    Arc::clone(&identity.canonical_id),
+                                    identity.owner,
+                                    Arc::clone(&identity.decl_name),
+                                ),
+                                Arc::from(args.to_vec().into_boxed_slice()),
+                                self.instantiate_context_for(
+                                    &identity.canonical_id,
+                                    ProjectionReductionContext::structural_transit_with_mode(
+                                        ProjectionMode::Navigate,
+                                    ),
+                                ),
+                            ),
+                        ));
+                        crate::request_context::observe_component_meta_read_suppress(&read);
+                        crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                            self.ctx,
+                            &read.dep_signature,
+                        );
+                        completeness = completeness
+                            .or_partial_if(read.result_is_partial, read.partial_reason_classes());
+                        if let QueryResult::Value(target) = read.value {
+                            if target != n {
+                                if !visited.insert(n) {
+                                    break Some(PartialReasonSet::SAME_PATH_RECURSION);
+                                }
+                                if let Err(reasons) = self.charge_connected_work() {
+                                    break Some(reasons);
+                                }
+                                n = target;
+                                continue;
+                            }
+                        }
+                    }
+                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasTransparent => {}
+                }
+            }
             if !is_residual {
                 break None;
             }
+            let Some(data) = self.graph().node_data(n) else {
+                break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
+            };
             if !visited.insert(n) {
                 // Residual-carrier cycle (`type MutA = MutB; type MutB = MutA`):
                 // the chain can never settle.
@@ -627,6 +802,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 break Some(reasons);
             }
             let resolved = match data.as_ref() {
+                // A class expression's instance resolves to the instance surface
+                // it carries — the body a `DeclRef` resolves to, already in hand.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => *surface,
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the `ScopeId { canonical_id, local_scope: None }` shape the
                 // canonical resolver issues).
@@ -728,6 +906,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
         }
+        // The alias names the type its application settled on only while
+        // that type is one the alias itself constructs; a union that
+        // collapsed to one member (`type U<T> = T | string` at `string`) or
+        // an intersection reduced to `never` is printed as itself.
+        if let Some(named) = named_alias_application {
+            if self.alias_names_settled_type(n) {
+                n = named;
+            }
+        }
         match completeness {
             ResultCompleteness::Complete => StructuralFactDemandOutcome::Complete(n),
             ResultCompleteness::Partial(reasons) => {
@@ -760,6 +947,311 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.fold_local_partial_completeness(reasons);
                 StructuralFactDemandOutcome::Partial(reasons)
             }
+        }
+    }
+
+    /// How the checker prints an application of the named declaration
+    /// `identity` — measured on the pinned TypeScript 7.0.2 through the
+    /// corpus's two-step wrapper:
+    ///
+    /// - an interface or class application is printed by its name
+    ///   (`GI` with `interface GI<T = number>` prints `GI<number>`);
+    /// - an alias whose declared body is a type the alias itself
+    ///   constructs — an object, function, mapped, array or tuple type, a
+    ///   union or an intersection — is printed by the alias (`Tup<number>`,
+    ///   `Fn<number>`);
+    /// - an alias whose body references another declaration prints as
+    ///   [`Self::printed_alias_reference`] decides;
+    /// - every other alias is not named by the alias: a conditional
+    ///   (`Cond` prints its selected branch), a bare parameter
+    ///   (`type Lit<T> = T`) or a primitive.
+    ///
+    /// `None` when the declaration's kind or body cannot be recovered.
+    fn printed_declaration(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<PrintedDeclaration> {
+        self.printed_declaration_within(identity, &mut rustc_hash::FxHashSet::default())
+    }
+
+    fn printed_declaration_within(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    ) -> Option<PrintedDeclaration> {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if !visited.insert(identity.clone()) {
+            // An alias cycle names nothing.
+            return Some(PrintedDeclaration::AliasTransparent);
+        }
+        match self.prepared_decl_kind(identity)? {
+            TypeDeclKind::Interface | TypeDeclKind::Class => {
+                return Some(PrintedDeclaration::Named)
+            }
+            TypeDeclKind::Alias => {}
+        }
+        let Some(body) = self.declared_alias_body(identity)? else {
+            return Some(PrintedDeclaration::AliasTransparent);
+        };
+        Some(match self.graph().node_data(body).as_deref() {
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Union(_)
+                | SemanticNodeData::Intersection(_),
+            ) => PrintedDeclaration::AliasNamed,
+            Some(SemanticNodeData::DeclRef { identity: target }) => {
+                self.printed_alias_reference(target, &[], visited)
+            }
+            Some(SemanticNodeData::InstantiationRef { base: target, args }) => {
+                self.printed_alias_reference(target, args, visited)
+            }
+            _ => PrintedDeclaration::AliasTransparent,
+        })
+    }
+
+    /// How the checker prints an alias whose declared body references
+    /// `target` with the declared arguments `args`, measured on TypeScript
+    /// 7.0.2:
+    ///
+    /// - a reference to a NON-generic declaration is that declaration's
+    ///   type, printed as it prints (`type ToFace = Face` prints `Face`,
+    ///   `type ToObj = Obj` prints `Obj`, `type ToToFace = ToFace` prints
+    ///   `Face`);
+    /// - a generic interface or class application is named by the alias
+    ///   (`type ToGFace = GFace<string>` prints `ToGFace`,
+    ///   `type ToGFaceDefault = GFace` prints `ToGFaceDefault`,
+    ///   `type PromAlias<T> = Promise<T>` prints `PromAlias<number>`);
+    /// - a homomorphic mapped application — `Partial` / `Required` /
+    ///   `Readonly`, or an alias declaring one — keeps the MAPPED name
+    ///   unless its declared source is a union (`type P<T> = Partial<T>`
+    ///   prints `P<{ a: 1 }>` as `Partial<{ a: 1; }>`, `type PP<T> = P<T>`
+    ///   too, `type MpA<T> = Mp<T>` over `type Mp<T> = { [K in keyof T]:
+    ///   T[K] }` prints `Mp<{ a: 1; }>`, `type PFace = Partial<Face>` prints
+    ///   `Partial<Face>`, while `type PU = Partial<Face | Obj>` prints `PU`);
+    /// - a keyed mapped application is named by the alias (`type PickA<T> =
+    ///   Pick<T, 'a'>` prints `PickA<{ a: 1; b: 2; }>`, `type Rec<K> =
+    ///   Record<K, number>` prints `Rec<"x">`, `type PickAB = Pick<…>`
+    ///   prints `PickAB`);
+    /// - a generic alias application is named by the outer alias unless the
+    ///   target itself prints as what it resolves to (`type G<U> = F<U[]>`
+    ///   prints `G<boolean>`, `type OuterCond<T> = Cond<T>` prints the
+    ///   selected branch);
+    /// - any other builtin (a conditional utility) is what it resolves to.
+    fn printed_alias_reference(
+        &self,
+        target: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
+    ) -> PrintedDeclaration {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        if is_builtin(target) {
+            return match BuiltinMappedUtility::of(&target.decl_name) {
+                Some(BuiltinMappedUtility::Homomorphic) if !self.declared_union(args.first()) => {
+                    PrintedDeclaration::AliasThrough
+                }
+                Some(_) => PrintedDeclaration::AliasNamed,
+                None if self.runtime_nominal_identity(target).is_some() => {
+                    PrintedDeclaration::AliasNamed
+                }
+                None => PrintedDeclaration::AliasTransparent,
+            };
+        }
+        let (Some(kind), Some(generic)) = (
+            self.prepared_decl_kind(target),
+            self.prepared_decl_is_generic(target),
+        ) else {
+            return PrintedDeclaration::AliasTransparent;
+        };
+        match kind {
+            _ if !generic => PrintedDeclaration::AliasThrough,
+            TypeDeclKind::Interface | TypeDeclKind::Class => PrintedDeclaration::AliasNamed,
+            TypeDeclKind::Alias if self.alias_declares_homomorphic_mapping(target) => {
+                PrintedDeclaration::AliasThrough
+            }
+            TypeDeclKind::Alias => match self.printed_declaration_within(target, visited) {
+                Some(PrintedDeclaration::AliasTransparent) | None => {
+                    PrintedDeclaration::AliasTransparent
+                }
+                Some(_) => PrintedDeclaration::AliasNamed,
+            },
+        }
+    }
+
+    /// Whether the alias `identity` declares a homomorphic mapped type — a
+    /// mapping over `keyof` one of its type parameters, a `Partial` /
+    /// `Required` / `Readonly` application over a source that is not a
+    /// union, or an application of another alias that does. The checker
+    /// gives such a declaration the mapped type's own name, so an alias of
+    /// it is printed by that name.
+    fn alias_declares_homomorphic_mapping(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut current = identity.clone();
+        loop {
+            if !visited.insert(current.clone()) {
+                return false;
+            }
+            let Some(Some(body)) = self.declared_alias_body(&current) else {
+                return false;
+            };
+            let graph = self.graph();
+            let next = match graph.node_data(body).as_deref() {
+                Some(SemanticNodeData::Mapped { mapper, .. }) => {
+                    return match graph.node_data(mapper.key_space).as_deref() {
+                        Some(SemanticNodeData::KeyOf { base }) => matches!(
+                            graph.node_data(*base).as_deref(),
+                            Some(SemanticNodeData::TypeParam { .. })
+                        ),
+                        _ => false,
+                    };
+                }
+                Some(SemanticNodeData::InstantiationRef { base, args }) if is_builtin(base) => {
+                    return BuiltinMappedUtility::of(&base.decl_name)
+                        == Some(BuiltinMappedUtility::Homomorphic)
+                        && !self.declared_union(args.first());
+                }
+                Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+                _ => return false,
+            };
+            if self.prepared_decl_kind(&next) != Some(TypeDeclKind::Alias) {
+                return false;
+            }
+            current = next;
+        }
+    }
+
+    /// Whether a declared (unsubstituted) type argument is a union.
+    fn declared_union(&self, argument: Option<&SemanticNodeId>) -> bool {
+        argument.is_some_and(|argument| {
+            matches!(
+                self.graph().node_data(*argument).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            )
+        })
+    }
+
+    /// How the checker prints a builtin application reached directly: a
+    /// mapped utility is printed by its name (`Partial<{ a: 1 }>` prints
+    /// `Partial<{ a: 1; }>`, `Pick<…, 'a'>` prints `Pick<{ a: 1; b: 2; },
+    /// "a">`, `Partial<Face | Obj>` prints `Partial<Face | Obj>`) except a
+    /// homomorphic one over a primitive, array or tuple, which the checker
+    /// maps into that type (`Partial<string>` prints `string`). `None` for
+    /// every other builtin, which resolves as before.
+    fn printed_builtin_application(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> Option<PrintedDeclaration> {
+        match BuiltinMappedUtility::of(&identity.decl_name)? {
+            BuiltinMappedUtility::Keyed => Some(PrintedDeclaration::Named),
+            BuiltinMappedUtility::Homomorphic => {
+                let source = self
+                    .normalize_node_for_structural_fact_demand(*args.first()?, context)
+                    .into_complete_node()?;
+                (!matches!(
+                    self.graph().node_data(source).as_deref(),
+                    Some(
+                        SemanticNodeData::Primitive(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Array { .. }
+                            | SemanticNodeData::Tuple { .. }
+                    )
+                ))
+                .then_some(PrintedDeclaration::Named)
+            }
+        }
+    }
+
+    /// An alias's declared body shape with `Alias` wrappers peeled: `None`
+    /// when the body cannot be recovered, `Some(None)` for an alias cycle.
+    fn declared_alias_body(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<Option<SemanticNodeId>> {
+        let mut body = self.declared_body_shape(identity)?;
+        let mut aliases = rustc_hash::FxHashSet::default();
+        while let Some(SemanticNodeData::Alias(target)) = self.graph().node_data(body).as_deref() {
+            if !aliases.insert(body) {
+                return Some(None);
+            }
+            body = *target;
+        }
+        Some(Some(body))
+    }
+
+    /// The declaration's own unsubstituted body shape, through the
+    /// memoized locator provider every declaration body lowers through.
+    fn declared_body_shape(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<SemanticNodeId> {
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+        };
+        match self.lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                symbol: Arc::clone(&identity.decl_name),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        })) {
+            QueryResult::Value(body) => Some(body),
+            QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+        }
+    }
+
+    /// Whether a named alias application still names the type it settled
+    /// on: one of the constructed types the checker attaches an alias to,
+    /// a lib interface application (`Promise<number>`) included.
+    fn alias_names_settled_type(&self, settled: SemanticNodeId) -> bool {
+        match self.graph().node_data(settled).as_deref() {
+            Some(
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Union(_)
+                | SemanticNodeData::Intersection(_),
+            ) => true,
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                self.runtime_nominal_identity(base).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// The application of `identity` the checker prints for `carrier`: its
+    /// supplied arguments followed by every omitted defaulted one
+    /// ([`Self::declared_application_arguments`]). The carrier itself when
+    /// nothing is omitted or the defaults cannot be recovered.
+    fn declared_application(
+        &self,
+        carrier: SemanticNodeId,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        match self.declared_application_arguments(identity, args, context) {
+            Some(complete) if complete.len() > args.len() => self.graph().intern_preserving_scope(
+                carrier,
+                SemanticNodeData::InstantiationRef {
+                    base: identity.clone(),
+                    args: complete,
+                },
+            ),
+            _ => carrier,
         }
     }
 

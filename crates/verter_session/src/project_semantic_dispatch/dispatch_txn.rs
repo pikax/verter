@@ -154,18 +154,19 @@ impl StrictFamilyConfig {
     }
 }
 
-/// The environment one dispatch runs its relation judgements under: the
-/// `R/T/L/J` dimensions and the strict-family configuration of the project
-/// owning the REQUEST's canonical (the program doing the checking, as in
-/// TypeScript, where strictness is a program-wide option — never the file a
-/// related node happens to be declared in).
+/// The environment a relation judgement runs under: the `R/T/L/J`
+/// dimensions and the strict-family configuration of the project doing the
+/// checking (as in TypeScript, where strictness is a program-wide option —
+/// never the file a related node happens to be declared in). That project
+/// owns the file whose answer is being decided: a flow-return frame's own
+/// function file while the frame evaluates, the REQUEST's canonical
+/// otherwise ([`super::ProjectSemanticDispatch::relation_environment`]).
 ///
-/// Derived once per dispatch ([`super::ProjectSemanticDispatch::relation_environment`])
-/// from the same published project tables the env hashes were composed
-/// from, so the key's `T` and the reducer's branch are two projections of
-/// ONE option set. A dispatch running outside any request context (no
-/// canonical to own it) runs the workspace default: TypeScript's default
-/// options under the workspace-default env.
+/// Derived from the same published project tables the env hashes were
+/// composed from, so the key's `T` and the reducer's branch are two
+/// projections of ONE option set. A dispatch running outside any request
+/// context and any flow frame (no canonical to own it) runs the workspace
+/// default: TypeScript's default options under the workspace-default env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RelationEnvironment {
     pub(crate) env: crate::session_view::EnvHashes,
@@ -2842,6 +2843,35 @@ pub(crate) struct CompletedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
+    /// Set when a later demand for the same key on this transaction may
+    /// reuse the proven value instead of re-evaluating the body (§12:
+    /// shared body-obligation consumers reuse completed return work): the
+    /// member closed as its OWN SCC root, so its value came only from work
+    /// inside its frame, and every read that work made was recorded and
+    /// clean. `None` for a member closed inside a larger component, whose
+    /// value also rests on frames outside its own, and for any member
+    /// whose evaluation was not recorded or read something a replay cannot
+    /// reproduce.
+    pub(crate) reuse: Option<FlowMemberReuse>,
+}
+
+/// What reusing a completed flow member replays at the demanding site: the
+/// reads its evaluation made on every channel an enclosing build observes,
+/// so a scope that was not live when the member ran still sees them — the
+/// transaction-local counterpart of a warm hit bubbling its stored
+/// signature. Only a CLEAN evaluation is recorded as reusable (no
+/// non-cacheable read, no partial or cache-suppressing taint, a complete
+/// cold-compute scope), so these three rails are all a replay needs.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowMemberReuse {
+    /// The fact reads, fanned out again into the live tracers.
+    pub(crate) reads: crate::resolver_core::resolver_context::RecordedFactReads,
+    /// The file self-roots canonical construction deposited, re-deposited
+    /// on the live build-local frame.
+    pub(crate) observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// Whether the evaluation deposited canonical evidence, which a
+    /// substitution's cache decision watches for.
+    pub(crate) canonical_evidence_deposited: bool,
 }
 
 /// A call member whose mixed component closed cleanly, queued for the

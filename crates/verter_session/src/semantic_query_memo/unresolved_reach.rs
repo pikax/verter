@@ -208,6 +208,7 @@ impl SemanticGraphStore {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 children.extend(params.iter().map(|param| param.ty));
@@ -216,8 +217,21 @@ impl SemanticGraphStore {
                     children.extend(parameter.constraint);
                     children.extend(parameter.default);
                 }
+                children.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::InstantiationRef { args, .. } => children.extend_from_slice(args),
+            // A class expression's type arguments and instance surface are
+            // structure the class expression's own evaluation produced —
+            // never a declaration a later query materialises — so a miss
+            // inside them is this value's.
+            SemanticNodeData::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => {
+                children.extend_from_slice(type_arguments);
+                children.push(*surface);
+            }
             // A deferred intrinsic application is a KNOWN value whose operands
             // are locally-supplied structure: descend them, and never set the
             // unresolved bit for the application itself.

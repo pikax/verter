@@ -9,14 +9,11 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
-
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
-    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
-    QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceEntry, SurfaceMember,
+    AuthoredPropertyKey, LiteralValue, MapperKind, NodeScopeId, NullabilityPolicy, OptionalityMod,
+    PredicateSubject, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
+    SemanticNodeId, SignatureKind, SurfaceEntry, SurfaceMember,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::CompilerIntrinsicTypeOp;
@@ -74,6 +71,7 @@ pub mod subtag {
     pub const SIGNATURE: u8 = 8;
     pub const OBJECT: u8 = 9;
     pub const MERGED_DECL: u8 = 10;
+    pub const CLASS_EXPRESSION_INSTANCE: u8 = 11;
     pub const TYPE_PARAM: u8 = 1;
     pub const INFER: u8 = 2;
     pub const INFER_REF: u8 = 3;
@@ -263,7 +261,8 @@ fn primitive_subtag(kind: PrimitiveKind) -> u8 {
 
 fn origin_tag(category: CompositeOriginCategory) -> u8 {
     match category {
-        CompositeOriginCategory::Canonical => 1,
+        CompositeOriginCategory::Canonical(NullabilityPolicy::Strict) => 1,
+        CompositeOriginCategory::Canonical(NullabilityPolicy::Erased) => 8,
         CompositeOriginCategory::CanonicalUnproven => 2,
         CompositeOriginCategory::AuthoredShell => 3,
         CompositeOriginCategory::OrderedCarrier => 4,
@@ -271,6 +270,9 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
         CompositeOriginCategory::QuerySubject => 6,
         #[cfg(any(test, feature = "test-support"))]
         CompositeOriginCategory::TestFixture => 7,
+        CompositeOriginCategory::Heritage => 9,
+        CompositeOriginCategory::OverloadGroup => 10,
+        CompositeOriginCategory::MergedOverloadGroup => 11,
     }
 }
 
@@ -518,6 +520,7 @@ fn encode_data(
                 MapperKind::Identity => 1,
                 MapperKind::Computed => 2,
             });
+            enc.bool(mapper.over_type_variable);
             match mapper.name_remap {
                 None => enc.u8(0),
                 Some(remap) => {
@@ -613,6 +616,36 @@ fn encode_data(
                 encode_child(graph, *arg, seen, &mut enc, depth);
             }
         }
+        // The class identity is the authored position (file, owner, offset);
+        // the printed name and the enclosing clauses ride along, and the
+        // reference's type arguments and the instance surface descend as
+        // children, so two instantiations of one class expression stay
+        // distinct.
+        SemanticNodeData::ClassExpressionInstance {
+            identity,
+            type_arguments,
+            surface,
+        } => {
+            enc.header(category::AUTHORED, subtag::CLASS_EXPRESSION_INSTANCE);
+            enc.str(&identity.canonical_id);
+            encode_owner(&mut enc, identity.owner);
+            enc.u32(identity.offset);
+            enc.str(&identity.name);
+            enc.u16(identity.outer_clauses.len() as u16);
+            for clause in identity.outer_clauses.iter() {
+                enc.str(&clause.container);
+                enc.u16(clause.parameters.len() as u16);
+                for parameter in clause.parameters.iter() {
+                    enc.str(parameter);
+                }
+            }
+            enc.u32(identity.own_arity);
+            enc.u16(type_arguments.len() as u16);
+            for argument in type_arguments.iter() {
+                encode_child(graph, *argument, seen, &mut enc, depth);
+            }
+            encode_child(graph, *surface, seen, &mut enc, depth);
+        }
         SemanticNodeData::MergedDecl { contributors } => {
             enc.header(category::AUTHORED, subtag::MERGED_DECL);
             enc.u16(contributors.len() as u16);
@@ -629,6 +662,7 @@ fn encode_data(
             return_carrier: _,
             signature_span: _,
             return_type_span: _,
+            predicate,
         } => {
             enc.header(category::AUTHORED, subtag::SIGNATURE);
             enc.u8(match kind {
@@ -644,7 +678,10 @@ fn encode_data(
                         enc.str(n);
                     }
                 }
-                enc.bool(p.optional);
+                // One byte for optionality and the literal-declared fact:
+                // a parameter that is not literal-declared encodes exactly
+                // as its optionality alone.
+                enc.u8(u8::from(p.optional) | (u8::from(p.declared_literal) << 1));
                 enc.bool(p.rest);
                 encode_child(graph, p.ty, seen, &mut enc, depth);
             }
@@ -659,6 +696,27 @@ fn encode_data(
                 Some(occ) => {
                     enc.u8(1);
                     enc.bytes(&format!("{occ:?}").into_bytes());
+                }
+            }
+            // The predicate is a trailing section, present only on a
+            // predicate signature: every predicate-less signature keeps its
+            // key bytes, and a predicate key extends that prefix, so the two
+            // never collide.
+            if let Some(predicate) = predicate {
+                match predicate.subject {
+                    PredicateSubject::This => enc.u8(1),
+                    PredicateSubject::Parameter(index) => {
+                        enc.u8(2);
+                        enc.u32(index);
+                    }
+                }
+                enc.bool(predicate.asserts);
+                match predicate.ty {
+                    None => enc.u8(0),
+                    Some(ty) => {
+                        enc.u8(1);
+                        encode_child(graph, ty, seen, &mut enc, depth);
+                    }
                 }
             }
         }
@@ -899,9 +957,18 @@ fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
         QueryError::UnrepresentableSurfaceMember => 19,
         QueryError::OpenSurface => 20,
         QueryError::UnmodeledPosition => 21,
+        QueryError::CheckerRecovery(_) => 22,
     };
     enc.u8(tag);
     match err {
+        QueryError::CheckerRecovery(diagnostic) => {
+            enc.u16(u16::try_from(diagnostic.code.code()).unwrap_or(u16::MAX));
+            enc.u8(match diagnostic.operation {
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited => 1,
+                crate::semantic_query::CheckerDiagnosticOperation::AwaitOperand => 2,
+                crate::semantic_query::CheckerDiagnosticOperation::AsyncReturnPayload => 3,
+            });
+        }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
         QueryError::RecursiveRef { name } => enc.str(name),
         QueryError::Other(s) => enc.str(s),
@@ -965,6 +1032,9 @@ pub fn canonicalize_union_members(
         .map(|&id| (stable_key_for_node(graph, id), id))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if graph.union_order_reversed() {
+        keyed.reverse();
+    }
     // Admission-time convergence is ORDER only: structurally equal but
     // arena-distinct members stay — the build's budgeted comparator owns
     // the collapse and its discard-evidence discipline.
@@ -972,36 +1042,32 @@ pub fn canonicalize_union_members(
     keyed.into_iter().map(|(_, id)| id).collect()
 }
 
-struct UnionViewTable {
-    by_key: FxHashMap<SemanticUnionMembersKey, Arc<[SemanticNodeId]>>,
-}
-
-fn union_view_table() -> &'static Mutex<UnionViewTable> {
-    static TABLE: std::sync::OnceLock<Mutex<UnionViewTable>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        Mutex::new(UnionViewTable {
-            by_key: FxHashMap::default(),
-        })
-    })
+/// Order a union's members by the `VerterStableV1` stable key — THE union
+/// order. Every union construction sorts through here, so the one order has
+/// one site (and one test-only counterfactual, a store that reverses it).
+pub fn sort_union_members_by_stable_key(
+    graph: &SemanticGraphStore,
+    members: &mut [SemanticNodeId],
+) {
+    sort_by_stable_key(graph, members);
+    if graph.union_order_reversed() {
+        members.reverse();
+    }
 }
 
 /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
+/// Views live in the store whose arena the union's id indexes.
 pub fn semantic_union_members(
     graph: &SemanticGraphStore,
     union: SemanticNodeId,
     ctx: &SemanticContext,
 ) -> Arc<[SemanticNodeId]> {
     let key = SemanticUnionMembersKey::from_context(union, ctx);
-    {
-        let table = union_view_table().lock();
-        if let Some(view) = table.by_key.get(&key) {
-            return Arc::clone(view);
-        }
+    if let Some(view) = graph.union_view(&key) {
+        return view;
     }
     let view = build_union_view(graph, union);
-    let mut table = union_view_table().lock();
-    table.by_key.entry(key).or_insert_with(|| Arc::clone(&view));
-    view
+    graph.keep_union_view(key, &view)
 }
 
 fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[SemanticNodeId]> {

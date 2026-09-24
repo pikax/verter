@@ -3846,6 +3846,81 @@ fn staged_flow_proof(
     .expect("a clean re-staged value mints a proof")
 }
 
+/// A completed member marked reusable answers a later demand on its
+/// transaction with its proven value, and REPLAYS what its evaluation read
+/// into the scopes live at the demanding site — the fact into the live
+/// tracer, the canonical self-root onto the live build frame, and the
+/// canonical-evidence epoch — so a build that consumes the reused value
+/// is rooted exactly as if it had re-evaluated it.
+#[test]
+fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
+        let value = flow_result_value(dispatch, key.clone());
+        // Unpublished, as a member queued behind its machinery root is.
+        dispatch.graph().evict_family_for_tests(&query);
+        let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/ws/replayed.ts".to_string(),
+            hash: [5; 16],
+        };
+        let root: crate::semantic_query_memo::ObservedGraphSelfRoot =
+            (Arc::from("/ws/replayed.ts"), [6; 16]);
+        dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .flow
+            .completed_members
+            .push(super::dispatch_txn::CompletedFlowReturnMember {
+                key: key.clone(),
+                result: staged_flow_proof(&key, value.clone()),
+                inline_flight: None,
+                self_roots: Vec::new(),
+                materialized: crate::semantic_query::demand::MaterializedSet::default(),
+                reuse: Some(super::dispatch_txn::FlowMemberReuse {
+                    reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                        facts: Arc::from(vec![fact.clone()]),
+                        non_cacheable: false,
+                    },
+                    observed_self_roots: vec![root.clone()],
+                    canonical_evidence_deposited: true,
+                }),
+            });
+        let epoch = dispatch.canonical_evidence_epoch.get();
+        let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+        let (step, read_set) = host
+            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                dispatch.execute_flow_return(key.clone())
+            });
+        let observed = frame.finish();
+        match step {
+            crate::semantic_query::FlowReturnStep::Complete(result) => assert_eq!(
+                result.return_type(),
+                value.return_type(),
+                "the demand is answered with the member's proven value"
+            ),
+            other => panic!("a reusable member answers Complete, got {other:?}"),
+        }
+        let crate::resolver_core::FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+            panic!("the live tracer seals a cacheable signature");
+        };
+        assert!(
+            signature.contains(&fact),
+            "the recorded fact reaches the live tracer: {signature:?}"
+        );
+        assert!(
+            observed.observed_self_roots.contains(&root),
+            "the recorded self-root reaches the live build frame"
+        );
+        assert_ne!(
+            dispatch.canonical_evidence_epoch.get(),
+            epoch,
+            "the recorded canonical evidence advances the epoch"
+        );
+    });
+}
+
 /// One PUBLIC-API demand: a fresh top-level dispatch per call, exactly as
 /// an external `SemanticQueryApi` consumer issues it.
 fn scc_public_demand(
@@ -5861,8 +5936,9 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
                 .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
                     crate::semantic_query::PrimitiveKind::Number,
                 ));
-        let _ = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+        let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
+            nullability: crate::semantic_query::NullabilityPolicy::Strict,
         });
 
         // The pending typed-gap roots: a typed refusal, never a graph or
@@ -8724,18 +8800,16 @@ function f(x: string | number) {
     });
 }
 
-/// A CONTROL position nested inside a leaf-lowered expression is still a
-/// control position: the checker binds the predicate call in the ternary
-/// test into the branch narrowing even though the WHOLE array folds into
-/// one shallow-pass leaf answer — `[isString(x) ? x : false]` is
-/// `(string | boolean)[]` in the checker. Blanket-certifying the nested
-/// test call decided-above dropped that narrowing and the unnarrowed
-/// superset sealed complete and warm. The nested control call takes the
-/// per-callee certification instead: a predicate callee is unprovable
-/// here, so the element keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// An array element that is a CONDITIONAL narrows its branches through a
+/// predicate test exactly as a returned conditional does: the array
+/// literal lowers structurally, so the element is the branch join and the
+/// predicate call is the guard's own evidence — `[isString(x) ? x :
+/// false]` is the checker's `(string | boolean)[]` (TypeScript 7.0.2),
+/// clean and warm. (The same conditional folded into a LEAF answer keeps
+/// the per-callee certification and its typed gap:
+/// `flow_slice_content_tests::leaf_nested_control_position_calls_are_never_blanket_certified`.)
 #[test]
-fn leaf_nested_conditional_predicate_never_certifies_decided_above() {
+fn array_element_conditional_narrows_through_its_predicate() {
     const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8759,37 +8833,26 @@ function f(x: string | number) {
         let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
             panic!("f: the return is an array, got {expr:?}");
         };
-        // The dropped branch narrowing never collapses the element to the
-        // narrowed branch read: the `false` arm survives and no arm is the
-        // narrowed `string`. (The consequent's bare `typeof x` root rides
-        // its own typed miss carrier — bare frame-rooted `typeof` roots
-        // are not path-projected, before and after this change.)
         let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
-            panic!("f: the element keeps the unnarrowed join, got {expr:?}");
+            panic!("f: the element is the branch join, got {expr:?}");
         };
-        assert!(
-            arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)),
-            "f: the `false` arm survives, got {expr:?}"
-        );
-        assert!(
-            !arms.iter().any(|arm| *arm
-                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
-            "f: the narrowed branch read never publishes, got {expr:?}"
-        );
+        let mut arms: Vec<_> = arms.iter().cloned().collect();
+        arms.sort_by_key(|arm| format!("{arm:?}"));
         assert_eq!(
-            result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            )),
-            "f: the nested control call degrades to the typed guard-narrowing gap"
+            arms,
+            vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ],
+            "f: the consequent reads the narrowed `string`, got {expr:?}"
         );
+        assert_eq!(result.degradation(), None, "f: {expr:?}");
         assert_eq!(
             dispatch
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-            0,
-            "f: an unprovable nested control call never warms"
+            1,
+            "f: a clean complete result admits warm"
         );
     });
 }
@@ -10986,7 +11049,7 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
     // than an inequality: an inequality with slack cannot see the memo
     // disappear.
     assert_eq!(
-        cold_reads, 15,
+        cold_reads, 13,
         "the cold relation budget of this three-arm join moved; a reunion that re-asks a \
          decided arm pair spends more"
     );

@@ -76,6 +76,18 @@ fn register_eager_function_alias(
     ) {
         infer_binders.register_equivalent_subtree(alias, original);
     }
+    if let (Some(alias), Some(original)) = (
+        alias_function
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+        original
+            .predicate
+            .as_deref()
+            .and_then(|predicate| predicate.ty.as_deref()),
+    ) {
+        infer_binders.register_equivalent_subtree(alias, original);
+    }
 }
 
 /// The scalar → projected-`TypeExpr` mapping for a stored enum member fact —
@@ -1770,6 +1782,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     scope.clone(),
                 );
+                // A `keyof` operand the environment binds names a type
+                // parameter even once it lowers to its argument: the mapping
+                // stays homomorphic over it. An unbound operand is read off
+                // its lowered node below.
+                let over_type_variable = match source.as_ref() {
+                    TypeExpr::KeyOf(inner) => match inner.as_ref() {
+                        TypeExpr::TypeParameter(param) => env.contains_key(param.name.as_str()),
+                        TypeExpr::Ref {
+                            name,
+                            type_arguments,
+                        } => type_arguments.is_empty() && env.contains_key(name.as_ref()),
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 let (source_sem, key_space_sem, base_infer_name) = match source.as_ref() {
                     // `{ [K in keyof T]: ... }` — extract T.
                     TypeExpr::KeyOf(inner) => {
@@ -1927,6 +1954,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     readonly: readonly_mod,
                     name_remap,
                     kind,
+                    over_type_variable: over_type_variable
+                        || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
+                            && crate::semantic_query::keyof_operand_is_type_variable(
+                                graph, source_sem,
+                            )),
                 };
 
                 // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
@@ -2541,8 +2573,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         rest: param.rest,
                         // Carry the IR parameter's OXC span verbatim.
                         span: param.span,
+                        declared_literal: crate::semantic_query::declares_literal_type(&param.ty),
                     })
                     .collect();
+                // A body-derived return carries the predicate the checker infers
+                // from the body beside it.
+                let mut inferred_predicate = None;
                 let (return_type, return_carrier) = match &func.flow_return {
                     // A body-derived return is demanded from the
                     // whole-function producer through the sealed helper:
@@ -2579,6 +2615,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     scope_canonical.as_ref(),
                                 ) {
                                     super::flow_return::FunctionReturnNode::Flow(result) => {
+                                        inferred_predicate = result.inferred_predicate();
                                         result.return_type()
                                     }
                                     _ => self.opaque(QueryError::Miss),
@@ -2661,6 +2698,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         is_const: tp.is_const,
                     })
                     .collect();
+                // The predicate target lowers under the signature's own
+                // binders, exactly like the return it rides beside.
+                let predicate = func
+                    .predicate
+                    .as_deref()
+                    .and_then(|predicate| {
+                        let target = predicate.ty.as_deref().map(|target| {
+                            self.lower_type_expr_with_infer_factory(
+                                infer_binders,
+                                target,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            )
+                        });
+                        crate::semantic_query::SignaturePredicate::resolve(
+                            predicate, &params, target,
+                        )
+                    })
+                    .or(inferred_predicate);
                 let kind = match expr {
                     TypeExpr::ConstructorType(_) => crate::semantic_query::SignatureKind::Construct,
                     _ => crate::semantic_query::SignatureKind::Call,
@@ -2681,6 +2742,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // FunctionExpr (NOT recovered from child node ids).
                         signature_span: func.spans.signature,
                         return_type_span: func.spans.return_type,
+                        predicate,
                     },
                     scope.clone(),
                 )

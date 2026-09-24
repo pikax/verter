@@ -15,9 +15,9 @@
 use super::*;
 use crate::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, FlowReturnResult, PrimitiveKind, RelateMemoKey,
-    RelationContext, RelationOutcome, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
-    SemanticNodeData,
+    FlowReturnKey, FlowReturnPolicy, FlowReturnResult, NullabilityPolicy, PrimitiveKind,
+    RelateMemoKey, RelationContext, RelationOutcome, ResolvedDeclSlotIdentity,
+    ReturnProjectionDemand, SemanticNodeData,
 };
 use crate::semantic_retention_account::{
     ChargeClass, RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
@@ -80,7 +80,10 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
                 project_identity: [0u8; 16],
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
-                policy: FlowReturnPolicy {},
+                policy: FlowReturnPolicy {
+                    nullability: NullabilityPolicy::Strict,
+                    no_implicit_any: true,
+                },
             },
             demand: ReturnProjectionDemand::whole_return(),
             input: FlowInputContext::empty(),

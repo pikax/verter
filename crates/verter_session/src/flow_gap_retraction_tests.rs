@@ -320,38 +320,71 @@ fn non_unit_member_conflict_narrows_to_the_checker_kept_intersection() {
     );
 }
 
-/// A predicate narrow over an operand nobody can read publishes NO fact in
+/// A predicate narrow over a member read through an indexed access of an
+/// OPTIONAL property decides as the checker does: `Boxed["k"]` over
+/// `k?: "a"` reads `"a" | undefined`, an empty discriminant against the
+/// predicate's `v: "b"`, so `Subject & { v: "b" }` is `never` and only
+/// the widened literal arm is left. Measured on TypeScript 7.0.2 (`tsc
+/// --strict`, and with `--strictNullChecks false`): `makeProps` returns
+/// `{ v: string; }`. The decided narrow is complete and warm.
+#[test]
+fn predicate_narrow_over_an_optional_member_read_decides_as_the_checker() {
+    let trace = run("optional_read_narrow", OPTIONAL_READ_NARROW, "makeProps");
+    assert_complete_warm(
+        &trace,
+        Some(
+            r#"{"kind":"object","properties":[{"excessOrigin":"freshOwn","key":{"kind":"string","value":"v"},"memberKind":"property","optional":false,"readonly":false,"ty":{"kind":"primitive","name":"string"}}]}"#,
+        ),
+    );
+}
+
+const OPTIONAL_READ_NARROW: &str = "type Boxed = { k?: \"a\" };\n\
+     type Subject = { v: Boxed[\"k\"] };\n\
+     function isOther(x: Subject): x is { v: \"b\" } { return true as boolean as never }\n\
+     function makeProps(x: Subject) { return { v: isOther(x) ? x : \"no\" } }";
+
+/// A predicate narrow whose relation is left UNDECIDED publishes NO fact in
 /// either direction — the subject keeps its own type, with no degradation.
 ///
-/// The deciding member value is an indexed access (`Boxed["k"]`) that no
-/// relation stage reduces: assignability defers, so the narrow never
-/// reaches a decided judgement at all, and the recompute (not a warm
-/// serve — an unread operand publishes nothing cacheable either) answers
-/// the same way. The temperature pins below carry that cold half: BOTH
-/// requests recompute (`from_cache` false, cold work nonzero) and neither
-/// admits a candidate, so an undecided relation can never be served warm
-/// as a decision. Both wrong-complete directions are discriminated by the
-/// value pin: minting a disjointness proof from the unread operand would
-/// publish `never` (the `v` type would collapse to the widened literal arm
-/// alone), and fabricating an overlap would publish an intersection the
-/// checker does not have.
+/// The relation reducer's work budget is tripped for the whole request, so
+/// the comparability the narrow asks for is never decided: assignability
+/// defers, the narrow never reaches a decided judgement at all, and the
+/// recompute (not a warm serve — an undecided narrow publishes nothing
+/// cacheable either) answers the same way. The temperature pins below carry
+/// that cold half: BOTH requests recompute (`from_cache` false, cold work
+/// nonzero) and neither admits a candidate, so an undecided relation can
+/// never be served warm as a decision. Both wrong-complete directions are
+/// discriminated by the value pin: minting a disjointness proof from the
+/// undecided relation would publish `never` (the `v` type would collapse to
+/// the widened literal arm alone), and fabricating an overlap would publish
+/// an intersection.
 #[test]
-fn predicate_narrow_over_an_unreduced_operand_publishes_no_fact() {
-    const SOURCE: &str = "type Boxed = { k: \"a\" };\n\
-         type Subject = { v: Boxed[\"k\"] };\n\
-         function isOther(x: Subject): x is { v: \"b\" } { return true as boolean as never }\n\
-         function makeProps(x: Subject) { return { v: isOther(x) ? x : \"no\" } }";
-    let trace = run("unreduced_operand_narrow", SOURCE, "makeProps");
+fn predicate_narrow_over_an_undecided_relation_publishes_no_fact() {
+    let host = make_audit_host();
+    let canonical = "/flow-gap-retraction/undecided_relation_narrow.ts";
+    upsert(
+        &host,
+        canonical,
+        &super::module_script(OPTIONAL_READ_NARROW),
+        FileLanguage::script_ts(),
+    );
+    host.relation_knobs
+        .force_budget_exhaustion
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let trace = run_on(&host, canonical, "makeProps");
+    host.relation_knobs
+        .force_budget_exhaustion
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     for sample in [&trace.first, &trace.second] {
         assert_eq!(sample.error, None, "must evaluate: {trace:#?}");
         assert_eq!(
             sample.degradation, None,
-            "an unread fact is not a gap: {trace:#?}"
+            "an undecided fact is not a gap: {trace:#?}"
         );
         assert!(
             !sample.from_cache,
-            "an unread operand publishes nothing cacheable — every request must \
-             recompute, never warm-serve an undecided narrow: {trace:#?}"
+            "an undecided narrow publishes nothing cacheable — every request must \
+             recompute, never warm-serve it: {trace:#?}"
         );
         assert!(
             sample.cold_computes >= 1,
@@ -367,12 +400,12 @@ fn predicate_narrow_over_an_unreduced_operand_publishes_no_fact() {
             .expect("the unchanged subject must project a value");
         assert!(
             json.contains("\"kind\":\"ref\",\"name\":\"Subject\""),
-            "the unread operand decides nothing: the subject keeps its own type rather than \
-             narrowing to `never` or to a fabricated intersection: {json}"
+            "the undecided relation decides nothing: the subject keeps its own type rather \
+             than narrowing to `never` or to a fabricated intersection: {json}"
         );
         assert!(
             !json.contains("\"kind\":\"intersection\""),
-            "no overlap fact exists for an unread operand: {json}"
+            "no overlap fact exists for an undecided relation: {json}"
         );
     }
     assert_eq!(

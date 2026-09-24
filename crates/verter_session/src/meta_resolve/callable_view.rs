@@ -140,6 +140,8 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Signature { .. }
         | SemanticNodeData::MergedDecl { .. }
+        // A class expression's instance is a reached object shape.
+        | SemanticNodeData::ClassExpressionInstance { .. }
         // The nominal terminal is a RESOLVED scalar (it widens to the
         // `symbol` primitive), never an unresolved carrier.
         | SemanticNodeData::TypeOfNominal(_) => SnippetParamsArg::ResolvedNonTuple,
@@ -1207,8 +1209,9 @@ impl SignatureNodeView<'_, '_> {
 /// a STABLE authored miss — a non-import `BareRef` mirror, an honest
 /// `Opaque(Miss)` from a lib-less environment, the walker's well-formed open
 /// markers — is deterministic and recompute-invariant, so it contributes no
-/// name and stays COMPLETE (an unresolvable `Date` first param must not turn
-/// every event contract partial). An IMPORT-BACKED unresolvable, an
+/// name and stays COMPLETE, and so does a builtin runtime nominal's carrier
+/// (a `Date` first param must not turn every event contract partial). An
+/// IMPORT-BACKED unresolvable, an
 /// unresolved `DeclRef` / `InstantiationRef` the demand primitive could not
 /// resolve, and every operational fault name their typed reason. A
 /// resolved-but-undecidable shape (an intersection-branded literal, an open
@@ -1229,6 +1232,14 @@ fn unenumerable_event_name_reasons(
         | SemanticNodeData::ImportType(_)
         | SemanticNodeData::Opaque(_)
         | SemanticNodeData::RawFallback { .. } => stable_member_carrier_partiality(ctx, Some(data)),
+        // A builtin runtime nominal's application carrier (`Date`,
+        // `Promise<T>`, …) is the RESOLVED type, and it is not a string
+        // literal: a decided complete non-contributor.
+        SemanticNodeData::InstantiationRef { base, .. }
+            if crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base).is_some() =>
+        {
+            None
+        }
         // An unresolved reference carrier the demand primitive could not
         // resolve — the declaration behind it is genuinely unavailable.
         SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. } => {

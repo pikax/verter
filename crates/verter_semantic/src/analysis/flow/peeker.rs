@@ -170,15 +170,17 @@ pub struct SliceDemand {
 
 impl SliceDemand {
     /// The whole-return-surface demand for `path` under every return
-    /// site of `skeleton`: origins = every return site, and each
-    /// demanded key resolved against the skeleton's interned name table
-    /// (a table lookup — not a body walk; a key the body never mentions
-    /// stays [`DemandSegment::Foreign`]).
+    /// site of `skeleton`: origins = every return site, then every
+    /// statement-position yield argument (a generator's yield type is part
+    /// of its return type), and each demanded key resolved against the
+    /// skeleton's interned name table (a table lookup — not a body walk; a
+    /// key the body never mentions stays [`DemandSegment::Foreign`]).
     #[must_use]
     pub fn for_return_projection(skeleton: &FunctionBodySkeleton, path: &[Arc<str>]) -> Self {
         let origins: Vec<SliceOrigin> = (0..skeleton.return_sites.len())
             .filter_map(|index| u32::try_from(index).ok())
             .map(|index| SliceOrigin::Return(SkeletonReturnSiteId::from_index(index)))
+            .chain(skeleton.yield_sites.iter().copied().map(SliceOrigin::Expr))
             .collect();
         let segments: Vec<DemandSegment> = path
             .iter()

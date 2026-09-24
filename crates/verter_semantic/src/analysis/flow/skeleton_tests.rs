@@ -444,7 +444,9 @@ fn object_entries(
 ) -> Vec<SkeletonObjectEntry> {
     match &skeleton.expr_site(site).shape {
         SkeletonExprShape::ObjectLiteral { entries } => entries.to_vec(),
-        SkeletonExprShape::BranchJoin { .. } | SkeletonExprShape::Other => {
+        SkeletonExprShape::BranchJoin { .. }
+        | SkeletonExprShape::ArrayLiteral { .. }
+        | SkeletonExprShape::Other => {
             panic!("site must be an object literal")
         }
     }
@@ -1081,7 +1083,7 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 
 /// A site is not a callback identity. Several callables share one
 /// expression site whenever the site is a compound the skeleton does not
-/// open per element — a call's argument list, an array literal — so the
+/// open per operand — a call's argument list, a logical expression — so the
 /// site-level capture union answers "is this cell retained here" and can
 /// never answer "which callback retains it". The per-callable inventory
 /// is the partition that can: exactly one record per authored callable,
@@ -1092,7 +1094,7 @@ fn declaration_span_index_preserves_authored_alias_and_shadow_identities() {
 fn each_callable_sharing_one_site_retains_its_own_capture_partition() {
     for source in [
         "function root() { const a = 1; const b = 2; sink(() => a, () => b); return 1; }",
-        "function root() { const a = 1; const b = 2; return [() => a, () => b]; }",
+        "function root() { const a = 1; const b = 2; return (() => a) || (() => b); }",
     ] {
         let prepared = indexed_structure_of(source);
         let skeleton = prepared.skeleton();
@@ -1249,41 +1251,58 @@ fn per_callable_captures_are_shadow_exact_and_transitive() {
     );
 }
 
-/// The indexed program serves no class member body or field initializer
+/// The indexed program serves no class constructor or field initializer
 /// and no parameter-list callable, so a cell retained there is named by
 /// no index record. A class evaluated at a site is therefore an unserved
 /// callable, and a SERVED callable whose body creates one only knows a
 /// lower bound of its captures. Neither may read as an exact capture set:
 /// an exact empty set is a capture-free proof, and every fixture here
-/// really retains `a`.
+/// really retains `a`. A class expression's method, and a callable its
+/// initializer holds, ARE served: each is its own callable at the site,
+/// with the exact capture set its index record names.
 #[test]
 fn callables_the_index_cannot_serve_never_read_as_an_exact_capture_set() {
-    use SkeletonClosureCorrelation::{Partial, Uncorrelated};
+    use SkeletonClosureCorrelation::{Exact, Partial, Uncorrelated};
     for (source, expected) in [
         (
             "function root() { const a = 1; sink(class { m() { return a; } }); return 1; }",
-            Uncorrelated,
+            &[Uncorrelated, Exact][..],
         ),
         (
             "function root() { const a = 1; sink(class { m = () => a; }); return 1; }",
-            Uncorrelated,
+            &[Uncorrelated, Exact][..],
         ),
         (
             "function root() { const a = 1; sink(() => class { m() { return a; } }); return 1; }",
-            Partial,
+            &[Partial][..],
         ),
         (
             "function root() { const a = 1; sink(() => { function g(q = () => a) { return q; } return g; }); return 1; }",
-            Partial,
+            &[Partial][..],
         ),
     ] {
         let prepared = indexed_structure_of(source);
-        let closures = sole_closure_inventory(prepared.skeleton());
-        assert_eq!(closures.len(), 1, "one authored callable at the site: {source}");
+        let skeleton = prepared.skeleton();
+        let a = single_binding_named(skeleton, "a");
+        let closures = sole_closure_inventory(skeleton);
         assert_eq!(
-            closures[0].correlation, expected,
+            closures
+                .iter()
+                .map(|closure| closure.correlation)
+                .collect::<Vec<_>>(),
+            expected,
             "an unserved capture is never an exact set: {source}"
         );
+        for closure in closures
+            .iter()
+            .filter(|closure| closure.correlation == Exact)
+        {
+            assert_eq!(
+                closure.captures.as_ref(),
+                &[FlowBindingRef::Local(a)],
+                "a served class member names the cell it retains: {source}"
+            );
+        }
     }
 }
 
@@ -1354,4 +1373,48 @@ fn sole_closure_inventory(skeleton: &FunctionBodySkeleton) -> &[SkeletonClosure]
     let site = sites.next().expect("the fixture authors one callable");
     assert!(sites.next().is_none(), "exactly one site holds a callable");
     &site.closures
+}
+
+#[test]
+// @ai-generated - A tagged template is one call occurrence of its tag.
+fn a_tagged_template_is_a_call_occurrence_of_its_tag() {
+    let source = "function f(x: string) { return tag`a${x}b`; }";
+    let skeleton = skeleton_of(source);
+    let calls: Vec<&SkeletonCall> = skeleton
+        .expr_sites
+        .iter()
+        .flat_map(|site| site.calls.iter())
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the tagged template calls its tag once; the substitution calls nothing"
+    );
+    assert_eq!(
+        calls[0].callee,
+        SkeletonCallee::Named(skeleton.name_id("tag").expect("tag interned"))
+    );
+    assert!(!calls[0].new_construct);
+}
+
+/// An array literal opens one child site per element, but a nest of array
+/// literals deeper than the shallow inference's nesting budget is a leaf:
+/// that inference answers it whole and reports the typed budget
+/// exhaustion, so neither half descends it level by level. Sixty-four
+/// levels are structural; sixty-five are one leaf.
+#[test]
+fn array_nests_past_the_inference_budget_are_leaves() {
+    let nest = |levels: usize| format!("{}0{}", "[".repeat(levels), "]".repeat(levels));
+    let return_shape = |levels: usize| {
+        let skeleton = skeleton_of(&format!("function f() {{ return {}; }}", nest(levels)));
+        let site = skeleton.return_sites[0]
+            .argument
+            .expect("the return carries a value");
+        matches!(
+            skeleton.expr_site(site).shape,
+            SkeletonExprShape::ArrayLiteral { .. }
+        )
+    };
+    assert!(return_shape(64), "a 64-level nest opens its array sites");
+    assert!(!return_shape(65), "a 65-level nest is one leaf");
 }

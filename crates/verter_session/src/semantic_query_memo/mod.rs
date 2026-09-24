@@ -62,6 +62,8 @@ mod reverse_index;
 mod scc_publish;
 #[cfg(test)]
 mod scc_publish_tests;
+mod signature_epoch;
+mod union_views;
 mod unresolved_reach;
 
 pub(crate) use inflight::InlineMemberFlight;
@@ -390,6 +392,21 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
+    /// The `VerterStableV1` member view of each union built in this store's
+    /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
+    /// contract with a payload-retiring holder: `union_views.rs`.
+    union_views: Mutex<
+        FxHashMap<
+            crate::semantic_query::semantic_context::SemanticUnionMembersKey,
+            Arc<[SemanticNodeId]>,
+        >,
+    >,
+    /// Test-only: order union members by DESCENDING stable key. Reversing the
+    /// one union order in a fresh store — an isolated cache namespace, its
+    /// views and memo entries included — is the §5.8 counterfactual that
+    /// admits an order-only difference as `VerterStableV1`-induced.
+    #[cfg(test)]
+    union_order_reversed_for_tests: std::sync::atomic::AtomicBool,
     /// Per-store test-only injection point for the
     /// [`Self::invalidate_all`] post-`entries`-clear tail. When a test
     /// arms it (via [`Self::test_invalidate_all_post_entries_clear_gate`])
@@ -1493,7 +1510,8 @@ impl SemanticGraphStore {
         // per-canonical clear is documented as future work in
         // hash_cons_memos.rs.
         self.clear_hash_cons_memos();
-
+        // A per-canonical edit is a reclamation point for the kernel store.
+        let _ = self.compact_signature_store_if_over_cap();
         evicted
     }
 
@@ -2004,16 +2022,15 @@ impl SemanticGraphStore {
             let entries = self.entries_lock_diagnosed();
             entries.get(family).map(|slots| slots.snapshot_slot(slot))
         };
-        // §3.4 TWO-GATE warm hit — `cached_satisfies` (recorded-point
-        // dominance, pure) AND `validate_with_self_roots` (fact rail).
-        // Both must pass; see `try_warm_hit_fast_path` for the rationale.
+        // §3.4 warm hit — `cached_satisfies` (recorded-point dominance,
+        // pure), a live kernel epoch, AND `validate_with_self_roots` (fact
+        // rail). All must pass; see `try_warm_hit_fast_path` for the rationale.
         // `validated_at_generation` is recency metadata only, never a
         // validity oracle: project-shape invalidation rides
         // `FactVersionRef::ProjectGeneration` on the carrier.
         let validated = snapshot.and_then(|list| {
-            list.into_iter().find(|entry| {
-                cached_satisfies(&entry.satisfied_projection, requested) && entry.validate(ctx)
-            })
+            list.into_iter()
+                .find(|entry| self.warm_candidate_serves(entry, requested, ctx))
         });
         if let Some(entry) = &validated {
             // Brief LRU bookkeeping — reacquire ONLY to update the
@@ -2380,17 +2397,17 @@ impl SemanticGraphStore {
             let entries = self.entries.lock();
             entries.get(family).map(|slots| slots.snapshot_slot(slot))
         };
-        // §3.4 TWO-GATE warm hit. Gate 1: `cached_satisfies` — the
-        // candidate's RECORDED materialised set must dominate the
-        // requested point (pure, no store view; cheap, so first). Gate 2:
-        // `validate_with_self_roots` — the fact rail must validate against
-        // the live view. BOTH must pass; a candidate failing either is
-        // skipped without bubbling. `validated_at_generation` is recency
-        // metadata only.
+        // §3.4 warm hit. Gate 1: `cached_satisfies` — the candidate's
+        // RECORDED materialised set must dominate the requested point
+        // (pure, no store view; cheap, so first). Gate 2: no retired
+        // kernel epoch. Gate 3: `validate_with_self_roots` — the fact rail
+        // must validate against the live view. ALL must pass; a candidate
+        // failing any is skipped without bubbling. `validated_at_generation`
+        // is recency metadata only.
         let requested = prepared.requested_point();
         let entry: MemoEntry = snapshot?
             .into_iter()
-            .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
+            .find(|e| self.warm_candidate_serves(e, requested, ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
@@ -2754,9 +2771,9 @@ impl SemanticGraphStore {
                 // listed in `winner_self_roots`, routed through the
                 // strict `validates_self_root_whole_hash`) AND that
                 // self-root validates against THIS follower's `ctx`.
-                // Both conditions are checked below; if either fails
-                // the follower MUST NOT return the winner's node — it
-                // forks and cold-recomputes for its own view.
+                // Both are checked below, with the kernel-epoch gate
+                // (`signature_epoch`); if any fails the follower MUST NOT
+                // return the winner's value — it forks and recomputes.
                 //
                 // No-self-root fork. `validate_with_self_roots` only
                 // DISCRIMINATES by view when the carrier carries a
@@ -2819,8 +2836,9 @@ impl SemanticGraphStore {
                 // retain the existing strict follower-view validation.
                 if !matches!(result, QueryResult::Recursive(_)) {
                     if let Some(ref carrier) = graph_carrier {
-                        let carrier_view_validates =
-                            carrier.validate_with_self_roots(ctx, &winner_self_roots);
+                        let carrier_view_validates = carrier
+                            .validate_with_self_roots(ctx, &winner_self_roots)
+                            && !self.names_retired_kernel_epoch(&result);
                         let lacks_view_discriminating_self_root =
                             !carrier.has_view_discriminating_self_root(&winner_self_roots);
                         if !carrier_view_validates || lacks_view_discriminating_self_root {

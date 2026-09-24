@@ -163,6 +163,8 @@ enum ProjectionChildPlan<'a> {
         params: &'a [FunctionParam],
         return_type: SemanticNodeId,
         type_parameters: &'a [TypeParamDecl],
+        /// The predicate target, projected LAST.
+        predicate_target: Option<SemanticNodeId>,
         context: ProjectionReductionContext,
     },
     General {
@@ -1094,6 +1096,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             value_expr,
             optionality: mapper.optionality,
             readonly: mapper.readonly,
+            over_type_variable: mapper.over_type_variable,
             name_remap,
             kind: crate::semantic_query::MapperKind::classify_value_expr(
                 self.graph(),
@@ -1237,6 +1240,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(index)
                 .map(|argument| (*argument, context.into_structural_provenance())),
             SemanticNodeData::Alias(target) => (index == 0).then_some((*target, context)),
+            // The reference's type arguments, then the instance surface.
+            SemanticNodeData::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => match type_arguments.get(index) {
+                Some(argument) => Some((*argument, context)),
+                None => (index == type_arguments.len()).then_some((*surface, context)),
+            },
             SemanticNodeData::TypeParam {
                 constraint,
                 default,
@@ -1276,6 +1288,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 let mut remaining = index;
@@ -1305,7 +1318,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         remaining -= 1;
                     }
                 }
-                None
+                predicate
+                    .and_then(|predicate| predicate.ty)
+                    .filter(|_| remaining == 0)
+                    .map(|target| (target, context))
             }
             SemanticNodeData::KeyOf { base } => (index == 0).then_some((*base, context)),
             SemanticNodeData::IndexedAccess {
@@ -1378,11 +1394,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => ProjectionChildPlan::Function {
                 params,
                 return_type: *return_type,
                 type_parameters,
+                predicate_target: predicate.and_then(|predicate| predicate.ty),
                 context,
             },
             _ => ProjectionChildPlan::General { data, context },
@@ -1406,6 +1424,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                predicate_target,
                 context,
             } => {
                 let mut remaining = index;
@@ -1435,7 +1454,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         remaining -= 1;
                     }
                 }
-                None
+                predicate_target
+                    .filter(|_| remaining == 0)
+                    .map(|target| (target, *context))
             }
             ProjectionChildPlan::General { data, context } => {
                 self.projection_child_at(data, *context, index)

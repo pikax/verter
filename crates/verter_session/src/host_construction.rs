@@ -1146,15 +1146,17 @@ impl VerterHost {
     }
 
     /// IndexedReady for a declaration file whose source is a global/ambient
-    /// contributor (`declare global` / `declare module`, or an automatic
-    /// lib). Ordinary `.ts` / export-only `.d.ts` stay on the shallow
-    /// upsert path so cold/fence flights are not consumed at upsert.
+    /// contributor (`declare global` / `declare module`, a script's
+    /// file-scope declaration, or an automatic lib). Ordinary `.ts` /
+    /// export-only `.d.ts` stay on the shallow upsert path so cold/fence
+    /// flights are not consumed at upsert.
     pub(crate) fn ingest_ambient_contributor(&self, canonical: &str, source: &str) {
         if !is_ambient_declaration_canonical(canonical) {
             return;
         }
         if !canonical.starts_with("ambient:/")
             && !crate::global_contributors::source_has_ambient_contribution(source)
+            && !crate::global_contributors::source_may_have_file_scope_global_contribution(source)
         {
             return;
         }

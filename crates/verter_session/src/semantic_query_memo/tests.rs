@@ -378,6 +378,7 @@ fn intern_span_participates_in_identity() {
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
+        predicate: None,
     };
     let id_a = store.intern_node(mk(10));
     let id_a_again = store.intern_node(mk(10));
@@ -8991,6 +8992,7 @@ mod env_scoped_key_identity_guards {
 
     fn mapper_key(id: SemanticNodeId) -> MapperKey {
         MapperKey {
+            over_type_variable: false,
             parameter_node: id,
             key_space: id,
             value_expr: id,
@@ -10547,6 +10549,7 @@ mod prepared_identity_bijection {
 
     fn mapper(id: u64) -> MapperKey {
         MapperKey {
+            over_type_variable: false,
             parameter_node: node(id),
             key_space: node(id),
             value_expr: node(id),
@@ -10708,12 +10711,14 @@ mod prepared_identity_bijection {
                     ),
                 },
             ),
-            SemanticQueryKeyTag::NormalizeUnion => (
-                SemanticQueryKey::NormalizeUnion {
+            SemanticQueryKeyTag::ReduceUnion => (
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 2]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
-                SemanticQueryKey::NormalizeUnion {
+                SemanticQueryKey::ReduceUnion {
                     members: nodes(&[1, 3]),
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
@@ -11110,7 +11115,10 @@ mod prepared_identity_bijection {
                 project_identity: h16(0),
                 result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
-                policy: crate::semantic_query::FlowReturnPolicy {},
+                policy: crate::semantic_query::FlowReturnPolicy {
+                    nullability: crate::semantic_query::NullabilityPolicy::Strict,
+                    no_implicit_any: true,
+                },
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),

@@ -51,6 +51,8 @@ enum ProofPathStep {
     ConditionalFalse,
     FunctionParam(u32),
     FunctionReturn,
+    /// The target of a signature's type predicate (`x is T`).
+    FunctionPredicate,
     FunctionTypeParamConstraint(u32),
     FunctionTypeParamDefault(u32),
     ReferenceArgument(u32),
@@ -208,6 +210,11 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
             SemanticNodeData::Alias(target) => {
                 stack.push(ProofWalkFrame::Enter(*target, path));
             }
+            // A class expression names no declaration; its references are
+            // its instance surface's.
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                stack.push(ProofWalkFrame::Enter(*surface, path));
+            }
             SemanticNodeData::Object(surface) => {
                 for (index, member) in surface.positive_members().iter().enumerate() {
                     push_proof_child(
@@ -363,6 +370,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 for (index, param) in params.iter().enumerate() {
@@ -379,6 +387,9 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                     ProofPathStep::FunctionReturn,
                     *return_type,
                 );
+                if let Some(target) = predicate.and_then(|predicate| predicate.ty) {
+                    push_proof_child(&mut stack, &path, ProofPathStep::FunctionPredicate, target);
+                }
                 for (index, parameter) in type_parameters.iter().enumerate() {
                     if let Some(constraint) = parameter.constraint {
                         push_proof_child(
@@ -690,6 +701,7 @@ fn normalized_projection_shape_equivalent(
                 if left_mapper.optionality != right_mapper.optionality
                     || left_mapper.readonly != right_mapper.readonly
                     || left_mapper.kind != right_mapper.kind
+                    || left_mapper.over_type_variable != right_mapper.over_type_variable
                     || !push_optional_proof_pair(
                         &mut stack,
                         left_mapper.name_remap,
@@ -815,6 +827,7 @@ fn normalized_projection_shape_equivalent(
                     params: left_params,
                     return_type: left_return,
                     type_parameters: left_type_parameters,
+                    predicate: left_predicate,
                     ..
                 },
                 SemanticNodeData::Signature {
@@ -822,6 +835,7 @@ fn normalized_projection_shape_equivalent(
                     params: right_params,
                     return_type: right_return,
                     type_parameters: right_type_parameters,
+                    predicate: right_predicate,
                     ..
                 },
             ) => {
@@ -830,6 +844,14 @@ fn normalized_projection_shape_equivalent(
                     || left_type_parameters.len() != right_type_parameters.len()
                 {
                     return Some(false);
+                }
+                match (left_predicate, right_predicate) {
+                    (None, None) => {}
+                    (Some(left), Some(right))
+                        if left.subject == right.subject
+                            && left.asserts == right.asserts
+                            && push_optional_proof_pair(&mut stack, left.ty, right.ty) => {}
+                    _ => return Some(false),
                 }
                 for (left, right) in left_params.iter().zip(right_params.iter()) {
                     if left.name != right.name
@@ -1298,10 +1320,12 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
             SemanticNodeData::Signature {
                 params,
                 return_type,
+                predicate,
                 ..
             } => {
                 worklist.extend(params.iter().map(|param| param.ty));
                 worklist.push(*return_type);
+                worklist.extend(predicate.and_then(|predicate| predicate.ty));
             }
             SemanticNodeData::Conditional {
                 check,

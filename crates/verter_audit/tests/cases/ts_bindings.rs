@@ -255,6 +255,7 @@ fn flow_partiality_tags_enumerate_every_closed_reason() {
         "BudgetDepthExceeded",
         "BudgetWorkExceeded",
         "UnstableState",
+        "Cancelled",
     ];
 
     for (union_name, expected) in [

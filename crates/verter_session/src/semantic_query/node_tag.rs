@@ -21,7 +21,7 @@ use super::{
 
 /// Exclusive upper bound of every [`SemanticNodeTag::stable_id`] — the width of
 /// per-variant bucket arrays.
-pub const SEMANTIC_NODE_TAG_BOUND: usize = 32;
+pub const SEMANTIC_NODE_TAG_BOUND: usize = 33;
 
 /// Fieldless identity of one [`SemanticNodeData`] variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -58,11 +58,12 @@ pub enum SemanticNodeTag {
     Signature = 29,
     ObjectSpreadProgram = 30,
     DeferredCallable = 31,
+    ClassExpressionInstance = 32,
 }
 
 impl SemanticNodeTag {
     /// Every tag, in stable-id order.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Alias,
         Self::Object,
         Self::Union,
@@ -93,6 +94,7 @@ impl SemanticNodeTag {
         Self::Signature,
         Self::ObjectSpreadProgram,
         Self::DeferredCallable,
+        Self::ClassExpressionInstance,
     ];
 
     /// The stable one-byte identity. Always in `1..SEMANTIC_NODE_TAG_BOUND`.
@@ -151,6 +153,7 @@ impl SemanticNodeData {
             Self::DeferredCallable(_) => SemanticNodeTag::DeferredCallable,
             Self::DeclRef { .. } => SemanticNodeTag::DeclRef,
             Self::InstantiationRef { .. } => SemanticNodeTag::InstantiationRef,
+            Self::ClassExpressionInstance { .. } => SemanticNodeTag::ClassExpressionInstance,
             Self::BareRef(_) => SemanticNodeTag::BareRef,
             Self::ImportType(_) => SemanticNodeTag::ImportType,
             Self::RawFallback { .. } => SemanticNodeTag::RawFallback,
@@ -184,6 +187,14 @@ impl SemanticNodeData {
                 args.iter().copied().for_each(visit);
             }
             Self::Alias(inner) | Self::KeyOf { base: inner } => visit(*inner),
+            Self::ClassExpressionInstance {
+                type_arguments,
+                surface,
+                ..
+            } => {
+                type_arguments.iter().copied().for_each(&mut visit);
+                visit(*surface);
+            }
             Self::Object(view) => {
                 for entry in view.entries.iter() {
                     match entry {
@@ -278,6 +289,7 @@ impl SemanticNodeData {
                 return_type,
                 type_parameters,
                 return_carrier,
+                predicate,
                 ..
             } => {
                 params.iter().map(|param| param.ty).for_each(&mut visit);
@@ -290,6 +302,10 @@ impl SemanticNodeData {
                     decl.constraint.into_iter().for_each(&mut visit);
                     decl.default.into_iter().for_each(&mut visit);
                 }
+                predicate
+                    .and_then(|predicate| predicate.ty)
+                    .into_iter()
+                    .for_each(visit);
             }
             Self::DeferredCallable(_) => return ChildWalk::Sealed,
             Self::SyntheticBinding { value_node, .. } => visit(SemanticNodeId(*value_node)),
@@ -353,7 +369,7 @@ mod tests {
     #[test]
     fn stable_ids_are_pinned() {
         use SemanticNodeTag as T;
-        let pinned: [(T, u8); 30] = [
+        let pinned: [(T, u8); 31] = [
             (T::Alias, 1),
             (T::Object, 2),
             (T::Union, 3),
@@ -384,6 +400,7 @@ mod tests {
             (T::Signature, 29),
             (T::ObjectSpreadProgram, 30),
             (T::DeferredCallable, 31),
+            (T::ClassExpressionInstance, 32),
         ];
         for (tag, id) in pinned {
             assert_eq!(tag.stable_id(), id, "{tag:?}");

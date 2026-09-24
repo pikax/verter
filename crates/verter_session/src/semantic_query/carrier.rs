@@ -347,6 +347,7 @@ impl SemanticNodeData {
             | Self::Signature { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
+            | Self::ClassExpressionInstance { .. }
             // An intrinsic application's operands are ordinary structural
             // children, descended by the normal walkers — it is not a
             // deferred-NAME carrier, so it exposes nothing here.
@@ -510,6 +511,7 @@ impl SemanticNodeData {
             | Self::Signature { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
+            | Self::ClassExpressionInstance { .. }
             // Rebuilt by the substitution walker, not by the carrier channel.
             | Self::IntrinsicApplication { .. }
             | Self::RawFallback { .. }

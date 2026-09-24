@@ -347,6 +347,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.project_decl_body_arms(
                             *contributor,
                             reference_arm_role,
+                            decl_kind == TypeDeclKind::Class,
                             // The peer-merge reducer consumes contributor arms
                             // by TOPOLOGY (`Intersection([heritage refs…, own
                             // Object])`, heritage arms preserved for lazy
@@ -374,6 +375,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.project_decl_body_arms(
                     shape,
                     reference_arm_role,
+                    decl_kind == TypeDeclKind::Class,
                     // A single declaration's body flows to the role-driven
                     // intersection surface merge, which classifies members by
                     // their stamped merge role — reference arms may evaluate
@@ -445,6 +447,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         body: SemanticNodeId,
         reference_arm_role: MemberMergeRole,
+        class_body: bool,
         reference_arm_demand: ReferenceArmDemand,
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -459,8 +462,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 drop(data);
                 let arm_ids: Vec<SemanticNodeId> = arms
                     .iter()
-                    .map(|arm| {
-                        let arm_kind = match self.graph().node_data(*arm).as_deref() {
+                    .filter_map(|arm| {
+                        // A class's `extends` names a VALUE: one the type
+                        // space does not declare contributes the instance
+                        // type of its construct signature, or nothing.
+                        let arm = match class_body
+                            .then(|| self.class_heritage_value_arm(*arm, context))
+                            .flatten()
+                        {
+                            Some(Some(instance)) => instance,
+                            Some(None) => return None,
+                            None => *arm,
+                        };
+                        let arm_kind = match self.graph().node_data(arm).as_deref() {
                             Some(SemanticNodeData::Object(_)) => AuthoredArmKind::OwnBodyObject,
                             _ => AuthoredArmKind::ReferenceArm,
                         };
@@ -497,14 +511,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             };
                             arm_ctx = arm_ctx.into_structural_transit_with_mode(mode);
                         }
-                        self.project_view_node(
-                            *arm,
+                        Some(self.project_view_node(
+                            arm,
                             arm_ctx,
                             inputs,
                             substitutions,
                             memo,
                             completeness,
-                        )
+                        ))
                     })
                     .collect();
                 if arm_ids.is_empty() {
@@ -513,17 +527,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if arm_ids.len() == 1 {
                     arm_ids[0]
                 } else {
-                    // Order- and scope-preserving rebuild of the heritage
-                    // carrier's projected arms: own-body-last order is
-                    // topology and display fidelity.
-                    self.graph().intern_preserving_scope(
-                        body,
-                        SemanticNodeData::Intersection(
+                    // Order- and scope-preserving rebuild of the projected
+                    // arms: own-body-last order is topology and display
+                    // fidelity. An interface or class body (its reference
+                    // arms are `extends` heritage) is minted a heritage
+                    // body, which inherits signatures by concatenation; an
+                    // alias's intersection stays an intersection.
+                    let arms: Arc<[SemanticNodeId]> = Arc::from(arm_ids.into_boxed_slice());
+                    let list = match reference_arm_role {
+                        MemberMergeRole::Heritage => {
+                            crate::semantic_query::composite::CompositeList::heritage(arms)
+                        }
+                        MemberMergeRole::Authored | MemberMergeRole::OwnBody => {
                             crate::semantic_query::composite::CompositeList::preserving_rebuild(
-                                Arc::from(arm_ids.into_boxed_slice()),
-                            ),
-                        ),
-                    )
+                                arms,
+                            )
+                        }
+                    };
+                    self.graph()
+                        .intern_preserving_scope(body, SemanticNodeData::Intersection(list))
                 }
             }
             _ => {
@@ -543,6 +565,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
         }
+    }
+
+    /// The base a class body's heritage `arm` contributes when it names a
+    /// value the type space does not declare: `Some(Some(instance))` for
+    /// the instance type of that value's construct signature, `Some(None)`
+    /// when the value gives no base type, and `None` when the arm is not
+    /// such a reference (it projects as it is).
+    fn class_heritage_value_arm(
+        &self,
+        arm: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<Option<SemanticNodeId>> {
+        let (identity, args) = match self.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => (
+                identity.clone(),
+                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            ),
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                (base.clone(), Arc::clone(args))
+            }
+            _ => return None,
+        };
+        if !self.heritage_names_value_only(
+            &identity.canonical_id,
+            identity.owner,
+            &identity.decl_name,
+        ) {
+            return None;
+        }
+        Some(
+            self.class_value_base(
+                &identity.canonical_id,
+                identity.owner,
+                &identity.decl_name,
+                &args,
+                context,
+            )
+            .and_then(|base| base.instance),
+        )
     }
 
     /// Project one substituted shape node into the demanded view — the

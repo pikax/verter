@@ -95,6 +95,17 @@ impl RuntimeNominal {
             _ => None,
         }
     }
+
+    /// The runtime nominal a `__builtin__` declaration identity names — the
+    /// unshadowed global lib type whose application carrier the lowering
+    /// fast path interns (`Promise<T>`, `Date`, …). That carrier IS the
+    /// resolved type: it has no declaration body to resolve further.
+    #[must_use]
+    pub fn of_builtin_identity(identity: &crate::semantic_query::DeclIdentity) -> Option<Self> {
+        (identity.canonical_id.as_ref() == "__builtin__")
+            .then(|| Self::from_global_name(identity.decl_name.as_ref()))
+            .flatten()
+    }
 }
 
 impl IntrinsicImpl {

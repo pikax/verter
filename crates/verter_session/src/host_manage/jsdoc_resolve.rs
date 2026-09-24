@@ -711,6 +711,7 @@ fn node_has_direct_macro_reference(
                 params,
                 return_type,
                 type_parameters,
+                predicate,
                 ..
             } => {
                 worklist.extend(params.iter().map(|param| param.ty));
@@ -719,6 +720,7 @@ fn node_has_direct_macro_reference(
                     worklist.extend(param.constraint);
                     worklist.extend(param.default);
                 }
+                worklist.extend(predicate.and_then(|predicate| predicate.ty));
             }
             // Object MEMBERS encode "nested" deps — never walked.
             _ => {}
