@@ -1096,6 +1096,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             value_expr,
             optionality: mapper.optionality,
             readonly: mapper.readonly,
+            over_type_variable: mapper.over_type_variable,
             name_remap,
             kind: crate::semantic_query::MapperKind::classify_value_expr(
                 self.graph(),
