@@ -39,8 +39,10 @@
 //!   returned body, a statement list its block body.
 //! - An event-option listener key (`.once` / `.capture` / `.passive`
 //!   append `Once` / `Capture` / `Passive`) is validated against its own
-//!   key when declared and otherwise against the listener key the runtime
-//!   strips the options from, never accepted untyped.
+//!   key when declared. Only a single trailing `Once` falls back to the
+//!   unsuffixed key, the once-handler component `emit` calls with the event
+//!   payload; a `Capture` / `Passive` key is no emit listener, so it never
+//!   borrows the event's payload contract.
 //! - Dynamic keys, listener objects, reserved vnode keys, DOM bindings,
 //!   runtime directives and compiler-synthesized model listeners are not
 //!   authored inference contributors here; each is recorded as excluded.
@@ -588,7 +590,8 @@ fn place(
 ) {
     let placed = |list: &[TransactionMember]| list.iter().any(|m| m.key() == Some(key));
     let fallback = listener_fallback(property.rule, key);
-    let constructible = !matches!(value, MemberValue::InlineHandler { .. }) && fallback.is_none();
+    let constructible = !matches!(value, MemberValue::InlineHandler { .. })
+        && !has_event_option(property.rule, key);
     match property.rule {
         MergeRule::Accumulate if constructible && !placed(listeners) => {
             listeners.push(TransactionMember::Property {
@@ -706,26 +709,26 @@ fn specialization_key(
     SpecializationKey(encoder.digest())
 }
 
-/// Listener key an event-option key falls back to: runtime `parseName`
-/// strips every trailing `Once` / `Passive` / `Capture`, and `emit` reads
-/// a `...Once` handler as its event's listener. `None` for a non-listener
-/// key or one without an option postfix.
+/// Whether a listener key carries an event-option postfix (`Once` /
+/// `Passive` / `Capture`), whose contract may be another key's.
+fn has_event_option(rule: MergeRule, key: &str) -> bool {
+    rule == MergeRule::Accumulate
+        && ["Once", "Passive", "Capture"].iter().any(|option| {
+            // `on` alone names no event.
+            key.strip_suffix(option).is_some_and(|base| base.len() > 2)
+        })
+}
+
+/// Listener key an event-option key falls back to: component `emit` calls
+/// `props[handler]` and `props[handler + "Once"]` with the event payload,
+/// so exactly one trailing `Once` is stripped. A `Capture` / `Passive`
+/// key (or `Once` followed by another option) is no emit listener and has
+/// no fallback. `None` for a non-listener key or one without that postfix.
 fn listener_fallback(rule: MergeRule, key: &str) -> Option<String> {
-    if rule != MergeRule::Accumulate {
+    if !has_event_option(rule, key) {
         return None;
     }
-    let mut base = key;
-    while let Some(stripped) = ["Once", "Passive", "Capture"]
-        .iter()
-        .find_map(|option| base.strip_suffix(option))
-    {
-        // `on` alone names no event.
-        if stripped.len() <= 2 {
-            break;
-        }
-        base = stripped;
-    }
-    (base.len() != key.len()).then(|| base.to_string())
+    key.strip_suffix("Once").map(str::to_string)
 }
 
 fn fallback_argument(fallback: Option<&str>) -> String {

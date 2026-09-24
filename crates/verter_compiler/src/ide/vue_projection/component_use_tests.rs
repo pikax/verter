@@ -204,15 +204,18 @@ fn component_use_contextual_callbacks_stay_in_the_construction() {
 }
 
 /// Every actual callable is validated against the listener contract the
-/// runtime reads: an event-option key falls back to its unsuffixed key
-/// instead of reaching the construction untyped, an optional member is the
-/// handler itself, a `@vue:` hook outside the reserved lifecycle set is an
-/// ordinary listener, a prop-spelled handler is an observed listener, and an
-/// inline expression returns its value while a statement list is a block.
+/// runtime reads: exactly one trailing `Once` falls back to the unsuffixed
+/// key `emit` calls with the event payload, a `Capture` / `Passive` key (even
+/// after `Once`) is no emit listener and never borrows that payload, no
+/// event-option key reaches the construction untyped, an optional member is
+/// the handler itself, a `@vue:` hook outside the reserved lifecycle set is
+/// an ordinary listener, a prop-spelled handler is an observed listener, and
+/// an inline expression returns its value while a statement list is a block.
 #[test]
 fn component_use_listener_contracts_follow_the_runtime_listener_key() {
     let projection = project(concat!(
-        "  <Table @change.once=\"count\" @change.capture.passive=\"(v) => v\" :onSave=\"save\"",
+        "  <Table @change.once=\"count\" @change.capture.passive=\"(v) => v\"",
+        " @change.once.capture=\"count\" @change.capture.once=\"count\" :onSave=\"save\"",
         " @change=\"props?.onChange\" v-on:change=\"flag === true\" @vue:foo=\"hook\"",
         " @vue:mounted=\"hook\" @close=\"a = 1; b = 2\" />",
     ));
@@ -246,7 +249,9 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
         checks,
         vec![
             ("onChangeOnce", Some("onChange"), "count"),
-            ("onChangeCapturePassive", Some("onChange"), "(v) => v"),
+            ("onChangeCapturePassive", None, "(v) => v"),
+            ("onChangeOnceCapture", None, "count"),
+            ("onChangeCaptureOnce", Some("onChangeCapture"), "count"),
             ("onChange", None, "flag === true"),
             ("onClose", None, "a = 1; b = 2"),
         ]
@@ -257,14 +262,16 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
         .iter()
         .map(|e| (e.op_index, e.reason))
         .collect();
-    assert_eq!(reasons, vec![(6, ExclusionReason::Reserved)]);
+    assert_eq!(reasons, vec![(8, ExclusionReason::Reserved)]);
     let rendered = witness.render();
     let b = &witness.binding;
     for line in [
         format!("const {b}_check0: __VerterUseListener<typeof {b}, \"onChangeOnce\", \"onChange\"> = (count);\n"),
-        format!("const {b}_check1: __VerterUseListener<typeof {b}, \"onChangeCapturePassive\", \"onChange\"> = ((v) => v);\n"),
-        format!("const {b}_check2: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (flag === true);\n"),
-        format!("const {b}_check3: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ a = 1; b = 2; }};\n"),
+        format!("const {b}_check1: __VerterUseListener<typeof {b}, \"onChangeCapturePassive\"> = ((v) => v);\n"),
+        format!("const {b}_check2: __VerterUseListener<typeof {b}, \"onChangeOnceCapture\"> = (count);\n"),
+        format!("const {b}_check3: __VerterUseListener<typeof {b}, \"onChangeCaptureOnce\", \"onChangeCapture\"> = (count);\n"),
+        format!("const {b}_check4: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (flag === true);\n"),
+        format!("const {b}_check5: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ a = 1; b = 2; }};\n"),
     ] {
         assert!(rendered.contains(&line), "missing {line} in {rendered}");
     }
@@ -282,7 +289,9 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
         events,
         vec![
             ("onChangeOnce", Some("onChange")),
-            ("onChangeCapturePassive", Some("onChange")),
+            ("onChangeCapturePassive", None),
+            ("onChangeOnceCapture", None),
+            ("onChangeCaptureOnce", Some("onChangeCapture")),
             ("onSave", None),
             ("onChange", None),
             ("onVnodeFoo", None),
