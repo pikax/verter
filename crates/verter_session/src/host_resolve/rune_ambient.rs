@@ -323,6 +323,7 @@ mod tests {
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
                 expression_source: None,
+                literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
             },
             signatures: Vec::new(),
             object_shape: None,

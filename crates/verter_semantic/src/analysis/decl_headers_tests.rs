@@ -240,7 +240,26 @@ declare module "pkg" { interface Config { instance: number } }
 fn assert_name_parity(source: &str) {
     let env = parse_and_build_env(source);
     let index = index_for(source);
+    assert_parity(&env, &index, source);
+}
 
+/// [`assert_name_parity`] for a file of `source_type`, with both walks
+/// over one parse.
+fn assert_name_parity_as(source: &str, source_type: oxc_span::SourceType) -> DeclHeaderIndex {
+    let allocator = oxc_allocator::Allocator::default();
+    let ret = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    assert!(!ret.panicked, "fixture must parse");
+    let env = build_eval_env(
+        &ret.program,
+        source,
+        &crate::analysis::type_eval_build::BuildEvalEnvContext::new("inline:parity"),
+    );
+    let index = build_decl_header_index(&ret.program, source);
+    assert_parity(&env, &index, source);
+    index
+}
+
+fn assert_parity(env: &crate::analysis::type_eval::EvalEnv, index: &DeclHeaderIndex, source: &str) {
     let mut env_types: Vec<&str> = env
         .type_symbols
         .keys()
@@ -1031,6 +1050,7 @@ interface Merged { b: number }
                 contributor.anchor,
             ),
             source,
+            ret.program.source_type.is_typescript_definition(),
             &mut scratch,
         );
     }
@@ -1051,4 +1071,83 @@ interface Merged { b: number }
         "selective lowering must not lower the un-demanded statement"
     );
     assert_eq!(scratch.total_decl_count(), 2);
+}
+
+#[test]
+fn hoisted_block_vars_match_env_walk() {
+    let index = assert_name_parity_as(
+        r#"
+declare const cond: boolean;
+if (cond) { var bvIf = 1; } else { var bvElse = "e"; }
+for (var bvFor = 0; ; ) { var bvForBody = 1; }
+for (var bvIn in {}) {}
+for (var bvOf of [1]) {}
+try { var bvTry = 1; } catch (e) { var bvCatch = 1; } finally { var bvFinally = 1; }
+switch (1) { case 1: var bvCase = 1; }
+lbl: { var bvLabel = 1; }
+function notHoisted() { var inner = 1; }
+if (cond) { let blockLet = 1; }
+"#,
+        oxc_span::SourceType::ts(),
+    );
+    let mut names: Vec<&str> = index
+        .value_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "bvCase",
+            "bvCatch",
+            "bvElse",
+            "bvFinally",
+            "bvFor",
+            "bvForBody",
+            "bvIf",
+            "bvIn",
+            "bvLabel",
+            "bvOf",
+            "bvTry",
+            "cond",
+            "notHoisted",
+        ]
+    );
+}
+
+#[test]
+fn declaration_file_namespace_values_match_env_walk() {
+    let source = r#"
+export namespace EN { function f(): 1; const c: 2; namespace Inner { function g(): 3 } }
+export namespace EX { function f(): 4; export function h(): 5; export {}; }
+declare global { namespace GN { function gf(): 6; } namespace GX { function gx(): 7; export {}; } }
+"#;
+    let index = assert_name_parity_as(source, oxc_span::SourceType::d_ts());
+    let mut names: Vec<&str> = index
+        .value_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["EN.Inner.g", "EN.c", "EN.f", "EX.h"]);
+    let mut global: Vec<&str> = index
+        .augmentation_value_headers
+        .values()
+        .flat_map(|names| names.keys().map(|key| key.name.as_ref()))
+        .collect();
+    global.sort_unstable();
+    assert_eq!(global, ["GN.gf"]);
+    // The same namespaces outside a declaration file export nothing
+    // unwritten.
+    let script = assert_name_parity_as(
+        "namespace EN { function f(): 1; export function h(): 2; }\n",
+        oxc_span::SourceType::ts(),
+    );
+    let names: Vec<&str> = script
+        .value_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    assert_eq!(names, ["EN.h"]);
 }

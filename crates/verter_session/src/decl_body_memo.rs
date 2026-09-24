@@ -1549,6 +1549,16 @@ impl DeclBodyMemo {
             .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
     }
 
+    /// Whether a per-symbol VALUE cell has a COMMITTED entry (test
+    /// observability — never a validity signal).
+    #[cfg(test)]
+    pub(crate) fn value_entry_materialized(&self, name: &str) -> bool {
+        let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
+        self.value_entries
+            .get(&key)
+            .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
+    }
+
     /// Whether a `(name, space)` raw-surface capture has a COMMITTED entry
     /// (test observability — never a validity signal). A lease-miss ReturnOnly
     /// never inserts, so this returns `false`.
@@ -1773,7 +1783,11 @@ impl DeclBodyMemo {
                 let parts = if svelte_component_runes_mode {
                     lower_svelte_runes_statement_parts(stmt, source)
                 } else {
-                    lower_statement_parts(stmt, source)
+                    lower_statement_parts(
+                        stmt,
+                        source,
+                        program.source_type.is_typescript_definition(),
+                    )
                 };
                 for decl in &parts.type_decls {
                     retained_types
@@ -2280,7 +2294,11 @@ impl DeclBodyMemo {
                 else {
                     continue;
                 };
-                let parts = lower_statement_parts(stmt, source);
+                let parts = lower_statement_parts(
+                    stmt,
+                    source,
+                    program.source_type.is_typescript_definition(),
+                );
                 match aug_scope.as_ref() {
                     Some(scope) => {
                         for (part_scope, decl) in &parts.aug_type_decls {
@@ -2715,7 +2733,11 @@ impl DeclBodyMemo {
                 let parts = if svelte_component_runes_mode {
                     lower_svelte_runes_statement_parts(stmt, source)
                 } else {
-                    lower_statement_parts(stmt, source)
+                    lower_statement_parts(
+                        stmt,
+                        source,
+                        program.source_type.is_typescript_definition(),
+                    )
                 };
                 let value_decls = parts.value_decls.iter().filter(|_| aug_scope.is_none());
                 let aug_value_decls = parts
@@ -2801,7 +2823,8 @@ pub(crate) fn lowered_decls_from_env_and_program(
         FxHashMap::default();
     let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {
-        let parts = lower_statement_parts(stmt, source);
+        let parts =
+            lower_statement_parts(stmt, source, program.source_type.is_typescript_definition());
         let contributor_anchor =
             u32::try_from(index)
                 .ok()
@@ -3304,6 +3327,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             annotation: Some(instance),
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
+            literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
         },
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),

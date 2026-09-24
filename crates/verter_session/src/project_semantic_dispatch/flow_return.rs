@@ -8945,6 +8945,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 None => {}
             }
         }
+        if self.reads_widening_declaration(expr, node) {
+            return self.top_level_literal_nodes(node);
+        }
         if let Some(call) = self.fresh_call_return_for(expr, node) {
             let values = Arc::clone(&call.values);
             if values.contains(&node) {
@@ -12365,6 +12368,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return Some(membership.clone());
             }
         }
+        if self.reads_widening_declaration(init, node) {
+            return Some(WideningMembership::All);
+        }
         if let Some(call) = self.fresh_call_return_for(init, node) {
             return Some(if call.values.contains(&node) {
                 WideningMembership::All
@@ -12504,6 +12510,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.widening_of(binding)
     }
 
+    /// Whether `expr` reads a value declared OUTSIDE the frame whose declared
+    /// type is a widening literal type (`const c = 1` read as `c`) — the
+    /// owner-scope counterpart of a widening-membership local read: every
+    /// literal the read yields is fresh. `node` is the value the read
+    /// yielded; a read that yields no literal has nothing to widen.
+    fn reads_widening_declaration(
+        &self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        node: SemanticNodeId,
+    ) -> bool {
+        let crate::flow_slice_content::SliceExpr::Type(leaf) = expr else {
+            return false;
+        };
+        let verter_type_expr::TypeExpr::TypeOf(value) = leaf.ty() else {
+            return false;
+        };
+        value.type_args.is_empty()
+            && !self.top_level_literal_nodes(node).is_empty()
+            && self
+                .dispatch
+                .value_read_widens(self.canonical, self.owner, &value.path)
+    }
+
     /// The completed fresh-literal call this expression IS (transparently)
     /// a read of, matched by the authored call-site SPAN — never by the
     /// interned literal value, so a sibling arm's authored pin of the same
@@ -12567,6 +12596,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 None => {}
             }
+        }
+        if self.reads_widening_declaration(expr, node) {
+            return widen_fresh_read_node(self.dispatch, node, self.nullability);
         }
         node
     }
@@ -12723,6 +12755,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                         // while two such yields keep
                                         // `1 | 2`.
                                         let fresh = bare_fresh
+                                            || self.reads_widening_declaration(expr, node)
                                             || self
                                                 .fresh_call_return_for(expr, node)
                                                 .is_some_and(|call| call.values.contains(&node));
@@ -12868,6 +12901,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             };
                             if let Some((node, fresh_values)) = evaluated {
                                 fresh_literal |= self.holds.len() > holds_before;
+                                fresh_literal |= self.reads_widening_declaration(expr, node);
                                 // A COMPLETED call that closed on a
                                 // WHOLE-return fresh literal feeds the
                                 // same join — matched by its authored
@@ -15873,8 +15907,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // `wrap("x")`); the indexed lowering classifies every
             // reference as pinned because only this frame knows the
             // binding's widening membership.
-            let reads_widening_local = matches!(&binding,
-                FlowIndexedArgumentBinding::ValueRead(binding) if self.widening_of(binding));
+            let reads_widening_local = match &binding {
+                FlowIndexedArgumentBinding::ValueRead(binding) => self.widening_of(binding),
+                // A value declared outside the frame (`const c = 1` read as
+                // `c`) widens by its declared type.
+                FlowIndexedArgumentBinding::Free => match &argument.expression {
+                    verter_type_expr::IndexedValueExpression::Value(
+                        verter_type_expr::TypeExpr::TypeOf(value),
+                    ) => {
+                        value.type_args.is_empty()
+                            && !self.top_level_literal_nodes(ty).is_empty()
+                            && self.dispatch.value_read_widens(
+                                self.canonical,
+                                self.owner,
+                                &value.path,
+                            )
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
             args.push(crate::semantic_query::CallArgKey::Eager {
                 ty,
                 spread: argument.spread,

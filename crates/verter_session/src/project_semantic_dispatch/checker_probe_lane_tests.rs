@@ -12,9 +12,10 @@ use crate::semantic_query::{
 };
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 
-/// The project a probe module is checked in: its sibling files and, when
-/// set, the `compilerOptions` of the tsconfig that owns them (TypeScript's
-/// defaults with `strict` otherwise).
+/// The project a probe module is checked in: its sibling files, when set
+/// the `compilerOptions` of the tsconfig that owns them (TypeScript's
+/// defaults with `strict` otherwise), and when set the ambient library the
+/// project's global declarations come from (none otherwise).
 #[derive(Clone, Copy, Default)]
 pub(super) struct ProbeProject<'a> {
     /// `(file name, source)` modules beside the probe module, in program
@@ -22,6 +23,10 @@ pub(super) struct ProbeProject<'a> {
     pub(super) files: &'a [(&'a str, &'a str)],
     /// The owning tsconfig's `compilerOptions` object.
     pub(super) compiler_options: Option<&'a str>,
+    /// The ambient library registered against the probe's project — the
+    /// global `String`, `Array`, … declarations a checker reads from its
+    /// `lib` files.
+    pub(super) ambient_lib: Option<&'a str>,
 }
 
 const PROBE_ROOT: &str = "/wb";
@@ -45,7 +50,12 @@ pub(super) fn with_probe_in<R>(
     read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
 ) -> R {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
-    let host = match project.compiler_options {
+    // A registered ambient library attaches to a configured project, so a
+    // probe that reads one is checked in the tsconfig project it belongs to.
+    let compiler_options = project
+        .compiler_options
+        .or(project.ambient_lib.map(|_| r#"{ "strict": true }"#));
+    let host = match compiler_options {
         None => make_audit_host(),
         Some(options) => Arc::new(crate::VerterHost::new_standalone_with_tsconfig_projects(
             crate::HostConfig {
@@ -60,13 +70,23 @@ pub(super) fn with_probe_in<R>(
             )],
         )),
     };
+    if let Some(lib) = project.ambient_lib {
+        host.workspace()
+            .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                project_id: None,
+                canonical_id: Arc::from("lib.probe.d.ts"),
+                source: Arc::from(lib),
+            })
+            .expect("the probe's ambient library registers against its project");
+    }
     for (name, file_source) in project.files {
-        crate::u6_flow_shape_corpus_tests::upsert(
-            &host,
-            &format!("{PROBE_ROOT}/{name}"),
-            file_source,
-            crate::FileLanguage::script_ts(),
-        );
+        let path = format!("{PROBE_ROOT}/{name}");
+        // A sibling is classified by its name, as the host classifies it: a
+        // `.d.ts` sibling is a declaration file.
+        let language = crate::LanguageRegistry::global()
+            .classify_static(&path)
+            .static_resolution();
+        crate::u6_flow_shape_corpus_tests::upsert(&host, &path, file_source, language);
     }
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
@@ -101,6 +121,11 @@ pub(super) fn with_probe_in<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    // A read of a global the ambient library declares is scoped by the
+    // probe module's project, as the member access in its body would be.
+    let _demand_scope = project.ambient_lib.map(|_| {
+        super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
+    });
     let node = dispatch
         .normalize_node_keeping_declaration_refs_for_tests(
             result.return_type(),

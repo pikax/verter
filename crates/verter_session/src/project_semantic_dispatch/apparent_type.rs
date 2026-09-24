@@ -103,25 +103,21 @@ impl ProjectSemanticDispatch<'_> {
                 ApparentDemandScope::Anchored => return miss(),
             },
         };
-        let Some(project) = self.project_stable_key_for_canonical(canonical.as_ref()) else {
-            return miss();
-        };
-        let Some(hit) = self
-            .ctx
-            .lookup_ambient_symbol(project, CALLABLE_APPARENT_INTERFACE)
-        else {
-            return miss();
-        };
-        // The consumer now depends on this ambient registration: a
+        // The consumer depends on the library the lookup reads: a
         // re-registration of the lib invalidates it through the standard
         // dependency-fact validators. For a rootless base the recorded
         // consumer is the demand canonical — the demand-project read.
-        self.ctx
-            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
+        let Some(declaration) = self.lib_global_declaration(
+            canonical.as_ref(),
+            CALLABLE_APPARENT_INTERFACE,
+            super::build::GlobalSpace::Type,
+        ) else {
+            return miss();
+        };
 
         let slot = self.type_slot_for(
-            Arc::clone(&hit.virtual_id),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::clone(&declaration.canonical_id),
+            declaration.owner,
             Arc::from(CALLABLE_APPARENT_INTERFACE),
         );
         let surface = self.execute_type_node(SemanticQueryKey::Instantiate(
@@ -129,7 +125,7 @@ impl ProjectSemanticDispatch<'_> {
                 slot,
                 Arc::from(Vec::new().into_boxed_slice()),
                 self.instantiate_context_for(
-                    hit.virtual_id.as_ref(),
+                    declaration.canonical_id.as_ref(),
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ),

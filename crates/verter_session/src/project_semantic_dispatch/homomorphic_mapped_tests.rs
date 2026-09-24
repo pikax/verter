@@ -156,10 +156,12 @@ fn an_array_or_tuple_maps_element_wise() {
     let loose = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+        ambient_lib: None,
     };
     let exact = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "exactOptionalPropertyTypes": true }"#),
+        ambient_lib: None,
     };
     for (project, strict_null_checks) in [(strict, true), (loose, false), (exact, true)] {
         let read = |on: &'static str, off: &'static str| if strict_null_checks { on } else { off };
@@ -222,10 +224,12 @@ fn an_optional_tuple_element_relates_with_its_implied_undefined() {
     let loose = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "strictNullChecks": false }"#),
+        ambient_lib: None,
     };
     let exact = ProbeProject {
         files: &[],
         compiler_options: Some(r#"{ "strict": true, "exactOptionalPropertyTypes": true }"#),
+        ambient_lib: None,
     };
     for (project, exact_optional) in [(strict, false), (loose, false), (exact, true)] {
         let read =

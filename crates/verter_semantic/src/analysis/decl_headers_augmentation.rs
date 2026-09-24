@@ -154,6 +154,7 @@ fn index_augmentation_module_declaration(
             );
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let implicit_export = !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 index_namespaced_statement_into_augmentation(
                     stmt,
@@ -161,6 +162,7 @@ fn index_augmentation_module_declaration(
                     index,
                     namespace.as_str(),
                     scope,
+                    implicit_export,
                 );
             }
         }
@@ -174,6 +176,7 @@ fn index_namespaced_statement_into_augmentation(
     index: &mut DeclHeaderIndex,
     namespace: &str,
     scope: &AugmentationScopeKind,
+    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -195,15 +198,16 @@ fn index_namespaced_statement_into_augmentation(
         Statement::TSModuleDeclaration(module) => {
             index_augmentation_module_declaration(module, ctx, index, scope, Some(namespace));
         }
-        // An augmentation block is ambient, so every member of a namespace
-        // inside it is exported, written `export` or not (mirror of an ambient
-        // namespace in `index_namespaced_statement`).
+        // An augmentation block is ambient, so a namespace body inside it
+        // without an export declaration exports every member, written
+        // `export` or not (mirror of an ambient namespace in
+        // `index_namespaced_statement`).
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 index_namespaced_declaration_into_augmentation(decl, ctx, index, namespace, scope);
             }
         }
-        Statement::VariableDeclaration(var_decl) => {
+        Statement::VariableDeclaration(var_decl) if implicit_export => {
             let scoped = index
                 .augmentation_value_headers
                 .entry(scope.clone())
@@ -212,7 +216,7 @@ fn index_namespaced_statement_into_augmentation(
                 index_variable(d, var_decl.kind, ctx, scoped, Some(namespace));
             }
         }
-        Statement::FunctionDeclaration(func) => {
+        Statement::FunctionDeclaration(func) if implicit_export => {
             let scoped = index
                 .augmentation_value_headers
                 .entry(scope.clone())

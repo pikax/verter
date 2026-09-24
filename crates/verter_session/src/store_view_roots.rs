@@ -949,6 +949,13 @@ impl StoreViewRoots {
     /// does not rebuild this view fails closed against a moved fingerprint.
     /// `None` while a contributor recorded at upsert waits for ingestion —
     /// it may declare the name, so no published fingerprint vouches for it.
+    ///
+    /// That miss is sound, never a stale warm answer: it only refuses the
+    /// warm entry, and the recompute that follows reads the population
+    /// through contribution collection, which ingests every pending
+    /// contributor first and then observes the fingerprint of the complete
+    /// population. The cost is one recompute for each warm read made while
+    /// a contributor waits.
     pub(crate) fn global_contributor_fingerprint(
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,

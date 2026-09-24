@@ -17,9 +17,9 @@
 use std::sync::Arc;
 
 use verter_type_expr::facts::{
-    AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, InferenceUnavailableReason,
-    ResolvedLocalTypeFact, SemanticTypeSource, ValueAnnotationClass, ValueDeclIdentityPart,
-    ValueTypeAnnotationFact,
+    AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, DeclaredLiteralFreshness,
+    InferenceUnavailableReason, ResolvedLocalTypeFact, SemanticTypeSource, ValueAnnotationClass,
+    ValueDeclIdentityPart, ValueTypeAnnotationFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, TypeArgLocator, TypeBodyPathStep,
@@ -100,6 +100,7 @@ pub(crate) fn value_type_annotation_fact(
             annotation: None,
             reference_head: AuthoredReferenceHeadFact::Unavailable,
             expression_source: None,
+            literal_freshness: DeclaredLiteralFreshness::Regular,
         };
     }
     let Some(annotation) = annotation else {
@@ -113,6 +114,7 @@ pub(crate) fn value_type_annotation_fact(
                 annotation: None,
                 reference_head: AuthoredReferenceHeadFact::NotReference,
                 expression_source,
+                literal_freshness: DeclaredLiteralFreshness::Regular,
             };
         }
         verter_debug_assert!(
@@ -127,6 +129,7 @@ pub(crate) fn value_type_annotation_fact(
             annotation: None,
             reference_head: AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
+            literal_freshness: DeclaredLiteralFreshness::Regular,
         };
     };
 
@@ -167,6 +170,7 @@ pub(crate) fn value_type_annotation_fact(
             }))
         }),
         expression_source: None,
+        literal_freshness: DeclaredLiteralFreshness::Regular,
     }
 }
 

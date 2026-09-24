@@ -30,13 +30,14 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
+use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
 use verter_type_expr::facts::{
-    AuthoredReferenceHeadFact, ClosedTypeFact, EnumMemberEntry, EnumMemberFact,
-    EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar, FlowFunctionReturnIdentity,
-    FunctionParamFact, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
-    IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
-    NarrowTypeParam, ObjectMemberFact, ObjectMethodFact, ObjectPropertyFact, ObjectShapeFact,
-    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
+    AuthoredReferenceHeadFact, ClosedTypeFact, DeclaredLiteralFreshness, EnumMemberEntry,
+    EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar,
+    FlowFunctionReturnIdentity, FunctionParamFact, FunctionPartIdentity, FunctionReturnSource,
+    FunctionSignatureFact, IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape,
+    LeafTypeFact, MemberHeaderFact, NarrowTypeParam, ObjectMemberFact, ObjectMethodFact,
+    ObjectPropertyFact, ObjectShapeFact, SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace,
@@ -346,6 +347,9 @@ pub struct LoweredValueDeclParts {
     pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
     /// Enum member-NAME inventory fact (`Some` exactly for an enum decl).
     pub enum_member_names: Option<EnumMemberNamesFact>,
+    /// Whether the declared type is a widening literal type (a `const`
+    /// initialized with a literal, see [`DeclaredLiteralFreshness`]).
+    pub literal_freshness: DeclaredLiteralFreshness,
 }
 
 /// The TRANSIENT lowered parts one top-level statement contributes, routed to
@@ -404,6 +408,7 @@ pub fn build_eval_env_with_owners(
                 statement_owner,
             },
             source,
+            program.source_type.is_typescript_definition(),
             &mut env,
         );
     }
@@ -446,18 +451,26 @@ pub fn lower_top_level_statement(
     stmt: &Statement<'_>,
     ctx: StatementLowerCtx<'_>,
     source: &str,
+    declaration_file: bool,
     env: &mut EvalEnv,
 ) {
-    let parts = lower_statement_parts(stmt, source);
+    let parts = lower_statement_parts(stmt, source, declaration_file);
     register_statement_parts(parts, ctx, env);
 }
 
 /// Lower ONE top-level statement to its TRANSIENT declaration parts, without
 /// registering anything. The single dispatch both the production registration
 /// walk and the in-crate lowering tests consume — one lowering path, no fork.
-pub fn lower_statement_parts(stmt: &Statement<'_>, source: &str) -> LoweredStatementParts {
+///
+/// `declaration_file` says the statement belongs to a declaration file,
+/// where every declaration is ambient.
+pub fn lower_statement_parts(
+    stmt: &Statement<'_>,
+    source: &str,
+    declaration_file: bool,
+) -> LoweredStatementParts {
     let mut out = LoweredStatementParts::default();
-    collect_statement_parts(stmt, source, &mut out);
+    collect_statement_parts(stmt, source, declaration_file, &mut out);
     out
 }
 
@@ -477,7 +490,7 @@ pub fn lower_svelte_runes_statement_parts(
     stmt: &Statement<'_>,
     source: &str,
 ) -> LoweredStatementParts {
-    let mut out = lower_statement_parts(stmt, source);
+    let mut out = lower_statement_parts(stmt, source, false);
     apply_svelte_rune_initializer_inference(stmt, source, &mut out.value_decls);
     out
 }
@@ -527,7 +540,12 @@ pub fn register_statement_parts(
     }
 }
 
-fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut LoweredStatementParts) {
+fn collect_statement_parts(
+    stmt: &Statement<'_>,
+    source: &str,
+    declaration_file: bool,
+    out: &mut LoweredStatementParts,
+) {
     match stmt {
         Statement::TSTypeAliasDeclaration(decl) => {
             out.type_decls.push(lower_named_type_alias_parts(
@@ -544,7 +562,7 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
             ));
         }
         Statement::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None, false);
+            collect_module_declaration(module, source, out, None, declaration_file);
         }
         Statement::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -569,7 +587,7 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
         }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                collect_from_declaration(decl, source, out);
+                collect_from_declaration(decl, source, declaration_file, out);
             }
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -609,6 +627,166 @@ fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut Lowered
         },
         _ => {}
     }
+    collect_hoisted_vars(stmt, source, out);
+}
+
+/// Where a `var` a top-level statement declares inside a nested block takes
+/// its type from.
+#[derive(Clone, Copy)]
+pub(crate) enum HoistedVarSource<'s, 'a> {
+    /// An ordinary declarator: its annotation or its initializer.
+    Declarator,
+    /// The loop variable of a `for…in`: a property key, `string`.
+    ForInKey,
+    /// The loop variable of a `for…of` over `iterated`: one element of it.
+    ForOfElement(&'s Expression<'a>),
+}
+
+/// Visit every `var` declarator a top-level statement declares INSIDE its
+/// nested blocks. A `var` is scoped to the top level it hoists to, not to
+/// the block that spells it; function and class bodies are scopes of their
+/// own and are never entered, and `let` / `const` stay block-scoped. The
+/// statement's own top-level declarators are not nested and are not visited.
+pub(crate) fn for_each_hoisted_var<'s, 'a>(
+    stmt: &'s Statement<'a>,
+    visit: &mut dyn FnMut(&'s VariableDeclarator<'a>, HoistedVarSource<'s, 'a>),
+) {
+    walk_hoisted_vars(stmt, false, visit);
+}
+
+fn walk_hoisted_vars<'s, 'a>(
+    stmt: &'s Statement<'a>,
+    nested: bool,
+    visit: &mut dyn FnMut(&'s VariableDeclarator<'a>, HoistedVarSource<'s, 'a>),
+) {
+    let declarators =
+        |declaration: &'s oxc_ast::ast::VariableDeclaration<'a>,
+         source: HoistedVarSource<'s, 'a>,
+         visit: &mut dyn FnMut(&'s VariableDeclarator<'a>, HoistedVarSource<'s, 'a>)| {
+            if declaration.kind == VariableDeclarationKind::Var {
+                for declarator in &declaration.declarations {
+                    visit(declarator, source);
+                }
+            }
+        };
+    match stmt {
+        Statement::VariableDeclaration(declaration) if nested => {
+            declarators(declaration, HoistedVarSource::Declarator, visit);
+        }
+        Statement::BlockStatement(block) => {
+            for inner in &block.body {
+                walk_hoisted_vars(inner, true, visit);
+            }
+        }
+        Statement::IfStatement(branch) => {
+            walk_hoisted_vars(&branch.consequent, true, visit);
+            if let Some(alternate) = &branch.alternate {
+                walk_hoisted_vars(alternate, true, visit);
+            }
+        }
+        Statement::ForStatement(for_statement) => {
+            if let Some(oxc_ast::ast::ForStatementInit::VariableDeclaration(declaration)) =
+                &for_statement.init
+            {
+                declarators(declaration, HoistedVarSource::Declarator, visit);
+            }
+            walk_hoisted_vars(&for_statement.body, true, visit);
+        }
+        Statement::ForInStatement(for_in) => {
+            if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(declaration) = &for_in.left {
+                declarators(declaration, HoistedVarSource::ForInKey, visit);
+            }
+            walk_hoisted_vars(&for_in.body, true, visit);
+        }
+        Statement::ForOfStatement(for_of) => {
+            if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(declaration) = &for_of.left {
+                // An awaited loop reads an async iterable's elements, which
+                // this reading does not model: the loop variable stays
+                // untyped.
+                let source = if for_of.r#await {
+                    HoistedVarSource::Declarator
+                } else {
+                    HoistedVarSource::ForOfElement(&for_of.right)
+                };
+                declarators(declaration, source, visit);
+            }
+            walk_hoisted_vars(&for_of.body, true, visit);
+        }
+        Statement::WhileStatement(loop_statement) => {
+            walk_hoisted_vars(&loop_statement.body, true, visit);
+        }
+        Statement::DoWhileStatement(loop_statement) => {
+            walk_hoisted_vars(&loop_statement.body, true, visit);
+        }
+        Statement::TryStatement(try_statement) => {
+            for inner in &try_statement.block.body {
+                walk_hoisted_vars(inner, true, visit);
+            }
+            if let Some(handler) = &try_statement.handler {
+                for inner in &handler.body.body {
+                    walk_hoisted_vars(inner, true, visit);
+                }
+            }
+            if let Some(finalizer) = &try_statement.finalizer {
+                for inner in &finalizer.body {
+                    walk_hoisted_vars(inner, true, visit);
+                }
+            }
+        }
+        Statement::SwitchStatement(switch) => {
+            for case in &switch.cases {
+                for inner in &case.consequent {
+                    walk_hoisted_vars(inner, true, visit);
+                }
+            }
+        }
+        Statement::LabeledStatement(labeled) => walk_hoisted_vars(&labeled.body, true, visit),
+        Statement::WithStatement(with) => walk_hoisted_vars(&with.body, true, visit),
+        _ => {}
+    }
+}
+
+/// The type of one element of a `for…of` loop's iterated value: an array's
+/// element, a tuple's elements, a string's characters. `None` for any other
+/// iterated value, which this reading does not model.
+fn iterated_element_type(iterated: &Expression<'_>, source: &str) -> Option<TypeExpr> {
+    let iterated =
+        infer_declaration_expression_type(iterated, source, TopLevelLiteralPolicy::Widen).ok()?;
+    match &iterated {
+        TypeExpr::Array { element, .. } => Some(element.as_ref().clone()),
+        TypeExpr::Primitive(PrimitiveName::String) => {
+            Some(TypeExpr::Primitive(PrimitiveName::String))
+        }
+        _ => None,
+    }
+}
+
+/// Lower the `var` declarators a top-level statement hoists out of its
+/// nested blocks (see [`for_each_hoisted_var`]). A `for…in` key is a
+/// `string`; a `for…of` variable is an element of the iterated value.
+fn collect_hoisted_vars(stmt: &Statement<'_>, source: &str, out: &mut LoweredStatementParts) {
+    for_each_hoisted_var(stmt, &mut |declarator, hoisted| {
+        let Some(mut parts) =
+            lower_variable_parts(declarator, VariableDeclarationKind::Var, source, None)
+        else {
+            return;
+        };
+        // A loop variable takes its type from the loop, not from the
+        // implicit `any` of a declarator without an initializer; an
+        // iterated value this reading does not model leaves it untyped.
+        if !parts.annotation_is_authored && declarator.init.is_none() {
+            match hoisted {
+                HoistedVarSource::Declarator => {}
+                HoistedVarSource::ForInKey => {
+                    parts.type_annotation = Some(TypeExpr::Primitive(PrimitiveName::String));
+                }
+                HoistedVarSource::ForOfElement(iterated) => {
+                    parts.type_annotation = iterated_element_type(iterated, source);
+                }
+            }
+        }
+        out.value_decls.push(parts);
+    });
 }
 
 /// Register the JSDoc `@typedef {T} Name` declaration named `name` into
@@ -726,7 +904,12 @@ fn register_jsdoc_typedefs(
     }
 }
 
-fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut LoweredStatementParts) {
+fn collect_from_declaration(
+    decl: &Declaration<'_>,
+    source: &str,
+    declaration_file: bool,
+    out: &mut LoweredStatementParts,
+) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
             out.type_decls.push(lower_named_type_alias_parts(
@@ -743,7 +926,7 @@ fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut Lowe
             ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            collect_module_declaration(module, source, out, None, false);
+            collect_module_declaration(module, source, out, None, declaration_file);
         }
         Declaration::TSGlobalDeclaration(global) => {
             collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
@@ -1262,7 +1445,7 @@ fn mint_value_decl(
         owner,
         owner_local_ordinal: ctx.statement_owner.owner_local_ordinal,
     };
-    let type_annotation = value_type_annotation_fact(
+    let mut type_annotation = value_type_annotation_fact(
         parts.type_annotation.as_ref(),
         parts.is_unique_symbol,
         &parts.unique_symbol_members,
@@ -1284,6 +1467,7 @@ fn mint_value_decl(
         }),
         parts.inference_unavailable,
     );
+    type_annotation.literal_freshness = parts.literal_freshness.clone();
     let signatures = parts
         .signatures
         .iter()
@@ -1612,9 +1796,10 @@ fn unique_symbol_members_of_interface_body(decl: &TSInterfaceDeclaration<'_>) ->
         .collect()
 }
 
-/// `ambient` is whether an enclosing namespace is ambient: a `declare
-/// namespace` and every namespace inside one exports each member, written
-/// `export` or not.
+/// `ambient` is whether the namespace sits in an ambient context: a
+/// declaration file, or inside a `declare namespace`. An ambient namespace
+/// body without an export declaration is an export context — it exports each
+/// member, written `export` or not.
 fn collect_module_declaration(
     decl: &TSModuleDeclaration<'_>,
     source: &str,
@@ -1654,8 +1839,16 @@ fn collect_module_declaration(
             collect_module_declaration(inner, source, out, Some(module_name.as_str()), ambient);
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let implicit_export = ambient && !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
-                collect_namespaced_statement(stmt, source, out, module_name.as_str(), ambient);
+                collect_namespaced_statement(
+                    stmt,
+                    source,
+                    out,
+                    module_name.as_str(),
+                    ambient,
+                    implicit_export,
+                );
             }
         }
     }
@@ -1748,7 +1941,7 @@ fn collect_augmentation_declaration(
         | Declaration::FunctionDeclaration(_)
         | Declaration::ClassDeclaration(_) => {
             let mut inner = LoweredStatementParts::default();
-            collect_from_declaration(decl, source, &mut inner);
+            collect_from_declaration(decl, source, true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
         }
         Declaration::TSModuleDeclaration(module) => {
@@ -1800,6 +1993,7 @@ fn collect_augmentation_module_declaration(
             );
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let implicit_export = !statements_have_export_declarations(&block.body);
             for stmt in &block.body {
                 collect_namespaced_statement_into_augmentation(
                     stmt,
@@ -1807,6 +2001,7 @@ fn collect_augmentation_module_declaration(
                     out,
                     namespace.as_str(),
                     scope,
+                    implicit_export,
                 );
             }
         }
@@ -1822,6 +2017,7 @@ fn collect_namespaced_statement_into_augmentation(
     out: &mut LoweredStatementParts,
     namespace: &str,
     scope: &AugmentationScopeKind,
+    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -1847,9 +2043,10 @@ fn collect_namespaced_statement_into_augmentation(
         Statement::TSModuleDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
-        // An augmentation block is ambient, so every member of a namespace
-        // inside it is exported, written `export` or not (an ambient namespace
-        // in `collect_namespaced_statement`).
+        // An augmentation block is ambient, so a namespace body inside it
+        // without an export declaration exports every member, written
+        // `export` or not (an ambient namespace in
+        // `collect_namespaced_statement`).
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 collect_namespaced_declaration_into_augmentation(
@@ -1857,7 +2054,7 @@ fn collect_namespaced_statement_into_augmentation(
                 );
             }
         }
-        Statement::VariableDeclaration(var_decl) => {
+        Statement::VariableDeclaration(var_decl) if implicit_export => {
             for declarator in &var_decl.declarations {
                 if let Some(parts) =
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
@@ -1866,7 +2063,7 @@ fn collect_namespaced_statement_into_augmentation(
                 }
             }
         }
-        Statement::FunctionDeclaration(func) => {
+        Statement::FunctionDeclaration(func) if implicit_export => {
             if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
                 out.aug_value_decls.push((scope.clone(), parts));
             }
@@ -1979,6 +2176,7 @@ fn collect_namespaced_statement(
     out: &mut LoweredStatementParts,
     namespace: &str,
     ambient: bool,
+    implicit_export: bool,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
@@ -2014,14 +2212,14 @@ fn collect_namespaced_statement(
         // `Statement::VariableDeclaration` is NOT indexed under its qualified
         // name. The exported path below (`export const VERSION = …` →
         // `collect_namespaced_declaration`) registers a qualified value member
-        // such as `N.VERSION` — and in an AMBIENT namespace every member is
-        // exported, written `export` or not.
+        // such as `N.VERSION` — and a namespace body that is an export
+        // context exports every member, written `export` or not.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
                 collect_namespaced_declaration(decl, source, out, namespace, ambient);
             }
         }
-        Statement::VariableDeclaration(var_decl) if ambient => {
+        Statement::VariableDeclaration(var_decl) if implicit_export => {
             for declarator in &var_decl.declarations {
                 if let Some(parts) =
                     lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
@@ -2030,7 +2228,7 @@ fn collect_namespaced_statement(
                 }
             }
         }
-        Statement::FunctionDeclaration(func) if ambient => {
+        Statement::FunctionDeclaration(func) if implicit_export => {
             if let Some(parts) = lower_function_parts_in(func, source, Some(namespace)) {
                 out.value_decls.push(parts);
             }
@@ -2714,6 +2912,7 @@ fn collect_named_class(
         object_shape: Some(constructor_shape),
         enum_members: None,
         enum_member_names: None,
+        literal_freshness: DeclaredLiteralFreshness::Regular,
     });
 }
 
@@ -2983,6 +3182,7 @@ fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
         object_shape: None,
         enum_members: Some(members),
         enum_member_names: Some(enum_member_names),
+        literal_freshness: DeclaredLiteralFreshness::Regular,
     });
 
     // Type-space: the enum used AS A TYPE is the union of its members'
@@ -3056,6 +3256,7 @@ fn lower_function_parts_in(
         object_shape: None,
         enum_members: None,
         enum_member_names: None,
+        literal_freshness: DeclaredLiteralFreshness::Regular,
     })
 }
 
@@ -3690,6 +3891,19 @@ fn lower_variable_parts(
         }
     }
 
+    // A declaration with neither an annotation nor an initializer declares
+    // the implicit `any` (the checker's TS7005 under `noImplicitAny`).
+    if type_annotation.is_none() && decl.init.is_none() {
+        type_annotation = Some(TypeExpr::Primitive(PrimitiveName::Any));
+    }
+
+    // A `const` without an annotation declares the fresh literal type of
+    // its initializer; every other declaration declares a regular type.
+    let literal_freshness = match (&decl.init, var_kind, annotation_is_authored) {
+        (Some(init), ValueDeclKind::Const, false) => initializer_literal_freshness(init),
+        _ => DeclaredLiteralFreshness::Regular,
+    };
+
     Some(LoweredValueDeclParts {
         name,
         kind: var_kind,
@@ -3719,7 +3933,80 @@ fn lower_variable_parts(
         object_shape,
         enum_members: None,
         enum_member_names: None,
+        literal_freshness,
     })
+}
+
+/// The freshness of the literal type a `const` initializer declares (see
+/// [`DeclaredLiteralFreshness`]). A literal — a signed number, a bigint, a
+/// substitution-free template — is fresh, seen through the wrappers that
+/// keep freshness (parentheses, `satisfies`, a non-null assertion); a
+/// conditional is fresh when both of its branches are; a read of another
+/// value follows that value; an assertion and every other form are regular.
+fn initializer_literal_freshness(init: &Expression<'_>) -> DeclaredLiteralFreshness {
+    match init {
+        Expression::ParenthesizedExpression(paren) => {
+            initializer_literal_freshness(&paren.expression)
+        }
+        Expression::TSSatisfiesExpression(satisfies) => {
+            initializer_literal_freshness(&satisfies.expression)
+        }
+        Expression::TSNonNullExpression(non_null) => {
+            initializer_literal_freshness(&non_null.expression)
+        }
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::BigIntLiteral(_) => DeclaredLiteralFreshness::Widening,
+        Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
+            DeclaredLiteralFreshness::Widening
+        }
+        Expression::UnaryExpression(unary)
+            if matches!(
+                (unary.operator, &unary.argument),
+                (
+                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
+                    Expression::NumericLiteral(_)
+                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
+            ) =>
+        {
+            DeclaredLiteralFreshness::Widening
+        }
+        Expression::ConditionalExpression(conditional) => {
+            match (
+                initializer_literal_freshness(&conditional.consequent),
+                initializer_literal_freshness(&conditional.alternate),
+            ) {
+                (DeclaredLiteralFreshness::Widening, DeclaredLiteralFreshness::Widening) => {
+                    DeclaredLiteralFreshness::Widening
+                }
+                _ => DeclaredLiteralFreshness::Regular,
+            }
+        }
+        Expression::Identifier(identifier) => {
+            DeclaredLiteralFreshness::Follows(Arc::from([identifier.name.to_string()]))
+        }
+        Expression::StaticMemberExpression(_) => {
+            let mut path = Vec::new();
+            let mut cursor = init;
+            loop {
+                match cursor {
+                    Expression::StaticMemberExpression(member) => {
+                        path.push(member.property.name.to_string());
+                        cursor = &member.object;
+                    }
+                    Expression::Identifier(identifier) => {
+                        path.push(identifier.name.to_string());
+                        break;
+                    }
+                    _ => return DeclaredLiteralFreshness::Regular,
+                }
+            }
+            path.reverse();
+            DeclaredLiteralFreshness::Follows(Arc::from(path.into_boxed_slice()))
+        }
+        _ => DeclaredLiteralFreshness::Regular,
+    }
 }
 
 fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> LoweredValueDeclParts {
@@ -3767,6 +4054,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
         object_shape,
         enum_members: None,
         enum_member_names: None,
+        literal_freshness: DeclaredLiteralFreshness::Regular,
     }
 }
 
@@ -4723,6 +5011,31 @@ fn infer_expression_type_ctx_with_read_root(
         }
         Expression::StringLiteral(s) => Ok(TypeExpr::string_literal(s.value.as_str())),
         Expression::NumericLiteral(n) => Ok(TypeExpr::number_literal(n.value)),
+        Expression::BigIntLiteral(b) => Ok(TypeExpr::Literal(
+            verter_type_expr::LiteralValue::BigInt(b.value.to_string()),
+        )),
+        // A signed numeric literal (`-1`, `+1`) and a negated bigint literal
+        // (`-1n`) are literals of their own value.
+        Expression::UnaryExpression(unary)
+            if matches!(
+                (unary.operator, &unary.argument),
+                (
+                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
+                    Expression::NumericLiteral(_)
+                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
+            ) =>
+        {
+            Ok(match &unary.argument {
+                Expression::NumericLiteral(n) if unary.operator == UnaryOperator::UnaryNegation => {
+                    TypeExpr::number_literal(-n.value)
+                }
+                Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
+                Expression::BigIntLiteral(b) => TypeExpr::Literal(
+                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
+                ),
+                _ => unreachable!("the guard admits only numeric and bigint literal operands"),
+            })
+        }
         Expression::BooleanLiteral(b) => Ok(TypeExpr::boolean_literal(b.value)),
         Expression::NullLiteral(_) => Ok(TypeExpr::Primitive(PrimitiveName::Null)),
         // `void x` evaluates its operand and produces `undefined`.
@@ -6251,7 +6564,11 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
 
     let mut out = LoweredFileParts::default();
     for stmt in &ret.program.body {
-        let parts = lower_statement_parts(stmt, source);
+        let parts = lower_statement_parts(
+            stmt,
+            source,
+            ret.program.source_type.is_typescript_definition(),
+        );
         out.type_decls.extend(parts.type_decls);
         out.value_decls.extend(parts.value_decls);
         out.aug_type_decls.extend(parts.aug_type_decls);
@@ -6733,6 +7050,16 @@ fn value_type_derives_from_a_call(expr: &Expression<'_>) -> bool {
         // evaluate to (an EMPTY one is its own string literal), so an
         // interpolated call contributes nothing to the answer.
         fn visit_template_literal(&mut self, _template: &oxc_ast::ast::TemplateLiteral<'a>) {}
+
+        // A conditional's value is one of its branches; a call in its test
+        // decides which, never what either branch is.
+        fn visit_conditional_expression(
+            &mut self,
+            conditional: &oxc_ast::ast::ConditionalExpression<'a>,
+        ) {
+            self.visit_expression(&conditional.consequent);
+            self.visit_expression(&conditional.alternate);
+        }
     }
 
     let mut probe = CallProbe::default();

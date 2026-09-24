@@ -4157,13 +4157,19 @@ mod checker_probe_lane_tests;
 #[cfg(test)]
 mod class_value_heritage_tests;
 #[cfg(test)]
+mod const_literal_widening_tests;
+#[cfg(test)]
 mod heritage_signature_tests;
 #[cfg(test)]
 mod homomorphic_mapped_tests;
 #[cfg(test)]
 mod indexed_access_relation_tests;
 #[cfg(test)]
+mod lib_global_tests;
+#[cfg(test)]
 mod merged_declaration_signature_tests;
+#[cfg(test)]
+mod module_value_surface_tests;
 #[cfg(test)]
 mod namespace_member_value_tests;
 #[cfg(test)]

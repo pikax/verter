@@ -182,8 +182,24 @@ pub struct ImportTarget {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
-    /// Whether the local binding is a namespace import (`import * as NS`).
+    /// Whether the local binding is a namespace import (`import * as NS`)
+    /// or an import assignment (`import NS = require("m")`).
     pub is_namespace: bool,
+}
+
+/// The [`ImportTarget::imported_name`] of an import assignment
+/// (`import x = require("m")`) — TypeScript's own name for the value a
+/// module assigns with `export =`, which the binding is when the module has
+/// one (its namespace otherwise). No identifier can spell it.
+pub const IMPORT_EQUALS_NAME: &str = "export=";
+
+impl ImportTarget {
+    /// Whether the binding is an import assignment
+    /// (`import x = require("m")`).
+    #[must_use]
+    pub fn is_import_equals(&self) -> bool {
+        self.is_namespace && self.imported_name == IMPORT_EQUALS_NAME
+    }
 }
 
 /// Narrow type-resolution view over [`ShallowFileState`].
@@ -856,11 +872,15 @@ impl ShallowFileState {
         for binding in &route_inventory.imports {
             let target = ImportTarget {
                 source_specifier: binding.source.clone(),
-                imported_name: match &binding.imported {
-                    RouteImportedName::Namespace => binding.local.clone(),
-                    RouteImportedName::Name(name) => name.clone(),
+                imported_name: match (&binding.imported, binding.form) {
+                    (_, RouteImportForm::ImportEquals) => IMPORT_EQUALS_NAME.to_string(),
+                    (RouteImportedName::Namespace, _) => binding.local.clone(),
+                    (RouteImportedName::Name(name), _) => name.clone(),
                 },
-                is_namespace: matches!(binding.form, RouteImportForm::Namespace),
+                is_namespace: matches!(
+                    binding.form,
+                    RouteImportForm::Namespace | RouteImportForm::ImportEquals
+                ),
             };
             let key = DeclBindingKey::new(binding.owner, binding.local.as_str());
             if ambiguous_imports.contains(&key) {
@@ -1362,6 +1382,28 @@ impl ShallowFileState {
     /// shallow EXPORT inventory; consumed by `typeof import("./m")` resolution.
     pub fn export_assignment_target(&self) -> Option<&str> {
         self.export_assignment.as_deref()
+    }
+
+    /// Whether the value `export = X` assigns can be called or constructed
+    /// (X is a function or class declaration): a namespace import of the
+    /// module names X by `default` only then. `None` for a module without an
+    /// export assignment.
+    pub(crate) fn export_assignment_is_callable(&self) -> Option<bool> {
+        use verter_semantic::analysis::type_eval::ValueDeclKind;
+        let assigned = self.export_assignment_target()?;
+        Some(
+            self.decl_bodies()
+                .header_index()
+                .value_header_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), assigned)
+                .is_some_and(|header| {
+                    matches!(
+                        header.kind,
+                        ValueDeclKind::Function
+                            | ValueDeclKind::AsyncFunction
+                            | ValueDeclKind::Class
+                    )
+                }),
+        )
     }
 
     /// Get the narrow type-resolution view over this file state.

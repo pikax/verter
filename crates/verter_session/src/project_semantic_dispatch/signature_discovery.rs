@@ -532,17 +532,19 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         else {
             return unsettled();
         };
-        let Some(project) = d.project_stable_key_for_canonical(canonical.as_ref()) else {
+        if d.project_stable_key_for_canonical(canonical.as_ref())
+            .is_none()
+        {
             return unsettled();
-        };
-        let Some(hit) = d.ctx.lookup_ambient_symbol(project, name) else {
+        }
+        let Some(declaration) =
+            d.lib_global_declaration(canonical.as_ref(), name, super::build::GlobalSpace::Type)
+        else {
             return Ok(Vec::new());
         };
-        d.ctx
-            .record_ambient_dependency(canonical.as_ref(), hit.virtual_id.as_ref());
         let slot = d.type_slot_for(
-            Arc::clone(&hit.virtual_id),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::clone(&declaration.canonical_id),
+            declaration.owner,
             Arc::from(name),
         );
         let surface = d.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
@@ -550,7 +552,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
                 slot,
                 Arc::from(args.to_vec().into_boxed_slice()),
                 d.instantiate_context_for(
-                    hit.virtual_id.as_ref(),
+                    declaration.canonical_id.as_ref(),
                     ProjectionReductionContext::published(
                         crate::semantic_query::ProjectionMode::Expanded,
                     ),
