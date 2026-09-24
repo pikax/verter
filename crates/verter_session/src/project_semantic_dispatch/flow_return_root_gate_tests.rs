@@ -366,7 +366,11 @@ fn string_lit(value: &str) -> TypeExpr {
 ///
 /// A CONDITIONAL expression, an object SPREAD and an ARRAY literal are not
 /// fail-closed rows: each has a structural arm, so their operands resolve
-/// through the frame's own lexical authority.
+/// through the frame's own lexical authority. Nor is a member path rooted
+/// at a frame binding: its root is the only name the answer
+/// references, so it reads through the frame whatever the owner scope
+/// answers — `paramBait.s` is the parameter's `number`, the checker's
+/// answer.
 /// `c ? condBait : 2` is the checker's `1 | 2`, `{ ...spreadBait, x: 1 }`
 /// is the checker's `{ a: number; x: number }`, and `[arrBait]` /
 /// `[() => nestBait]` are the checker's `number[]` / `(() => number)[]`
@@ -384,11 +388,12 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
     for name in [
         "gateStaticMemberOnLocalClass",
         "gateMethodCallOnLocal",
-        "gateStaticMemberOnParam",
         "gateTypeSpaceLocalClass",
     ] {
         assert_fails_closed(&host, name);
     }
+    // A member path rooted at the frame's parameter reads through the frame.
+    assert_clean_warm(&host, "gateStaticMemberOnParam", number());
 
     // The array element resolves to the frame's own local — its fresh
     // `1` widened at the element — never the owner-scope bait.
@@ -524,18 +529,17 @@ fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&st
 /// tsgo gives `number` for every one of them (`{ z: number }` for the
 /// `new` case).
 ///
-/// `gateOptionalChain` LEFT this set when the typed optional-member
-/// carrier landed: its root lowers through the frame (the `Local`
-/// carrier, substitution and narrowing included), so nothing can
-/// mis-bind — the row now asserts the checker's `number`, clean and
-/// warm, in the test below.
+/// `gateOptionalChain` and `gateTaggedTemplate` are not in this set:
+/// the optional-member carrier and the tagged-template call both lower
+/// their root through the frame (the `Local` carrier, substitution and
+/// narrowing included), so nothing can mis-bind — the rows assert the
+/// checker's `number`, clean and warm, below.
 #[test]
 fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     let host = make_host();
     for name in [
         "gateComputedMember",
         "gateNewExpression",
-        "gateTaggedTemplate",
         "gatePrivateField",
     ] {
         assert_fails_closed(&host, name);
@@ -545,6 +549,9 @@ fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     // no `| undefined`), never the owner-scope `declare const` of the
     // same name.
     assert_clean_warm(&host, "gateOptionalChain", number());
+    // A tagged template's tag is the frame's local arrow, whose return is
+    // `number` — never the owner-scope `"OUTERTAG"` tag of the same name.
+    assert_clean_warm(&host, "gateTaggedTemplate", number());
 }
 
 /// The positive controls. The gate is about names the FRAME owns, so a

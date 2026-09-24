@@ -118,6 +118,15 @@ export const NODE_MANDATORY_CASES = Object.freeze({
     "STP15-unused",
     "STP15-mutation",
   ]),
+  STP16: Object.freeze([
+    "STP16-required-api",
+    "STP16-public-members",
+    "STP16-private-leak",
+    "STP16-generic-constraint",
+    "STP16-public-callable",
+    "STP16-type-precision",
+    "STP16-public-specialization",
+  ]),
   STP17: Object.freeze([
     "STP17-spellings",
     "STP17-merge",
@@ -148,5 +157,6 @@ export const STP12_MANDATORY_CASES = NODE_MANDATORY_CASES.STP12;
 export const STP13_MANDATORY_CASES = NODE_MANDATORY_CASES.STP13;
 export const STP14_MANDATORY_CASES = NODE_MANDATORY_CASES.STP14;
 export const STP15_MANDATORY_CASES = NODE_MANDATORY_CASES.STP15;
+export const STP16_MANDATORY_CASES = NODE_MANDATORY_CASES.STP16;
 export const STP17_MANDATORY_CASES = NODE_MANDATORY_CASES.STP17;
 export const STS0_MANDATORY_CASES = NODE_MANDATORY_CASES.STS0;

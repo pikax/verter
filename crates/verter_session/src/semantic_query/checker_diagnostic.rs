@@ -69,6 +69,31 @@ impl CheckerDiagnosticCode {
     }
 }
 
+/// The pinned checker's limit on one TAIL run of the lib `Awaited<T>`
+/// conditional: the run fails with TS2589 at its 1000th tail step.
+///
+/// A tail step is `Awaited<X>` → `Awaited<V>` through a single callback
+/// (`then(onfulfilled: (v: V) => void)`) into a non-union `V`; the checker
+/// evaluates such steps as a loop, counting them. Measured on TypeScript
+/// 7.0.2 over chains of distinct thenables `C0 → C1 → … → number`: 999
+/// steps answer `number`, 1000 steps are `any` under TS2589. A run entered
+/// through a callback union starts with one step already counted (998
+/// further steps answer, 999 fail).
+pub(crate) const LIB_AWAITED_TAIL_STEPS: u32 = 1000;
+
+/// The pinned checker's limit on NESTED (non-tail) steps of the lib
+/// `Awaited<T>` conditional: the 98th nested step on one path fails with
+/// TS2589, as the checker's instantiation depth runs out.
+///
+/// A nested step either goes through a callback union (an optional or
+/// nullable `onfulfilled`, a union-typed `then`, every `Promise`) or into a
+/// union `V`; a step that does both counts twice. Measured on TypeScript
+/// 7.0.2: 97 nested steps answer the chain's value (reporting TS2589 on
+/// some shapes while keeping the value), 98 are `any` under TS2589, whether
+/// the application is written directly, through a generic alias, through a
+/// signature, or over `ReturnType`.
+pub(crate) const LIB_AWAITED_NESTED_STEPS: u32 = 98;
+
 /// The type operation that raised a [`CheckerDiagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CheckerDiagnosticOperation {

@@ -271,6 +271,8 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
         #[cfg(any(test, feature = "test-support"))]
         CompositeOriginCategory::TestFixture => 7,
         CompositeOriginCategory::Heritage => 9,
+        CompositeOriginCategory::OverloadGroup => 10,
+        CompositeOriginCategory::MergedOverloadGroup => 11,
     }
 }
 
@@ -412,6 +414,13 @@ fn encode_data(
         SemanticNodeData::Opaque(err) => {
             enc.header(category::INTRINSIC, subtag::OPAQUE);
             encode_query_error(&mut enc, err);
+            // A recursive back-edge names the instantiation it stands for.
+            if let QueryError::RecursiveRef { args, .. } = err {
+                enc.u16(args.len() as u16);
+                for arg in args.iter() {
+                    encode_child(graph, *arg, seen, &mut enc, depth);
+                }
+            }
         }
         SemanticNodeData::IntrinsicApplication { op, args } => {
             enc.header(category::SYNTHETIC, subtag::INTRINSIC_APP);
@@ -518,6 +527,7 @@ fn encode_data(
                 MapperKind::Identity => 1,
                 MapperKind::Computed => 2,
             });
+            enc.bool(mapper.over_type_variable);
             match mapper.name_remap {
                 None => enc.u8(0),
                 Some(remap) => {
@@ -675,7 +685,10 @@ fn encode_data(
                         enc.str(n);
                     }
                 }
-                enc.bool(p.optional);
+                // One byte for optionality and the literal-declared fact:
+                // a parameter that is not literal-declared encodes exactly
+                // as its optionality alone.
+                enc.u8(u8::from(p.optional) | (u8::from(p.declared_literal) << 1));
                 enc.bool(p.rest);
                 encode_child(graph, p.ty, seen, &mut enc, depth);
             }
@@ -964,7 +977,7 @@ fn encode_query_error(enc: &mut Encoder, err: &QueryError) {
             });
         }
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
-        QueryError::RecursiveRef { name } => enc.str(name),
+        QueryError::RecursiveRef { name, .. } => enc.str(name),
         QueryError::Other(s) => enc.str(s),
         QueryError::DeclPlaceholder {
             canonical_id,

@@ -514,7 +514,7 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
 ///   `NS.Sub.X` is not reachable as a bare name from `NS`).
 /// - [`Global`](crate::semantic_query::LocalScopeOrigin::Global): a
 ///   `declare global { namespace NS { ... } }` binds a global TYPE sibling
-///   ONLY (a global value sibling has no prepared-value slot).
+///   ONLY, as the eager producer does.
 /// - [`Module`](crate::semantic_query::LocalScopeOrigin::Module): binds
 ///   nothing (no consumable module-scope sibling is addressable today).
 ///

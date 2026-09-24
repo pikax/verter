@@ -5478,6 +5478,7 @@ mod tests {
         let mapped_open_keyspace = graph.intern_node(SemanticNodeData::Mapped {
             source: concrete_object,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: binder,
                 key_space: open_key,
                 value_expr: concrete_object,
@@ -5563,6 +5564,7 @@ mod tests {
             graph.intern_node(SemanticNodeData::Mapped {
                 source: concrete_object,
                 mapper: MapperKey {
+                    over_type_variable: false,
                     parameter_node: binder_k,
                     key_space: concrete_key,
                     value_expr: concrete_object,

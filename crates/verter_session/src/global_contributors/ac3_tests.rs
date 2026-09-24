@@ -306,6 +306,33 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
     assert!(!source_may_have_file_scope_global_contribution(
         "export const n = 1;\n"
     ));
+    // A script's file-scope value declarations are globals too.
+    for source in [
+        "var sv = 1;\n",
+        "let sl = 1;\n",
+        "const sc = 1;\n",
+        "function sf() {}\n",
+        "async function saf() {}\n",
+        "declare var dv: number;\n",
+        "declare function df(): void;\n",
+        "declare const dc: string;\n",
+    ] {
+        assert!(
+            source_may_have_file_scope_global_contribution(source),
+            "{source}"
+        );
+    }
+    for source in [
+        "if (ok) { const inner = 1; }\n",
+        "constant(1);\n",
+        "x.var = 1;\n",
+        "export {};\nvar sv = 1;\n",
+    ] {
+        assert!(
+            !source_may_have_file_scope_global_contribution(source),
+            "{source}"
+        );
+    }
     for source in [
         "if ((ok)) /; export {}/.test(x); interface Window {}",
         "while (ok) /; export {}/.test(x); interface Window {}",
@@ -373,6 +400,65 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
     assert!(
         !hit.entries.is_empty(),
         "never-upserted ordinary script interface must enter the population"
+    );
+}
+
+#[test]
+fn script_file_scope_values_enter_the_population_by_name() {
+    use super::ContributorOrigin;
+    use verter_semantic::facts::SymbolSpace;
+    let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file(
+        "/script.ts".to_owned(),
+        Arc::from("var scriptVar = 1;\nfunction scriptFn(): string { return \"\"; }\n"),
+    );
+    workspace.inject_file(
+        "/module.ts".to_owned(),
+        Arc::from("export {};\nvar moduleVar = 1;\n"),
+    );
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    host.ingest_program_ambient_roots();
+    let snapshot = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot();
+    let values = |name: &str| {
+        snapshot.lookup_in_space(
+            &AugmentationTargetKind::GlobalAugmentation,
+            name,
+            None,
+            true,
+            SymbolSpace::Value,
+        )
+    };
+    for name in ["scriptVar", "scriptFn"] {
+        let hit = values(name);
+        assert_eq!(hit.entries.len(), 1, "{name}");
+        assert_eq!(hit.entries[0].origin, ContributorOrigin::FileScopeValue);
+    }
+    assert!(
+        values("moduleVar").entries.is_empty(),
+        "a module's top-level value is not a global"
+    );
+    // One observation covers the value space too: a value contributor moves
+    // the fingerprint a reader of the name recorded.
+    let empty = snapshot.lookup(
+        &AugmentationTargetKind::GlobalAugmentation,
+        "scriptVar",
+        None,
+        true,
+    );
+    assert!(empty.entries.is_empty(), "no type-space contributor");
+    assert_ne!(
+        snapshot.observation_fingerprint(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "scriptVar",
+            None
+        ),
+        empty.fingerprint,
     );
 }
 

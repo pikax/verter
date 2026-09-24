@@ -978,6 +978,8 @@ export function arrSpreadMixed(v: number, xs: string[]) { return [v, ...xs]; }
 export function arrSpreadLocal() { const xs = [1, 2]; return [...xs]; }
 export function arrSpreadAny(x: any) { return [...x]; }
 export function arrSpreadString(s: string) { return [...s]; }
+export function arrSpreadUnion(xs: number[] | string[]) { return [...xs]; }
+export function arrSpreadLiteralString(s: "ab") { return [...s]; }
 export function arrSpreadEmpty() { return [...[]]; }
 export function arrSpreadConstLit() { return [...([1, "a"] as const)]; }
 export function arrLocalConstTuple() { const a = [1, 2] as const; return [a]; }
@@ -1125,6 +1127,14 @@ const ARRAY_TABLE: &[(&str, &str, &str)] = &[
     ("arrSpreadAny", "any[]", "any[]"),
     // string[] / string[]
     ("arrSpreadString", "string[]", "string[]"),
+    // (string | number)[] / (string | number)[]
+    (
+        "arrSpreadUnion",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // string[] / string[]
+    ("arrSpreadLiteralString", "string[]", "string[]"),
     // never[] / any[]
     ("arrSpreadEmpty", "never[]", "any[]"),
     // ("a" | 1)[] / ("a" | 1)[]

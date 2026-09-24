@@ -535,6 +535,7 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
     let read = dispatch.execute_read(SemanticQueryKey::MappedType {
         source: keys,
         mapper: crate::semantic_query::MapperKey {
+            over_type_variable: false,
             parameter_node: key_parameter,
             key_space: keys,
             value_expr: value,
@@ -3192,6 +3193,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
                     optional: false,
                     rest: false,
                     span: Some(verter_span::Span::new(span_start + 1, span_start + 2)),
+                    declared_literal: false,
                 }]
                 .into_boxed_slice(),
             ),
@@ -8366,6 +8368,7 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
         display_name: Arc::from("K"),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: binder,
         key_space,
         value_expr: value_placeholder,
@@ -8427,6 +8430,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
         })
     };
     let mapper_add = MapperKey {
+        over_type_variable: false,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -8436,6 +8440,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
         kind: crate::semantic_query::MapperKind::Computed,
     };
     let mapper_remove = MapperKey {
+        over_type_variable: false,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -8445,6 +8450,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
         kind: crate::semantic_query::MapperKind::Computed,
     };
     let mapper_ro_add = MapperKey {
+        over_type_variable: false,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -8528,6 +8534,7 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
     let value_expr = self::primitive(&graph, PrimitiveKind::Number);
 
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -8595,6 +8602,7 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
     let value_expr = num;
 
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -8796,6 +8804,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
     let value_expr = num;
 
     let mapper = crate::semantic_query::MapperKey {
+        over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9322,6 +9331,7 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     // dedups to the same MappedType result node via the memo.
     let opaque = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9908,6 +9918,7 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     // (probe10: Eq<{ [K in 1 | "a"]: string }, { 1: string; a: string }>).
     let empty_source = simple_object(&graph, &[]);
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9994,6 +10005,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                        parameter_node: SemanticNodeId,
                        value_expr: SemanticNodeId,
                        name_remap: Option<SemanticNodeId>| MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -10617,6 +10629,7 @@ fn mapped_narrowing_admits_exponent_range_numeric_keys() {
         let mapped = graph.intern_node(SemanticNodeData::Mapped {
             source: empty_source,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: param,
                 key_space,
                 value_expr: param,
@@ -10684,6 +10697,7 @@ fn key_remap_publishes_numeric_literal_keys() {
         match dispatch.execute_type_node(SemanticQueryKey::MappedType {
             source: empty_source,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: param,
                 key_space,
                 value_expr: param,
@@ -11282,6 +11296,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
         graph.intern_node(SemanticNodeData::Mapped {
             source: empty_source,
             mapper: MapperKey {
+                over_type_variable: false,
                 parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
                     decl: crate::semantic_query::DeclIdentity::synthetic("K"),
                     param_index: 0,
@@ -11619,6 +11634,7 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
                     optional: false,
                     rest: false,
                     span: None,
+                    declared_literal: false,
                 },
                 FunctionParam {
                     name: Some(Arc::from("active")),
@@ -11626,6 +11642,7 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
                     optional: true,
                     rest: false,
                     span: None,
+                    declared_literal: false,
                 },
             ]
             .into_boxed_slice(),
@@ -12925,7 +12942,7 @@ fn strip_line_comments(src: &str) -> String {
 /// balanced matching from the `{` after the enum name to its matching close
 /// brace, over comment-stripped source. This scoping is load-bearing: in
 /// `semantic_query.rs`, `enum QueryError` legitimately has a
-/// `RecursiveRef { name: Arc<str> }` variant (the
+/// `RecursiveRef { name: Arc<str>, args: std::sync::Arc::from([]) }` variant (the
 /// `Opaque(QueryError::RecursiveRef)` home), and isolating the
 /// `SemanticNodeData` body excludes it so the §7.18 declaration scan never
 /// false-trips on the QueryError variant.
@@ -13150,7 +13167,7 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         "\n",
         "pub enum QueryError {\n",
         "    Miss,\n",
-        "    RecursiveRef { name: Arc<str> },\n",
+        "    RecursiveRef { name: Arc<str>, args: std::sync::Arc::from([]) },\n",
         "}\n",
     );
     assert!(
@@ -13167,7 +13184,7 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         "}\n",
         "\n",
         "pub enum QueryError {\n",
-        "    RecursiveRef { name: Arc<str> },\n",
+        "    RecursiveRef { name: Arc<str>, args: std::sync::Arc::from([]) },\n",
         "}\n",
     );
     assert_eq!(
@@ -13767,6 +13784,7 @@ fn reverse_test_target(
     graph.intern_node(SemanticNodeData::Mapped {
         source: infer,
         mapper: crate::semantic_query::MapperKey {
+            over_type_variable: false,
             parameter_node: parameter,
             key_space,
             value_expr: template,
@@ -14193,6 +14211,7 @@ fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
     let never = primitive(&graph, PrimitiveKind::Never);
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
+        args: std::sync::Arc::from([]),
     }));
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", recursive, false, false)]);
@@ -14404,6 +14423,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
     let mapped_target = graph.intern_node(SemanticNodeData::Mapped {
         source: infer_t,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: mapper_parameter,
             key_space,
             value_expr: template,
@@ -16508,6 +16528,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     let remapped_target = graph.intern_node(SemanticNodeData::Mapped {
         source: remap_infer,
         mapper: MapperKey {
+            over_type_variable: false,
             parameter_node: remap_parameter,
             key_space: remap_key_space,
             value_expr: boxed(remap_projection),
@@ -17210,6 +17231,7 @@ fn unary_function(
                 optional: false,
                 rest: false,
                 span: None,
+                declared_literal: false,
             }]
             .into_boxed_slice(),
         ),
@@ -17302,6 +17324,7 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
     });
 
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -17389,6 +17412,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
 
     // (1) identity `{ [K in keyof T]: T[K] }` (Partial/Required/Readonly).
     let identity_mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr: num,
@@ -17400,6 +17424,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
     // (2) K-only value `{ [K in keyof T]: K }` — references the BOUND
     // binder only; no outer generic ⇒ CLOSED.
     let k_only_mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr: k_param,
@@ -17478,6 +17503,7 @@ fn mapped_binder_bound_outer_generic_open_value_discrimination() {
     });
 
     let make_mapper = |value_expr| MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -17558,6 +17584,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
     let t_param = outer_type_param(&graph, "T");
 
     let mapper_with = |key_space, value_expr, name_remap| MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -17744,6 +17771,7 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
     let keyof_foo_of_t = graph.intern_node(SemanticNodeData::KeyOf { base: foo_of_t });
 
     let mapper_with_value = |value_expr| MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space: keyof_foo_of_t,
         value_expr,
@@ -20114,6 +20142,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
         )))
     };
     let mapper_with = |name_remap| MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space: string_ty,
         value_expr: string_ty,
@@ -20845,6 +20874,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
         decl_name: Arc::from("Omit"),
     };
     let mapper = |key_space, value_expr| MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -21202,6 +21232,7 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
         },
     );
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space: string_ty,
         value_expr: string_ty,
@@ -21988,6 +22019,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
     let graph = host.project_type_store().semantic_graph();
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("R"),
+        args: std::sync::Arc::from([]),
     }));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -23516,6 +23548,7 @@ fn shallow_mapped_type_enumerates_keyset() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: str_id,
         mapper: crate::semantic_query::MapperKey {
+            over_type_variable: false,
             parameter_node: mapper_param,
             key_space,
             value_expr: num_id,
@@ -25261,6 +25294,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
     // placeholder, `kind = Identity` (mirrors `mapper_for`).
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr: placeholder,
@@ -27344,6 +27378,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: str_id,
         mapper: crate::semantic_query::MapperKey {
+            over_type_variable: false,
             parameter_node: mapper_param,
             key_space,
             value_expr,
@@ -27431,6 +27466,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     let mapped_target = graph.intern_node(SemanticNodeData::Mapped {
         source: empty_source,
         mapper: crate::semantic_query::MapperKey {
+            over_type_variable: false,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr,
@@ -27628,6 +27664,7 @@ fn mapped_type_over_open_program_source_defers() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source: open_source,
         mapper: crate::semantic_query::MapperKey {
+            over_type_variable: false,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr: mapper_param,
@@ -29557,6 +29594,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
         display_name: Arc::from("K"),
     });
     let mapper = crate::semantic_query::MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space: key_union,
         value_expr: deep_value,
@@ -29761,6 +29799,7 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mapper = crate::semantic_query::MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -29847,6 +29886,7 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mapper = crate::semantic_query::MapperKey {
+        over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
@@ -31424,6 +31464,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
             index: IndexKey::Computed(k_param),
         });
         MapperKey {
+            over_type_variable: false,
             parameter_node: k_param,
             key_space,
             value_expr,
@@ -31515,7 +31556,9 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
 }
 
 /// The DEGRADED twin: the flow return carries a member the substrate cannot
-/// model (`made`, typed marker), so the composed surface is partial — but
+/// model (`made`, typed marker: `notDeclared` is declared nowhere, so its
+/// call is TS2304 and the checker's error type is recovery the lane does not
+/// model), so the composed surface is partial — but
 /// the partiality is the POSITIONAL `FLOW_RETURN_UNINFERRED` class, which
 /// every macro codegen lane CONTAINS (the member carrying the marker
 /// degrades member-locally; its exact siblings keep their constructors).
@@ -31538,9 +31581,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
     upsert_ts(
         &host,
         "/ws.ts",
-        "class Box { readonly tag = \"box\" }\n\
-         declare function box(strings: TemplateStringsArray): Box\n\
-         function makeProps() { const f = () => box`b`; return { label: \"x\", made: f() } }\n\
+        "function makeProps() { const f = () => notDeclared(); return { label: \"x\", made: f() } }\n\
          interface Props extends ReturnType<typeof makeProps> { extra: string }",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -31561,6 +31602,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         index: IndexKey::Computed(k_param),
     });
     let mapper = MapperKey {
+        over_type_variable: false,
         parameter_node: k_param,
         key_space,
         value_expr,

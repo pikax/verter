@@ -814,7 +814,7 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
             // The active back-edge mints `Opaque(RecursiveRef { name: "Tree" })`.
             match dispatch.graph().node_data(resolved).as_deref() {
                 Some(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::RecursiveRef { name },
+                    crate::semantic_query::QueryError::RecursiveRef { name, .. },
                 )) => {
                     assert_eq!(
                         name.as_ref(),
