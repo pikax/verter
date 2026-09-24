@@ -1319,7 +1319,7 @@ fn public_constructor_reads_admitted_carrier_blocks() {
 #[test]
 fn component_uses_reads_admitted_carrier_blocks() {
     use verter_compiler::framework_common::vue_projection_backend::{
-        ObservationKind, TransactionMember, USE_PRELUDE,
+        ObservationKind, TransactionMember, USE_LISTENER, USE_PRELUDE,
     };
     use verter_compiler::framework_common::SetupProjectionRefusal;
 
@@ -1367,7 +1367,7 @@ fn component_uses_reads_admitted_carrier_blocks() {
     assert_eq!(rendered.matches("= new (").count(), 1);
     assert!(rendered.contains("\"project\": ((row) => row.name), \"kind\": \"list\""));
     assert!(rendered.contains(&format!(
-        "const {b}_check0: __VerterUseListener<typeof {b}, \"onChange\"> = (count);",
+        "const {b}_check0: {USE_LISTENER}<typeof {b}, \"onChange\"> = (count);",
         b = first.binding
     )));
     let owner = format!("typeof {}", first.binding);

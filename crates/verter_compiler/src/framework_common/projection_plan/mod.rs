@@ -193,34 +193,52 @@ pub struct OrderedAttributeOp {
 /// wraps handlers from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerShape {
-    /// Identifier or member expression: the value is the handler.
+    /// Identifier or member expression, optional chains included: the value
+    /// is the handler.
     Reference,
     /// Arrow or `function` expression: the value is the handler.
     Function,
-    /// Any other expression or a statement list: it runs inside a
-    /// synthesized `$event` handler.
+    /// Any other single expression: it is the body of a synthesized
+    /// `$event` handler, whose return is the expression's value.
     Inline,
+    /// A statement list: it is the block body of a synthesized `$event`
+    /// handler.
+    Statements,
 }
 
 impl HandlerShape {
     fn of(parsed: &OxcParsedExpression<'_>) -> Self {
-        use oxc_ast::ast::Expression;
+        use oxc_ast::ast::{ChainElement, Expression};
         if parsed.multi_statement {
-            return Self::Inline;
+            return Self::Statements;
         }
-        match parsed
+        let Some(expr) = parsed
             .expression
             .as_ref()
             .map(Expression::get_inner_expression)
-        {
-            Some(Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) => {
+        else {
+            return Self::Statements;
+        };
+        match expr {
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
                 Self::Function
             }
-            Some(expr)
-                if matches!(expr, Expression::Identifier(_)) || expr.is_member_expression() =>
-            {
-                Self::Reference
-            }
+            Expression::Identifier(ident) if ident.name != "undefined" => Self::Reference,
+            _ if expr.is_member_expression() => Self::Reference,
+            // `a?.b` (and `a?.b!`) is an optional member expression, which
+            // the runtime compiler passes through as the handler.
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::TSNonNullExpression(non_null)
+                    if non_null
+                        .expression
+                        .get_inner_expression()
+                        .is_member_expression() =>
+                {
+                    Self::Reference
+                }
+                element if element.is_member_expression() => Self::Reference,
+                _ => Self::Inline,
+            },
             _ => Self::Inline,
         }
     }

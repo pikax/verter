@@ -72,6 +72,7 @@ const RUST_CASES = Object.freeze({
   "STP18-literal": ["component_use_static_discriminant_stays_a_literal"],
   "STP18-handler-check": [
     "component_use_collected_listeners_validate_against_the_specialized_contract",
+    "component_use_listener_contracts_follow_the_runtime_listener_key",
     "component_use_non_contributors_are_excluded_with_reasons",
   ],
   "STP18-fresh-id": [
@@ -139,8 +140,8 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
   DIRTY_REPEATED_LISTENER_MEMBER: Object.freeze({
     patches: Object.freeze([
       Object.freeze({
-        find: "MergeRule::Accumulate if !inline && !placed(listeners) => {",
-        replace: "MergeRule::Accumulate if !inline => {",
+        find: "MergeRule::Accumulate if constructible && !placed(listeners) => {",
+        replace: "MergeRule::Accumulate if constructible => {",
       }),
     ]),
     discriminators: Object.freeze([

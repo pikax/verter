@@ -23,9 +23,14 @@ const POSITIVE_TEMPLATE: &str = concat!(
     "  <Table :rows=\"ids\" :project=\"(id) => id * 2\" kind=\"grid\" :columns=\"3\" @change=\"total += $event\" />",
 );
 
-/// Parent template of the negative probe: a collected listener whose
-/// parameter contradicts the specialized payload.
-const NEGATIVE_TEMPLATE: &str = "  <Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" @change=\"log\" v-on:change=\"count\" />";
+/// Parent template of the negative probe: collected listeners — a plain
+/// one, an event-option one and an optional member — whose parameter
+/// contradicts the specialized payload.
+const NEGATIVE_TEMPLATE: &str = concat!(
+    "  <Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" @change=\"log\" v-on:change=\"count\" />\n",
+    "  <Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" @change.once=\"count\" />\n",
+    "  <Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" @change=\"log\" v-on:change=\"handlers?.onChange\" />",
+);
 
 fn sfc(template: &str) -> String {
     format!(
@@ -131,7 +136,8 @@ fn component_use_observations_read_the_specialized_witness() {
                 name: "footer".to_string()
             },
             &ObservationKind::Event {
-                key: "onChange".to_string()
+                key: "onChange".to_string(),
+                fallback: None,
             },
             &ObservationKind::Model {
                 name: "modelValue".to_string()
@@ -187,13 +193,104 @@ fn component_use_contextual_callbacks_stay_in_the_construction() {
     assert_eq!(witness.transaction.validations.len(), 1);
     let check = &witness.transaction.validations[0];
     assert_eq!(check.contract, CheckContract::Listener);
-    assert!(
-        matches!(&check.value, MemberValue::InlineHandler { spelling, .. } if spelling == "total += $event")
-    );
+    assert!(matches!(
+        &check.value,
+        MemberValue::InlineHandler { spelling, statements: false, .. } if spelling == "total += $event"
+    ));
     assert!(witness.render().ends_with(&format!(
-        "const {b}_check0: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => {{ total += $event; }};\n",
+        "const {b}_check0: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (total += $event);\n",
         b = witness.binding
     )));
+}
+
+/// Every actual callable is validated against the listener contract the
+/// runtime reads: an event-option key falls back to its unsuffixed key
+/// instead of reaching the construction untyped, an optional member is the
+/// handler itself, a `@vue:` hook outside the reserved lifecycle set is an
+/// ordinary listener, a prop-spelled handler is an observed listener, and an
+/// inline expression returns its value while a statement list is a block.
+#[test]
+fn component_use_listener_contracts_follow_the_runtime_listener_key() {
+    let projection = project(concat!(
+        "  <Table @change.once=\"count\" @change.capture.passive=\"(v) => v\" :onSave=\"save\"",
+        " @change=\"props?.onChange\" v-on:change=\"flag === true\" @vue:foo=\"hook\"",
+        " @vue:mounted=\"hook\" @close=\"a = 1; b = 2\" />",
+    ));
+    let witness = only(&projection);
+    assert_eq!(
+        member_keys(witness),
+        vec![Some("onSave"), Some("onChange"), Some("onVnodeFoo")]
+    );
+    assert!(matches!(
+        member(witness, "onChange"),
+        MemberValue::Expression { spelling, .. } if spelling == "props?.onChange"
+    ));
+    let checks: Vec<(&str, Option<&str>, &str)> = witness
+        .transaction
+        .validations
+        .iter()
+        .map(|check| {
+            assert_eq!(check.contract, CheckContract::Listener);
+            (
+                check.key.as_str(),
+                check.fallback.as_deref(),
+                match &check.value {
+                    MemberValue::Expression { spelling, .. }
+                    | MemberValue::InlineHandler { spelling, .. } => spelling.as_str(),
+                    MemberValue::StaticText(_) => panic!("authored handler"),
+                },
+            )
+        })
+        .collect();
+    assert_eq!(
+        checks,
+        vec![
+            ("onChangeOnce", Some("onChange"), "count"),
+            ("onChangeCapturePassive", Some("onChange"), "(v) => v"),
+            ("onChange", None, "flag === true"),
+            ("onClose", None, "a = 1; b = 2"),
+        ]
+    );
+    let reasons: Vec<(u32, ExclusionReason)> = witness
+        .transaction
+        .excluded
+        .iter()
+        .map(|e| (e.op_index, e.reason))
+        .collect();
+    assert_eq!(reasons, vec![(6, ExclusionReason::Reserved)]);
+    let rendered = witness.render();
+    let b = &witness.binding;
+    for line in [
+        format!("const {b}_check0: __VerterUseListener<typeof {b}, \"onChangeOnce\", \"onChange\"> = (count);\n"),
+        format!("const {b}_check1: __VerterUseListener<typeof {b}, \"onChangeCapturePassive\", \"onChange\"> = ((v) => v);\n"),
+        format!("const {b}_check2: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (flag === true);\n"),
+        format!("const {b}_check3: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ a = 1; b = 2; }};\n"),
+    ] {
+        assert!(rendered.contains(&line), "missing {line} in {rendered}");
+    }
+    assert!(rendered.contains("\"onChange\": (props?.onChange)"));
+    assert!(!rendered.contains("\"onChangeOnce\": "));
+    let events: Vec<(&str, Option<&str>)> = witness
+        .observations
+        .iter()
+        .filter_map(|o| match &o.kind {
+            ObservationKind::Event { key, fallback } => Some((key.as_str(), fallback.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            ("onChangeOnce", Some("onChange")),
+            ("onChangeCapturePassive", Some("onChange")),
+            ("onSave", None),
+            ("onChange", None),
+            ("onVnodeFoo", None),
+            ("onClose", None),
+        ]
+    );
+    assert!(witness.observations.iter().any(|o| o.type_text
+        == format!("__VerterUseListener<typeof {b}, \"onChangeOnce\", \"onChange\">")));
 }
 
 /// A static discriminant is a string-literal member of the construction,

@@ -67,8 +67,8 @@ pub use crate::ide::vue_projection::attribute_operations::{
 pub use crate::ide::vue_projection::component_use::{
     CheckContract, ComponentUseProjection, ComponentUseWitness, ExcludedOperation, ExclusionReason,
     InferenceTransaction, MemberValue, ObservationKind, SpecializationKey,
-    SpecializedUseObservation, TransactionMember, ValidationCheck, USE_CONSTRUCTOR, USE_PRELUDE,
-    WITNESS_PREFIX,
+    SpecializedUseObservation, TransactionMember, ValidationCheck, USE_CONSTRUCTOR, USE_LISTENER,
+    USE_MODEL, USE_PRELUDE, USE_PROP, USE_SLOT_PROPS, WITNESS_PREFIX,
 };
 
 /// STP15 named products: the acceptance surface of

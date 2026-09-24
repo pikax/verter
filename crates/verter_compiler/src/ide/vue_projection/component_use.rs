@@ -34,8 +34,13 @@
 //!   the construction after every spread and each further handler is a
 //!   validation check against the specialized contract — never a
 //!   fabricated array or a synthetic call that loses variance.
-//! - An inline handler statement is validated inside a `$event` handler
-//!   typed by the specialized listener contract.
+//! - An inline handler is validated inside a `$event` handler typed by the
+//!   specialized listener contract: a single expression is the handler's
+//!   returned body, a statement list its block body.
+//! - An event-option listener key (`.once` / `.capture` / `.passive`
+//!   append `Once` / `Capture` / `Passive`) is validated against its own
+//!   key when declared and otherwise against the listener key the runtime
+//!   strips the options from, never accepted untyped.
 //! - Dynamic keys, listener objects, reserved vnode keys, DOM bindings,
 //!   runtime directives and compiler-synthesized model listeners are not
 //!   authored inference contributors here; each is recorded as excluded.
@@ -52,17 +57,21 @@ use crate::framework_common::projection_plan::{
     PlanSnapshotId, ProjectionPlan,
 };
 use crate::ide::vue_projection::attribute_operations::{
-    AttributeOperationsProjection, AttributeSyntax, EffectiveProperty, MergeRule, RuntimeKey,
-    RuntimePropertyKeyPlan, VueAttributeSequence, WriteValue,
+    is_reserved, AttributeOperationsProjection, AttributeSyntax, EffectiveProperty, MergeRule,
+    RuntimeKey, RuntimePropertyKeyPlan, VueAttributeSequence, WriteValue,
 };
-use crate::template::code_gen::shared::helpers::{is_member_expression, to_pascal_case};
+use crate::template::code_gen::shared::helpers::{
+    is_member_expression, to_pascal_case, trim_handler_body,
+};
 
 /// Construction helper: the component's construct signature with an
 /// `unknown` attribute index on its props parameter.
 pub const USE_CONSTRUCTOR: &str = "__VerterUseConstructor";
 /// Specialized `$props` member, `unknown` when the key is not declared.
 pub const USE_PROP: &str = "__VerterUseProp";
-/// Specialized listener contract, an untyped listener when not declared.
+/// Specialized listener contract of a key, else of its fallback key; an
+/// untyped listener only when neither is declared. A declared `any` stays
+/// `any`.
 pub const USE_LISTENER: &str = "__VerterUseListener";
 /// Specialized slot props, `unknown` when the slot is not declared.
 pub const USE_SLOT_PROPS: &str = "__VerterUseSlotProps";
@@ -78,7 +87,7 @@ const SPECIALIZATION_DOMAIN: &str =
 pub const USE_PRELUDE: &str = concat!(
     "declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: P & Record<string, unknown>) => I;\n",
     "type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;\n",
-    "type __VerterUseListener<I, K extends PropertyKey> = unknown extends __VerterUseProp<I, K> ? (...args: any[]) => unknown : __VerterUseProp<I, K>;\n",
+    "type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;\n",
     "type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;\n",
     "type __VerterUseModel<I, K extends PropertyKey> = NonNullable<__VerterUseProp<I, K>> extends (value: infer V, ...rest: any[]) => any ? V : unknown;\n",
 );
@@ -105,12 +114,15 @@ pub enum MemberValue {
         /// Authored spelling at this snapshot.
         spelling: String,
     },
-    /// An inline `v-on` statement run inside a `$event` handler.
+    /// An inline `v-on` value run inside a `$event` handler.
     InlineHandler {
         /// Admitted expression.
         id: AdmittedExpressionId,
         /// Authored spelling at this snapshot.
         spelling: String,
+        /// A statement list (block body) rather than one expression
+        /// (returned body).
+        statements: bool,
     },
     /// Literal static attribute text (a string at runtime).
     StaticText(String),
@@ -120,15 +132,15 @@ impl MemberValue {
     fn render(&self) -> String {
         match self {
             Self::Expression { spelling, .. } => format!("({spelling})"),
-            Self::InlineHandler { spelling, .. } => format!("($event) => {{ {spelling}; }}"),
+            Self::InlineHandler {
+                spelling,
+                statements: true,
+                ..
+            } => format!("($event) => {{ {spelling}; }}"),
+            Self::InlineHandler { spelling, .. } => {
+                format!("($event) => ({})", trim_handler_body(spelling))
+            }
             Self::StaticText(text) => quote(text),
-        }
-    }
-
-    fn spelling(&self) -> &str {
-        match self {
-            Self::Expression { spelling, .. } | Self::InlineHandler { spelling, .. } => spelling,
-            Self::StaticText(text) => text,
         }
     }
 
@@ -208,6 +220,9 @@ pub struct ValidationCheck {
     pub key: String,
     /// Contract the value is checked against.
     pub contract: CheckContract,
+    /// Listener key the contract falls back to when `key` is not declared:
+    /// the key without its event-option postfixes.
+    pub fallback: Option<String>,
     /// Carried value.
     pub value: MemberValue,
 }
@@ -225,7 +240,8 @@ pub enum ExclusionReason {
     ModelUpdate,
     /// Compiler-synthesized `v-model` modifiers object.
     ModelModifiers,
-    /// Reserved vnode key (`key`, `ref`, `onVnode*`).
+    /// Reserved vnode key (`key`, `ref`, `ref_for`, `ref_key` and the six
+    /// `onVnode*` lifecycle hooks).
     Reserved,
     /// `.prop` / `^attr` DOM binding.
     DomBinding,
@@ -267,6 +283,9 @@ pub enum ObservationKind {
     Event {
         /// Runtime listener key.
         key: String,
+        /// Listener key the contract falls back to (see
+        /// [`ValidationCheck::fallback`]).
+        fallback: Option<String>,
     },
     /// Write type of a `v-model`.
     Model {
@@ -328,10 +347,11 @@ impl ComponentUseWitness {
                 CheckContract::Prop => USE_PROP,
             };
             out.push_str(&format!(
-                "const {}_check{ordinal}: {contract}<typeof {}, {}> = {};\n",
+                "const {}_check{ordinal}: {contract}<typeof {}, {}{}> = {};\n",
                 self.binding,
                 self.binding,
                 quote(&check.key),
+                fallback_argument(check.fallback.as_deref()),
                 check.value.render()
             ));
         }
@@ -464,22 +484,23 @@ fn assemble_transaction(
     for op in &sequence.operations {
         let value = |id: &AdmittedExpressionId| -> Option<MemberValue> {
             let spelling = plan.expression(id)?.spelling.clone();
-            let inline = use_
+            let handler = use_
                 .operations
                 .iter()
                 .find(|plan_op| plan_op.index == op.index)
-                .and_then(|plan_op| plan_op.handler)
-                == Some(HandlerShape::Inline);
-            Some(if inline {
-                MemberValue::InlineHandler {
+                .and_then(|plan_op| plan_op.handler);
+            Some(match handler {
+                Some(shape @ (HandlerShape::Inline | HandlerShape::Statements)) => {
+                    MemberValue::InlineHandler {
+                        id: id.clone(),
+                        spelling,
+                        statements: shape == HandlerShape::Statements,
+                    }
+                }
+                _ => MemberValue::Expression {
                     id: id.clone(),
                     spelling,
-                }
-            } else {
-                MemberValue::Expression {
-                    id: id.clone(),
-                    spelling,
-                }
+                },
             })
         };
         match op.syntax {
@@ -553,7 +574,9 @@ fn assemble_transaction(
 
 /// Route one effective write: the first handler of a listener key and the
 /// first write of any other key reach the construction; a later write of a
-/// combined or accumulated key is a validation check.
+/// combined or accumulated key, an inline handler and any handler of an
+/// event-option key (whose contract may be another key's) is a validation
+/// check.
 fn place(
     property: &EffectiveProperty,
     op_index: u32,
@@ -564,9 +587,10 @@ fn place(
     validations: &mut Vec<ValidationCheck>,
 ) {
     let placed = |list: &[TransactionMember]| list.iter().any(|m| m.key() == Some(key));
-    let inline = matches!(value, MemberValue::InlineHandler { .. });
+    let fallback = listener_fallback(property.rule, key);
+    let constructible = !matches!(value, MemberValue::InlineHandler { .. }) && fallback.is_none();
     match property.rule {
-        MergeRule::Accumulate if !inline && !placed(listeners) => {
+        MergeRule::Accumulate if constructible && !placed(listeners) => {
             listeners.push(TransactionMember::Property {
                 op_index,
                 key: key.to_string(),
@@ -577,12 +601,14 @@ fn place(
             op_index,
             key: key.to_string(),
             contract: CheckContract::Listener,
+            fallback,
             value,
         }),
         MergeRule::Combine if placed(members) => validations.push(ValidationCheck {
             op_index,
             key: key.to_string(),
             contract: CheckContract::Prop,
+            fallback: None,
             value,
         }),
         MergeRule::Combine | MergeRule::Overwrite => members.push(TransactionMember::Property {
@@ -614,15 +640,24 @@ fn observe(
     }
     for property in &key_plan.effective {
         let key = &property.key;
+        // Whatever its spelling (`@change` or `:onChange`), an authored
+        // handler of a listener key is a listener of that key.
         let authored_listener = key_plan.writes.iter().any(|write| {
             write.value == WriteValue::Expression
-                && write.syntax == AttributeSyntax::On
                 && matches!(&write.key, RuntimeKey::Static(k) if k == key)
         });
-        if property.rule == MergeRule::Accumulate && authored_listener {
+        if property.rule == MergeRule::Accumulate && authored_listener && !is_reserved(key) {
+            let fallback = listener_fallback(property.rule, key);
             observations.push(SpecializedUseObservation {
-                kind: ObservationKind::Event { key: key.clone() },
-                type_text: format!("{USE_LISTENER}<{witness}, {}>", quote(key)),
+                type_text: format!(
+                    "{USE_LISTENER}<{witness}, {}{}>",
+                    quote(key),
+                    fallback_argument(fallback.as_deref())
+                ),
+                kind: ObservationKind::Event {
+                    key: key.clone(),
+                    fallback,
+                },
             });
         }
     }
@@ -662,7 +697,8 @@ fn specialization_key(
     }
     for check in &transaction.validations {
         field(&mut encoder, &check.key);
-        field(&mut encoder, check.value.spelling());
+        field(&mut encoder, check.fallback.as_deref().unwrap_or_default());
+        field(&mut encoder, &check.value.render());
     }
     for observation in observations {
         field(&mut encoder, &observation.type_text);
@@ -670,9 +706,32 @@ fn specialization_key(
     SpecializationKey(encoder.digest())
 }
 
-/// Runtime `isReservedProp`.
-fn is_reserved(key: &str) -> bool {
-    matches!(key, "" | "key" | "ref" | "ref_for" | "ref_key") || key.starts_with("onVnode")
+/// Listener key an event-option key falls back to: runtime `parseName`
+/// strips every trailing `Once` / `Passive` / `Capture`, and `emit` reads
+/// a `...Once` handler as its event's listener. `None` for a non-listener
+/// key or one without an option postfix.
+fn listener_fallback(rule: MergeRule, key: &str) -> Option<String> {
+    if rule != MergeRule::Accumulate {
+        return None;
+    }
+    let mut base = key;
+    while let Some(stripped) = ["Once", "Passive", "Capture"]
+        .iter()
+        .find_map(|option| base.strip_suffix(option))
+    {
+        // `on` alone names no event.
+        if stripped.len() <= 2 {
+            break;
+        }
+        base = stripped;
+    }
+    (base.len() != key.len()).then(|| base.to_string())
+}
+
+fn fallback_argument(fallback: Option<&str>) -> String {
+    fallback
+        .map(|key| format!(", {}", quote(key)))
+        .unwrap_or_default()
 }
 
 fn quote(text: &str) -> String {

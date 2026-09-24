@@ -26,13 +26,13 @@ declare let total: number;
 
 declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: P & Record<string, unknown>) => I;
 type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;
-type __VerterUseListener<I, K extends PropertyKey> = unknown extends __VerterUseProp<I, K> ? (...args: any[]) => unknown : __VerterUseProp<I, K>;
+type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;
 type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;
 type __VerterUseModel<I, K extends PropertyKey> = NonNullable<__VerterUseProp<I, K>> extends (value: infer V, ...rest: any[]) => any ? V : unknown;
 const __VerterUse_34ba6e5f483b1e90 = new (__VerterUseConstructor(Table))({ "rows": (rows), "project": ((row) => row.name), "kind": "list", "modelValue": (selected), "onChange": ((value) => log(value)) });
 const __VerterUse_34ba6e5f483b1e90_check0: __VerterUseListener<typeof __VerterUse_34ba6e5f483b1e90, "onChange"> = (log);
 const __VerterUse_e0840c5a5320209d = new (__VerterUseConstructor(Table))({ "rows": (ids), "project": ((id) => id * 2), "kind": "grid", "columns": (3) });
-const __VerterUse_e0840c5a5320209d_check0: __VerterUseListener<typeof __VerterUse_e0840c5a5320209d, "onChange"> = ($event) => { total += $event; };
+const __VerterUse_e0840c5a5320209d_check0: __VerterUseListener<typeof __VerterUse_e0840c5a5320209d, "onChange"> = ($event) => (total += $event);
 
 // STP18-single-witness: every channel of the first use reads one
 // specialization (T = Row, U = string); its slot props, model write and
@@ -60,5 +60,17 @@ export const explicit = new Table<Row, string>({ rows, project: (row) => row.nam
 export const inferred = new Table({ rows, project: (row) => row.name, kind: "list" });
 export const explicitParity: typeof explicit = __VerterUse_34ba6e5f483b1e90;
 export const inferredParity: typeof __VerterUse_34ba6e5f483b1e90 = inferred;
+
+// STP18-handler-check: the listener contract keeps an author-written `any`
+// (a declared `any` accepts a non-function), an event-option key falls back
+// to its unsuffixed listener key, and an inline expression handler returns
+// its value to a listener that expects one.
+export const declaredAnyListener: __VerterUseListener<{ readonly $props: { onRaw: any } }, "onRaw"> = 1;
+export const fallbackListener: __VerterUseListener<{ readonly $props: { onChange?: (value: string) => void } }, "onChangeOnce", "onChange"> = (value) => {
+  const text: string = value;
+  void text;
+};
+declare const flag: boolean;
+export const returningListener: __VerterUseListener<{ readonly $props: { onSave: (value: string) => boolean } }, "onSave"> = ($event) => (flag === true);
 
 export const stp18DefinitionTarget: typeof Table = Table;
