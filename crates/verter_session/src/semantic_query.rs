@@ -8397,9 +8397,9 @@ pub enum SemanticQueryKey {
     ///   clause);
     /// - a `Promise<V>` carrier — recognised by RESOLVED declaration
     ///   identity through the intrinsic registry, never by spelling —
-    ///   RE-ENTERS this family on `V`, so nesting unwraps through the
-    ///   memo / singleflight / cycle machinery rather than a private
-    ///   recursion;
+    ///   continues this relation's RUN on `V` as a tail step, in one loop
+    ///   that costs no query depth however long the chain (every step
+    ///   charged to the connected-work budget);
     /// - a union DISTRIBUTES by re-entering this family per arm and
     ///   renormalising through the canonical union; any undecidable arm
     ///   defers the whole reduction (partial distribution would silently
@@ -8418,11 +8418,11 @@ pub enum SemanticQueryKey {
     ///   application is awaited again;
     /// - an object surface follows the checker's thenable protocol: no
     ///   callable `then` ⇒ itself; a callable `then` whose `onfulfilled`
-    ///   is callable RE-ENTERS this family on the promised value; a callable
+    ///   is callable continues the run on a single promised value; a callable
     ///   `then` that promises nothing, or an optional callable `then` ⇒
     ///   `any` (the checker reports the operand);
     /// - a declaration carrier (`DeclRef` / `InstantiationRef`) expands
-    ///   one level through `Instantiate` and re-enters this family on the
+    ///   one level through `Instantiate` and continues the run on the
     ///   body; an unchanged body answers with the CARRIER, so a
     ///   non-thenable alias keeps its identity;
     /// - a thenable whose promised value is a type this family is ALREADY

@@ -3117,18 +3117,15 @@ fn wrapped_async_return_admits_warm_and_replay_equal_to_fresh() {
     assert_clean_warm(&host, CALLS, "callAsyncPlain", expected);
 }
 
-/// BOUNDED WORK: one awaited-relation build PER UNWRAP LEVEL, and
+/// BOUNDED WORK: one awaited-relation build PER DEMANDED OPERAND, and
 /// identical warm demand adds ZERO builds.
 ///
 /// `callAwait` is `return await asyncSrc()` where `asyncSrc(): Promise<number>`,
-/// so the cold demand measures 2: `AwaitedNormalize(Promise<number>)` and, via
-/// that arm's re-entry on the payload, `AwaitedNormalize(number)`. Two is the
-/// CORRECT bound, not an accounting slip — the composite arms re-enter the
-/// family rather than recursing privately, which is what puts every unwrap
-/// level under its own memo entry. The predecessor did the whole chain inside
-/// one `Instantiate` and cost 1; the second entry here is independently
-/// reusable by any other await of `number`, which the private recursion could
-/// never offer.
+/// so the cold demand measures 1: `AwaitedNormalize(Promise<number>)`, whose
+/// run unwraps the payload `number` as a TAIL step in its own loop rather
+/// than re-entering the family — the shape that lets a chain of any length
+/// cost no query depth. A union arm is the one nested unwrap that still
+/// re-enters the family, under its own memo entry.
 ///
 /// The load-bearing half is the SECOND assertion: warm repeats add ZERO. A
 /// warm family hit returns before the builder runs, so the per-family counter
@@ -3164,8 +3161,8 @@ fn wrapped_await_demand_adds_one_cold_instantiation_and_zero_warm() {
         .awaited_normalize_count;
     assert_eq!(
         cold - before,
-        2,
-        "the cold awaited-unwrap demand pays exactly one build per unwrap level"
+        1,
+        "the cold awaited-unwrap demand pays exactly one build: the payload is a tail step"
     );
     // bounded-loop: three warm repeats, a fixed demand count
     for _ in 0..3 {
@@ -6317,10 +6314,12 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
 /// of distinct thenables awaits to its value, and neither `await` of a
 /// `GrowThen<string>` nor returning one from an async function terminated
 /// within 25 minutes (0.9 GB and climbing) on tsc 7.0.2 — no oracle answer
-/// exists for them. The relation here stops at its own operational budget
-/// instead: the `await` has no value and the async return publishes the
-/// typed gap — never the thenable the relation stopped at, never warm, and
-/// never the checker's diagnostic.
+/// exists for them. The relation here charges every tail step to the
+/// connected-work budget and stops where it runs out: the `await` has no
+/// value and the async return publishes the typed gap — never the thenable
+/// the relation stopped at, never warm, and never the checker's diagnostic.
+/// (The runtime half runs under a reduced budget so the test stays fast;
+/// the production budget's cost is recorded in the ledger.)
 #[test]
 fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
     use crate::semantic_query::{
@@ -6336,30 +6335,52 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
         }))
     );
     assert_eq!(raised, any());
-    assert_fails_closed(&host, RECURSIVE_THENABLE, "awaitGrowThen");
-    assert_degraded(
-        &host,
-        RECURSIVE_THENABLE,
-        "returnGrowThen",
-        FlowReturnDegradation::UnresolvedValue,
-    );
+    let under_budget = |name: &str| {
+        with_dispatch(&host, |dispatch| {
+            dispatch.set_connected_limits_for_tests(
+                8_000,
+                super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+            );
+            let key = key_of(dispatch, RECURSIVE_THENABLE, name);
+            eval_key_on(&host, dispatch, key)
+        })
+    };
+    assert_eq!(under_budget("awaitGrowThen"), Outcome::Miss);
+    match under_budget("returnGrowThen") {
+        Outcome::Value {
+            ty,
+            degradation,
+            candidates,
+        } => {
+            assert_eq!(
+                (degradation, candidates),
+                (Some(FlowReturnDegradation::UnresolvedValue), 0),
+                "returnGrowThen: the typed gap, never warm, got {ty:?}"
+            );
+            assert!(
+                !format!("{ty:?}").contains("GrowThen"),
+                "returnGrowThen: never the thenable the relation stopped at, got {ty:?}"
+            );
+        }
+        other => panic!("returnGrowThen: the typed gap, got {other:?}"),
+    }
 }
 
-/// A chain of DISTINCT thenables `C0 → C1 → … → number` longer than this
-/// substrate's operational budget: each step of the runtime relation
-/// re-enters its own query, so a long enough chain reaches the connected
-/// demand's nested-query depth bound (a stack-safety bound, not a rule of
-/// the checker). tsc 7.0.2 answers at any length (5000 steps measured for
-/// `await`; at both 8 and 40 steps `awaitChain` and `returnChain` are
-/// `Promise<number>`, `yieldChain` `AsyncGenerator<number, void, unknown>`
-/// and `returnFromGenerator` `AsyncGenerator<never, number, unknown>`).
-/// Here the 8-step chain answers exactly that, and the 40-step chain is a
-/// typed incompleteness — the `await` has no value and every wrap publishes
-/// the typed gap — never the thenable the relation stopped at, which a
-/// budget-tripped read used to hand the wrap as its payload
-/// (`Promise<C14>` for fifteen steps).
+/// A chain of DISTINCT thenables `C0 → C1 → … → number`: the runtime
+/// relation runs its tail steps in one loop, so a chain's length costs no
+/// query depth, and a long chain awaits to its value as the checker's does.
+/// tsc 7.0.2 has no depth rule here (5000 steps measured for `await`; at 8,
+/// 40 and 200 steps `awaitChain` and `returnChain` are `Promise<number>`,
+/// `yieldChain` `AsyncGenerator<number, void, unknown>` and
+/// `returnFromGenerator` `AsyncGenerator<never, number, unknown>`).
+///
+/// The connected-work budget stays this substrate's typed incompleteness
+/// for work it cannot finish: a demand whose budget runs out part-way down
+/// the chain has no `await` value, and every wrap publishes the typed gap —
+/// never the thenable the relation stopped at, which a budget-cut read used
+/// to hand the wrap as its payload (`Promise<C14>`).
 #[test]
-fn a_thenable_chain_past_the_operational_budget_is_a_typed_incompleteness() {
+fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
     let chain = |steps: usize| {
         let mut source = String::new();
         for index in 0..steps {
@@ -6385,26 +6406,86 @@ fn a_thenable_chain_past_the_operational_budget_is_a_typed_incompleteness() {
     const SHORT: &str = "/ws/cov/thenable_chain_short.ts";
     const LONG: &str = "/ws/cov/thenable_chain_long.ts";
     let short = chain(8);
-    let long = chain(40);
+    let long = chain(200);
     let host = host_with(&[(SHORT, short.as_str()), (LONG, long.as_str())]);
-    for name in ["awaitChain", "returnChain"] {
-        assert_clean_warm(&host, SHORT, name, promise_of(number()));
+    for file in [SHORT, LONG] {
+        for name in ["awaitChain", "returnChain"] {
+            assert_clean_warm(&host, file, name, promise_of(number()));
+        }
+        assert_clean_warm(
+            &host,
+            file,
+            "yieldChain",
+            async_generator_of(number(), void()),
+        );
+        assert_clean_warm(
+            &host,
+            file,
+            "returnFromGenerator",
+            async_generator_of(never(), number()),
+        );
     }
-    assert_clean_warm(
-        &host,
-        SHORT,
+    // The budget's measure: a cold chain charges 16 units per element plus
+    // 6, every tail step among them, so under a budget of 806 units a
+    // 50-element chain answers and a 51-element one does not.
+    for (steps, answers) in [(50, true), (51, false)] {
+        let file = format!("/ws/cov/thenable_chain_{steps}.ts");
+        let source = chain(steps);
+        let host = host_with(&[(file.as_str(), source.as_str())]);
+        let outcome = with_dispatch(&host, |dispatch| {
+            dispatch.set_connected_limits_for_tests(
+                16 * 50 + 6,
+                super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+            );
+            let key = key_of(dispatch, &file, "awaitChain");
+            eval_key_on(&host, dispatch, key)
+        });
+        if answers {
+            assert!(
+                matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number())),
+                "{steps} elements answer within 806 units, got {outcome:?}"
+            );
+        } else {
+            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 806 units");
+        }
+    }
+    // The same 200-step chain under a work budget it cannot finish within:
+    // each tail step is charged, so the relation stops as a typed partial.
+    let budgeted = host_with(&[(LONG, long.as_str())]);
+    let under_budget = |name: &str| {
+        with_dispatch(&budgeted, |dispatch| {
+            dispatch.set_connected_limits_for_tests(
+                600,
+                super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+            );
+            let key = key_of(dispatch, LONG, name);
+            eval_key_on(&budgeted, dispatch, key)
+        })
+    };
+    for name in [
+        "awaitChain",
+        "returnChain",
         "yieldChain",
-        async_generator_of(number(), void()),
-    );
-    assert_clean_warm(
-        &host,
-        SHORT,
         "returnFromGenerator",
-        async_generator_of(never(), number()),
-    );
-    assert_fails_closed(&host, LONG, "awaitChain");
-    for name in ["returnChain", "yieldChain", "returnFromGenerator"] {
-        assert_degraded(&host, LONG, name, FlowReturnDegradation::UnresolvedValue);
+    ] {
+        match under_budget(name) {
+            Outcome::Value {
+                ty,
+                degradation,
+                candidates,
+            } => {
+                assert!(
+                    degradation.is_some() && candidates == 0,
+                    "{name}: a budget-cut relation read is never a clean payload, got {ty:?}"
+                );
+                assert!(
+                    !format!("{ty:?}").contains("C1"),
+                    "{name}: never the thenable the relation stopped at, got {ty:?}"
+                );
+            }
+            Outcome::Miss => {}
+            other => panic!("{name}: a typed incompleteness, got {other:?}"),
+        }
     }
 }
 
@@ -7025,4 +7106,75 @@ fn an_indexed_access_of_a_self_reference_is_the_declaration() {
             | TypeExpr::Ref { name, .. } if name.as_ref() == "Chain"),
         "`next` is the self-reference, got {raised:?}"
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// The checker's evolving array
+// ──────────────────────────────────────────────────────────────────────
+
+/// Unannotated declarations initialised to an empty array literal. Every
+/// expected answer below is measured on tsc 7.0.2 over this module
+/// (`--noEmit --strict --target es2022`, each type read through the tuple
+/// wrapper quoted by TS2322).
+const EVOLVING: &str = "/ws/cov/evolving_array.ts";
+const EVOLVING_SRC: &str = r#"
+export function readWhole() { const a = []; return a; }
+export function readParenthesized() { const a = ([]); return a; }
+export function readInElement() { const a = []; return [a]; }
+export function readThroughLocal() { const a = []; const b = a; return b; }
+export function readVar() { var a = []; return a; }
+export function pushed() { const a = []; a.push(1); return a; }
+export function reassigned() { let a = []; a = [1]; return a; }
+export function captured() { const a = []; const f = () => a; return f(); }
+export function annotated() { const a: number[] = []; return a; }
+export function literal() { return []; }
+"#;
+
+fn array_of(element: TypeExpr) -> TypeExpr {
+    TypeExpr::Array {
+        element: Arc::new(element),
+        readonly: false,
+    }
+}
+
+/// An empty array literal initialising an unannotated declaration is the
+/// checker's EVOLVING array under `noImplicitAny`: its type follows the
+/// `push` / `unshift` / element writes / reassignments that reach each
+/// read. A binding the frame only reads whole reads `any[]`; one some
+/// position may evolve is not followed here, so it is the typed gap rather
+/// than the `never[]` of a bare `[]`.
+///
+/// tsc 7.0.2 (`--strict`, each with TS7034 / TS7005 at the declaration and
+/// the read): `readWhole`, `readThroughLocal` and `readVar` are `any[]`,
+/// `readInElement` (`[a]`) is `any[][]`; `pushed` (`a.push(1)`) and
+/// `reassigned` (`a = [1]`) are `number[]` and `captured` (read inside an
+/// arrow) `any[]` — the three this frame does not follow. The controls:
+/// `annotated` is `number[]`, a bare `return []` is `never[]`, and so is
+/// `readParenthesized` — `const a = ([])` is not the evolving form (no
+/// TS7034; the checker does not look through the parentheses).
+#[test]
+fn an_empty_array_initializer_is_the_checkers_evolving_array() {
+    let host = host_with(&[(EVOLVING, EVOLVING_SRC)]);
+    let any_array = array_of(any());
+    for name in ["readWhole", "readThroughLocal", "readVar"] {
+        assert_clean_warm(&host, EVOLVING, name, any_array.clone());
+    }
+    assert_clean_warm(&host, EVOLVING, "readInElement", array_of(any_array));
+    for name in ["pushed", "reassigned", "captured"] {
+        assert_degraded(
+            &host,
+            EVOLVING,
+            name,
+            FlowReturnDegradation::UnmodeledPosition,
+        );
+    }
+    assert_clean_warm(&host, EVOLVING, "annotated", array_of(number()));
+    for name in ["literal", "readParenthesized"] {
+        assert_clean_warm(
+            &host,
+            EVOLVING,
+            name,
+            array_of(TypeExpr::Primitive(PrimitiveName::Never)),
+        );
+    }
 }

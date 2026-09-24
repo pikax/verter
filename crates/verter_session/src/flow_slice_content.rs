@@ -525,6 +525,11 @@ pub enum SliceStatement {
         /// variable's type follows its assignments; without it the
         /// variable is declared as its initializer's widened type.
         auto_typed_form: bool,
+        /// The checker's EVOLVING array form (`autoArrayType`): an
+        /// unannotated declaration whose initializer is an empty array
+        /// literal — not a parenthesized one (tsc 7.0.2: `const a = ([])`
+        /// is `never[]`). `None` for every other declaration.
+        evolving_array: Option<SliceEvolvingArray>,
     },
     /// A return-free loop with no selected downstream transfer: fall-through
     /// transparent because no captured guard, call, write, or escaping `var`
@@ -1636,6 +1641,22 @@ pub enum SliceObjectEntry {
         /// The spread source's lowered value.
         source: Box<SliceExpr>,
     },
+}
+
+/// What the frame does with an EVOLVING array binding
+/// ([`SliceStatement::Binding::evolving_array`]). Under `noImplicitAny`
+/// the checker types such a binding by the operations that reach each read
+/// (`push`, `unshift`, element writes, reassignments); a binding the frame
+/// only reads whole — never through a member, a call, a write, or a
+/// closure — reads `any[]` everywhere (tsc 7.0.2: `const a = []; return
+/// a` is `any[]`, and so are `[a]`'s element and `{ a }`'s member).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceEvolvingArray {
+    /// Only whole reads of the binding in this frame.
+    Settled,
+    /// Some position may evolve the binding's element type: this frame
+    /// does not follow those operations, so its reads are the typed gap.
+    MayEvolve,
 }
 
 /// One element of a structurally lowered array literal.
@@ -5583,22 +5604,36 @@ impl Lowerer<'_> {
                                 .init
                                 .as_ref()
                                 .is_none_or(|init| self.is_null_or_undefined_keyword(init));
+                        let Some(binding) = self.bindings.declaration_at_span(self.rebase(id.span))
+                        else {
+                            out.push(SliceStatement::Gap(
+                                crate::semantic_query::FlowGap::UnmodeledExpression,
+                            ));
+                            continue;
+                        };
+                        let evolving_array = (declared.is_none()
+                            && declarator.init.as_ref().is_some_and(|init| {
+                                matches!(
+                                    init,
+                                    Expression::ArrayExpression(array) if array.elements.is_empty()
+                                )
+                            }))
+                        .then(|| {
+                            if self.binding_only_read_whole(binding) {
+                                SliceEvolvingArray::Settled
+                            } else {
+                                SliceEvolvingArray::MayEvolve
+                            }
+                        });
                         out.push(SliceStatement::Binding {
-                            binding: match self.bindings.declaration_at_span(self.rebase(id.span)) {
-                                Some(binding) => binding,
-                                None => {
-                                    out.push(SliceStatement::Gap(
-                                        crate::semantic_query::FlowGap::UnmodeledExpression,
-                                    ));
-                                    continue;
-                                }
-                            },
+                            binding,
                             name: Arc::from(id.name.as_str()),
                             kind,
                             init,
                             declared,
                             freshness,
                             auto_typed_form,
+                            evolving_array,
                         });
                     }
                 }
@@ -8127,6 +8162,42 @@ impl Lowerer<'_> {
                 }
             }
         }
+    }
+
+    /// Whether this frame only ever reads `binding` WHOLE: no read of a
+    /// member of it, no call through it, no write to it or into it after
+    /// its declaration, and no closure capturing it. Over-approximate by
+    /// construction — any of those positions may evolve an empty array's
+    /// element type in the checker.
+    fn binding_only_read_whole(&self, binding: SkeletonBindingId) -> bool {
+        let runtime = self.bindings.canonical_local(binding);
+        let is_binding = |candidate: &Option<FlowBindingRef>| {
+            matches!(
+                candidate,
+                Some(FlowBindingRef::Local(local))
+                    if self.bindings.canonical_local(*local) == runtime
+            )
+        };
+        let sites_ok = self.skeleton.expr_sites.iter().all(|site| {
+            site.reads
+                .iter()
+                .all(|read| read.path.is_empty() || !is_binding(&read.binding))
+                && site.calls.iter().all(|call| !is_binding(&call.binding))
+                && site.capture_bindings.iter().all(|capture| {
+                    !matches!(
+                        capture,
+                        FlowBindingRef::Local(local)
+                            if self.bindings.canonical_local(*local) == runtime
+                    )
+                })
+        });
+        // The declarator's own initializer is not a skeleton write.
+        sites_ok
+            && !self
+                .skeleton
+                .writes
+                .iter()
+                .any(|write| is_binding(&write.binding))
     }
 
     fn lower_identifier_read(

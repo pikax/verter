@@ -155,6 +155,45 @@ fn recv_signal_within(rx: &std::sync::mpsc::Receiver<()>, label: &str) {
     }
 }
 
+/// The inert-structure bit and the unresolved-reach bit of a node live in
+/// ONE per-node entry, so the two memos share one lifecycle: an entry
+/// released for a node id takes both bits with it, and no second node-id
+/// map exists to outlive it.
+#[test]
+fn a_nodes_structural_bits_share_one_sidecar_entry() {
+    let store = SemanticGraphStore::new();
+    let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let array = store.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: false,
+    });
+    assert_eq!(store.node_structure_bits_for_tests(array), None);
+    assert!(store.node_is_inert_structure(array));
+    assert_eq!(
+        store.node_structure_bits_for_tests(array),
+        Some(unresolved_reach::NodeStructureBits {
+            unresolved: None,
+            inert: Some(true),
+        })
+    );
+    assert!(!store.node_reaches_unresolved(array));
+    assert_eq!(
+        store.node_structure_bits_for_tests(array),
+        Some(unresolved_reach::NodeStructureBits {
+            unresolved: Some(false),
+            inert: Some(true),
+        }),
+        "both bits sit in the node's one entry"
+    );
+    assert_eq!(
+        store.node_structure_bits_for_tests(number),
+        Some(unresolved_reach::NodeStructureBits {
+            unresolved: Some(false),
+            inert: Some(true),
+        })
+    );
+}
+
 #[test]
 fn interning_returns_unique_stable_ids() {
     let store = SemanticGraphStore::new();
