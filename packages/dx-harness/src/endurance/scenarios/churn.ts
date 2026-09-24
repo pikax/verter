@@ -1,6 +1,7 @@
 /**
  * Document-lifecycle CHURN lane: open → edit → query → close, repeated, with
- * process-TREE resident memory compared across two quiesced checkpoints.
+ * process-TREE resident memory and the server's exact heap read at quiesced
+ * checkpoints along the whole run and judged as a plateau over its second half.
  *
  * The other endurance lanes keep documents OPEN and hammer them. That workload
  * cannot see a per-document-version leak at all: a store that retains every
@@ -16,23 +17,31 @@
  * descendant (the type-provider engine included), so anything the session
  * retains anywhere in its process tree is inside the measurement.
  *
- * Measurement shape — two QUIESCED checkpoints, not a slope through the noise:
+ * Measurement shape — a quiesced TRAJECTORY, not a two-endpoint envelope:
  *
  *  1. a warm-up prefix of full cycles, so the baseline already contains every
  *     one-time cost (project load, provider program, lazily-initialised caches)
- *     and the comparison is not measuring startup;
+ *     and the readings are not measuring startup;
  *  2. quiesce (host work counters unchanged across consecutive polls, no
- *     scanner/drain/sync WARN churn), then read the tree — the BASELINE;
- *  3. the remaining cycles;
- *  4. quiesce again, then read the tree — the FINAL reading.
+ *     scanner/drain/sync WARN churn), then read the tree, the exact server
+ *     heap and the retention counters — the BASELINE;
+ *  3. the remaining cycles in equal windows, each ended by the same quiesced
+ *     reading, so the run is a trajectory of readings rather than two ends;
+ *  4. the verdict, over the LATE span (every reading from the run's midpoint
+ *     on), per process: the server's exact heap must hold within an absolute
+ *     band with no trend its noise cannot explain, the server's resident set
+ *     within an allocator-settling band, a child's resident set within a band
+ *     per plateau segment with one level shift set aside only when both
+ *     sides prove a plateau; a post-shift segment too short to prove one is
+ *     inconclusive and the scenario EXTENDS the run; retained-object counters
+ *     must not rise significantly, a cap-bounded counter must stay under its
+ *     cap, and pressure refusals must be zero (`decideChurnSlope`,
+ *     `decideChurnRetention`).
  *
- * Growth is then `final <= baseline * factor + floor`. Both terms matter: the
- * factor catches proportional growth on a large baseline, and the absolute
- * floor keeps a small-baseline run from failing on allocator noise. A retained
- * document version is ~hundreds of KiB (provider text + carrier source + a
- * UTF-16 line index over each, twice over); a thousand cycles of it is hundreds
- * of MiB, far outside either tolerance, while a bounded session returns to its
- * baseline.
+ * A `final <= baseline * factor + floor` envelope over the two ends is still
+ * reported as supplementary evidence, but it is not the AC1 proof: an envelope
+ * describes a destination and admits any leak with a low enough gradient,
+ * while the criterion is about the trajectory (see `decideChurnSlope`).
  *
  * Semantic strength is not traded for the memory figure: every cycle answers a
  * real provider-backed request, and the lane ends with a strict convergence
