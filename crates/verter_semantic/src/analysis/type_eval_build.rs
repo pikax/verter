@@ -1518,7 +1518,16 @@ fn lower_named_type_alias_parts(
     }
 }
 
-fn heritage_expression_name(expression: &Expression<'_>) -> Option<String> {
+/// The value a class declaration's `extends` EXPRESSION registers under
+/// (`K:extends` for `class K extends Mixin(Base)`): not an authorable
+/// name, so it never collides with a declaration, and the class's heritage
+/// arm reads the expression's value through it — the value route every
+/// value-only base takes.
+pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
+    format!("{class_name}:extends")
+}
+
+pub(crate) fn heritage_expression_name(expression: &Expression<'_>) -> Option<String> {
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.to_string()),
         Expression::StaticMemberExpression(member) => {
@@ -2631,7 +2640,35 @@ fn collect_named_class(
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members,
     }));
-    let body = match decl.super_class.as_ref().and_then(heritage_expression_name) {
+    // A heritage EXPRESSION the facts cannot name reads its value through a
+    // synthetic value declaration indexed at the expression.
+    let heritage_expression = decl
+        .super_class
+        .as_ref()
+        .filter(|heritage| heritage_expression_name(heritage).is_none());
+    if let Some(heritage) = heritage_expression {
+        out.value_decls.push(LoweredValueDeclParts {
+            name: class_heritage_value_name(&name),
+            kind: ValueDeclKind::Const,
+            is_unique_symbol: false,
+            unique_symbol_members: Vec::new(),
+            type_annotation: None,
+            annotation_is_authored: false,
+            inference_unavailable: None,
+            expression_source_offset: Some(heritage.span().start),
+            signatures: Vec::new(),
+            object_shape: None,
+            enum_members: None,
+            enum_member_names: None,
+        });
+    }
+    let base_name = match decl.super_class.as_ref() {
+        Some(heritage) => {
+            heritage_expression_name(heritage).or_else(|| Some(class_heritage_value_name(&name)))
+        }
+        None => None,
+    };
+    let body = match base_name {
         Some(base_name) => {
             let base_args: Vec<TypeExpr> = decl
                 .super_type_arguments
@@ -3533,6 +3570,65 @@ pub(crate) fn for_each_indexed_call_source_type_query<'a>(
     }
 }
 
+/// The class expression a declarator's initializer is, through
+/// parentheses.
+fn initializer_class_expression<'a>(init: &'a Expression<'a>) -> Option<&'a Class<'a>> {
+    match init {
+        Expression::ClassExpression(class) => Some(class),
+        Expression::ParenthesizedExpression(inner) => {
+            initializer_class_expression(&inner.expression)
+        }
+        _ => None,
+    }
+}
+
+/// A variable initialized with a CLASS EXPRESSION (`const C = class { … }`)
+/// holds the class's constructor: the class lowers as a class declaration
+/// does, and its construct signatures return the class's instance shape
+/// itself — the class declares no type, so nothing else names that instance
+/// (`C` is a value only). A generic class, or one whose `extends` is an
+/// expression, is left to initializer inference.
+fn lower_class_expression_value(
+    class: &Class<'_>,
+    source: &str,
+    name: &str,
+    kind: ValueDeclKind,
+) -> Option<LoweredValueDeclParts> {
+    if class.type_parameters.is_some()
+        || class
+            .super_class
+            .as_ref()
+            .is_some_and(|heritage| heritage_expression_name(heritage).is_none())
+    {
+        return None;
+    }
+    let mut parts = LoweredStatementParts::default();
+    collect_named_class(class, source, &mut parts, name.to_string());
+    let instance = parts
+        .type_decls
+        .into_iter()
+        .find(|decl| decl.name == name)?
+        .body;
+    let mut value = parts
+        .value_decls
+        .into_iter()
+        .find(|decl| decl.name == name)?;
+    let named_instance = TypeExpr::named(name.to_string());
+    let retarget = |return_type: &mut Option<Arc<TypeExpr>>| {
+        if return_type.as_deref() == Some(&named_instance) {
+            *return_type = Some(Arc::new(instance.clone()));
+        }
+    };
+    for member in value.object_shape.as_mut()?.properties.iter_mut() {
+        if let ObjectMember::ConstructSignature(signature) = member {
+            retarget(&mut signature.return_type);
+        }
+    }
+    value.kind = kind;
+    value.signatures = Vec::new();
+    Some(value)
+}
+
 fn lower_variable_parts(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
@@ -3571,6 +3667,14 @@ fn lower_variable_parts(
         .type_annotation
         .as_ref()
         .is_some_and(|annotation| ts_type_is_unique_symbol(&annotation.type_annotation));
+
+    if decl.type_annotation.is_none() {
+        if let Some(class) = decl.init.as_ref().and_then(initializer_class_expression) {
+            if let Some(parts) = lower_class_expression_value(class, source, &name, var_kind) {
+                return Some(parts);
+            }
+        }
+    }
 
     // Extract type annotation from the variable declarator
     let mut type_annotation = decl

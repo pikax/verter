@@ -1082,6 +1082,24 @@ fn index_named_class(
             .constructor_visibility
             .insert(ctx.key(name), visibility);
     }
+    // A heritage EXPRESSION's synthetic value (see
+    // `class_heritage_value_name`), mirroring `collect_named_class`.
+    if let Some(heritage) = decl.super_class.as_ref().filter(|heritage| {
+        crate::analysis::type_eval_build::heritage_expression_name(heritage).is_none()
+    }) {
+        let span: Span = heritage.span().into();
+        let entry = index
+            .value_headers
+            .entry(ctx.key(&crate::analysis::type_eval_build::class_heritage_value_name(name)))
+            .or_insert_with(|| ValueDeclHeader {
+                kind: ValueDeclKind::Const,
+                span,
+                name_span: span,
+                object_member_headers: Vec::new(),
+                contributors: Vec::new(),
+            });
+        push_contributor(&mut entry.contributors, ctx, span, span);
+    }
 
     let params = type_param_headers(decl.type_parameters.as_deref());
     let mut instance_members = Vec::new();

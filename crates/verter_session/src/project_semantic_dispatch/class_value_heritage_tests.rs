@@ -149,3 +149,57 @@ fn a_union_or_non_constructor_value_gives_no_base_type() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const EXPRESSION_BASES: &str = "\
+export class Base { b = 'base' as const; }
+declare function Mixin<T extends new (...args: any[]) => {}>(B: T): T & (new (...args: any[]) => { mixed: 'm' });
+export function Tagged<T extends new (...args: any[]) => {}>(B: T) { return class extends B { tag = 't' as const; }; }
+export class KM extends Mixin(Base) {}
+export class KM2 extends KM {}
+export class KT extends Tagged(Base) {}
+export namespace NSC { export class Inner { inner = 'i' as const; } }
+export class KN extends NSC.Inner {}
+const CE = class { ce = 'ce' as const; };
+export class DCE extends CE {}
+export const KMV = Mixin(Base);
+export const KTV = Tagged(Base);
+";
+
+/// A heritage EXPRESSION's value is the base constructor type: a call's
+/// result through call resolution (a declared mixin's intersection, a
+/// factory's body-derived class expression), a namespace member path, and
+/// a constant initialized with a class expression — each read by the value
+/// rule above, as is the same call held by a module constant.
+///
+/// Measured on TypeScript 7.0.2: `KM['b']` and `InstanceType<typeof
+/// KM>['b']` are `"base"`, `KM['mixed']` and `KM2['mixed']` are `"m"`,
+/// `KM extends { b: 'base'; mixed: 'm' }` is `"y"` and
+/// `ConstructorParameters<typeof KM> extends [] ? 'y' : 'n'` is `"y"`
+/// (`ConstructorParameters<typeof KM>` is `[]`); `KT['tag']` is `"t"` and
+/// `KT['b']` `"base"`; `KN['inner']` is `"i"`; `DCE['ce']` is `"ce"`;
+/// `InstanceType<typeof KMV>['mixed']` is `"m"` and `InstanceType<typeof
+/// KTV>['tag']` `"t"`.
+#[test]
+fn a_value_expression_base_reads_the_expression_value() {
+    let failures = mismatches(
+        EXPRESSION_BASES,
+        &[
+            ("KM['b']", "\"base\""),
+            ("InstanceType<typeof KM>['b']", "\"base\""),
+            ("KM['mixed']", "\"m\""),
+            ("KM2['mixed']", "\"m\""),
+            ("KM extends { b: 'base'; mixed: 'm' } ? 'y' : 'n'", "\"y\""),
+            (
+                "ConstructorParameters<typeof KM> extends [] ? 'y' : 'n'",
+                "\"y\"",
+            ),
+            ("KT['tag']", "\"t\""),
+            ("KT['b']", "\"base\""),
+            ("KN['inner']", "\"i\""),
+            ("DCE['ce']", "\"ce\""),
+            ("InstanceType<typeof KMV>['mixed']", "\"m\""),
+            ("InstanceType<typeof KTV>['tag']", "\"t\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

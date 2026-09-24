@@ -1819,10 +1819,9 @@ fn assignment_expression_return_is_the_assigned_type() {
 /// Oracle: `ReturnType<typeof leafClassExpr>` is
 /// `typeof (Anonymous class)`, declaration-emitted as `{ new (): {}; }`.
 ///
-/// The value is complete and undegraded, and still `ReturnOnly`: the
-/// class's constructor and field initializers are callables no indexed
-/// function position serves, so the capture family keeps its typed gap
-/// over them and the result never warms.
+/// The value is complete and undegraded, and warms: the class's implicit
+/// constructor only runs its field initializers, which are the enclosing
+/// frame's own footprint, so no capture obligation is left open over it.
 #[test]
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
@@ -1842,7 +1841,7 @@ fn class_expression_return_is_its_constructor_type() {
                 )],
             })),
             degradation: None,
-            candidates: 0,
+            candidates: 1,
         },
         "leafClassExpr"
     );
@@ -6201,14 +6200,13 @@ export function instantiatedOverloads() { const x: ReturnType<typeof O<string>> 
 
 /// How a CLASSES probe's answer is admitted.
 ///
-/// An answer read through a class expression's value is `ReturnOnly`: the
-/// class's constructor and field initializers are callables no indexed
-/// function position serves, so the capture family keeps its typed gap
-/// over them — the answer is complete and undegraded, and it never warms.
+/// An answer read through a class expression's value warms: the class's
+/// methods and declared constructor are nested callables the index serves,
+/// and its field initializers are the enclosing frame's own footprint, so
+/// no capture obligation is left open over it.
 #[derive(Clone, Copy, Debug)]
 enum ClassProbeAdmission {
     Warm,
-    ReturnOnly,
 }
 
 /// Evaluate one CLASSES probe CLEAN (undegraded) under `admission`, and
@@ -6238,7 +6236,6 @@ fn with_class_probe<R>(
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             match admission {
                 ClassProbeAdmission::Warm => 1,
-                ClassProbeAdmission::ReturnOnly => 0,
             },
             "{name} must be admitted {admission:?}"
         );
@@ -6277,7 +6274,7 @@ fn assert_class_probe(name: &str, admission: ClassProbeAdmission, expected: &str
 fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
     with_class_probe(
         name,
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         |dispatch, node| match dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Tuple { elements, .. }) => elements
                 .iter()
@@ -6314,19 +6311,15 @@ fn class_probe_tuple(name: &str) -> Vec<(Option<String>, bool, bool)> {
 fn class_expression_value_is_its_constructor_over_its_own_members() {
     assert_class_probe(
         "plainInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "(Anonymous class)",
     );
-    assert_class_probe("plainExtra", ClassProbeAdmission::ReturnOnly, "number");
-    assert_class_probe("plainLit", ClassProbeAdmission::ReturnOnly, "1");
-    assert_class_probe(
-        "plainMethod",
-        ClassProbeAdmission::ReturnOnly,
-        "() => number",
-    );
-    assert_class_probe("plainGetter", ClassProbeAdmission::ReturnOnly, "boolean");
-    assert_class_probe("plainStatic", ClassProbeAdmission::ReturnOnly, "string");
-    assert_class_probe("protoRead", ClassProbeAdmission::ReturnOnly, "C");
+    assert_class_probe("plainExtra", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("plainLit", ClassProbeAdmission::Warm, "1");
+    assert_class_probe("plainMethod", ClassProbeAdmission::Warm, "() => number");
+    assert_class_probe("plainGetter", ClassProbeAdmission::Warm, "boolean");
+    assert_class_probe("plainStatic", ClassProbeAdmission::Warm, "string");
+    assert_class_probe("protoRead", ClassProbeAdmission::Warm, "C");
     assert_eq!(class_probe_tuple("plainCtorParams"), Vec::new());
 }
 
@@ -6345,7 +6338,7 @@ fn class_expression_declared_constructor_types_the_construct_signature() {
             (Some("b".to_owned()), true, false),
         ]
     );
-    assert_class_probe("ctorProperty", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("ctorProperty", ClassProbeAdmission::Warm, "string");
 }
 
 /// A class expression extending a named class inherits the base
@@ -6361,7 +6354,7 @@ fn class_expression_declared_constructor_types_the_construct_signature() {
 fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
     assert_class_probe(
         "derivedInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "(Anonymous class)",
     );
     assert_eq!(
@@ -6371,13 +6364,9 @@ fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
             (Some("b".to_owned()), true, false),
         ]
     );
-    assert_class_probe(
-        "derivedInherited",
-        ClassProbeAdmission::ReturnOnly,
-        "number",
-    );
-    assert_class_probe("derivedOwn", ClassProbeAdmission::ReturnOnly, "number");
-    assert_class_probe("derivedStatic", ClassProbeAdmission::ReturnOnly, "string");
+    assert_class_probe("derivedInherited", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("derivedOwn", ClassProbeAdmission::Warm, "number");
+    assert_class_probe("derivedStatic", ClassProbeAdmission::Warm, "string");
 }
 
 /// The mixin form: a class expression extending a parameter typed by a
@@ -6397,12 +6386,12 @@ fn class_expression_extending_a_class_inherits_its_constructor_and_members() {
 fn mixin_class_expression_composes_with_its_instantiated_base() {
     assert_class_probe(
         "mixinInstance",
-        ClassProbeAdmission::ReturnOnly,
+        ClassProbeAdmission::Warm,
         "Mixin.(Anonymous class) & Base",
     );
-    assert_class_probe("mixinCtorParams", ClassProbeAdmission::ReturnOnly, "any[]");
-    assert_class_probe("mixinInherited", ClassProbeAdmission::ReturnOnly, "string");
-    assert_class_probe("mixinOwn", ClassProbeAdmission::ReturnOnly, "number");
+    assert_class_probe("mixinCtorParams", ClassProbeAdmission::Warm, "any[]");
+    assert_class_probe("mixinInherited", ClassProbeAdmission::Warm, "string");
+    assert_class_probe("mixinOwn", ClassProbeAdmission::Warm, "number");
 }
 
 /// A DECLARED mixin factory's result composes the same way: the

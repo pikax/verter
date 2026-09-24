@@ -97,6 +97,10 @@ pub enum FunctionDescentStep {
     CallCallee { call_ordinal: u32 },
     /// A directly nested callable in the shared source-order inventory.
     NestedCallable { ordinal: u32 },
+    /// The `extends` EXPRESSION of the class declaration — an indexed
+    /// program expression (`class K extends Mixin(Base) {}`), never a
+    /// function position.
+    ClassHeritage,
 }
 
 /// Arena-free locator for one function's body inside the retained parse
@@ -2774,7 +2778,44 @@ fn discover_class<'ast>(
         Some(prefix) => format!("{prefix}.{}", id.name),
         None => id.name.to_string(),
     };
+    discover_class_heritage_expression(class, contributor_index, &[], ctx);
     discover_class_members(class, &name, contributor_index, Vec::new(), ctx);
+}
+
+/// Index a class declaration's `extends` EXPRESSION — one the declaration
+/// facts cannot name (`extends Mixin(Base)`, not `extends Base` or
+/// `extends NS.Base`) — as a program expression, so its value (the base
+/// constructor type) reads through the same indexed-expression rail a
+/// declarator initializer does.
+fn discover_class_heritage_expression<'ast>(
+    class: &'ast Class<'ast>,
+    contributor_index: usize,
+    descent: &[FunctionDescentStep],
+    ctx: &mut DiscoveryCtx<'_, 'ast>,
+) {
+    let Some(heritage) = class.super_class.as_ref() else {
+        return;
+    };
+    if crate::analysis::type_eval_build::heritage_expression_name(heritage).is_some() {
+        return;
+    }
+    let Some(anchor) = ctx.anchor(contributor_index) else {
+        return;
+    };
+    let mut descent = descent.to_vec();
+    descent.push(FunctionDescentStep::ClassHeritage);
+    ctx.expressions.push(ProgramExpressionRecord {
+        point: ProgramExpressionIdentity {
+            canonical_id: Arc::clone(&ctx.canonical_id),
+            offset: heritage.span().start,
+        },
+        span: heritage.span().into(),
+        locator: FunctionBodyLocator {
+            contributor: anchor,
+            descent: Arc::from(descent.into_boxed_slice()),
+        },
+        source: program_expression_source(heritage),
+    });
 }
 
 fn discover_class_ns<'ast>(
@@ -2788,6 +2829,7 @@ fn discover_class_ns<'ast>(
         return;
     };
     let name = format!("{namespace}.{}", id.name);
+    discover_class_heritage_expression(class, contributor_index, descent, ctx);
     discover_class_members(class, &name, contributor_index, descent.to_vec(), ctx);
 }
 
@@ -4103,6 +4145,23 @@ enum DeclRef<'a> {
     ExportDefaultObject(&'a oxc_ast::ast::ObjectExpression<'a>),
 }
 
+/// The class a statement declares, exported or not.
+fn class_declaration_of<'a>(statement: &'a Statement<'a>) -> Option<&'a Class<'a>> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+    match statement {
+        Statement::ClassDeclaration(class) => Some(class),
+        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
+            Declaration::ClassDeclaration(class) => Some(class),
+            _ => None,
+        },
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => Some(class),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
     use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
     match statement {
@@ -4243,6 +4302,9 @@ pub fn resolve_function_node<'a>(
     let mut steps = locator.descent.iter().peekable();
     loop {
         match steps.next()? {
+            // A heritage expression is an indexed program expression, never a
+            // function position.
+            FunctionDescentStep::ClassHeritage => return None,
             FunctionDescentStep::NamespaceMember { statement_ordinal } => {
                 let DeclRef::Module(module) = declaration_of(statement)? else {
                     return None;
@@ -4585,6 +4647,9 @@ pub fn build_indexed_program_expression_ir(
                 }
                 _ => return None,
             }
+        }
+        FunctionDescentStep::ClassHeritage if steps.len() == 0 => {
+            class_declaration_of(statement)?.super_class.as_ref()?
         }
         _ => return None,
     };

@@ -1142,6 +1142,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, true)
     }
 
+    /// A TYPE-LEVEL read of an indexed expression — a declaration's
+    /// initializer that `typeof` reads. Its value belongs to the reading
+    /// query, never to a flow frame that happens to be open around it, so a
+    /// call it resolves serves its value instead of a hold on that frame: a
+    /// module constant initialized by a call reads as the call's result
+    /// inside a body too. A call that leaves an obligation pending is
+    /// provisional and must not warm the reading query: a typed miss.
+    pub(crate) fn evaluate_indexed_value_expression_for_type(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        let pending = || {
+            self.dispatch_txn
+                .borrow()
+                .obligations
+                .pending()
+                .pending_len()
+        };
+        let before = pending();
+        let node =
+            self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, false);
+        if pending() != before {
+            crate::request_context::mark_request_result_partial();
+            return None;
+        }
+        node
+    }
+
     pub(crate) fn evaluate_indexed_value_expression_node_inner(
         &self,
         canonical: &str,
@@ -1286,7 +1316,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     verter_semantic::analysis::function_program::ProgramExpressionSource::Value
                     | verter_semantic::analysis::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = memo.indexed_program_expression_ir(record)?;
-                        self.evaluate_indexed_value_expression_node(
+                        self.evaluate_indexed_value_expression_for_type(
                             point.canonical_id.as_ref(),
                             owner,
                             expression.as_ref(),
