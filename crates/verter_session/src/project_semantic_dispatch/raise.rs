@@ -2684,7 +2684,7 @@ fn lower_and_classify_key_domain_at(
 /// `T = D` bound slot), derefed LEASE-ONLY through the anchor canonical's
 /// retained snapshot via the shared locator-deref worker. `None` =
 /// unavailable — conservative (undecidable ⇒ refusal).
-fn deref_slot_body(
+pub(super) fn deref_slot_body(
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     slot: &verter_type_expr::locators::TypeBodySlot,
 ) -> Option<TypeExpr> {

@@ -6139,19 +6139,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let body_slot = prepared.body_facts.body_slot.clone();
         let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-        let body = match serve
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .deref_locator_body(&verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                body_slot.clone(),
-            )) {
-            Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
-                shape: crate::decl_body_memo::DerefedBodyShape::Single(body),
-                ..
-            }) => body,
-            _ => return None,
-        };
+        let body = super::raise::deref_slot_body(self.ctx, &body_slot)?;
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(canonical),
             owner,
