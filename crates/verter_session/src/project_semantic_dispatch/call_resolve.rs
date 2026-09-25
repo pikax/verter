@@ -1362,6 +1362,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
     }
 
+    /// Whether the return of a call signature of `target` — the contextual
+    /// signature a context-sensitive function argument is checked under —
+    /// mentions one of `params`. A signature list that does not settle
+    /// answers `true`: nothing proves the return free of them.
+    fn contextual_return_mentions(
+        &self,
+        target: SemanticNodeId,
+        params: &[SemanticNodeId],
+    ) -> bool {
+        match self.shared_signature_nodes(target, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                nodes.iter().any(|node| {
+                    let return_type = match self.graph().node_data(*node).as_deref() {
+                        Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                        _ => return false,
+                    };
+                    params
+                        .iter()
+                        .any(|param| self.mentions_node(return_type, *param))
+                })
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
+        }
+    }
+
     /// Demand the ordered candidates of the callee's `bucket`, instantiated
     /// under `type_args`, and classify a set that did not come back
     /// through the SAME shared signature list the producer read — never
@@ -2052,6 +2077,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             }
         }
+        let uninferred_params: Vec<SemanticNodeId> = uninferred_positions
+            .iter()
+            .map(|&position| fixed[position].param)
+            .collect();
         // The uninferred parameters that took their DEFAULT. A default names
         // earlier parameters, and the checker instantiates it with their
         // INFERRED types — after literal widening — so a widened
@@ -2245,6 +2274,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+        let mut context_sensitive_targets: Vec<SemanticNodeId> = Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             if deferred_generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
@@ -2265,6 +2295,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
+            if argument.context_sensitive {
+                context_sensitive_targets.push(target);
+            }
             let (source, freshness_origin, _) = argument_source(argument, target);
             let target = self.substitute_canonical(target, &substitution);
             match decided_call_relation(
@@ -2291,6 +2324,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if recovery && (failure.is_none() || deferred_for_relation_scc) {
             self.abandon_session(session_id);
             return CandidateVerdict::Mismatch;
+        }
+        // The checker infers a type parameter no other argument inferred
+        // from a context-sensitive function argument's RETURN: its second
+        // inference pass checks the function under the contextual signature
+        // and infers from what the body returns (`map<U>` over `x => x`).
+        // This executor types no function body under a contextual
+        // signature: the call is undecided, and no rail may answer it with
+        // the parameter's fallback.
+        if key.explicit_type_args.is_empty()
+            && !uninferred_params.is_empty()
+            && context_sensitive_targets
+                .iter()
+                .any(|target| self.contextual_return_mentions(*target, &uninferred_params))
+        {
+            self.abandon_session(session_id);
+            return CandidateVerdict::Degraded(ResolveCallFailure::ContextSensitiveInference);
         }
         let ordered_args = raw_type_params
             .iter()

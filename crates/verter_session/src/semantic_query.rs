@@ -2392,6 +2392,13 @@ pub enum ResolveCallFailure {
     Undecidable,
     /// The call-resolution work envelope tripped.
     Budget,
+    /// A type parameter no other argument infers occurs in the return of
+    /// the contextual signature a context-sensitive function argument is
+    /// checked under: the checker infers it from what that function
+    /// returns, which applicability does not model. Undecided like
+    /// [`Self::Undecidable`], but no rail may answer the call with the
+    /// parameter's fallback instead.
+    ContextSensitiveInference,
 }
 
 /// The env-free declaration-slot SEED — exactly the four env-free

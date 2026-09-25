@@ -23413,10 +23413,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already
             // defines; the executor never widens it to `any`, and
-            // neither does this rail.
+            // neither does this rail. So is a call whose type parameter
+            // the checker infers from a context-sensitive argument's
+            // return: this rail's own read would answer that parameter's
+            // fallback.
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
-                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
+                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
+                | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference,
             ) => Some(self.degraded_unrepresentable_callee()),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
