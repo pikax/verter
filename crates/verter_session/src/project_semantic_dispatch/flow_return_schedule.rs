@@ -47,8 +47,17 @@
 //!   signatures the call executor reads, for a call — by the frame or by a
 //!   function value it composes — that forwards the frame's own binders.
 //!   A call no rail resolves to a named function, an argument of any other
-//!   call, and an instantiation of any other shape are left to the body,
-//!   which evaluates them recursively exactly as before.
+//!   call, and an instantiation of any other shape are not predicted.
+//! - **What discovery does not predict is found where it is demanded.**
+//!   Under an open schedule, an inline evaluation of a callee return no
+//!   schedule has settled does not nest. Beneath a scheduled evaluation —
+//!   a probe — it is recorded and refused, typed and inside the probe's
+//!   private rails; the recorded returns are walked and evaluated first,
+//!   and the probed entry is evaluated again. Anywhere else it is
+//!   scheduled where it is made, its own evaluation probed in turn. An
+//!   instantiation read from an argument of any form, or a call nested
+//!   where discovery does not look, then costs one refused probe per level
+//!   rather than one native level.
 //! - **Cycles stay with the SCC machinery.** A callee whose discovered
 //!   closure reaches a frame in flight, an open member of a pending
 //!   component, or an entry below it on the explicit stack is never
@@ -76,8 +85,9 @@
 //! The schedule keeps one transaction-local session while any frame is
 //! evaluating: the callee returns it has already settled — evaluated, left
 //! to the body, or abandoned — so a nested frame's schedule never
-//! re-evaluates them, and the instantiated demands each uninstantiated
-//! frame made. The session is cleared when the outermost frame finishes.
+//! re-evaluates them, the instantiated demands each uninstantiated frame
+//! made, and the probes in progress. The session is cleared when the
+//! outermost frame finishes.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -107,6 +117,23 @@ pub(crate) struct FlowScheduleSession {
     /// The instantiated callee returns each uninstantiated frame demanded
     /// while it evaluated, in demand order.
     demands: FxHashMap<FlowReturnKey, Vec<FlowReturnKey>>,
+    /// The scheduled evaluations in progress, innermost last: `Some` for a
+    /// probe collecting the unsettled callee returns its evaluation
+    /// demands, `None` for one whose demands are scheduled where they are
+    /// made.
+    probes: Vec<Option<Vec<FlowReturnKey>>>,
+}
+
+/// What [`ProjectSemanticDispatch::intercept_unscheduled_flow_demand`]
+/// did with one inline flow demand.
+pub(super) enum UnscheduledDemand {
+    /// The demand was already settled, or no schedule is open: it runs.
+    Runs,
+    /// A probe recorded it and refused it, typed and partial.
+    Refused,
+    /// It was scheduled where it was made; its answer is reusable when the
+    /// schedule reached one.
+    Scheduled,
 }
 
 /// Keeps a frame's schedule session open for the frame's whole evaluation;
@@ -125,6 +152,7 @@ impl Drop for FlowScheduleScope<'_> {
             if session.open == 0 {
                 session.settled.clear();
                 session.demands.clear();
+                session.probes.clear();
             }
         }
     }
@@ -164,6 +192,13 @@ struct ScheduledCallee {
     /// Whether evaluating this entry at its demand would nest a further
     /// evaluation — some callee was neither answered nor open.
     nests: bool,
+    /// How many of `callees` discovery predicted; the rest a probe of
+    /// this entry recorded.
+    predicted: usize,
+    /// Whether this entry is evaluated here even with nothing left beneath
+    /// it: a demand scheduled where it was made, or one a probe recorded,
+    /// whose own demands only its evaluation can show.
+    forced: bool,
 }
 
 /// The explicit stacks of one schedule run: the depth-first walk, and
@@ -204,7 +239,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             && crate::resolver_core::resolver_context::fact_tracer_installed()
         {
             let roots = self.callees_of(frame, index, entry, lowered);
-            self.run_flow_return_schedule(roots);
+            self.run_flow_return_schedule(roots, false);
         }
         scope
     }
@@ -233,7 +268,63 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    fn run_flow_return_schedule(&self, roots: Vec<FlowReturnKey>) {
+    /// The demand-time half of discovery, for an inline flow evaluation of
+    /// `key` about to open beneath a frame evaluating under an open
+    /// schedule. A demand the schedule already settled, answered or holds
+    /// runs as it is. An unsettled one is a callee return no discovery
+    /// predicted — an instantiation read from an argument of any form, a
+    /// call nested where discovery does not look. Beneath a probe it is
+    /// recorded and refused, so the probe's entry is evaluated again once
+    /// the recorded return is; elsewhere it is scheduled where it is made,
+    /// its own unpredicted demands probed in turn, so it is evaluated from
+    /// the explicit stack rather than one native level deeper.
+    pub(super) fn intercept_unscheduled_flow_demand(
+        &self,
+        key: &FlowReturnKey,
+    ) -> UnscheduledDemand {
+        let probing = {
+            let txn = self.dispatch_txn.borrow();
+            let session = &txn.flow.schedule;
+            if session.open == 0 {
+                return UnscheduledDemand::Runs;
+            }
+            matches!(session.probes.last(), Some(Some(_)))
+        };
+        if !flow_return_schedule_enabled()
+            || !crate::resolver_core::resolver_context::fact_tracer_installed()
+            || !matches!(
+                self.callee_standing(key, &ScheduleRun::default()),
+                CalleeStanding::Unsettled
+            )
+        {
+            return UnscheduledDemand::Runs;
+        }
+        if probing {
+            if let Some(Some(recorded)) = self
+                .dispatch_txn
+                .borrow_mut()
+                .flow
+                .schedule
+                .probes
+                .last_mut()
+            {
+                push_unique(recorded, key.clone());
+            }
+            // The refusal stays inside the probe's private rails: it marks
+            // every build that read it partial, and never trips the
+            // connected demand.
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
+            );
+            return UnscheduledDemand::Refused;
+        }
+        self.run_flow_return_schedule(vec![key.clone()], true);
+        UnscheduledDemand::Scheduled
+    }
+
+    /// Run the schedule over `roots`; `forced` evaluates each root even
+    /// with nothing discovered beneath it.
+    fn run_flow_return_schedule(&self, roots: Vec<FlowReturnKey>, forced: bool) {
         let mut run = ScheduleRun {
             next_index: OPEN_COMPONENT + 1,
             ..ScheduleRun::default()
@@ -242,7 +333,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if !matches!(self.callee_standing(&root, &run), CalleeStanding::Unsettled) {
                 continue;
             }
-            self.push_discovered(&mut run, root);
+            self.push_discovered(&mut run, root, forced);
             if !self.drain_flow_return_schedule(&mut run) {
                 return;
             }
@@ -250,7 +341,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Discover `key`'s callees and push it on both stacks.
-    fn push_discovered(&self, run: &mut ScheduleRun, key: FlowReturnKey) {
+    fn push_discovered(&self, run: &mut ScheduleRun, key: FlowReturnKey, forced: bool) {
         let index = run.next_index;
         run.next_index += 1;
         let callees = self.discover_flow_return_callees(&key);
@@ -258,11 +349,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         run.component.push(key.clone());
         run.walking.push(ScheduledCallee {
             key,
+            predicted: callees.len(),
             callees,
             next: 0,
             index,
             low: index,
             nests: false,
+            forced,
         });
     }
 
@@ -284,7 +377,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     CalleeStanding::Unsettled => {
                         top.nests = true;
-                        self.push_discovered(run, callee);
+                        // A callee a probe recorded is forced in turn.
+                        let forced = top.next > top.predicted;
+                        self.push_discovered(run, callee, forced);
                     }
                 }
                 continue;
@@ -306,23 +401,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .expect("a discovered entry is on the component stack");
             let members = run.component.split_off(position);
             self.settle_all(members.iter());
-            // A cycle's root, or an entry with something left to evaluate
-            // beneath it, is evaluated now; anything else is left to its
-            // demand, one level deep, in the body's own order.
-            if members.len() == 1 && !done.nests {
+            // A cycle's root, an entry with something left to evaluate
+            // beneath it, and a forced entry are evaluated now; anything
+            // else is left to its demand, one level deep, in the body's own
+            // order.
+            if members.len() == 1 && !done.nests && !done.forced {
                 continue;
             }
             if self.connected_demand().work_available().is_err() {
                 self.abandon(run);
                 return false;
             }
-            if !self.evaluate_scheduled_callee(&done.key) {
-                // Not reusable: every entry still being walked would
-                // re-evaluate it at its own demand, one level deeper each.
-                // They are left to the recursive path, as without a
-                // schedule.
-                self.abandon(run);
+            // A lone entry is probed: a callee return its evaluation
+            // demands that no discovery predicted is recorded instead of
+            // nesting. A cycle's root runs through the ordinary path.
+            let evaluated = self.evaluate_scheduled_callee(&done.key, members.len() == 1);
+            if evaluated.reusable {
+                continue;
             }
+            let recorded: Vec<FlowReturnKey> = evaluated
+                .recorded
+                .into_iter()
+                .filter(|key| !done.callees.contains(key))
+                .collect();
+            if !recorded.is_empty() {
+                // The probe met callee returns beneath it: they are walked,
+                // and evaluated, before the entry is evaluated again.
+                let mut entry = done;
+                entry.callees.extend(recorded);
+                run.component.push(entry.key.clone());
+                run.walking.push(entry);
+                continue;
+            }
+            // Not reusable: every entry still being walked would
+            // re-evaluate it at its own demand, one level deeper each.
+            // They are left to the recursive path, as without a schedule.
+            self.abandon(run);
         }
         // Whatever reached an open component never closed here: it joins
         // that component at its demand.
@@ -378,24 +492,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Evaluate one scheduled callee through the ordinary inline path,
-    /// under private rails (see the module documentation). `true` when it
-    /// closed as a reusable completed member.
-    fn evaluate_scheduled_callee(&self, key: &FlowReturnKey) -> bool {
+    /// under private rails (see the module documentation); `probe`
+    /// records the unsettled callee returns it demands instead of nesting
+    /// them.
+    fn evaluate_scheduled_callee(&self, key: &FlowReturnKey, probe: bool) -> ScheduledEvaluation {
         let deferred_sticky = crate::request_context::DeferredPartialStickyScope::enter();
         let completeness = crate::request_context::ColdComputeCompletenessScope::enter();
         let frame = BuildLocalTaintGuard::push(&self.build_local_taint);
+        self.dispatch_txn
+            .borrow_mut()
+            .flow
+            .schedule
+            .probes
+            .push(probe.then(Vec::new));
         let step = self.execute_flow_return(key.clone());
+        let recorded = self
+            .dispatch_txn
+            .borrow_mut()
+            .flow
+            .schedule
+            .probes
+            .pop()
+            .flatten()
+            .unwrap_or_default();
         let _ = frame.finish();
         completeness.discard();
         drop(deferred_sticky);
-        matches!(step, FlowReturnStep::Complete(_))
+        let reusable = matches!(step, FlowReturnStep::Complete(_))
             && self
                 .dispatch_txn
                 .borrow()
                 .flow
                 .completed_members
                 .iter()
-                .any(|member| &member.key == key && member.reuse.is_some())
+                .any(|member| &member.key == key && member.reuse.is_some());
+        ScheduledEvaluation { reusable, recorded }
     }
 
     /// The callee returns a discovered callee's body demands. It has not
@@ -1239,6 +1370,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         identity.anchor.owner = root.owner;
         Some(identity)
     }
+}
+
+/// The outcome of one scheduled evaluation.
+struct ScheduledEvaluation {
+    /// It closed as a reusable completed member.
+    reusable: bool,
+    /// The unsettled callee returns its probe recorded, in demand order.
+    recorded: Vec<FlowReturnKey>,
 }
 
 /// One call a frame's body evaluates for its value, whose callee's

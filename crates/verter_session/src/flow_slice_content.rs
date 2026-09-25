@@ -1588,7 +1588,7 @@ fn authored_call_site(
     )
 }
 
-/// The arguments of one call that are themselves calls, lowered in the
+/// The arguments of one call that are themselves calls or member reads,
 /// calling frame, by argument ordinal.
 ///
 /// A call's arguments are otherwise parse facts its call sink re-reads
@@ -1610,7 +1610,7 @@ impl SliceCallArguments {
         Self::default()
     }
 
-    /// The frame-lowered argument at `ordinal`, when it is a call.
+    /// The frame-lowered argument at `ordinal`, when it is lowered here.
     #[must_use]
     pub fn get(&self, ordinal: usize) -> Option<&SliceExpr> {
         self.0.get(ordinal).and_then(Option::as_ref)
@@ -8980,38 +8980,44 @@ impl<'a> Lowerer<'a> {
     }
 
     /// The [`SliceCallArguments`] of one call's `arguments`: each argument
-    /// that is itself a call (through parentheses), lowered through this
-    /// frame's call carrier. An immediately invoked function, a spread
-    /// element and every other argument stay with the call sink's own
-    /// reading.
+    /// that is itself a call (through parentheses), or a static member
+    /// read (`o.a`), lowered through this frame's own carriers, so the
+    /// bindings it reads are the frame's. An immediately invoked function,
+    /// a spread element and every other argument stay with the call sink's
+    /// own reading — a bare binding read already reads the frame.
     fn lower_call_arguments(
         &mut self,
         arguments: &[oxc_ast::ast::Argument<'_>],
         mode: ExprMode,
     ) -> SliceCallArguments {
-        let is_call =
-            |argument: &oxc_ast::ast::Argument<'_>| {
-                argument.as_expression().map(unwrap_parenthesized).is_some_and(|argument| {
-                matches!(argument, Expression::CallExpression(call)
-                    if !matches!(
+        let in_frame = |argument: &oxc_ast::ast::Argument<'_>| {
+            argument
+                .as_expression()
+                .map(unwrap_parenthesized)
+                .is_some_and(|argument| match argument {
+                    Expression::CallExpression(call) => !matches!(
                         unwrap_parenthesized(&call.callee),
                         Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
-                    ))
-            })
-            };
-        if !arguments.iter().any(is_call) {
+                    ),
+                    Expression::StaticMemberExpression(_) => true,
+                    _ => false,
+                })
+        };
+        if !arguments.iter().any(in_frame) {
             return SliceCallArguments::none();
         }
         let lowered: Vec<Option<SliceExpr>> = arguments
             .iter()
-            .map(
-                |argument| match argument.as_expression().map(unwrap_parenthesized) {
-                    Some(expression @ Expression::CallExpression(_)) if is_call(argument) => {
-                        Some(self.lower_expr(expression, mode))
-                    }
-                    _ => None,
-                },
-            )
+            .map(|argument| {
+                in_frame(argument).then(|| {
+                    let expression = unwrap_parenthesized(
+                        argument
+                            .as_expression()
+                            .expect("an in-frame argument is an expression"),
+                    );
+                    self.lower_expr(expression, mode)
+                })
+            })
             .collect();
         SliceCallArguments(Arc::from(lowered.into_boxed_slice()))
     }

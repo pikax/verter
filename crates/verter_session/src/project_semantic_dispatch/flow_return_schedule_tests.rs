@@ -531,7 +531,13 @@ fn warm_local_chain_second(levels: usize, scheduled: bool) -> WarmSecond {
         "export function second(v: boolean) {{ return l{}(v); }}\n",
         levels - 1
     ));
-    let host = host_with(&[(PATH, source.as_str())]);
+    warm_second(&source, scheduled)
+}
+
+/// [`warm_local_chain_second`] over any `source` that exports `witness`
+/// and `second`.
+fn warm_second(source: &str, scheduled: bool) -> WarmSecond {
+    let host = host_with(&[(PATH, source)]);
     let warm = with_dispatch(&host, |dispatch| {
         eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
     });
@@ -763,9 +769,10 @@ fn witness_under_depth(source: &str, expected: &str, depth: u16) -> ColdRead {
     })
 }
 
-/// A call nested inside another call's argument is evaluated in the frame
-/// it is written in: its callee, its own arguments and the bindings they
-/// read are the frame's, and its value takes the frame's call carrier.
+/// A call nested inside another call's argument, and a member read there,
+/// is evaluated in the frame it is written in: its callee, its own
+/// arguments and the bindings they read are the frame's, and its value
+/// takes the frame's carriers.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, `--declaration
 /// --emitDeclarationOnly`, identical under all four `strictNullChecks` x
@@ -782,9 +789,12 @@ fn witness_under_depth(source: &str, expected: &str, depth: u16) -> ColdRead {
 /// | `w5(n: number)` = `pair(num(n), id(n))` | `{ a: number; b: number; }` |
 /// | `w6(s: string)` = `id(id(id(s)))` | `string` |
 /// | `w7(n?: number)` = `id(num(n ?? 1))` | `number` |
+/// | `m1(o: { a: string })` = `id(o.a)` | `string` |
+/// | `m2()` = `const box = { a: 1 }; return id(box.a);` | `number` |
+/// | `m3(o: { a: { b: "k" } })` = `id(o.a.b)` | `"k"` |
 ///
-/// Evaluated in the file's owner scope instead, the frame's `x`, `v`, `n`
-/// and `s` are unbound, so `v` answered a semantic miss.
+/// Evaluated in the file's owner scope instead, the frame's `x`, `v`, `n`,
+/// `s`, `o` and `box` are unbound, so each answered a semantic miss.
 #[test]
 fn a_call_in_another_calls_argument_evaluates_in_its_own_frame() {
     assert_answers_as_the_checker(&cold_read_of(
@@ -807,8 +817,14 @@ export function w3(n: number) { return id(h(n)); }\n\
 export function w4() { const r = id(g()); return r; }\n\
 export function w5(n: number) { return pair(num(n), id(n)); }\n\
 export function w6(s: string) { return id(id(id(s))); }\n\
-export function w7(n?: number) { return id(num(n ?? 1)); }\n";
+export function w7(n?: number) { return id(num(n ?? 1)); }\n\
+export function m1(o: { a: string }) { return id(o.a); }\n\
+export function m2() { const box = { a: 1 }; return id(box.a); }\n\
+export function m3(o: { a: { b: \"k\" } }) { return id(o.a.b); }\n";
     for (name, expected) in [
+        ("m1", "string"),
+        ("m2", "number"),
+        ("m3", "\"k\""),
         ("nested", "{ v: string | number; tag: \"c\"; }"),
         ("w1", "string"),
         ("w2", "\"a\""),
@@ -886,61 +902,104 @@ fn a_200_level_type_position_chain_answers_on_the_default_stack() {
     ));
 }
 
-/// The queries a cold read of `witness` over `source` dispatches, by kind.
-fn dispatched_queries(source: &str) -> std::collections::BTreeMap<&'static str, usize> {
-    use crate::project_semantic_dispatch::raise::{enable_dispatch_trace_for_test, DISPATCH_TRACE};
-    let host = host_with(&[(PATH, source)]);
-    with_dispatch(&host, |dispatch| {
-        let _trace = enable_dispatch_trace_for_test();
-        let read = cold_read(dispatch, PATH, "witness", "{ v: number; tag: \"c\"; }");
-        assert_answers_as_the_checker(&read);
-        DISPATCH_TRACE.with(|trace| {
-            let mut counts = std::collections::BTreeMap::new();
-            for kind in trace.borrow().iter() {
-                *counts.entry(*kind).or_insert(0) += 1;
-            }
-            counts
-        })
-    })
-}
-
-/// The type-position chain lowers each level's `typeof` once: one more
-/// level adds the same queries — one `TypeOf` and the `LowerLocator` it
-/// lowers the function through — at 16, 64 and 200 levels, and the
-/// schedule evaluates each level's return once, before the level that
-/// reads it.
+/// The type-position chain's connected work is linear in its length: one
+/// more level costs the same at 16, 64 and 200 levels.
 ///
-/// The chain's connected WORK is not linear: each level's `LowerLocator`
-/// projects the function type `typeof` names, and that type's return is
-/// the level below's `ReturnType<…>` carrier, whose argument is that
-/// level's function type in turn. The view projection walks the whole
-/// nested carrier chain beneath it — a walk that grows by one level per
-/// level (about 1.5·N² units at N levels: 60,498 at 200, and the work rail
-/// refuses the chain, typed, from 418 levels). The checker resolves a
-/// `ReturnType` of a closed function type eagerly, so its chain stays
-/// flat; this is the published-carrier representation's cost, not the
-/// schedule's.
+/// Each level's `ReturnType<typeof t(N-1)>` resolves where the level
+/// builds it, to the return below, as the checker resolves a conditional
+/// type whose check type is not generic: no level publishes a carrier
+/// over the level beneath it, so no reader projects the chain again.
 ///
 /// Oracle: as for
 /// [`a_200_level_type_position_chain_answers_on_the_default_stack`], at
 /// every length.
 #[test]
-fn a_type_position_chain_dispatches_the_same_queries_per_level() {
-    let per_level: Vec<std::collections::BTreeMap<&'static str, usize>> = [16, 64, 200]
-        .into_iter()
-        .map(|levels| {
-            let shorter = dispatched_queries(&type_position_chain(levels));
-            let longer = dispatched_queries(&type_position_chain(levels + 1));
-            longer
-                .iter()
-                .map(|(kind, count)| (*kind, count - shorter.get(kind).copied().unwrap_or(0)))
-                .collect()
-        })
-        .collect();
+fn a_type_position_chain_costs_the_same_work_per_level() {
+    let per_level = work_per_level(
+        type_position_chain,
+        "{ v: number; tag: \"c\"; }",
+        &[16, 64, 200],
+    );
     assert!(
         per_level.windows(2).all(|pair| pair[0] == pair[1]),
-        "queries per level: {per_level:?}"
+        "work per level: {per_level:?}"
     );
+}
+
+/// A 1,000-level type-position chain answers, under the production work
+/// budget and on the default test stack.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings, measured at 200 levels — every level is the
+/// same declaration): `witness` is `{ v: number; tag: "c"; }`.
+#[test]
+fn a_1000_level_type_position_chain_answers() {
+    assert_answers_as_the_checker(&cold_read_of(
+        &type_position_chain(1_000),
+        "witness",
+        "{ v: number; tag: \"c\"; }",
+    ));
+}
+
+/// A body's `ReturnType<…>` resolves where it is built exactly where the
+/// checker resolves it — its check type is not generic — and stays the
+/// deferred application where the checker defers it; the published
+/// return is the resolved type, as the checker prints it.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`, identical under all four `strictNullChecks` x
+/// `noImplicitAny` settings), over `t0(x: number)` and `g0<T>(x: T)`
+/// returning `{ v: x, tag: "c" as const }`:
+///
+/// | function | declared return |
+/// |---|---|
+/// | `t1(x: number) { let r!: ReturnType<typeof t0>; return r; }` | `{ v: number; tag: "c"; }` |
+/// | `t2(x: number) { let r!: ReturnType<typeof t1>; return r; }` | `{ v: number; tag: "c"; }` |
+/// | `g1(x: number) { let r!: ReturnType<typeof g0>; return r; }` | `{ v: unknown; tag: "c"; }` |
+/// | `d1<T>(x: T) { let r!: ReturnType<() => T>; return r; }` | `T` |
+/// | `d3<T extends (...a: any) => any>(f: T) { let r!: ReturnType<T>; return r; }` | `ReturnType<T>` |
+#[test]
+fn a_return_type_in_a_body_resolves_unless_its_check_type_is_generic() {
+    const SOURCE: &str = "\
+function t0(x: number) { return { v: x, tag: \"c\" as const }; }\n\
+export function t1(x: number) { let r!: ReturnType<typeof t0>; return r; }\n\
+export function t2(x: number) { let r!: ReturnType<typeof t1>; return r; }\n\
+function g0<T>(x: T) { return { v: x, tag: \"c\" as const }; }\n\
+export function g1(x: number) { let r!: ReturnType<typeof g0>; return r; }\n\
+export function d1<T>(x: T) { let r!: ReturnType<() => T>; return r; }\n\
+export function d3<T extends (...a: any) => any>(f: T) { let r!: ReturnType<T>; return r; }\n";
+    let host = host_with(&[(PATH, SOURCE)]);
+    for name in ["t1", "t2"] {
+        assert_tagged_value(&eval(&host, PATH, name), &[number()]);
+    }
+    assert_tagged_value(
+        &eval(&host, PATH, "g1"),
+        &[TypeExpr::Primitive(PrimitiveName::Unknown)],
+    );
+    assert_eq!(
+        eval(&host, PATH, "d1"),
+        Outcome::Value {
+            ty: type_param("T"),
+            degradation: None,
+            candidates: 1,
+        }
+    );
+    match &eval(&host, PATH, "d3") {
+        Outcome::Value {
+            ty: TypeExpr::Ref {
+                name,
+                type_arguments,
+            },
+            degradation: None,
+            candidates: 1,
+        } if name.as_ref() == "ReturnType" => {
+            assert!(
+                matches!(type_arguments.as_ref(), [TypeExpr::TypeParameter(param)] if param.name == "T"),
+                "{type_arguments:?}"
+            );
+        }
+        other => panic!("`d3` keeps the deferred `ReturnType<T>`: {other:?}"),
+    }
 }
 
 /// A new instantiation of a warm 200-level chain whose every level calls
@@ -1001,5 +1060,241 @@ fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level
     assert!(
         per_level.windows(2).all(|pair| pair[0] == pair[1]),
         "work per level: {per_level:?}"
+    );
+}
+
+/// A chain whose every level calls the next inside another call's
+/// argument, inside a local arrow function:
+/// `aN<T>(x: T) { const f = (y: T) => id(a(N-1)(y)); return f(x); }`.
+fn arrow_nested_argument_chain(levels: usize) -> String {
+    let mut source = "function id<T>(x: T) { return x; }\n\
+                      function a0<T>(x: T) { return { v: x, tag: \"c\" as const }; }\n"
+        .to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function a{level}<T>(x: T) {{ const f = (y: T) => id(a{}(y)); return f(x); }}\n",
+            level - 1
+        ));
+    }
+    source.push_str(&format!(
+        "export function witness(v: number | string) {{ return a{}(v); }}\n",
+        levels - 1
+    ));
+    source
+}
+
+/// A 200-level chain whose every edge is a call inside a generic call's
+/// argument, inside a local arrow function, answers on the default test
+/// stack: the callee return no discovery predicts is recorded by the
+/// probe that meets it and evaluated first, from the explicit stack.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings): `witness` is `{ v: string | number; tag:
+/// "c"; }` over the 200-level chain.
+#[test]
+fn a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack() {
+    assert_answers_as_the_checker(&cold_read_of(
+        &arrow_nested_argument_chain(200),
+        "witness",
+        "{ v: string | number; tag: \"c\"; }",
+    ));
+}
+
+/// The nested-argument chain through local arrows costs the same work per
+/// level at 16, 64 and 200 levels.
+///
+/// Oracle: as for
+/// [`a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack`],
+/// at every length.
+#[test]
+fn a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level() {
+    let per_level = work_per_level(
+        arrow_nested_argument_chain,
+        "{ v: string | number; tag: \"c\"; }",
+        &[16, 64, 200],
+    );
+    assert!(
+        per_level.windows(2).all(|pair| pair[0] == pair[1]),
+        "work per level: {per_level:?}"
+    );
+}
+
+/// A chain whose every level passes the next a member read of a local:
+/// `kN<T>(x: T) { const box = { a: x }; return k(N-1)(box.a); }`.
+fn member_read_chain(levels: usize) -> String {
+    let mut source = "function k0<T>(x: T) { return { v: x, tag: \"c\" as const }; }\n".to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function k{level}<T>(x: T) {{ const box = {{ a: x }}; return k{}(box.a); }}\n",
+            level - 1
+        ));
+    }
+    let last = levels - 1;
+    source.push_str(&format!(
+        "export function witness(v: number | string) {{ return k{last}(v); }}\n\
+         export function second(v: boolean) {{ return k{last}(v); }}\n"
+    ));
+    source
+}
+
+/// A chain whose every level passes the next a member read of a
+/// parameter beside the parameter:
+/// `qN<T>(x: T, o: { a: T }) { return q(N-1)(o.a, o); }`.
+fn parameter_member_chain(levels: usize) -> String {
+    let mut source =
+        "function q0<T>(x: T, o: { a: T }) { return { v: x, tag: \"c\" as const }; }\n".to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function q{level}<T>(x: T, o: {{ a: T }}) {{ return q{}(o.a, o); }}\n",
+            level - 1
+        ));
+    }
+    let last = levels - 1;
+    source.push_str(&format!(
+        "export function witness(v: number | string, o: {{ a: number | string }}) {{ \
+         return q{last}(v, o); }}\n\
+         export function second(v: boolean, o: {{ a: boolean }}) {{ return q{last}(v, o); }}\n"
+    ));
+    source
+}
+
+/// A chain whose every level passes the next a literal beside its own
+/// parameter: `rN<T, U>(x: T, u: U) { return r(N-1)(x, "lit"); }`.
+fn literal_argument_chain(levels: usize) -> String {
+    let mut source =
+        "function r0<T, U>(x: T, u: U) { return { v: x, u, tag: \"c\" as const }; }\n".to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function r{level}<T, U>(x: T, u: U) {{ return r{}(x, \"lit\"); }}\n",
+            level - 1
+        ));
+    }
+    let last = levels - 1;
+    source.push_str(&format!(
+        "export function witness(v: number | string) {{ return r{last}(v, 0); }}\n\
+         export function second(v: boolean) {{ return r{last}(v, 0); }}\n"
+    ));
+    source
+}
+
+/// A chain whose every level passes the next a call on its parameter:
+/// `sN<T>(x: T) { return s(N-1)(id(x)); }`.
+fn call_argument_chain(levels: usize) -> String {
+    let mut source = "function id<T>(x: T) { return x; }\n\
+                      function s0<T>(x: T) { return { v: x, tag: \"c\" as const }; }\n"
+        .to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function s{level}<T>(x: T) {{ return s{}(id(x)); }}\n",
+            level - 1
+        ));
+    }
+    let last = levels - 1;
+    source.push_str(&format!(
+        "export function witness(v: number | string) {{ return s{last}(v); }}\n\
+         export function second(v: boolean) {{ return s{last}(v); }}\n"
+    ));
+    source
+}
+
+/// A first request's `witness` over a chain `source`, then a second
+/// request's `second` over the warm chain, each answers the checker's
+/// print, clean and admitted.
+#[track_caller]
+fn assert_warm_second_answers(source: &str, witness: &str, second: &str) {
+    let host = host_with(&[(PATH, source)]);
+    for (name, expected) in [("witness", witness), ("second", second)] {
+        let read = with_dispatch(&host, |dispatch| cold_read(dispatch, PATH, name, expected));
+        assert_answers_as_the_checker(&read);
+    }
+}
+
+/// The connected work of the second request's `second` over a warm chain
+/// of `levels`.
+fn warm_second_work(chain: ChainSource, levels: usize, second: &str) -> usize {
+    let host = host_with(&[(PATH, chain(levels).as_str())]);
+    with_dispatch(&host, |dispatch| {
+        let _ = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key_of(
+            dispatch, PATH, "witness",
+        ))));
+    });
+    with_dispatch(&host, |dispatch| {
+        let read = cold_read(dispatch, PATH, "second", second);
+        assert_answers_as_the_checker(&read);
+        read.work
+    })
+}
+
+/// A new instantiation of a warm 200-level `chain` answers on the default
+/// test stack, and one more level costs the same work at 16, 32 and 64
+/// levels.
+#[track_caller]
+fn assert_warm_argument_form(chain: ChainSource, witness: &str, second: &str) {
+    assert_warm_second_answers(&chain(200), witness, second);
+    let per_level: Vec<usize> = [16, 32, 64]
+        .into_iter()
+        .map(|levels| {
+            warm_second_work(chain, levels + 1, second) - warm_second_work(chain, levels, second)
+        })
+        .collect();
+    assert!(
+        per_level.windows(2).all(|pair| pair[0] == pair[1]),
+        "work per level: {per_level:?}"
+    );
+}
+
+// A new instantiation of a warm chain answers on the default test stack
+// whatever each level passes the next: the instantiation each level
+// demands is the call executor's own, recorded by the probe that meets it
+// and evaluated first, from the explicit stack.
+//
+// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+// `noImplicitAny` settings, over each 200-level chain):
+//
+// | chain | `witness(v: number \| string, …)` | `second(v: boolean, …)` |
+// |---|---|---|
+// | parameter member read `q(N-1)(o.a, o)` | `{ v: string \| number; tag: "c"; }` | `{ v: boolean; tag: "c"; }` |
+// | local member read `k(N-1)(box.a)` | `{ v: string \| number; tag: "c"; }` | `{ v: boolean; tag: "c"; }` |
+// | literal `r(N-1)(x, "lit")` | `{ v: string \| number; u: string; tag: "c"; }` | `{ v: boolean; u: string; tag: "c"; }` |
+// | call `s(N-1)(id(x))` | `{ v: string \| number; tag: "c"; }` | `{ v: boolean; tag: "c"; }` |
+
+/// A parameter member read (`q(N-1)(o.a, o)`); oracle in the table above.
+#[test]
+fn a_warm_chain_passing_a_parameter_member_read_instantiates_stacklessly() {
+    assert_warm_argument_form(
+        parameter_member_chain,
+        "{ v: string | number; tag: \"c\"; }",
+        "{ v: boolean; tag: \"c\"; }",
+    );
+}
+
+/// A local member read (`k(N-1)(box.a)`); oracle in the table above.
+#[test]
+fn a_warm_chain_passing_a_local_member_read_instantiates_stacklessly() {
+    assert_warm_argument_form(
+        member_read_chain,
+        "{ v: string | number; tag: \"c\"; }",
+        "{ v: boolean; tag: \"c\"; }",
+    );
+}
+
+/// A literal beside the parameter (`r(N-1)(x, "lit")`); oracle in the
+/// table above.
+#[test]
+fn a_warm_chain_passing_a_literal_instantiates_stacklessly() {
+    assert_warm_argument_form(
+        literal_argument_chain,
+        "{ v: string | number; u: string; tag: \"c\"; }",
+        "{ v: boolean; u: string; tag: \"c\"; }",
+    );
+}
+
+/// A call on the parameter (`s(N-1)(id(x))`); oracle in the table above.
+#[test]
+fn a_warm_chain_passing_a_call_on_its_parameter_instantiates_stacklessly() {
+    assert_warm_argument_form(
+        call_argument_chain,
+        "{ v: string | number; tag: \"c\"; }",
+        "{ v: boolean; tag: \"c\"; }",
     );
 }

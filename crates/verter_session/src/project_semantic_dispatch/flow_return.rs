@@ -1442,6 +1442,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(identity)
     }
 
+    /// The value a body position's signature-utility application
+    /// (`ReturnType<typeof callee>`, `Parameters<…>`, `InstanceType<…>`,
+    /// …) denotes when its argument is a function or object type: the
+    /// utility's answer, resolved where the type is built. Each utility is
+    /// a conditional type over its argument, and the checker resolves a
+    /// conditional type whose check type is not generic immediately
+    /// (`getConditionalType`); a function or object type literal is never
+    /// generic, even when a signature in it names a type parameter
+    /// (`ReturnType<() => T>` is `T`). Any other application keeps its
+    /// carrier — a type parameter or an operator over one is where the
+    /// checker defers (`ReturnType<T>` stays `ReturnType<T>`), and a carrier
+    /// this lowering has not read stays deferred to its reader — and so does
+    /// an application the instantiation does not answer.
+    ///
+    /// A flow body demands the value it types, so a body-derived callee's
+    /// return is demanded here in full, as the checker demands it. Without
+    /// this, each body that reads its callee's return through a type
+    /// position publishes the carrier over the callee's function type,
+    /// whose return is the callee's own carrier in turn, and every reader
+    /// projects the whole nested chain again.
+    pub(super) fn resolve_closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let Some(data) = self.graph().node_data(node) else {
+            return node;
+        };
+        let SemanticNodeData::InstantiationRef { base, args } = data.as_ref() else {
+            return node;
+        };
+        let graph = self.graph();
+        let closed = |argument: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*argument).as_deref(),
+                Some(SemanticNodeData::Object(_) | SemanticNodeData::Signature { .. })
+            )
+        };
+        if base.canonical_id.as_ref() != "__builtin__"
+            || super::signature_utility::SignatureUtility::from_builtin_name(&base.decl_name)
+                .is_none()
+            || !args.iter().all(closed)
+        {
+            return node;
+        }
+        match self.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    Arc::clone(&base.canonical_id),
+                    base.owner,
+                    Arc::clone(&base.decl_name),
+                ),
+                Arc::clone(args),
+                self.instantiate_context_for(&base.canonical_id, context),
+            ),
+        )) {
+            QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
+            _ => node,
+        }
+    }
+
     /// Whether `node` is the builtin `ReturnType<typeof callee>`
     /// instantiation carrier over a body-derived (flow-return) callee —
     /// the shape whose MEMBER projection routes through the
@@ -1858,6 +1919,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// SCC close and drained by the machinery root onto the root's
     /// carrier.
     fn execute_flow_return_inline(&self, key: FlowReturnKey) -> FlowReturnStep {
+        // A demand no schedule predicted is recorded by the probe it is
+        // made under, or scheduled here, before it can nest.
+        match self.intercept_unscheduled_flow_demand(&key) {
+            schedule::UnscheduledDemand::Runs => {}
+            schedule::UnscheduledDemand::Refused => {
+                return FlowReturnStep::NoValue(FlowReturnFailure::Budget(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                ));
+            }
+            schedule::UnscheduledDemand::Scheduled => {
+                if let Some(result) = self.reusable_completed_flow_member(&key) {
+                    return FlowReturnStep::Complete(result);
+                }
+            }
+        }
         if self.refuse_nested_flow_evaluation() || self.charge_connected_work().is_err() {
             return FlowReturnStep::NoValue(FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
@@ -14487,7 +14563,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// keeps the binder, never an outer same-name resolution.
     fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        self.dispatch.shallow_lower_type_expr_with_context(
+        let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
+        let node = self.dispatch.shallow_lower_type_expr_with_context(
             ty,
             &self.binder_env.env,
             &self.binder_env.scope,
@@ -14495,8 +14572,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.binder_env.scope_payload.as_ref(),
             &self.binder_env.shadowing,
             &mut substitutions,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )
+            context,
+        );
+        self.dispatch
+            .resolve_closed_signature_utility(node, context)
     }
 
     /// Whether the file OWNER SCOPE answers `name` in the name space it
@@ -18032,18 +18111,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return Some(self.degraded_unrepresentable_callee());
             };
             let binding = self.indexed_argument_binding(*root);
-            // An argument that is itself a call evaluates through this
-            // frame's call carrier, against the frame's bindings: a hold
-            // on its callee holds this call too.
-            let evaluated = match (&argument.expression, arguments.get(ordinal)) {
-                (verter_type_expr::IndexedValueExpression::Call(_), Some(lowered)) => {
-                    match self.eval_expr(lowered) {
-                        Positional::Value(node) => Some(node),
-                        Positional::Hold => return Some(Positional::Hold),
-                        Positional::Unmodeled => None,
-                    }
-                }
-                _ => self.eval_indexed_call_argument(&argument.expression, &binding),
+            // An argument that is itself a call, or a member read,
+            // evaluates through this frame's carriers, against the frame's
+            // bindings: a hold on its callee holds this call too.
+            let evaluated = match arguments.get(ordinal) {
+                Some(lowered) => match self.eval_expr(lowered) {
+                    Positional::Value(node) => Some(node),
+                    Positional::Hold => return Some(Positional::Hold),
+                    Positional::Unmodeled => None,
+                },
+                None => self.eval_indexed_call_argument(&argument.expression, &binding),
             };
             let Some(ty) = evaluated else {
                 // An argument this substrate cannot type leaves
