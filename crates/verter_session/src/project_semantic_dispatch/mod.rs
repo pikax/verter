@@ -4215,6 +4215,8 @@ mod differential_harness_tests;
 #[cfg(test)]
 mod differential_module_tests;
 #[cfg(test)]
+mod differential_narrowing_tests;
+#[cfg(test)]
 mod differential_relation_tests;
 #[cfg(test)]
 mod enum_literal_tests;
