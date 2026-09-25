@@ -587,14 +587,26 @@ fn redischarge_stability_requires_same_polarity_and_binding_snapshot() {
     ));
 }
 
+fn one_parameter_session_setup() -> InferenceSessionSetup {
+    setup(
+        SemanticNodeId(901),
+        VariancePhase::Covariant,
+        InferencePassKind::Ordinary,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    )
+}
+
 #[test]
 fn candidate_writes_mark_every_non_owner_ancestor_mutating_an_outer_session() {
     let mut txn = CheckerDispatchTransaction::default();
     let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
-    let session = SessionId(7);
     let owner = txn
         .reentry_mut()
         .push_relate(relation_key(301), occurrence, 0);
+    let session = txn.push_collecting_session(one_parameter_session_setup(), None);
     txn.note_opened_session(owner, session);
     txn.note_candidate_write(Some(session));
 
@@ -620,6 +632,47 @@ fn candidate_writes_mark_every_non_owner_ancestor_mutating_an_outer_session() {
     assert!(
         !session_delta(&owner),
         "the frame that owns the session may publish its fixed bindings"
+    );
+}
+
+/// A call executor opens its candidate session beneath two relation
+/// frames (the shape a class relation reaches through a generic call in
+/// its heritage clause), and the argument relation above it deposits into
+/// that session. Only the argument relation mutates a session it did not
+/// open; the relations below the call enclose the session, so they stay
+/// publishable — the bottom one is the machinery root, which must close
+/// as its SCC's root with its own payload.
+#[test]
+fn a_call_session_write_marks_only_the_frames_opened_inside_the_session() {
+    let mut txn = CheckerDispatchTransaction::default();
+    let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
+    txn.reentry_mut()
+        .push_relate(relation_key(311), occurrence, 0);
+    txn.reentry_mut()
+        .push_relate(relation_key(313), occurrence, 0);
+    txn.reentry_mut().push_resolve_call(resolve_call_key(), 0);
+    let session = txn.push_collecting_session(one_parameter_session_setup(), None);
+    txn.reentry_mut()
+        .push_relate(relation_key(315), occurrence, 0);
+    txn.note_candidate_write(Some(session));
+
+    let argument = txn.reentry_mut().pop();
+    let _call = txn.reentry_mut().pop();
+    let enclosing = txn.reentry_mut().pop();
+    let root = txn.reentry_mut().pop();
+    let session_delta =
+        |frame: &ObligationFrame| frame.relation().expect("relation frame").session_delta;
+    assert!(
+        session_delta(&argument),
+        "the argument relation writing the call's session must be ReturnOnly"
+    );
+    assert!(
+        !session_delta(&enclosing),
+        "a relation enclosing the call does not mutate the call's own session"
+    );
+    assert!(
+        !session_delta(&root),
+        "the machinery root beneath the call does not mutate the call's own session"
     );
 }
 

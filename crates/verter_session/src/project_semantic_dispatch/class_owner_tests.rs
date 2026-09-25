@@ -184,21 +184,36 @@ fn a_class_expression_extending_a_class_expression_derives_from_it() {
 }
 
 /// A class extending a mixin application derives from the mixin's base.
+/// Relating `G` reaches the generic call `Tagged(TB)` in its heritage
+/// clause, whose candidate session opens beneath the relation frames, so
+/// the relation closes as its own SCC root around that call.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
 /// `Ext<G, TB>` over `class G extends Tagged(TB) { protected z = 3 }` is
-/// `"y"` and `Ext<TB, G>` `"n"`; over a function-local `class L extends
-/// Tagged(TB) { protected z = 2 }` returned as an instance,
-/// `Ext<ReturnType<typeof loc>, TB>` is `"y"` and `Ext<TB,
-/// ReturnType<typeof loc>>` `"n"`.
+/// `"y"` and `Ext<TB, G>` `"n"`.
 #[test]
-#[ignore = "a class extending a mixin application relates through its mixin base without a relation panic"]
 fn a_class_extending_a_mixin_application_derives_from_its_base() {
     let failures = mismatches(
         HERITAGE,
+        &[("Ext<G, TB>", "\"y\""), ("Ext<TB, G>", "\"n\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A function-local class extending a mixin application derives from the
+/// mixin's base, as a file-scope class does.
+///
+/// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`): over a
+/// function-local `class L extends Tagged(TB) { protected z = 2 }`
+/// returned as an instance, `Ext<ReturnType<typeof loc>, TB>` is `"y"` and
+/// `Ext<TB, ReturnType<typeof loc>>` `"n"`. The lane reads the local
+/// class's instance as an unmodelled position, so both stay undecided.
+#[test]
+#[ignore = "function-local classes do not evaluate yet"]
+fn a_function_local_class_extending_a_mixin_application_derives_from_its_base() {
+    let failures = mismatches(
+        HERITAGE,
         &[
-            ("Ext<G, TB>", "\"y\""),
-            ("Ext<TB, G>", "\"n\""),
             ("Ext<ReturnType<typeof loc>, TB>", "\"y\""),
             ("Ext<TB, ReturnType<typeof loc>>", "\"n\""),
         ],
