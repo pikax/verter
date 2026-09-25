@@ -37,7 +37,7 @@ use verter_type_expr::facts::{
     FunctionParamFact, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
     IndexSignatureFact, InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
     NarrowTypeParam, ObjectMemberFact, ObjectMethodFact, ObjectPropertyFact, ObjectShapeFact,
-    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
+    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact, TypeParamVariance,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace,
@@ -255,6 +255,9 @@ pub struct LoweredTypeDeclParts {
     pub kind: TypeDeclKind,
     /// Lowered type-parameter headers (constraint/default typed IR included).
     pub type_parameters: Vec<TypeParam>,
+    /// Each type parameter's authored variance annotation, by ordinal;
+    /// shorter than `type_parameters` when the tail is unannotated.
+    pub type_parameter_variances: Vec<TypeParamVariance>,
     /// The fully-lowered declaration body.
     pub body: TypeExpr,
     /// Statically-named members whose authored annotations are exactly
@@ -858,6 +861,7 @@ fn lower_jsdoc_typedef_named_matching(
             name: typedef.name.clone(),
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
+            type_parameter_variances: Vec::new(),
             body: typedef.body.clone(),
             unique_symbol_members: Vec::new(),
         };
@@ -897,6 +901,7 @@ fn register_jsdoc_typedefs(
             name: typedef.name,
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
+            type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
         };
@@ -989,8 +994,28 @@ fn anchored_slot(anchor: &AuthoredAnchor, path: Vec<TypeBodyPathStep>) -> TypeBo
 /// constraint / default bound positions (`[TypeParamBound { ordinal, position }]`
 /// rooted at the declaration header — the one placement the closed path
 /// vocabulary defines for type-parameter bounds).
+/// The authored variance annotation of each parameter of a declaration's
+/// type-parameter list (`in T`, `out T`, `in out T`), by ordinal.
+fn type_param_variances(params: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<TypeParamVariance> {
+    params
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|param| match (param.r#in, param.r#out) {
+                    (true, true) => TypeParamVariance::InOut,
+                    (true, false) => TypeParamVariance::In,
+                    (false, true) => TypeParamVariance::Out,
+                    (false, false) => TypeParamVariance::Unannotated,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn narrow_decl_header_type_params(
     params: &[TypeParam],
+    variances: &[TypeParamVariance],
     anchor: &AuthoredAnchor,
 ) -> TypeParamDeclFact {
     TypeParamDeclFact {
@@ -1017,6 +1042,7 @@ fn narrow_decl_header_type_params(
                         .is_some()
                         .then(|| bound_slot(TypeParamBoundPosition::Default)),
                     is_const: param.is_const,
+                    variance: variances.get(index).copied().unwrap_or_default(),
                 })
             })
             .collect(),
@@ -1047,6 +1073,7 @@ pub(crate) fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowT
                 constraint: None,
                 default: None,
                 is_const: param.is_const,
+                variance: TypeParamVariance::Unannotated,
             })
         })
         .collect()
@@ -1066,7 +1093,11 @@ fn mint_type_decl(
         owner,
         declaration_id: 0,
         kind: parts.kind,
-        type_parameters: narrow_decl_header_type_params(&parts.type_parameters, &anchor),
+        type_parameters: narrow_decl_header_type_params(
+            &parts.type_parameters,
+            &parts.type_parameter_variances,
+            &anchor,
+        ),
         direct_member_headers: member_header_facts_from_body(&parts.body),
         unique_symbol_members: Arc::from(parts.unique_symbol_members.clone().into_boxed_slice()),
         body: anchored_slot(&anchor, Vec::new()),
@@ -1703,6 +1734,7 @@ fn lower_named_type_alias_parts(
         name,
         kind: TypeDeclKind::Alias,
         type_parameters,
+        type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_ts_type(&decl.type_annotation),
     }
@@ -1781,6 +1813,7 @@ fn lower_named_interface_parts(
         name,
         kind: TypeDeclKind::Interface,
         type_parameters,
+        type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_interface_body(decl),
     }
@@ -2946,6 +2979,7 @@ fn collect_named_class(
         name: name.clone(),
         kind: TypeDeclKind::Class,
         type_parameters,
+        type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: Vec::new(),
     });
@@ -3184,6 +3218,7 @@ fn collect_enum(
         name,
         kind: TypeDeclKind::Alias,
         type_parameters: Vec::new(),
+        type_parameter_variances: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
     });
@@ -6991,6 +7026,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             name: typedef.name,
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
+            type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
         });

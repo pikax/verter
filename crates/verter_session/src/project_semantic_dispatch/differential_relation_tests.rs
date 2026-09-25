@@ -140,14 +140,8 @@ fn object_types_relate_as_the_checker_relates_them() {
 /// A target member declared as a METHOD compares its parameters bivariantly
 /// under `strictFunctionTypes` (`strictVariance` excludes method signatures),
 /// so a function-typed property with a narrower parameter fits it.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[Mv] extends [M] ? 1 : 2`: the checker answers `1`; the lane measured
-///   `2`.
 #[test]
-#[ignore = "a method member's parameters relate bivariantly under strictFunctionTypes"]
-fn wrong_clean_a_function_property_relates_to_a_method_member_bivariantly() {
+fn a_function_property_relates_to_a_method_as_the_checker_relates_it() {
     let matrix = Matrix::new(OBJECTS);
     let failures = matrix.types(&[("[Mv] extends [M] ? 1 : 2", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -480,6 +474,55 @@ type Id<T> = T;
 type Pair<A, B> = [A, B];
 declare function idf<T>(x: T): T;
 "##;
+
+/// Generic interfaces with and without variance annotations whose members
+/// alone would relate otherwise.
+const VARIANCE: &str = r##"
+interface Sink<in T> { put(v: T): void }
+interface Sink2<T> { put(v: T): void }
+interface Src<out T> { get(): T; put(v: T): void }
+interface Inv<in out T> { v: T }
+"##;
+
+/// Two applications of one generic declaration whose type parameters carry
+/// variance annotations relate by their arguments under those annotations,
+/// before any structural comparison: `Sink<in T>` contravariantly, `Src<out
+/// T>` covariantly although its method takes `T`, `Inv<in out T>` invariantly
+/// although its property is covariant. An unannotated `Sink2<T>` relates
+/// structurally, its method's parameter bivariantly, and an object literal
+/// type relates to `Sink<…>` structurally.
+///
+/// Measured on TypeScript 7.0.2 (all four settings alike).
+#[test]
+fn variance_annotations_relate_as_the_checker_reads_them() {
+    let matrix = Matrix::new(VARIANCE);
+    let failures = matrix.types(&[
+        (
+            "[Sink<string>] extends [Sink<string | number>] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[Sink<string | number>] extends [Sink<string>] ? 1 : 2",
+            "1",
+        ),
+        ("[Src<string>] extends [Src<string | number>] ? 1 : 2", "1"),
+        ("[Src<string | number>] extends [Src<string>] ? 1 : 2", "2"),
+        ("[Inv<string>] extends [Inv<string | number>] ? 1 : 2", "2"),
+        (
+            "[Sink2<string>] extends [Sink2<string | number>] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[Sink2<string | number>] extends [Sink2<string>] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[{ put(v: string): void }] extends [Sink<string | number>] ? 1 : 2",
+            "1",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
 
 /// Generic applications relate by their arguments' variance: covariant through
 /// a property, contravariant through a callback parameter, as annotated with
@@ -863,21 +906,35 @@ fn an_optional_parameter_relates_as_the_checker_relates_its_undefined() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Two method members compare their parameters bivariantly even under
-/// `strictFunctionTypes`, so a method taking `Dog2` fits one taking `Animal`.
-/// Wrong-but-clean.
+/// A target METHOD compares its parameters bivariantly even under
+/// `strictFunctionTypes`, so a method or a function-typed property taking
+/// `Dog2` fits a method taking `Animal`; a function-typed target property
+/// stays strict, and unrelated parameters fit in neither direction.
 ///
-/// What the lane gives:
-/// - `[{ m(x: Dog2): void }] extends [{ m(x: Animal): void }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2`.
+/// Measured on TypeScript 7.0.2 (all four settings alike): the method and
+/// property-to-method rows are `1`, the method-to-property and
+/// `number`-to-`string` rows `2`.
 #[test]
-#[ignore = "method members compare their parameters bivariantly"]
-fn wrong_clean_a_method_member_relates_its_parameters_bivariantly() {
+fn a_method_member_relates_as_the_checker_relates_its_parameters() {
     let matrix = Matrix::new(SIGNATURES);
-    let failures = matrix.types(&[(
-        "[{ m(x: Dog2): void }] extends [{ m(x: Animal): void }] ? 1 : 2",
-        "1",
-    )]);
+    let failures = matrix.types(&[
+        (
+            "[{ m(x: Dog2): void }] extends [{ m(x: Animal): void }] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[{ m: (x: Dog2) => void }] extends [{ m(x: Animal): void }] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[{ m(x: Dog2): void }] extends [{ m: (x: Animal) => void }] ? 1 : 2",
+            "2",
+        ),
+        (
+            "[{ m(x: number): void }] extends [{ m(x: string): void }] ? 1 : 2",
+            "2",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

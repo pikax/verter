@@ -5570,12 +5570,92 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             return result;
         }
+        // Two applications of one generic declaration whose every type
+        // parameter carries a variance annotation relate by their arguments
+        // under those annotations, before any structural comparison
+        // (`structuredTypeRelatedTo`'s reference variance check, where
+        // `getVariances` reads an annotation instead of measuring).
+        if let Some(pairs) = self.annotated_variance_argument_pairs(key.source, key.target) {
+            let mut acc = assignable(bindings);
+            for (source, target) in pairs {
+                let result = self.relate_member(source, target, bindings, InferPosition::Covariant);
+                acc = result_and(acc, result);
+                if matches!(acc, RelationResult::NotAssignable) {
+                    return RelationResult::NotAssignable;
+                }
+            }
+            return acc;
+        }
         match self.shallow_relation_check(key.source, key.target) {
             ShallowRelation::Assignable => return assignable(bindings),
             ShallowRelation::NotAssignable => return RelationResult::NotAssignable,
             ShallowRelation::Unknown => {}
         }
         self.decide_relation_with_dispatch(key.source, key.target, bindings)
+    }
+
+    /// The `(source, target)` argument pairs two applications of ONE
+    /// generic declaration relate by when every one of its type parameters
+    /// carries a variance annotation: an `out` argument pair as written, an
+    /// `in` pair reversed, an `in out` pair both ways. `None` for any other
+    /// pair — different declarations, an unannotated parameter (whose
+    /// variance the checker measures; the structural comparison answers
+    /// it), or a declaration whose header is not read.
+    fn annotated_variance_argument_pairs(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<(SemanticNodeId, SemanticNodeId)>> {
+        use verter_type_expr::facts::TypeParamVariance;
+        let graph = self.graph();
+        let source_data = graph.node_data(source)?;
+        let target_data = graph.node_data(target)?;
+        let (
+            SemanticNodeData::InstantiationRef {
+                base: source_base,
+                args: source_args,
+            },
+            SemanticNodeData::InstantiationRef {
+                base: target_base,
+                args: target_args,
+            },
+        ) = (&*source_data, &*target_data)
+        else {
+            return None;
+        };
+        if source_base.canonical_id != target_base.canonical_id
+            || source_base.owner != target_base.owner
+            || source_base.decl_name != target_base.decl_name
+            || source_args.len() != target_args.len()
+        {
+            return None;
+        }
+        let prepared = self.ctx.prepared_type_decl_return_only(
+            source_base.canonical_id.as_ref(),
+            source_base.owner,
+            source_base.decl_name.as_ref(),
+        )?;
+        if prepared.type_parameters.len() != source_args.len() {
+            return None;
+        }
+        let mut pairs = Vec::with_capacity(source_args.len());
+        for ((param, s), t) in prepared
+            .type_parameters
+            .iter()
+            .zip(source_args.iter())
+            .zip(target_args.iter())
+        {
+            match param.variance {
+                TypeParamVariance::Unannotated => return None,
+                TypeParamVariance::Out => pairs.push((*s, *t)),
+                TypeParamVariance::In => pairs.push((*t, *s)),
+                TypeParamVariance::InOut => {
+                    pairs.push((*s, *t));
+                    pairs.push((*t, *s));
+                }
+            }
+        }
+        Some(pairs)
     }
 
     fn try_object_spread_program_relation(
@@ -7776,6 +7856,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 target,
                 target_result,
                 kind,
+                false,
                 bindings,
             ));
             return;
@@ -9107,12 +9188,60 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             target_value
         };
+        // A target METHOD relates its parameters bivariantly under
+        // `strictFunctionTypes` too: the checker's `strictVariance` is
+        // decided by the target signature's declaration kind, so a
+        // function-typed property with a narrower parameter fits a method.
+        if target.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
+            if let Some(result) =
+                self.relate_method_signatures(source_value, target_value, bindings)
+            {
+                return result;
+            }
+        }
         self.relate_member(
             source_value,
             target_value,
             bindings,
             InferPosition::Covariant,
         )
+    }
+
+    /// Relate a member value to a target METHOD's value when both are one
+    /// call signature: parameters bivariantly
+    /// ([`Self::relate_function`]'s `method_target`). `None` for any other
+    /// pair of values (an overload group, a carrier), which relates as any
+    /// member does.
+    fn relate_method_signatures(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        let graph = self.graph();
+        let result_of = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Call,
+                return_type,
+                predicate,
+                ..
+            }) => Some(FunctionResult {
+                return_type: *return_type,
+                predicate: *predicate,
+            }),
+            _ => None,
+        };
+        let source_result = result_of(source)?;
+        let target_result = result_of(target)?;
+        Some(self.relate_function(
+            source,
+            source_result,
+            target,
+            target_result,
+            crate::semantic_query::SignatureKind::Call,
+            true,
+            bindings,
+        ))
     }
 
     /// The accessibility half of the checker's `propertyRelatedTo`, decided
@@ -9503,7 +9632,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// variance follows the key's policy (RI-10 behavioral branch):
     /// strictly contravariant under `strictFunctionTypes`, bivariant
     /// otherwise (either direction suffices per parameter pair); the
-    /// return is covariant. Subtype never uses the bivariant shortcut. A
+    /// return is covariant. A `method_target` — a target signature declared
+    /// as a method — relates its parameters bivariantly whatever
+    /// `strictFunctionTypes` says (the checker's `strictVariance` excludes
+    /// method declarations). Subtype never uses the bivariant shortcut. A
     /// comparison whose positions do not settle is unknown, never a guess.
     ///
     /// A target carrying a TYPE predicate (`x is T` / `this is T`) relates
@@ -9523,6 +9655,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
         target_result: FunctionResult,
         kind: crate::semantic_query::SignatureKind,
+        method_target: bool,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         let Ok(plan) =
@@ -9549,7 +9682,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let bivariant = {
             let txn = self.dispatch_txn.borrow();
             let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
-            !strict.strict_function_types && !self.subtype_mode()
+            (method_target || !strict.strict_function_types) && !self.subtype_mode()
         };
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),

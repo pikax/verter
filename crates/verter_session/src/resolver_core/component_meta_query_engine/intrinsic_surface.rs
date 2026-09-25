@@ -409,6 +409,7 @@ fn expanded_call_signature_from_node(
                     constraint: None,
                     default: None,
                     is_const: param.is_const,
+                    variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),

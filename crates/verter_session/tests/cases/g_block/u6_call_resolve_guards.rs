@@ -532,6 +532,7 @@ fn const_modifier_survives_type_param_and_narrow_type_param() {
         constraint: None,
         default: None,
         is_const: true,
+        variance: verter_type_expr::facts::TypeParamVariance::Unannotated,
     };
     let verter_type_expr::facts::NarrowTypeParam {
         name,
@@ -539,6 +540,7 @@ fn const_modifier_survives_type_param_and_narrow_type_param() {
         constraint,
         default,
         is_const,
+        ..
     } = &narrow;
     assert_eq!(name, "T");
     assert_eq!(*ordinal, 0);
