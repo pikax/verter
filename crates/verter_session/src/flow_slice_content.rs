@@ -12024,7 +12024,17 @@ impl<'a> Lowerer<'a> {
                 }
                 _ => false,
             },
-            void @ Expression::UnaryExpression(_) => void_write_assignment(void).is_some(),
+            void @ Expression::UnaryExpression(unary)
+                if unary.operator == oxc_ast::ast::UnaryOperator::Void =>
+            {
+                void_write_assignment(void).is_some()
+            }
+            // An operator's operands run before it: `x++ > 0`, `!(x += 1)`.
+            Expression::UnaryExpression(unary) => self.discarded_value_holds_write(&unary.argument),
+            Expression::BinaryExpression(binary) => {
+                self.discarded_value_holds_write(&binary.left)
+                    || self.discarded_value_holds_write(&binary.right)
+            }
             Expression::ConditionalExpression(conditional) => {
                 self.discarded_value_holds_write(&conditional.consequent)
                     || self.discarded_value_holds_write(&conditional.alternate)
@@ -12656,7 +12666,7 @@ impl<'a> Lowerer<'a> {
                 self.lower_condition(&logical.left, &nothing, &right, context, out);
             }
             LogicalOperator::Coalesce => {
-                if discarded_value_holds_write(&logical.left) {
+                if self.discarded_value_holds_write(&logical.left) {
                     self.lower_discarded_effects(&logical.left, context, out);
                 }
                 let guard = self.nullish_guard(&logical.left);
@@ -12844,12 +12854,12 @@ impl<'a> Lowerer<'a> {
             // a prefix `!`).
             Expression::UnaryExpression(unary)
                 if unary.operator == oxc_ast::ast::UnaryOperator::LogicalNot
-                    && discarded_value_holds_write(&unary.argument) =>
+                    && self.discarded_value_holds_write(&unary.argument) =>
             {
                 self.lower_condition(&unary.argument, on_false, on_true, context, out);
             }
             other => {
-                if discarded_value_holds_write(other) {
+                if self.discarded_value_holds_write(other) {
                     self.lower_discarded_effects(other, context, out);
                 }
                 let guard = self.lower_guard(other);
