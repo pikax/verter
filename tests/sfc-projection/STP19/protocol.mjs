@@ -112,7 +112,7 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
   }),
   DIRTY_OPEN_ARGS_WIDENED: Object.freeze({
     caseId: "STP19-foreign",
-    find: "(I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I)",
+    find: "(I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I)",
     replace: "new (...args: A) => I",
     discriminators: Object.freeze([
       "foreign_contract_declarations_keep_published_shapes",
@@ -167,10 +167,13 @@ const TS_TWINS = Object.freeze({
     rewrite: (text) =>
       text
         .replace(
-          "(I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I)",
+          "(I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I)",
           "new (...args: A) => I",
         )
-        .replace("(0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P)", "P"),
+        .replace(
+          "(0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P)",
+          "P",
+        ),
     expect: { loses: "\"count\": ('1')" },
   }),
   DIRTY_ADAPTER_ANY: Object.freeze({

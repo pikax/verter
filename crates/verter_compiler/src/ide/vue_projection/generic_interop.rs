@@ -17,9 +17,10 @@
 //!   - a constructor whose last construct signature is Vue's open
 //!     `...args: any[]` (the Options API `defineComponent`) is rebuilt
 //!     signature by signature, in declaration order: every open signature is
-//!     constructed from the props its instance publishes (`$props`), never
-//!     widened to accept anything, and every earlier precise overload stays
-//!     selectable ahead of it;
+//!     constructed from the props its instance publishes (`$props`, or no
+//!     props when the instance publishes none), never widened to accept
+//!     anything, and every earlier overload the walk reads stays selectable
+//!     ahead of it;
 //!   - a callable functional component is consumed through its own call
 //!     signatures: each props parameter becomes a construct parameter and
 //!     its context's `slots` / `emit` the instance's `$slots` / `$emit`.
@@ -44,7 +45,8 @@
 //!   binder.
 //!
 //!   The attribute-tolerant signature (an `unknown` attribute index on the
-//!   props of the component's last signature) is the fallback only, never
+//!   props of the component's last signature, the published `$props` or no
+//!   props behind an open-argument one) is the fallback only, never
 //!   part of a rebuilt overload: an undeclared fallthrough attribute is not
 //!   an excess-key error, while an exact overload always wins over it.
 //! - [`AdvancedGenericUseProjection`] — every use of a parent carrier,
@@ -86,8 +88,8 @@ pub const USE_CONSTRUCTS: &str = "__VerterUseConstructs";
 /// order as construct signatures.
 pub const USE_CALLS: &str = "__VerterUseCalls";
 /// Props of the attribute-tolerant signature: the declared props (the
-/// published `$props` behind an open-argument constructor) plus an
-/// `unknown` attribute index.
+/// published `$props`, or no props, behind an open-argument constructor)
+/// plus an `unknown` attribute index.
 pub const USE_TOLERANT: &str = "__VerterUseTolerant";
 /// Instance of a functional component: its props and its context's slots
 /// and emit.
@@ -106,12 +108,12 @@ macro_rules! foreign_contract_declarations {
             "type __VerterUseSame<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;\n",
             "type __VerterUsePeeled<N> = { readonly __verterUsePeeled: N };\n",
             "type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;\n",
-            "type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I) : new (...args: A) => I;\n",
+            "type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I) : new (...args: A) => I;\n",
             "type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;\n",
             "type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, never>) => __VerterUseFunctional<unknown, unknown>;\n",
             "type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;\n",
             "type __VerterUseContract<C> = C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;\n",
-            "type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P) & Record<string, unknown>;\n",
+            "type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P) & Record<string, unknown>;\n",
             "type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };\n",
             "declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;\n",
             "declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;\n",

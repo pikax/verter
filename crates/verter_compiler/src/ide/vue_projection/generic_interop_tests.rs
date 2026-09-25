@@ -268,14 +268,14 @@ fn foreign_contract_declarations_keep_published_shapes() {
         "({USE_OPEN_ARGS}<A> extends true ? {USE_CONSTRUCTS}<C, unknown, never, []> : C) : {USE_CALLS}<C, unknown, never, []>;"
     )));
     assert!(declarations.contains(
-        "(I extends { readonly $props: infer P } ? new (props: P) => I : new (...args: A) => I)"
+        "(I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I)"
     ));
     let tolerant = declarations
         .lines()
         .find(|line| line.starts_with(&format!("type {USE_TOLERANT}<P, I> = ")))
         .expect("tolerant declaration");
     assert!(tolerant
-        .contains("(0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : P) : P)"));
+        .contains("(0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P)"));
     assert!(declarations.contains(&format!(
         "declare function {USE_CONSTRUCTOR}<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => {USE_FUNCTIONAL}<P, X>;"
     )));
