@@ -305,21 +305,35 @@ fn boolean_relates_as_the_checker_relates_true_or_false() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `unknown` is below `{} | null | undefined` in every setting, and below `{}`
-/// alone when `strictNullChecks` is off. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[unknown] extends [{}] ? 1 : 2`: the checker answers `2` (strict), `1`
-///   (strictNullChecks off), `2` (noImplicitAny off), `1` (both off); the lane
-///   measured `2` (strictNullChecks off, both off).
-/// - `[unknown] extends [{} | null | undefined] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
+/// `unknown` is below `{} | null | undefined` in every setting and below `{}`
+/// alone when `strictNullChecks` is off; with it, a union without the empty
+/// object type itself does not take it (without it every object type does),
+/// and `object` never does (TypeScript 7.0.2).
 #[test]
-#[ignore = "unknown relates to {} | null | undefined, and to {} without strictNullChecks"]
-fn wrong_clean_unknown_is_below_empty_object_and_nullish() {
+fn unknown_relates_as_the_checker_relates_its_unknown_union() {
     let matrix = Matrix::new(UNIONS);
-    let mut failures = matrix.types(&[("[unknown] extends [{} | null | undefined] ? 1 : 2", "1")]);
-    failures.extend(matrix.nullness(&[(Read::Type("[unknown] extends [{}] ? 1 : 2"), "2", "1")]));
+    let mut failures = matrix.types(&[
+        ("[unknown] extends [{} | null | undefined] ? 1 : 2", "1"),
+        (
+            "[unknown] extends [string | {} | null | undefined] ? 1 : 2",
+            "1",
+        ),
+        ("[unknown] extends [object | null | undefined] ? 1 : 2", "2"),
+        ("[unknown] extends [object] ? 1 : 2", "2"),
+    ]);
+    failures.extend(matrix.nullness(&[
+        (Read::Type("[unknown] extends [{}] ? 1 : 2"), "2", "1"),
+        (
+            Read::Type("[unknown] extends [{ a?: 1 } | null | undefined] ? 1 : 2"),
+            "2",
+            "1",
+        ),
+        (
+            Read::Type("[unknown] extends [{ a?: 1 }] ? 1 : 2"),
+            "2",
+            "1",
+        ),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

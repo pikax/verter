@@ -6778,6 +6778,69 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(assignable(bindings));
                 return;
             }
+            // `unknown` against an object type or a union: without
+            // `strictNullChecks` it relates as `{}` (`null` and `undefined`
+            // inhabit every type); with it, it fits a union holding `null`,
+            // `undefined` and the empty object type `{}` itself — the
+            // checker's unknown union — and nothing narrower
+            // (`{ a?: 1 } | null | undefined` does not take it).
+            if matches!(
+                (&*source_data, &*target_data),
+                (
+                    SemanticNodeData::Primitive(PrimitiveKind::Unknown),
+                    SemanticNodeData::Object(_) | SemanticNodeData::Union(_)
+                )
+            ) && !self.subtype_mode()
+            {
+                if !strict.strict_null_checks {
+                    // Only an object type takes it: never `object`, a
+                    // primitive or `null` / `undefined` arm.
+                    let object_arms: Vec<SemanticNodeId> = match &*target_data {
+                        SemanticNodeData::Union(members) => members
+                            .iter()
+                            .copied()
+                            .filter(|member| {
+                                matches!(
+                                    graph.node_data(*member).as_deref(),
+                                    Some(SemanticNodeData::Object(_))
+                                )
+                            })
+                            .collect(),
+                        _ => vec![target],
+                    };
+                    if !object_arms.is_empty() {
+                        drop(source_data);
+                        drop(target_data);
+                        let object_target =
+                            self.intern_normalized_union_or_intersection(&object_arms, true);
+                        work.push(RelateWork::Eval(self.empty_object(), object_target));
+                        return;
+                    }
+                }
+                if let SemanticNodeData::Union(members) = &*target_data {
+                    let holds = |wanted: &dyn Fn(&SemanticNodeData) -> bool| {
+                        members
+                            .iter()
+                            .any(|member| graph.node_data(*member).as_deref().is_some_and(wanted))
+                    };
+                    if holds(&|data| {
+                        matches!(data, SemanticNodeData::Primitive(PrimitiveKind::Null))
+                    }) && holds(&|data| {
+                        matches!(data, SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                    }) && holds(&|data| {
+                        matches!(data, SemanticNodeData::Object(view)
+                            if view.closed().is_empty()
+                                && view.call_signatures.is_empty()
+                                && view.construct_signatures.is_empty()
+                                && view.index_signatures.is_empty())
+                    }) {
+                        drop(source_data);
+                        drop(target_data);
+                        results.push(assignable(bindings));
+                        return;
+                    }
+                }
+            }
         }
 
         // ── Type parameters: call-owned sessions bind their exact declared
