@@ -388,3 +388,104 @@ fn a_namespace_function_returns_its_inferred_type() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const AUGMENTED_FUNCTION_MODULE: &str =
+    "export function f(x: number): \"m-num\";\nexport function f(x: any): any { return x; }\n";
+const AUGMENTING_FUNCTION_MODULE: &str = "\
+import './m';
+declare module './m' {
+  function f(x: string): \"aug-str\";
+  function f(x: boolean): \"aug-bool\";
+}
+export {};
+";
+const AUGMENTED_FUNCTION_USE: &str = "\
+import { f } from './m';
+import * as M from './m';
+export function fs() { return f(\"a\"); }
+export function fb() { return f(true); }
+export function fn() { return f(1); }
+export function mfs() { return M.f(\"a\"); }
+";
+
+/// A module's function merges the declarations a `declare module` block
+/// augmenting that module adds, after its own: `typeof f` lists every
+/// declaration's signatures in that order, so `ReturnType` and
+/// `Parameters` read the augmentation's last one, and a call resolves
+/// against all of them.
+///
+/// Measured on TypeScript 7.0.2 (`--module commonjs`, alike on the four
+/// `strictNullChecks` × `noImplicitAny` settings): `ReturnType<typeof f>`
+/// is `"aug-bool"`, `Parameters<typeof f>[0]` `boolean`, `fs` and `mfs`
+/// `"aug-str"`, `fb` `"aug-bool"`, `fn` `"m-num"`.
+///
+/// Mutation: merging no augmenting declaration answers
+/// `ReturnType<typeof f>`, `fs`, `fb` and `mfs` `"m-num"` and
+/// `Parameters<typeof f>[0]` `number`.
+#[test]
+fn a_module_function_merges_its_augmentations() {
+    let files = [
+        ("m.ts", AUGMENTED_FUNCTION_MODULE),
+        ("aug.ts", AUGMENTING_FUNCTION_MODULE),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        AUGMENTED_FUNCTION_USE,
+        &[
+            ("ReturnType<typeof f>", "\"aug-bool\""),
+            ("Parameters<typeof f>[0]", "boolean"),
+            ("ReturnType<typeof fs>", "\"aug-str\""),
+            ("ReturnType<typeof fb>", "\"aug-bool\""),
+            ("ReturnType<typeof fn>", "\"m-num\""),
+            ("ReturnType<typeof mfs>", "\"aug-str\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const SCRIPT_OVERLOAD_ONE: &str = "declare function gf(x: number): \"s1-num\";\n";
+const SCRIPT_OVERLOAD_TWO: &str =
+    "declare function gf(x: string): \"s2-str\";\ndeclare function gf(x: boolean): \"s2-bool\";\n";
+const SCRIPT_OVERLOAD_USE: &str = "\
+export function gs() { return gf(\"a\"); }
+export function gb() { return gf(true); }
+export function gn() { return gf(1); }
+";
+
+/// A global function declared in several scripts is one function whose
+/// signatures are every script's, in program order.
+///
+/// Measured on TypeScript 7.0.2 (alike on the four settings), the scripts
+/// in the order listed: `ReturnType<typeof gf>` is `"s2-bool"`,
+/// `Parameters<typeof gf>[0]` `boolean`, `gs` `"s2-str"`, `gb`
+/// `"s2-bool"`, `gn` `"s1-num"`.
+///
+/// Mutation: reading the first script's declaration alone answers
+/// `ReturnType<typeof gf>` `"s1-num"`.
+#[test]
+fn a_global_function_merges_every_scripts_overloads() {
+    let files = [
+        ("s1.ts", SCRIPT_OVERLOAD_ONE),
+        ("s2.ts", SCRIPT_OVERLOAD_TWO),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        SCRIPT_OVERLOAD_USE,
+        &[
+            ("ReturnType<typeof gf>", "\"s2-bool\""),
+            ("Parameters<typeof gf>[0]", "boolean"),
+            ("ReturnType<typeof gs>", "\"s2-str\""),
+            ("ReturnType<typeof gb>", "\"s2-bool\""),
+            ("ReturnType<typeof gn>", "\"s1-num\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

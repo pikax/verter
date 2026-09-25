@@ -279,3 +279,154 @@ fn an_ambient_module_is_its_blocks_object() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const GLOBAL_SCRIPT: &str = "\
+namespace GN { export const c = 1; export function f(): \"gf\" { return \"gf\"; } export namespace Inner { export const i = 3; } export interface T { t: 1 } }
+declare namespace GD { const d: \"gd\"; function g(): \"gg\"; }
+";
+
+const GLOBAL_USE: &str = "\
+export function gnC() { return GN.c; }
+export function gnF() { return GN.f(); }
+export function gnObj() { return GN; }
+";
+
+/// A namespace a script declares is a global one, and read from another
+/// file as a value it is its object, as a module's own namespace is.
+///
+/// Measured on TypeScript 7.0.2 (alike on the four `strictNullChecks` ×
+/// `noImplicitAny` settings): `keyof typeof GN` is `"Inner" | "c" | "f"`,
+/// `keyof typeof GD` `"d" | "g"`, `(typeof GN)['Inner']['i']` `3`, `gnC`
+/// `number`, `gnF` `"gf"`, `gnObj` `typeof GN` (its `f` `() => "gf"`).
+///
+/// Mutation: reading no object for a global namespace leaves every
+/// whole-namespace row a typed miss.
+#[test]
+fn a_global_namespace_is_its_object() {
+    let files = [("gscript.ts", GLOBAL_SCRIPT)];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        GLOBAL_USE,
+        &[
+            ("keyof typeof GN", "\"Inner\" | \"c\" | \"f\""),
+            ("keyof typeof GD", "\"d\" | \"g\""),
+            ("(typeof GN)['Inner']['i']", "3"),
+            ("ReturnType<typeof gnC>", "number"),
+            ("ReturnType<typeof gnF>", "\"gf\""),
+            ("ReturnType<typeof gnObj>['f']", "() => \"gf\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const INSTANTIATED: &str = "\
+namespace OnlyPriv { const hidden = 1; }
+namespace OnlyPrivFn { function h() {} }
+namespace Outer { export namespace PrivInner { const hidden = 1; } export namespace TypesInner { export interface U {} } }
+export function rOP() { return OnlyPriv; }
+";
+
+/// A namespace that declares a value is a value even when it exports none
+/// (an instantiated namespace): its object has no member. A namespace
+/// holding only types is no value (the checker's TS2708), and neither is
+/// its nested namespace a member of the enclosing one.
+///
+/// Measured on TypeScript 7.0.2 (alike on the four settings):
+/// `keyof typeof OnlyPriv` and `keyof typeof OnlyPrivFn` are `never`,
+/// `rOP` returns `typeof OnlyPriv` (an object without members, `{}`),
+/// `keyof typeof Outer` is `"PrivInner"`.
+///
+/// Mutation: reading no object for a namespace that exports no value
+/// leaves the `OnlyPriv` rows a typed miss and answers
+/// `keyof typeof Outer` `never`.
+#[test]
+fn a_namespace_declaring_a_value_is_a_value() {
+    let failures = mismatches_in(
+        ProbeProject::default(),
+        INSTANTIATED,
+        &[
+            ("keyof typeof OnlyPriv", "never"),
+            ("keyof typeof OnlyPrivFn", "never"),
+            ("ReturnType<typeof rOP>", "{}"),
+            ("keyof typeof Outer", "\"PrivInner\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The checker's `keyof` of the object a function returns when it returns
+/// an instantiated namespace without exported values.
+///
+/// Measured on TypeScript 7.0.2: `keyof ReturnType<typeof rOP>` is `never`.
+#[test]
+#[ignore = "keyof over the ReturnType of a function returning a namespace object reduces to never"]
+fn keyof_of_a_returned_namespace_object_is_never() {
+    let failures = mismatches_in(
+        ProbeProject::default(),
+        INSTANTIATED,
+        &[("keyof ReturnType<typeof rOP>", "never")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const CALLABLE_IFACE_EQ: &str = "\
+interface CallIface { (): \"ci\"; p: \"cp\"; }
+declare const CI: CallIface;
+export = CI;
+";
+const CALLABLE_CONST_EQ: &str = "declare const CF: () => \"cf\";\nexport = CF;\n";
+
+const CALLABLE_VALUE_USE: &str = "\
+import * as EQ from './eq';
+import EQD from './eq';
+import * as EQC from './eqc';
+import EQCD from './eqc';
+export function eqd() { return EQD(); }
+export function eqDef() { return EQ.default(); }
+export function eqcd() { return EQCD(); }
+export function eqcDef() { return EQC.default(); }
+";
+
+/// A module assigned with `export =` a `const` whose type can be called —
+/// an interface with a call signature, a function type — gives a
+/// namespace import a `default` naming it, decided by the value's
+/// signatures, not its declaration kind; the object keeps the value's own
+/// properties.
+///
+/// Measured on TypeScript 7.0.2 (`--module commonjs`, alike on the four
+/// settings): `eqd` and `eqDef` are `"ci"`, `keyof typeof EQ`
+/// `"default" | "p"`, `eqcd` and `eqcDef` `"cf"`, `keyof typeof EQC`
+/// `"default"`.
+///
+/// Mutation: treating a callable `const` as its declaration kind does —
+/// neither callable nor constructable — leaves `eqDef`, `eqcDef` and both
+/// `keyof` rows a typed miss; reading none of the value's own properties
+/// answers `keyof typeof EQ` `"default"`.
+#[test]
+fn a_callable_value_assigned_with_export_equals_has_a_default() {
+    let files = [
+        ("eq.d.ts", CALLABLE_IFACE_EQ),
+        ("eqc.d.ts", CALLABLE_CONST_EQ),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        CALLABLE_VALUE_USE,
+        &[
+            ("ReturnType<typeof eqd>", "\"ci\""),
+            ("ReturnType<typeof eqDef>", "\"ci\""),
+            ("keyof typeof EQ", "\"default\" | \"p\""),
+            ("ReturnType<typeof eqcd>", "\"cf\""),
+            ("ReturnType<typeof eqcDef>", "\"cf\""),
+            ("keyof typeof EQC", "\"default\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -213,6 +213,7 @@ fn index_augmentation_module_declaration(
                 owner: ctx.anchor.owner,
                 qualified_name: namespace.clone(),
                 span: decl.span.into(),
+                instantiated: module_body_instantiated(body),
             },
         ));
     }

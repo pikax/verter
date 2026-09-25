@@ -542,3 +542,77 @@ fn a_readonly_static_and_a_nullish_declaration_widen_as_the_checker_declares() {
         );
     }
 }
+
+const READONLY_INSTANCE: &str = "\
+class K { readonly r = 1; readonly rAnn: 1 = 1; readonly rAs = 1 as const; readonly rs = \"s\"; readonly rn = -1; readonly rc: number; readonly rCtor; constructor() { this.rc = 2; this.rCtor = 3; } }
+export function kr(k: K) { return k.r; }
+export function krAnn(k: K) { return k.rAnn; }
+export function krAs(k: K) { return k.rAs; }
+export function krs(k: K) { return k.rs; }
+export function krn(k: K) { return k.rn; }
+export function krc(k: K) { return k.rc; }
+export function krObj(k: K) { return { v: k.r }; }
+export function krLet(k: K) { let v = k.r; return v; }
+export function tkr() { const x: K['r'] = null as any; return x; }
+export function krCtor(k: K) { return k.rCtor; }
+";
+
+/// An unannotated `readonly` instance property with a literal initializer
+/// declares the fresh literal type, so a read of it widens wherever a bare
+/// literal widens; an annotation or a `const` assertion declares a regular
+/// literal.
+///
+/// Measured on TypeScript 7.0.2 (alike on the four `strictNullChecks` ×
+/// `noImplicitAny` settings): `kr`, `krn`, `krLet` and `tkr` are `number`,
+/// `krs` `string`, `krObj` `{ v: number; }`, while `krAnn` and `krAs` stay
+/// `1` and `krc` is `number`.
+#[test]
+#[ignore = "a read of an unannotated readonly instance property with a literal initializer widens"]
+fn a_readonly_instance_literal_widens_as_the_checker_declares() {
+    let failures = mismatches(
+        READONLY_INSTANCE,
+        &[
+            ("ReturnType<typeof kr>", "number"),
+            ("ReturnType<typeof krAnn>", "1"),
+            ("ReturnType<typeof krAs>", "1"),
+            ("ReturnType<typeof krs>", "string"),
+            ("ReturnType<typeof krn>", "number"),
+            ("ReturnType<typeof krc>", "number"),
+            ("ReturnType<typeof krObj>", "{ v: number; }"),
+            ("ReturnType<typeof krLet>", "number"),
+            ("ReturnType<typeof tkr>", "number"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A property declared without a type or an initializer takes the type
+/// its constructor assigns under `noImplicitAny`, and is the implicit
+/// `any` without it.
+///
+/// Measured on TypeScript 7.0.2: `krCtor` (`readonly rCtor;` assigned `3`
+/// in the constructor) is `number` with `noImplicitAny`, `any` without it,
+/// under both `strictNullChecks` settings.
+#[test]
+#[ignore = "a property without a type or initializer takes the type its constructor assigns"]
+fn a_constructor_assigned_property_takes_the_assigned_type() {
+    for (compiler_options, answer) in [
+        (None, "number"),
+        (Some(r#"{ "strict": true, "noImplicitAny": false }"#), "any"),
+    ] {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            READONLY_INSTANCE,
+            &[("ReturnType<typeof krCtor>", answer)],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}

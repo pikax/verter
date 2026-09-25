@@ -97,6 +97,46 @@ pub struct NamespaceBlockRecord {
     pub owner: TopLevelOwnerId,
     pub qualified_name: String,
     pub span: Span,
+    /// Whether the block is INSTANTIATED — it declares a value, exported
+    /// or not (a variable, a function, a class, a non-`const` enum, a
+    /// statement, an instantiated nested namespace) — so the namespace is
+    /// a value too. A block holding only types, `const` enums and
+    /// uninstantiated namespaces is none (the checker's TS2708).
+    pub instantiated: bool,
+}
+
+/// Whether a namespace body is instantiated ([`NamespaceBlockRecord::instantiated`]).
+pub(crate) fn module_body_instantiated(body: &TSModuleDeclarationBody<'_>) -> bool {
+    match body {
+        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
+            inner.body.as_ref().is_some_and(module_body_instantiated)
+        }
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            block.body.iter().any(statement_instantiates)
+        }
+    }
+}
+
+fn statement_instantiates(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::TSInterfaceDeclaration(_) | Statement::TSTypeAliasDeclaration(_) => false,
+        Statement::TSEnumDeclaration(enum_decl) => !enum_decl.r#const,
+        Statement::TSModuleDeclaration(module) => {
+            module.body.as_ref().is_some_and(module_body_instantiated)
+        }
+        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
+            Some(
+                Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_),
+            ) => false,
+            Some(Declaration::TSEnumDeclaration(enum_decl)) => !enum_decl.r#const,
+            Some(Declaration::TSModuleDeclaration(module)) => {
+                module.body.as_ref().is_some_and(module_body_instantiated)
+            }
+            Some(_) => true,
+            None => false,
+        },
+        _ => true,
+    }
 }
 
 /// A `declare module "X" { … }` / `declare global { … }` augmentation
@@ -382,7 +422,7 @@ impl DeclHeaderIndex {
     /// The value members a reference from outside `namespace` can read
     /// (the properties of the namespace's object), sorted: every exported
     /// value declared directly in it, and every exported namespace nested
-    /// in it that declares a value (a namespace holding only types is no
+    /// in it that is instantiated (a namespace holding only types is no
     /// value). `scope` selects the file's own declarations (`None`) or one
     /// augmentation block's; `namespace` `None` reads the block's own
     /// top level.
@@ -418,9 +458,54 @@ impl DeclHeaderIndex {
                     .then(|| member.to_string())
             })
             .collect();
+        let child_of = |qualified: &str| -> Option<String> {
+            let rest = match namespace {
+                Some(namespace) => qualified.strip_prefix(namespace)?.strip_prefix('.')?,
+                None => qualified,
+            };
+            (!rest.contains('.')).then(|| rest.to_string())
+        };
+        let blocks: Vec<&NamespaceBlockRecord> = match scope {
+            None => self.namespace_blocks.iter().collect(),
+            Some(scope) => self
+                .augmentation_namespace_blocks
+                .iter()
+                .filter(|(block_scope, _)| block_scope == scope)
+                .map(|(_, block)| block)
+                .collect(),
+        };
+        members.extend(
+            blocks
+                .into_iter()
+                .filter(|block| block.owner == owner && block.instantiated)
+                .filter(|block| self.namespace_member_is_exported(owner, &block.qualified_name))
+                .filter_map(|block| child_of(&block.qualified_name)),
+        );
         members.sort();
         members.dedup();
         members
+    }
+
+    /// Whether the namespace `namespace` declared by `owner` (in its own
+    /// scope, or in the `declare module` block `scope`) is instantiated in
+    /// some block ([`NamespaceBlockRecord::instantiated`]).
+    #[must_use]
+    pub fn namespace_is_instantiated(
+        &self,
+        scope: Option<&AugmentationScopeKind>,
+        owner: TopLevelOwnerId,
+        namespace: &str,
+    ) -> bool {
+        let matches = |block: &NamespaceBlockRecord| {
+            block.owner == owner && block.qualified_name == namespace && block.instantiated
+        };
+        match scope {
+            None => self.namespace_blocks.iter().any(matches),
+            Some(scope) => self
+                .augmentation_namespace_blocks
+                .iter()
+                .any(|(block_scope, block)| block_scope == scope && matches(block)),
+        }
     }
 }
 
@@ -946,6 +1031,7 @@ fn index_module_declaration(
         owner: ctx.anchor.owner,
         qualified_name: module_name.clone(),
         span: decl.span.into(),
+        instantiated: module_body_instantiated(body),
     });
 
     match body {

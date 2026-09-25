@@ -15341,6 +15341,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         return node;
                     }
                 }
+                // A member call rooted at one of the frame's own bindings
+                // (`c.m()` over a local or parameter `c`) is the same read:
+                // its callee references no other name, and the call rail
+                // resolves that root through the frame.
+                if let crate::flow_slice_content::SliceExpr::Call(
+                    crate::flow_slice_content::SliceCall::Symbolic(
+                        verter_type_expr::TypeExpr::Ref { type_arguments, .. },
+                        binding,
+                    ),
+                    _,
+                ) = inner.as_ref()
+                {
+                    if type_arguments.len() == 1
+                        && self
+                            .frame_rooted_typeof_path_node(&type_arguments[0], binding.as_ref())
+                            .is_some()
+                    {
+                        return self.eval_expr(inner);
+                    }
+                }
                 if shadowed
                     .iter()
                     .any(|name| self.owner_scope_answers_name(name))

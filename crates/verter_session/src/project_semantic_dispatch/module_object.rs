@@ -77,7 +77,7 @@ impl ProjectSemanticDispatch<'_> {
                     .resolve_type_dependency_canonical(canonical, &target.source_specifier)
                 {
                     Some(dependency) => match self.export_assignment_root(&dependency) {
-                        Some((assigned, _)) => {
+                        Some(assigned) => {
                             let hash = self
                                 .ctx
                                 .ensure_indexed_ready_serve(&dependency)?
@@ -121,13 +121,15 @@ impl ProjectSemanticDispatch<'_> {
                     .any(|block| block.owner == owner && block.qualified_name == name)
                 {
                     None
-                } else {
+                } else if let Some((scope, _)) = headers
+                    .augmentation_namespace_blocks
+                    .iter()
+                    .find(|(_, block)| block.owner == owner && block.qualified_name == name)
+                {
                     // A namespace a `declare module` block declares.
-                    let (scope, _) = headers
-                        .augmentation_namespace_blocks
-                        .iter()
-                        .find(|(_, block)| block.owner == owner && block.qualified_name == name)?;
                     Some(scope.clone())
+                } else {
+                    return None;
                 };
                 self.namespace_object(canonical, owner, scope.as_ref(), name, context)
             }
@@ -283,9 +285,93 @@ impl ProjectSemanticDispatch<'_> {
         ))
     }
 
+    /// The object of the global namespace `name` a reference reads: every script's top-level namespace of that
+    /// name, merged in declaration order (the first declaring a member names
+    /// it). The program's global contributors of the name are observed, so a
+    /// declaration appearing or changing later misses the read.
+    pub(super) fn global_namespace_object(
+        &self,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<ModuleObject> {
+        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        if name.contains('.') {
+            return None;
+        }
+        let host = self.ctx.host_for_fact_tracer_install();
+        let population =
+            self.global_contributors_in(name, verter_semantic::facts::SymbolSpace::Namespace);
+        let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
+            .entries
+            .iter()
+            .filter(|entry| {
+                !entry.is_automatic_lib
+                    && entry.origin == ContributorOrigin::FileScopeNamespace
+                    && entry.module_kind == FileModuleKind::Script
+            })
+            .collect();
+        declarations.sort_by(|left, right| {
+            host.declaration_sequence_rank(left.artifact_key.canonical.as_ref())
+                .cmp(&host.declaration_sequence_rank(right.artifact_key.canonical.as_ref()))
+                .then_with(|| {
+                    left.artifact_key
+                        .canonical
+                        .as_ref()
+                        .cmp(right.artifact_key.canonical.as_ref())
+                })
+        });
+        let first = declarations.first()?;
+        let mut roots: Vec<ObservedGraphSelfRoot> = Vec::new();
+        let mut members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
+        let mut instantiated = false;
+        for entry in &declarations {
+            let canonical = entry.artifact_key.canonical.as_ref();
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(canonical)
+                .map(|serve| serve.indexed)
+            else {
+                continue;
+            };
+            push_root(&mut roots, (Arc::from(canonical), indexed.whole_hash));
+            let headers = indexed.shallow_state.decl_bodies().header_index();
+            instantiated |= headers.namespace_is_instantiated(None, entry.owner, name);
+            for member in headers.namespace_value_members(None, entry.owner, Some(name)) {
+                if seen.insert(member.clone()) {
+                    let qualified = format!("{name}.{member}");
+                    members.push((
+                        Arc::from(member.as_str()),
+                        file_root(canonical, entry.owner, &qualified),
+                    ));
+                }
+            }
+        }
+        if !instantiated {
+            return None;
+        }
+        members.sort_by(|left, right| left.0.cmp(&right.0));
+        let first_canonical: Arc<str> = Arc::clone(&first.artifact_key.canonical);
+        let hash = self
+            .ctx
+            .ensure_indexed_ready_serve(first_canonical.as_ref())?
+            .indexed
+            .whole_hash;
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&first_canonical),
+            owner: first.owner,
+            whole_hash: hash,
+            local_scope: None,
+        };
+        Some((
+            self.value_object(members, scope, first_canonical.as_ref(), context),
+            roots,
+        ))
+    }
+
     /// The object of the namespace `name` declared in `canonical` (in its
     /// own scope, or in the `declare module` block `scope`); `None` when it
-    /// declares no value.
+    /// is not instantiated.
     fn namespace_object(
         &self,
         canonical: &str,
@@ -297,7 +383,9 @@ impl ProjectSemanticDispatch<'_> {
         let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
         let headers = indexed.shallow_state.decl_bodies().header_index();
         let names = headers.namespace_value_members(scope, owner, Some(name));
-        if names.is_empty() {
+        // A namespace that declares no value (only types) is no value; one
+        // whose values it does not export is an object without members.
+        if names.is_empty() && !headers.namespace_is_instantiated(scope, owner, name) {
             return None;
         }
         let members = names
@@ -346,10 +434,17 @@ impl ProjectSemanticDispatch<'_> {
         if !interop || !self.has_call_or_construct_signatures(whole)? {
             return Some((whole, roots));
         }
-        let mut members: Vec<SurfaceMember> = Vec::new();
-        if let Some(SemanticNodeData::Object(surface)) = self.graph().node_data(whole).as_deref() {
-            members.extend(surface.positive_members().iter().cloned());
-        }
+        // X's own properties: the one-level surface of its type (a class's
+        // statics, the properties of an interface it is declared with).
+        let mut members: Vec<SurfaceMember> = self
+            .resolve_typeinfo_surface_view(
+                whole,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Shallow,
+                ),
+            )
+            .map(|surface| surface.positive_members().to_vec())
+            .unwrap_or_default();
         let headers = indexed.shallow_state.decl_bodies().header_index();
         let merged: Vec<(Arc<str>, ValueRootKey)> = headers
             .namespace_value_members(scope, assigned.scope.owner, Some(assigned.name.as_ref()))
@@ -384,6 +479,25 @@ impl ProjectSemanticDispatch<'_> {
             node_scope,
         );
         Some((object, roots))
+    }
+
+    /// Whether the value `root` names has a call or a construct signature
+    /// (`SignaturesOfType` over its `typeof`); `None` when that does not
+    /// settle.
+    pub(super) fn value_has_call_or_construct_signatures(
+        &self,
+        root: &ValueRootKey,
+    ) -> Option<bool> {
+        let context = crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Navigate,
+        );
+        match self
+            .execute_read(self.typeof_key_for(root.clone(), context))
+            .value
+        {
+            QueryResult::Value(node) => self.has_call_or_construct_signatures(node),
+            _ => None,
+        }
     }
 
     /// Whether `node` has a call or a construct signature
