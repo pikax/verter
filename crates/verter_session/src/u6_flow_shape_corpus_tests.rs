@@ -3343,7 +3343,7 @@ mod corpus_suite {
             ),
             (
                 "N47_correlated_tuple_discriminant",
-                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | Opaque(UnmodeledPosition)) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(number | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N48_closure_narrows_captured_binding",
@@ -3382,11 +3382,9 @@ mod corpus_suite {
             ),
             (
                 "N09_narrow_then_write",
-                "checker prints `{ label: string; }`; the renderer spells \
-                 `{ label: Union(string | Opaque(UnmodeledPosition)) }` — the retained \
-                 unmodelled-marker arm the `typeof` test cannot classify; print syntax \
-                 AND semantics differ; the KnownOwed divergence is held by the semantic \
-                 test",
+                "checker prints `{ label: string; }`; the renderer spells the same \
+                 surface `{ label: string }` — object members print without the \
+                 trailing `;` terminator",
             ),
             (
                 "N56_arrow_predicate_annotated_binding",
@@ -5184,12 +5182,6 @@ const OPEN_DEBTS: &[&str] = &[
     "X10_destructured_default_conditional",
     "X27_finally_fallthrough_break_override",
     // ── NARROWING ────────────────────────────────────────────────────
-    // The narrowing blocks landed: every seeded narrowing row now matches
-    // the checker except N09_narrow_then_write, whose remaining debt is
-    // not the narrowing — `v.trim()` is a call to a string-intrinsic
-    // method and the walk authority has no lib/intrinsic member surface
-    // for a primitive base (`UnrepresentableCallee`, ReturnOnly).
-    "N09_narrow_then_write",
     "N55_in_operator_nonliteral_key",
     // ── CALL RESOLUTION — context-sensitive callback inference ──────────
     // A callback argument's un-annotated parameter is never contextually
@@ -5354,7 +5346,12 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // 26 matching, 12 parked.
     (Owner::U6NarrowLattice, 38, 26, 12),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
-    (Owner::U6NarrowInvalidation, 2, 1, 1),
+    // An unannotated `let` initialised from a union is declared as that
+    // union, so N09's write through an unmodelled `v.trim()` reduces
+    // against it, which keeps the whole union for a value it cannot read,
+    // and the `typeof` read publishes the checker's `string` (still
+    // ReturnOnly): both rows match.
+    (Owner::U6NarrowInvalidation, 2, 2, 0),
     // A `new` and a tagged template resolve to the instance: C02, C04, C08,
     // C11 and C12 and their tagged-template twins C18, C19, C21, C23 and C24
     // match the checker. Over an undeclared call, C25 and C28 keep the

@@ -11477,6 +11477,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         in_analysis: &mut Vec<usize>,
         memo: &mut rustc_hash::FxHashMap<(usize, Vec<usize>), FlowProductStore>,
     ) -> Result<FlowProductStore, FlowReturnFailure> {
+        // A reference entering the loop at its declared type holds it
+        // at the head: every antecedent the checker's loop label would
+        // join is a subtype of it (`let i = 0 as 0 | 1; while (i < n)
+        // i++` leaves `i` `0 | 1`).
+        if self.loop_entry_holds_declared(&input.carried[subject]) {
+            return Ok(input.entry.products.clone());
+        }
         let closure = &input.dependencies[subject];
         let mut frozen: Vec<usize> = in_analysis
             .iter()
@@ -11522,6 +11529,43 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         memo.insert(key, products.clone());
         Ok(products)
+    }
+
+    /// Whether `subject` holds exactly its declared type where the state
+    /// is read: a parameter or a local with a declared type, reaching it
+    /// unwritten or written with that very type, and under no narrowing.
+    fn loop_entry_holds_declared(&mut self, subject: &FlowProductSubject) -> bool {
+        let canonical = self.canonical_runtime_subject(subject);
+        let parameter_declared = match &canonical {
+            FlowProductSubject::Local(binding) => {
+                self.param_names
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ordinal, param)| {
+                        param
+                            .binding
+                            .filter(|parameter| {
+                                self.bindings.canonical_local(*parameter) == *binding
+                            })
+                            .and_then(|_| self.params.get(ordinal).copied())
+                    })
+            }
+            FlowProductSubject::Captured(_) => None,
+        };
+        let Some(declared) = parameter_declared.or_else(|| self.local_declared(subject)) else {
+            return false;
+        };
+        let narrowed = self
+            .products
+            .narrowing(subject)
+            .is_some_and(|narrowing| narrowing.facts().iter().any(|fact| fact.path.is_empty()));
+        if narrowed {
+            return false;
+        }
+        match self.products.reaching(subject) {
+            Some(reaching) => reaching == declared,
+            None => parameter_declared.is_some(),
+        }
     }
 
     /// One pass of a loop body from `head`: the head's test (its writes,
@@ -12794,13 +12838,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         segments: &[Arc<str>],
     ) -> Option<SemanticNodeId> {
+        // A segment spelled as a canonical integer is an element read
+        // (`a[0]`), which indexes an array, a tuple or a numeric index
+        // signature as the type-level `T[0]` does; no identifier spells one.
         let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
             segments
                 .iter()
                 .map(|segment| {
-                    crate::semantic_query::PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier(Arc::from(segment.as_ref())),
-                    )
+                    match segment
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|index| index.to_string() == segment.as_ref())
+                        .and_then(crate::semantic_query::CanonicalIndexInt::from_canonical_i64)
+                    {
+                        Some(index) => crate::semantic_query::PathSegment::Index(
+                            crate::semantic_query::IndexKey::Number(index),
+                        ),
+                        None => crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from(
+                                segment.as_ref(),
+                            )),
+                        ),
+                    }
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -17322,6 +17381,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                             }
                                             None => node,
                                         };
+                                        // The checker declares the
+                                        // binding as its widened
+                                        // initializer's type; a UNION
+                                        // declared type reduces every
+                                        // assignment to the constituents
+                                        // the value can be
+                                        // (`getAssignmentReducedType`: `x
+                                        // = 1` over `let x = 0 as 0 | 1 |
+                                        // 2` is `1`).
+                                        if !auto_typed
+                                            && self.dispatch.union_arms_of(node).is_some()
+                                        {
+                                            self.set_declared_local(
+                                                &FlowProductSubject::Local(*binding),
+                                                *kind,
+                                                Some(node),
+                                            );
+                                        }
                                         // An auto-typed variable's bare
                                         // `null` / `undefined` initializer
                                         // is the checker's widening
@@ -18736,6 +18813,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         ));
                         return Positional::Unmodeled;
                     };
+                    // An element read (`a[0]`) the walk misses is a position
+                    // this lane does not model, never a published miss.
+                    let element_read = name.parse::<u64>().is_ok();
+                    if element_read
+                        && matches!(
+                            graph.node_data(member).as_deref(),
+                            Some(SemanticNodeData::Opaque(
+                                crate::semantic_query::QueryError::Miss
+                            ))
+                        )
+                    {
+                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                            crate::semantic_query::FlowGap::UnmodeledExpression,
+                        ));
+                        return Positional::Unmodeled;
+                    }
                     let member = match this_source {
                         Some(_) => self.dispatch.bind_this_receiver(member, current),
                         None => member,

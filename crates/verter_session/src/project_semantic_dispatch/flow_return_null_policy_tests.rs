@@ -6672,3 +6672,629 @@ const TEST_UPDATES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 fn test_updates_apply_where_the_test_evaluates() {
     assert_measured_matrix("test-updates.ts", TEST_UPDATES_SOURCE, TEST_UPDATES_TABLE);
 }
+
+/// The global declarations TypeScript 7.0.2's libraries make for the
+/// members the array tables read, verbatim (`lib.es5.d.ts`, with `find`
+/// from `lib.es2015.core.d.ts` and `includes` from
+/// `lib.es2016.array.include.d.ts`; measured with `--target es2022`).
+const ARRAY_LIB: &str = r#"
+interface ConcatArray<T> { readonly length: number; readonly [n: number]: T; join(separator?: string): string; slice(start?: number, end?: number): T[]; }
+interface Array<T> {
+    length: number;
+    pop(): T | undefined;
+    push(...items: T[]): number;
+    concat(...items: ConcatArray<T>[]): T[];
+    concat(...items: (T | ConcatArray<T>)[]): T[];
+    join(separator?: string): string;
+    slice(start?: number, end?: number): T[];
+    indexOf(searchElement: T, fromIndex?: number): number;
+    some(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): boolean;
+    map<U>(callbackfn: (value: T, index: number, array: T[]) => U, thisArg?: any): U[];
+    filter<S extends T>(predicate: (value: T, index: number, array: T[]) => value is S, thisArg?: any): S[];
+    filter(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): T[];
+    find<S extends T>(predicate: (value: T, index: number, obj: T[]) => value is S, thisArg?: any): S | undefined;
+    find(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): T | undefined;
+    includes(searchElement: T, fromIndex?: number): boolean;
+    [n: number]: T;
+}
+interface ReadonlyArray<T> { readonly length: number; readonly [n: number]: T; }
+interface String { readonly length: number; readonly [index: number]: string; }
+interface StringConstructor { new (value?: any): String; (value?: any): string; readonly prototype: String; }
+declare var String: StringConstructor;
+"#;
+
+/// [`assert_measured_matrix`] with `lib` registered as every project's
+/// ambient library.
+fn assert_measured_matrix_with_lib(
+    file: &str,
+    source: &str,
+    lib: &str,
+    table: &[(&str, &str, &str, &str, &str)],
+) {
+    let host = four_policy_host();
+    for ordinal in 0..4u32 {
+        host.workspace()
+            .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                project_id: Some(verter_workspace::workspace_snapshot::ProjectId(ordinal)),
+                canonical_id: std::sync::Arc::from(format!("lib.array{ordinal}.d.ts").as_str()),
+                source: std::sync::Arc::from(lib),
+            })
+            .expect("the library registers against its project");
+    }
+    let mismatches = matrix_mismatches(&host, file, source, table);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+const LITERAL_UNION_SOURCE: &str = r#"
+declare const c: boolean;
+declare function num(): number;
+export function assertSingle() { let x = "a" as "a"; return x; }
+export function assertSingleAngle() { let x = <1>1; return x; }
+export function assertSingleObj() { let x = "a" as "a"; return { x }; }
+export function assignLit() { let x = 0 as 0 | 1 | 2; x = 1; return x; }
+export function assignLitNum() { let x = 0 as 0 | 1 | 2; x = num() as 0 | 1; return x; }
+export function assignLitDecl() { let x: 0 | 1 | 2 = 0; x = 1; return x; }
+export function assignLitBool() { let x = true as boolean; x = false; return x; }
+export function assignLitStrUnion() { let x = "a" as "a" | "b"; x = "b"; return x; }
+export function assignWide() { let x = 0 as number; x = 1; return x; }
+export function assignConstAssert() { let x = 0 as const; return x; }
+export function assignSat() { let x = 0 satisfies number; x = 1; return x; }
+export function assignAngle() { let x = <0 | 1 | 2>0; x = 2; return x; }
+export function assignParenAs() { let x = (0 as 0 | 1 | 2); x = 1; return x; }
+export function counterForLit() { let x = 0 as 0 | 1 | 2; for (let i = 0; i < 3; i++) { x = 1; } return x; }
+export function counterWhileLit() { let x = 0 as 0 | 1 | 2; while (c) { x = 2; } return x; }
+export function counterIfLit() { let x = 0 as 0 | 1 | 2; if (c) { x = 2; } return x; }
+export function counterLoopRead() { let x = 0 as 0 | 1 | 2; let y = x; while (c) { y = x; x = 1; } return y; }
+export function assignNonUnionFromUnion() { let x = 0 as 0 | 1 | 2; x = (c ? 1 : 2); return x; }
+export function assignMismatch() { let x = 0 as 0 | 1 | 2; x = 5 as any; return x; }
+export function incLitUnion() { let x = 0 as 0 | 1 | 2; x++; return x; }
+export function inductionLiteral(n: number) { let i = 0 as 0 | 1; while (i < n) { i++; } return i; }
+export function inductionLiteralBody(n: number) { let i = 0 as 0 | 1; while (i < n) { i++; if (c) return i; } return null; }
+export function paramLoopCompound(p: 0 | 1) { while (c) { p++; } return p; }
+export function letVarUnionInit() { var v = 0 as 0 | 1; v = 1; return v; }
+export function condInit() { let x = c ? 1 : "a"; x = 1; return x; }
+"#;
+
+const LITERAL_UNION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "a" under all four
+    ("assertSingle", "\"a\"", "\"a\"", "\"a\"", "\"a\""),
+    // 1 under all four
+    ("assertSingleAngle", "1", "1", "1", "1"),
+    // { x: "a"; } under all four
+    (
+        "assertSingleObj",
+        "{ x: \"a\" }",
+        "{ x: \"a\" }",
+        "{ x: \"a\" }",
+        "{ x: \"a\" }",
+    ),
+    // 1 under all four
+    ("assignLit", "1", "1", "1", "1"),
+    // 0 | 1 under all four
+    ("assignLitNum", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // 1 under all four
+    ("assignLitDecl", "1", "1", "1", "1"),
+    // boolean under all four
+    ("assignLitBool", "boolean", "boolean", "boolean", "boolean"),
+    // "b" under all four
+    ("assignLitStrUnion", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // number under all four
+    ("assignWide", "number", "number", "number", "number"),
+    // 0 under all four
+    ("assignConstAssert", "0", "0", "0", "0"),
+    // number under all four
+    ("assignSat", "number", "number", "number", "number"),
+    // 2 under all four
+    ("assignAngle", "2", "2", "2", "2"),
+    // 1 under all four
+    ("assignParenAs", "1", "1", "1", "1"),
+    // 0 | 1 | 2 under all four
+    (
+        "counterForLit",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "counterWhileLit",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "counterIfLit",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "counterLoopRead",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 1 | 2 under all four
+    (
+        "assignNonUnionFromUnion",
+        "1 | 2",
+        "1 | 2",
+        "1 | 2",
+        "1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "assignMismatch",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // number under all four
+    ("incLitUnion", "number", "number", "number", "number"),
+    // 0 | 1 under all four
+    ("inductionLiteral", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // number | null / number / number | null / number
+    (
+        "inductionLiteralBody",
+        "null | number",
+        "number",
+        "null | number",
+        "number",
+    ),
+    // 0 | 1 under all four
+    ("paramLoopCompound", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // 1 under all four
+    ("letVarUnionInit", "1", "1", "1", "1"),
+    // number under all four
+    ("condInit", "number", "number", "number", "number"),
+];
+
+/// An unannotated `let` / `var` is declared as its initializer's widened
+/// type, and a type assertion's type is not fresh, so it does not widen:
+/// `let x = 0 as 0 | 1 | 2` declares `0 | 1 | 2`, and `let x = "a" as "a"`
+/// reads `"a"`. Each assignment reduces against a union declared type
+/// (`getAssignmentReducedType`): `x = 1` leaves `1`, and
+/// a value no constituent can hold leaves the whole union. A loop head where
+/// the reference enters at its declared type stays that type, so `i++` in
+/// `while (i < n)` over `let i = 0 as 0 | 1` leaves `0 | 1` past the loop
+/// while the body reads `number` after the update. Measured on TypeScript
+/// 7.0.2 in all four `strictNullChecks` × `noImplicitAny` settings.
+#[test]
+fn assignments_reduce_against_an_asserted_declared_type() {
+    assert_measured_matrix(
+        "literal-union.ts",
+        LITERAL_UNION_SOURCE,
+        LITERAL_UNION_TABLE,
+    );
+}
+
+const INDUCTION_LOOPS_SOURCE: &str = r#"
+export function inductionOnly(n: number) { let i = 0; for (; i < n; i++) { } return i; }
+export function inductionOnlyWhile(n: number) { let i = 0; while (i < n) { i++; } return i; }
+export function inductionLiteral(n: number) { let i = 0 as 0 | 1; while (i < n) { i++; } return i; }
+export function inductionFor(n: number) { let k = 0; for (let i = 0; i < n; i++) { k = i; } return k; }
+export function inductionReturn(n: number) { for (let i = 0; i < n; i++) { if (i > 3) return i; } return null; }
+"#;
+
+const INDUCTION_LOOPS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    ("inductionOnly", "number", "number", "number", "number"),
+    // number under all four
+    ("inductionOnlyWhile", "number", "number", "number", "number"),
+    // 0 | 1 under all four
+    ("inductionLiteral", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // number under all four
+    ("inductionFor", "number", "number", "number", "number"),
+    // number | null / number / number | null / number
+    (
+        "inductionReturn",
+        "null | number",
+        "number",
+        "null | number",
+        "number",
+    ),
+];
+
+/// A loop whose only write is its induction variable (`i++` in a `for` update
+/// or a `while` body) types that variable at the head like any other written
+/// reference: `let i = 0` reads `number` past the loop and inside it, and one
+/// declared `0 | 1` stays `0 | 1`. Measured on TypeScript 7.0.2.
+#[test]
+fn loops_writing_only_their_induction_variable_take_the_loop_head() {
+    assert_measured_matrix(
+        "induction-loops.ts",
+        INDUCTION_LOOPS_SOURCE,
+        INDUCTION_LOOPS_TABLE,
+    );
+}
+
+const ARRAY_MEMBERS_SOURCE: &str = r#"
+export function evLength() { const a = []; a.push(1); return a.length; }
+export function evLengthEmpty() { const a = []; return a.length; }
+export function evLengthBetween() { const a = []; const n = a.length; a.push(1); return [n, a]; }
+export function evIndex() { const a = []; a.push(1); return a[0]; }
+export function evIndexEmpty() { const a = []; return a[0]; }
+export function evFilter() { const a = []; a.push(1); a.push("s"); return a.filter(x => x); }
+export function evJoin() { const a = []; a.push(1); return a.join(","); }
+export function evSlice() { const a = []; a.push(1); return a.slice(); }
+export function evPop() { const a = []; a.push(1); return a.pop(); }
+export function evFind() { const a = []; a.push(1); return a.find(x => x > 0); }
+export function evSome() { const a = []; a.push(1); return a.some(x => x > 0); }
+export function decLength(a: number[]) { return a.length; }
+export function decIndex(a: number[]) { return a[0]; }
+export function decFilter(a: (string | number)[]) { return a.filter(x => x); }
+export function decJoin(a: number[]) { return a.join(","); }
+export function decIndexOf(a: number[]) { return a.indexOf(1); }
+export function decSlice(a: number[]) { return a.slice(); }
+export function decPop(a: number[]) { return a.pop(); }
+export function decFind(a: number[]) { return a.find(x => x > 0); }
+export function decLocalLength() { const a: number[] = [1]; return a.length; }
+export function decReadonlyLength(a: readonly string[]) { return a.length; }
+export function decReadonlyIndex(a: readonly string[]) { return a[0]; }
+export function decTupleLength(t: [number, string]) { return t.length; }
+export function tupleIndex(t: [number, string]) { return t[1]; }
+export function localTupleIndex() { const t = [1, "a"] as const; return t[0]; }
+"#;
+
+const ARRAY_MEMBERS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    ("evLength", "number", "number", "number", "number"),
+    // number under all four
+    ("evLengthEmpty", "number", "number", "number", "number"),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] / (number | any[])[]
+    (
+        "evLengthBetween",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // number / number / never / any
+    ("evIndex", "number", "number", "never", "any"),
+    // any / any / never / any
+    ("evIndexEmpty", "any", "any", "never", "any"),
+    // (string | number)[] / (string | number)[] / never[] / any[]
+    (
+        "evFilter",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // string under all four
+    ("evJoin", "string", "string", "string", "string"),
+    // number[] / number[] / never[] / any[]
+    ("evSlice", "number[]", "number[]", "never[]", "any[]"),
+    // number | undefined / number / undefined / any
+    ("evPop", "number | undefined", "number", "undefined", "any"),
+    // number | undefined / number / undefined / any
+    ("evFind", "number | undefined", "number", "undefined", "any"),
+    // boolean under all four
+    ("evSome", "boolean", "boolean", "boolean", "boolean"),
+    // number under all four
+    ("decLength", "number", "number", "number", "number"),
+    // number under all four
+    ("decIndex", "number", "number", "number", "number"),
+    // (string | number)[] under all four
+    (
+        "decFilter",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // string under all four
+    ("decJoin", "string", "string", "string", "string"),
+    // number under all four
+    ("decIndexOf", "number", "number", "number", "number"),
+    // number[] under all four
+    ("decSlice", "number[]", "number[]", "number[]", "number[]"),
+    // number | undefined / number / number | undefined / number
+    (
+        "decPop",
+        "number | undefined",
+        "number",
+        "number | undefined",
+        "number",
+    ),
+    // number | undefined / number / number | undefined / number
+    (
+        "decFind",
+        "number | undefined",
+        "number",
+        "number | undefined",
+        "number",
+    ),
+    // number under all four
+    ("decLocalLength", "number", "number", "number", "number"),
+    // number under all four
+    ("decReadonlyLength", "number", "number", "number", "number"),
+    // string under all four
+    ("decReadonlyIndex", "string", "string", "string", "string"),
+    // 2 under all four
+    ("decTupleLength", "2", "2", "2", "2"),
+    // string under all four
+    ("tupleIndex", "string", "string", "string", "string"),
+    // 1 under all four
+    ("localTupleIndex", "1", "1", "1", "1"),
+];
+
+/// A member read off an array, a readonly array or a tuple reads the global
+/// `Array` / `ReadonlyArray` wrapper's member (`getApparentType`), and an
+/// element read at an integer literal reads the element (a tuple's position):
+/// an EVOLVING array finalizes where it is read, so `a.length` and `a[0]`
+/// over `const a = []; a.push(1)` read `number`, `a.pop()` `number |
+/// undefined` (`number` with `strictNullChecks` off), and `a.filter(x => x)`
+/// over a `string | number` array `(string | number)[]`; without
+/// `noImplicitAny` the array is declared `never[]` (`any[]` with
+/// `strictNullChecks` off). Measured on TypeScript 7.0.2 (`--target es2022`),
+/// the table's comments in the checker's print order.
+#[test]
+fn array_members_read_through_the_apparent_wrapper() {
+    assert_measured_matrix_with_lib(
+        "array-members.ts",
+        ARRAY_MEMBERS_SOURCE,
+        ARRAY_LIB,
+        ARRAY_MEMBERS_TABLE,
+    );
+}
+
+const ARRAY_MAP_SOURCE: &str = r#"
+export function evMap() { const a = []; a.push(1); return a.map(x => x); }
+export function evMapString() { const a = []; a.push(1); return a.map(x => String(x)); }
+export function decMap(a: number[]) { return a.map(x => x); }
+export function decMapString(a: number[]) { return a.map(x => String(x)); }
+"#;
+
+const ARRAY_MAP_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] / any[]
+    ("evMap", "number[]", "number[]", "never[]", "any[]"),
+    // string[] under all four
+    (
+        "evMapString",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+    // number[] under all four
+    ("decMap", "number[]", "number[]", "number[]", "number[]"),
+    // string[] under all four
+    (
+        "decMapString",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+];
+
+/// `map<U>` infers `U` from its callback's return, the callback's parameter
+/// contextually typed by the array's element: `a.map(x => x)` over
+/// `number[]` is `number[]` and `a.map(x => String(x))` `string[]`
+/// (measured on TypeScript 7.0.2). The lane answers `unknown[]`.
+#[test]
+#[ignore = "call inference from a contextually typed callback return: `a.map(x => x)` over `number[]` is `number[]`"]
+fn array_map_infers_its_callback_return() {
+    assert_measured_matrix_with_lib("array-map.ts", ARRAY_MAP_SOURCE, ARRAY_LIB, ARRAY_MAP_TABLE);
+}
+
+const ARRAY_CONCAT_SOURCE: &str = r#"
+export function evConcat() { const a = []; a.push(1); return a.concat([2]); }
+export function decConcat(a: number[]) { return a.concat([2]); }
+"#;
+
+const ARRAY_CONCAT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] / any[]
+    ("evConcat", "number[]", "number[]", "never[]", "any[]"),
+    // number[] under all four
+    ("decConcat", "number[]", "number[]", "number[]", "number[]"),
+];
+
+/// `a.concat([2])` over `number[]` resolves `concat`'s first overload and
+/// is `number[]` (measured on TypeScript 7.0.2). The lane refuses the callee.
+#[test]
+#[ignore = "overload resolution of `concat(...items: ConcatArray<T>[])` over an array literal argument"]
+fn array_concat_resolves_its_overloads() {
+    assert_measured_matrix_with_lib(
+        "array-concat.ts",
+        ARRAY_CONCAT_SOURCE,
+        ARRAY_LIB,
+        ARRAY_CONCAT_TABLE,
+    );
+}
+
+const NON_ASSIGNABLE_ARGUMENT_SOURCE: &str = r#"
+export function evIndexOf() { const a = []; a.push(1); return a.indexOf(1); }
+export function evIncludes() { const a = []; a.push(1); return a.includes(1); }
+"#;
+
+const NON_ASSIGNABLE_ARGUMENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    ("evIndexOf", "number", "number", "number", "number"),
+    // boolean under all four
+    ("evIncludes", "boolean", "boolean", "boolean", "boolean"),
+];
+
+/// Without `noImplicitAny` an evolving array is `never[]`, so `a.indexOf(1)`
+/// passes an argument `never` cannot hold (TS2345), and the checker still
+/// types the call by its only signature: `number`, and `boolean` for
+/// `includes` (measured on TypeScript 7.0.2). The lane refuses the callee in
+/// that setting.
+#[test]
+#[ignore = "a call whose argument is not assignable still takes the return type of its only signature"]
+fn a_call_with_a_non_assignable_argument_keeps_its_only_signature() {
+    assert_measured_matrix_with_lib(
+        "non-assignable-argument.ts",
+        NON_ASSIGNABLE_ARGUMENT_SOURCE,
+        ARRAY_LIB,
+        NON_ASSIGNABLE_ARGUMENT_TABLE,
+    );
+}
+
+const BOOLEAN_MEMBER_RETURNS_SOURCE: &str = r#"
+export function decIncludes(a: number[]) { return a.includes(1); }
+export function decSome(a: number[]) { return a.some(x => x > 0); }
+export function nestedIndex(o: { xs: boolean[] }) { return o.xs[0]; }
+"#;
+
+const BOOLEAN_MEMBER_RETURNS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // boolean under all four
+    ("decIncludes", "boolean", "boolean", "boolean", "boolean"),
+    // boolean under all four
+    ("decSome", "boolean", "boolean", "boolean", "boolean"),
+    // boolean under all four
+    ("nestedIndex", "boolean", "boolean", "boolean", "boolean"),
+];
+
+/// `return a.includes(1)`, `return a.some(x => x > 0)` and `return o.xs[0]`
+/// read a parameter's member and are `boolean`: the checker infers no type
+/// predicate from them (measured on TypeScript 7.0.2). The lane answers
+/// `boolean` degraded by the guard-narrowing gap.
+#[test]
+#[ignore = "a boolean member call or element read of a parameter infers no type predicate"]
+fn boolean_member_reads_of_a_parameter_infer_no_type_predicate() {
+    assert_measured_matrix_with_lib(
+        "boolean-member-returns.ts",
+        BOOLEAN_MEMBER_RETURNS_SOURCE,
+        ARRAY_LIB,
+        BOOLEAN_MEMBER_RETURNS_TABLE,
+    );
+}
+
+const STRING_ELEMENT_SOURCE: &str = r#"
+export function strIndex(s: string) { return s[0]; }
+"#;
+
+const STRING_ELEMENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string under all four
+    ("strIndex", "string", "string", "string", "string"),
+];
+
+/// `s[0]` over `s: string` is `string`, the `String` wrapper's
+/// `[index: number]: string` (measured on TypeScript 7.0.2). The lane misses
+/// the read.
+#[test]
+#[ignore = "an element read of a string reads the `String` wrapper's number index signature"]
+fn a_string_element_read_reads_the_string_index_signature() {
+    assert_measured_matrix_with_lib(
+        "string-element.ts",
+        STRING_ELEMENT_SOURCE,
+        ARRAY_LIB,
+        STRING_ELEMENT_TABLE,
+    );
+}
+
+const INVOKED_WRITES_SOURCE: &str = r#"
+declare const c: boolean;
+export function iifeStraight() { let x: string | number = 0; (() => { x = "s"; })(); return x; }
+export function iifeCond() { let x: string | number = 0; if (c) { (() => { x = "s"; })(); } return x; }
+export function iifeFnExpr() { let x: string | number = 0; (function () { x = "s"; })(); return x; }
+export function iifeLoop(n: number) { let x: string | number = 0; for (let i = 0; i < n; i++) { (() => { x = "s"; })(); } return x; }
+export function iifeLoopWhile() { let x: string | number = 0; while (c) { (function () { x = "s"; })(); } return x; }
+export function iifeLoopRead(n: number) { let x: string | number = 0; let r = 0 as string | number; for (let i = 0; i < n; i++) { r = x; (() => { x = "s"; })(); } return r; }
+"#;
+
+const INVOKED_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string under all four
+    ("iifeStraight", "string", "string", "string", "string"),
+    // string | number under all four
+    (
+        "iifeCond",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string under all four
+    ("iifeFnExpr", "string", "string", "string", "string"),
+    // string | number under all four
+    (
+        "iifeLoop",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number under all four
+    (
+        "iifeLoopWhile",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number under all four
+    (
+        "iifeLoopRead",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+];
+
+/// The checker's flow runs through an immediately invoked function
+/// expression's body, so its writes to a captured binding reach the reads
+/// after the call: `(() => { x = "s"; })()` over `let x: string | number =
+/// 0` leaves `string`, in a loop `string | number` (measured on TypeScript
+/// 7.0.2). The lane refuses the function.
+#[test]
+#[ignore = "an immediately invoked function expression's writes to captured bindings enter the caller's flow"]
+fn invoked_function_expressions_apply_their_writes() {
+    assert_measured_matrix(
+        "invoked-writes.ts",
+        INVOKED_WRITES_SOURCE,
+        INVOKED_WRITES_TABLE,
+    );
+}
+
+const MEMBER_WRITES_SOURCE: &str = r#"
+declare const c: boolean;
+export function memberWriteStraight() { const o: { y: string | number } = { y: 0 }; o.y = "s"; return o.y; }
+export function memberWriteLoop() { const o: { y: string | number | boolean } = { y: 0 }; o.y = 0; while (c) { o.y = "s"; } return o.y; }
+"#;
+
+const MEMBER_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string under all four
+    (
+        "memberWriteStraight",
+        "string",
+        "string",
+        "string",
+        "string",
+    ),
+    // string | number under all four
+    (
+        "memberWriteLoop",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+];
+
+/// An assignment `o.y = "s"` narrows the reference `o.y` for the reads after
+/// it: `string` straight after it, and `string | number` past a loop that
+/// assigns it over `o.y = 0` (measured on TypeScript 7.0.2). The lane reads the
+/// member's declared type.
+#[test]
+#[ignore = "an assignment to a member path narrows later reads of that path, in and outside loops"]
+fn member_writes_narrow_their_member_path() {
+    assert_measured_matrix(
+        "member-writes.ts",
+        MEMBER_WRITES_SOURCE,
+        MEMBER_WRITES_TABLE,
+    );
+}

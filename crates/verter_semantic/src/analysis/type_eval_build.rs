@@ -4528,6 +4528,12 @@ fn infer_declaration_expression_type_with_budget(
         );
     }
     match expr {
+        // A type assertion's type is not a FRESH literal type, and the
+        // checker widens only a fresh one (`getWidenedLiteralType`): `let x =
+        // 0 as 0 | 1 | 2` declares `0 | 1 | 2` under either policy.
+        Expression::TSAsExpression(_) | Expression::TSTypeAssertion(_) => {
+            infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, budget, depth + 1)
+        }
         // Structurally transparent: the wrapper is not a top level of its
         // own, so the caller's policy passes straight through.
         Expression::ParenthesizedExpression(parenthesized) => {

@@ -3229,6 +3229,35 @@ fn optional_member_chain_parts<'a>(
     }
 }
 
+/// The root identifier and member path of a non-optional element read at
+/// a non-negative integer literal (`a[0]`, `o.xs[1]`) over a static member
+/// chain rooted at an identifier; the index is the path's last key.
+fn element_read_path<'a>(
+    member: &'a oxc_ast::ast::ComputedMemberExpression<'a>,
+) -> Option<(&'a oxc_ast::ast::IdentifierReference<'a>, Vec<Arc<str>>)> {
+    let Expression::NumericLiteral(index) = &member.expression else {
+        return None;
+    };
+    if member.optional || index.value < 0.0 || index.value.fract() != 0.0 || index.value > 1e15 {
+        return None;
+    }
+    let mut links: Vec<Arc<str>> = vec![Arc::from(format!("{}", index.value as u64).as_str())];
+    let mut current = &member.object;
+    loop {
+        match current {
+            Expression::StaticMemberExpression(object) if !object.optional => {
+                links.push(Arc::from(object.property.name.as_str()));
+                current = &object.object;
+            }
+            Expression::Identifier(root) => {
+                links.reverse();
+                return Some((root, links));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// One STATIC link of a member-valued optional chain: the member name and
 /// its own `?.`-authored optionality.
 type OptionalMemberLink = (Arc<str>, bool);
@@ -9355,6 +9384,24 @@ impl<'a> Lowerer<'a> {
                 SliceExpr::OptionalMember {
                     root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
                     links: path.into_iter().map(|name| (name, false)).collect(),
+                }
+            }
+            // An element read at an integer literal position off a
+            // parameter or local reference (`a[0]`, `o.xs[1]`) reads that
+            // key of the reference's type through the member-path walk a
+            // static member read takes.
+            Expression::ComputedMemberExpression(member)
+                if element_read_path(member).is_some_and(|(root, _)| {
+                    matches!(
+                        self.classify_occurrence(root.span),
+                        NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured
+                    )
+                }) =>
+            {
+                let (root, links) = element_read_path(member).expect("guarded");
+                SliceExpr::OptionalMember {
+                    root: Box::new(self.lower_identifier_read(root, mode)),
+                    links: links.into_iter().map(|name| (name, false)).collect(),
                 }
             }
             Expression::FunctionExpression(func) => {
