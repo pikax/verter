@@ -466,7 +466,6 @@ fn a_method_call_on_a_library_generic_instance_resolves() {
 /// - `Parameters<Set<number>['add']>`: the checker answers `[value: number]`;
 ///   the lane measured `<opaque Miss>`.
 #[test]
-#[ignore = "an indexed access into an instantiated library generic interface reads its member"]
 fn a_member_of_a_library_generic_instance_reads_in_type_position() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let mut failures = matrix.types(&[("Parameters<Set<number>['add']>", "[value: number]")]);
@@ -519,7 +518,6 @@ fn promise_all_and_race_map_their_tuple_argument() {
 /// - `mSize`: the checker answers `number`; the lane measured `Map<string,
 ///   number>`.
 #[test]
-#[ignore = "a readonly property read on a Map instance is the property's type"]
 fn wrong_clean_a_map_size_read_is_its_declared_type() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[("mSize", "number")]);

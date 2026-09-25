@@ -2398,6 +2398,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// later step under a shared subject, or a read with no demand site at
     /// all, is scoped to the demand, which the key cannot name — that entry
     /// stays out of the shared memo.
+    /// The surface a runtime nominal carrier (`Map<K, V>`, `Date`,
+    /// `Promise<T>`) reads its members from: the application carrier has no
+    /// declaration body in the graph, so a member of it is the member of
+    /// the global interface of that name instantiated with the carrier's
+    /// arguments (the checker's `Map<K, V>` IS that interface). `None` for
+    /// any other node, and when the project's interface does not settle.
+    fn runtime_nominal_member_surface(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        use super::apparent_type::GlobalWrapper;
+        let (nominal, args) = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, args }) => (
+                crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base)?,
+                args.to_vec(),
+            ),
+            Some(SemanticNodeData::DeclRef { identity }) => (
+                crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(identity)?,
+                Vec::new(),
+            ),
+            _ => return None,
+        };
+        match self.global_surface_read(nominal.global_name(), &args) {
+            GlobalWrapper::Surface(surface) if surface != node => Some(surface),
+            GlobalWrapper::Surface(_) | GlobalWrapper::Absent | GlobalWrapper::Unsettled => None,
+        }
+    }
+
     fn apparent_wrapper_read(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         use super::apparent_type::GlobalWrapper;
         let (name, args) = self.dispatch.apparent_wrapper_of(node)?;
@@ -4339,6 +4364,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                     };
                     if resolved == current {
+                        // A declaration with no body to read (a runtime
+                        // nominal) reads a pending segment off its global
+                        // interface; the reference itself is never the
+                        // member it was asked for.
+                        if index < path.len() {
+                            match self.runtime_nominal_member_surface(current) {
+                                Some(surface) => {
+                                    current = surface;
+                                    continue;
+                                }
+                                None => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            }
+                        }
                         results.push(current);
                         return;
                     }
@@ -4476,6 +4517,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             }
                         };
                     if resolved == current {
+                        if still_more_path {
+                            match self.runtime_nominal_member_surface(current) {
+                                Some(surface) => {
+                                    current = surface;
+                                    continue;
+                                }
+                                None => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            }
+                        }
                         results.push(current);
                         return;
                     }

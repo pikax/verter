@@ -81,6 +81,21 @@ pub enum RuntimeNominal {
 }
 
 impl RuntimeNominal {
+    /// The global interface name this nominal is.
+    #[must_use]
+    pub fn global_name(self) -> &'static str {
+        match self {
+            Self::Date => "Date",
+            Self::Map => "Map",
+            Self::Set => "Set",
+            Self::WeakMap => "WeakMap",
+            Self::WeakSet => "WeakSet",
+            Self::Promise => "Promise",
+            Self::Error => "Error",
+            Self::Function => "Function",
+        }
+    }
+
     #[must_use]
     pub fn from_global_name(name: &str) -> Option<Self> {
         match name {
