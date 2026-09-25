@@ -4209,6 +4209,28 @@ mod conditional_indexed_check_tests;
 #[cfg(test)]
 mod const_literal_widening_tests;
 #[cfg(test)]
+mod differential_call_tests;
+#[cfg(test)]
+mod differential_class_tests;
+#[cfg(test)]
+mod differential_depth_tests;
+#[cfg(test)]
+mod differential_flow_tests;
+#[cfg(test)]
+mod differential_global_library_tests;
+#[cfg(test)]
+mod differential_harness_tests;
+#[cfg(test)]
+mod differential_literal_tests;
+#[cfg(test)]
+mod differential_module_tests;
+#[cfg(test)]
+mod differential_narrowing_tests;
+#[cfg(test)]
+mod differential_relation_tests;
+#[cfg(test)]
+mod differential_type_operator_tests;
+#[cfg(test)]
 mod enum_literal_tests;
 #[cfg(test)]
 mod heritage_signature_tests;
