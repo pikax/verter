@@ -1787,9 +1787,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// scopes, so an edit anywhere beneath the function reaches every
     /// instantiation read from it. `None` when the key is uninstantiated;
     /// when its uninstantiated return is unanswered, in flight or degraded;
-    /// or when the return cannot be bound by name (a nested clause
-    /// re-declaring one of the function's binder names): the body is then
-    /// evaluated under the instantiation.
+    /// or when a signature in the return declares one of the binders being
+    /// bound (a function type written in the body whose clause re-declares
+    /// one of the function's binder names): the body is then evaluated
+    /// under the instantiation.
     fn instantiated_from_uninstantiated(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
         if schedule::is_uninstantiated(key) {
             return None;
@@ -4404,12 +4405,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// this environment. TS2300 constrains only one frame
     /// (`function f<T>() { class T {} }`); across frames the two
     /// genuinely coexist and the nearest wins, in both directions.
+    ///
+    /// The clause's DECLARATION is its binders' identity, as each checker
+    /// type parameter is its own symbol. The root frame's clause interns
+    /// by name in the file scope (`nested_at` `None`) — the identity the
+    /// declaration lowering's signature-scoped binders, the enclosing-class
+    /// rebinding and the instantiation's by-name binding all read. A
+    /// nested declaration's clause — a function value's or a class
+    /// expression's, `nested_at` its start offset in the defining file —
+    /// interns under a name qualified by that offset, so `g<T>`'s `T` and
+    /// the `T` of an `id: <T,>(z: T) => z` it returns are distinct nodes:
+    /// substituting the one never rewrites the other.
+    /// The qualified name is an identity mint (the `\u{1}` separator
+    /// cannot appear in an authored identifier); the display name stays
+    /// the authored one.
     fn flow_binder_env(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         outer: Option<&FlowBinderEnv>,
+        nested_at: Option<u32>,
     ) -> FlowBinderEnv {
         let graph = self.graph();
         let whole_hash = self
@@ -4442,8 +4458,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let intern_binder = |name: &Arc<str>,
                              constraint: Option<SemanticNodeId>,
                              default: Option<SemanticNodeId>| {
+            let decl_name = match nested_at {
+                Some(offset) => Arc::from(format!("{name}\u{1}{offset}").as_str()),
+                None => Arc::clone(name),
+            };
             graph.intern_node(SemanticNodeData::TypeParam {
-                decl: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::clone(name)),
+                decl: crate::semantic_query::DeclIdentity::from_scope(&scope, decl_name),
                 param_index: 0,
                 constraint,
                 default,
@@ -4984,13 +5004,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The ENCLOSING declaration's clause seeds it: a class member's
         // signature and body see `class C<T>`'s binders, which appear in
         // no clause of the member itself.
-        let enclosing_binder_env = (!ir.enclosing_type_parameters.is_empty())
-            .then(|| self.flow_binder_env(canonical, owner, &ir.enclosing_type_parameters, None));
+        let enclosing_binder_env = (!ir.enclosing_type_parameters.is_empty()).then(|| {
+            self.flow_binder_env(canonical, owner, &ir.enclosing_type_parameters, None, None)
+        });
         let binder_env = self.flow_binder_env(
             canonical,
             owner,
             &ir.type_parameters,
             enclosing_binder_env.as_ref(),
+            None,
         );
         // The instantiation overlay: a flow key demanded under a call's
         // FINAL ordered type-argument mapping binds this frame's OWN
@@ -16698,6 +16720,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.owner,
             type_parameters,
             Some(outer_env),
+            Some(anchor),
         );
         // The SAME signature gate the root evaluation takes. A nested
         // signature sits inside the enclosing frame's body, so its

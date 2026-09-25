@@ -764,3 +764,165 @@ fn a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiate
     });
     assert_tagged_value(&second, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
 }
+
+/// Chains through local arrow functions whose head returns a nested
+/// generic declaration re-declaring the chain's binder name — a function
+/// value (`id: <T,>(z: T) => z`) or a class expression
+/// (`K: class<T> { own!: T; }`): the nested clause is its own declaration,
+/// with binders distinct from every level's `T`, so each level's
+/// instantiation is read off its uninstantiated return without touching
+/// the nested parameter. Each 256-level chain answers, and a new
+/// instantiation of the warm chain answers on a 512 KiB stack.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike, measured at 256 levels): `witness` is
+/// `{ v: string | number; tag: "c"; id: <T>(z: T) => T; }` and
+/// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`
+/// over the function head; over the class head the `id` member is
+/// `K: { new <T>(): { own: T; }; }`.
+#[test]
+fn a_256_level_chain_returning_a_same_name_generic_answers() {
+    for (head, member, keeps_its_clause) in [
+        (
+            "id: <T,>(z: T) => z",
+            "id",
+            identity_of_its_own_t as fn(&TypeExpr) -> bool,
+        ),
+        ("K: class<T> { own!: T; }", "K", constructor_of_its_own_t),
+    ] {
+        let source = local_arrow_chain(256).replacen(
+            "{ v: x, tag: \"c\" as const }",
+            &format!("{{ v: x, tag: \"c\" as const, {head} }}"),
+            1,
+        );
+        assert_same_name_generic_chain_answers(source, member, keeps_its_clause, 512 << 10);
+    }
+}
+
+/// The same chain over a head holding a function TYPE written in the body
+/// with a same-name clause (`const id: <T>(z: T) => T = (z) => z`). That
+/// clause lowers to the enclosing `T`'s own node, so an instantiation is
+/// not read off the uninstantiated return: every level of a new
+/// instantiation is evaluated again, one nested inline evaluation per
+/// level, and the 256-level `second` ends in a typed refusal (`Miss`).
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike, measured at 256 levels): `witness` is
+/// `{ v: string | number; tag: "c"; id: <T>(z: T) => T; }` and
+/// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`.
+#[test]
+#[ignore = "a function type written in a body shares the enclosing function's binder for a same-name clause, so a new instantiation of a deep chain returning one is evaluated per level instead of read off the uninstantiated return"]
+fn a_256_level_chain_returning_a_same_name_function_type_answers() {
+    let source = local_arrow_chain(256).replacen(
+        "function l0<T>(x: T) { return { v: x, tag: \"c\" as const }; }",
+        "function l0<T>(x: T) { const id: <T>(z: T) => T = (z) => z; \
+         return { v: x, tag: \"c\" as const, id }; }",
+        1,
+    );
+    // The production worker stack: the per-level evaluation meets the
+    // typed depth refusal rather than a small test stack's end.
+    assert_same_name_generic_chain_answers(source, "id", identity_of_its_own_t, 8 << 20);
+}
+
+/// A binder named `T`.
+fn is_t(ty: &TypeExpr) -> bool {
+    matches!(ty, TypeExpr::TypeParameter(param) if param.name == "T")
+}
+
+/// `<T>(z: T) => T`.
+fn identity_of_its_own_t(member: &TypeExpr) -> bool {
+    matches!(member, TypeExpr::Function(id)
+        if id.type_parameters.len() == 1
+            && id.type_parameters[0].name == "T"
+            && id.parameters.len() == 1
+            && is_t(&id.parameters[0].ty)
+            && id.return_type.as_deref().is_some_and(is_t))
+}
+
+/// `{ new <T>(): { own: T; }; }`.
+fn constructor_of_its_own_t(member: &TypeExpr) -> bool {
+    let TypeExpr::Object(constructor) = member else {
+        return false;
+    };
+    let [ObjectMember::ConstructSignature(construct)] = constructor.properties.as_slice() else {
+        return false;
+    };
+    let Some(TypeExpr::Object(instance)) = construct.return_type.as_deref() else {
+        return false;
+    };
+    construct.type_parameters.len() == 1
+        && construct.type_parameters[0].name == "T"
+        && matches!(instance.properties.as_slice(),
+            [ObjectMember::Property(own)] if own.key == "own".into() && is_t(&own.ty))
+}
+
+/// Over a 256-level chain `source` ending in `l255`: `witness` answers
+/// `{ v: string | number; tag: "c"; <member> }` cold, and a new
+/// instantiation `second(v: boolean)` answers `{ v: boolean; tag: "c";
+/// <member> }` on a `second_stack`-byte stack, clean and admitted, with
+/// `member` keeping its own clause.
+fn assert_same_name_generic_chain_answers(
+    mut source: String,
+    member: &str,
+    keeps_its_clause: fn(&TypeExpr) -> bool,
+    second_stack: usize,
+) {
+    source.push_str("export function second(v: boolean) { return l255(v); }\n");
+    let host = host_with(&[(PATH, source.as_str())]);
+    let witness = {
+        let host = Arc::clone(&host);
+        on_stack(8 << 20, move || {
+            with_dispatch(&host, |dispatch| {
+                eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"))
+            })
+        })
+    };
+    let second = on_stack(second_stack, move || {
+        with_dispatch(&host, |dispatch| {
+            eval_key_on(&host, dispatch, key_of(dispatch, PATH, "second"))
+        })
+    });
+    for (name, outcome, arms) in [
+        ("witness", &witness, vec![number(), string()]),
+        (
+            "second",
+            &second,
+            vec![TypeExpr::Primitive(PrimitiveName::Boolean)],
+        ),
+    ] {
+        let Outcome::Value {
+            ty: TypeExpr::Object(object),
+            degradation: None,
+            candidates: 1,
+        } = outcome
+        else {
+            panic!("expected a clean, admitted object for `{name}`: {outcome:?}");
+        };
+        let property = |name: &str| {
+            object.properties.iter().find_map(|entry| match entry {
+                ObjectMember::Property(property) if property.key == name.into() => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(object.properties.len(), 3, "{outcome:?}");
+        assert_eq!(
+            property("tag"),
+            Some(&TypeExpr::Literal(LiteralValue::String("c".to_string()))),
+            "{outcome:?}"
+        );
+        match property("v") {
+            Some(TypeExpr::Union(members)) => assert!(
+                members.len() == arms.len() && arms.iter().all(|arm| members.contains(arm)),
+                "{outcome:?}"
+            ),
+            Some(single) => assert_eq!(std::slice::from_ref(single), &arms[..], "{outcome:?}"),
+            None => panic!("no `v` member: {outcome:?}"),
+        }
+        assert!(
+            property(member).is_some_and(keeps_its_clause),
+            "`{member}` keeps its own `<T>`: {outcome:?}"
+        );
+    }
+}

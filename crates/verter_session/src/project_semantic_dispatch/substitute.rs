@@ -267,12 +267,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Bind a function's OWN clause in its body-derived return by
     /// declaration order, exactly as an instantiated frame's binder
     /// environment binds it: every binder the flow lane interned for
-    /// `names[i]` in `canonical`'s `owner` scope becomes `args[i]`.
+    /// `names[i]` in `canonical`'s `owner` scope becomes `args[i]`, all
+    /// at once.
     ///
-    /// The flow lane interns a nested generic signature's binder in the
-    /// same file scope, so a returned signature re-declaring one of
-    /// `names` shares that binder's node while meaning its own parameter;
-    /// such a return is ambiguous by name and answers `None`.
+    /// A nested function value's clause interns its own binder identities
+    /// (see the flow lane's binder environment), so a returned generic
+    /// function value re-declaring one of `names` keeps its own parameter.
+    /// A signature that declares one of the binders being replaced — the
+    /// same node, as a function TYPE written in the body with a same-name
+    /// clause lowers to — answers `None`, and so does an ordinal `args`
+    /// does not cover.
+    ///
+    /// The binding is simultaneous: `g<A, B>` instantiated at `[B, A]`
+    /// from a same-file `f<A, B>` (whose root clause shares `g`'s
+    /// name-keyed binders) swaps them, as the instantiated frame's
+    /// environment does, rather than collapsing both onto one.
     pub(super) fn bind_flow_return_own_clause(
         &self,
         node: SemanticNodeId,
@@ -282,6 +291,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &[SemanticNodeId],
     ) -> Option<SemanticNodeId> {
         let mut binders: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut declared: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut stack = vec![node];
         while let Some(current) = stack.pop() {
@@ -308,37 +318,73 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 SemanticNodeData::Signature {
                     type_parameters, ..
-                } if type_parameters
-                    .iter()
-                    .any(|declared| names.contains(&declared.name)) =>
-                {
-                    return None;
-                }
+                } => declared.extend(type_parameters.iter().map(|param| param.param)),
                 _ => {}
             }
             let _ = data.for_each_child(|child| stack.push(child));
         }
-        // One binder at a time is simultaneous only when no argument
-        // mentions a binder being replaced (a same-file `g<B, A>` read
-        // from `f<A, B>` would otherwise collapse both onto one).
-        let replaced: Vec<SemanticNodeId> = binders
-            .iter()
-            .filter(|(binder, argument)| binder != argument)
-            .map(|(binder, _)| *binder)
-            .collect();
-        if binders
-            .iter()
-            .any(|(binder, argument)| binder != argument && self.mentions_any(*argument, &replaced))
-        {
+        binders.retain(|(binder, argument)| binder != argument);
+        if binders.iter().any(|(binder, _)| declared.contains(binder)) {
             return None;
         }
-        Some(
+        let replaced: Vec<SemanticNodeId> = binders.iter().map(|(binder, _)| *binder).collect();
+        // One binder at a time is already simultaneous unless an argument
+        // mentions a binder being replaced; then every binder first moves
+        // to a placeholder no argument can mention.
+        if !binders
+            .iter()
+            .any(|(_, argument)| self.mentions_any(*argument, &replaced))
+        {
+            return Some(
+                binders
+                    .into_iter()
+                    .fold(node, |result, (binder, argument)| {
+                        self.substitute_semantic_type_param(result, binder, argument)
+                    }),
+            );
+        }
+        let placeholders: Vec<SemanticNodeId> = (0..binders.len())
+            .map(|ordinal| self.simultaneous_binding_placeholder(canonical, owner, ordinal))
+            .collect();
+        let parked =
             binders
-                .into_iter()
-                .fold(node, |result, (binder, argument)| {
-                    self.substitute_semantic_type_param(result, binder, argument)
-                }),
-        )
+                .iter()
+                .zip(&placeholders)
+                .fold(node, |result, ((binder, _), placeholder)| {
+                    self.substitute_semantic_type_param(result, *binder, *placeholder)
+                });
+        Some(binders.iter().zip(&placeholders).fold(
+            parked,
+            |result, ((_, argument), placeholder)| {
+                self.substitute_semantic_type_param(result, *placeholder, *argument)
+            },
+        ))
+    }
+
+    /// The `ordinal`-th placeholder binder of a simultaneous binding in
+    /// `canonical`'s `owner` scope: a `TypeParam` whose identity no
+    /// authored or flow-minted clause produces (its name begins with the
+    /// `\u{1}` separator no identifier can hold), interned once per
+    /// ordinal and never left in a bound value.
+    fn simultaneous_binding_placeholder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        ordinal: usize,
+    ) -> SemanticNodeId {
+        let name: Arc<str> = Arc::from(format!("\u{1}{ordinal}").as_str());
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(&name),
+            },
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: name,
+        })
     }
 
     /// Whether `node` is, or reaches through its children, any of `targets`.
