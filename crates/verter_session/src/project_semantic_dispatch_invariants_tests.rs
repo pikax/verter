@@ -4796,6 +4796,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let check = function(string_node, number_node);
@@ -4937,6 +4938,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
@@ -5580,6 +5582,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5652,6 +5655,7 @@ fn constructor_type_relates_and_binds_infer_return() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         });
         graph.intern_construct_twin_for_tests(signature)
     };
@@ -5738,6 +5742,7 @@ fn mapped_constructor_value_substitutes_per_key() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let ctor = graph.intern_construct_twin_for_tests(signature);
 
@@ -5834,6 +5839,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let ctor_pattern = graph.intern_construct_twin_for_tests(signature);
     // Inner: `(new (x: number) => any) extends new (x: infer P) => any ? P : never`.
@@ -5855,6 +5861,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let inner_check = graph.intern_construct_twin_for_tests(inner_check_sig);
     let inner = graph.intern_node(SemanticNodeData::Conditional {
@@ -5933,6 +5940,7 @@ fn signature_fixture_nodes(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let construct = graph.intern_construct_twin_for_tests(call);
     (call, construct)
@@ -6149,6 +6157,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let construct_obj = graph.intern_node(SemanticNodeData::Object(

@@ -1153,6 +1153,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             } => {
                 // Signature-local TypeParams need no spelling-based stop:
                 // legitimate outer references carry an exact InferRef;
@@ -1272,6 +1273,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
                             predicate: sub_predicate,
+                            is_abstract: *is_abstract,
                         },
                     ),
                     true,

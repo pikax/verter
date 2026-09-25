@@ -378,6 +378,7 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let callable_operand = object(graph, []);
     let callable_operand = match graph.node_data(callable_operand).as_deref() {
@@ -501,6 +502,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -519,6 +521,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let program = program(
         graph,
@@ -1365,6 +1368,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let setter = |value: SemanticNodeId| {
@@ -1385,6 +1389,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let member_x = |program: SemanticNodeId| {
@@ -2587,6 +2592,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -2605,6 +2611,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("T"),
@@ -3374,6 +3381,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let setter_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
@@ -3392,6 +3400,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let accessor_effect = |key: AuthoredPropertyKey, signature| AuthoredAccessorEffect {
         key,
@@ -3818,6 +3827,7 @@ fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     // Closed program `{ (): void; [k: string]: number }` — one call
     // signature AND one index signature. The raise fold's single-call

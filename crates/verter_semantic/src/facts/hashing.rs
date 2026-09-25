@@ -572,8 +572,10 @@ impl<'a> Walker<'a> {
             // (`0x73`) before reusing the identical `walk_function` body
             // encoding, so the carried signature still hashes alpha-stably while
             // the constructor-ness is part of the hash.
+            // An ABSTRACT constructor type is distinct again (`0x74`): an
+            // abstract signature refuses assignment to a non-abstract one.
             TypeExpr::ConstructorType(func) => {
-                self.buf.push(0x73);
+                self.buf.push(if func.is_abstract { 0x74 } else { 0x73 });
                 self.walk_function(func);
             }
             TypeExpr::Ref {

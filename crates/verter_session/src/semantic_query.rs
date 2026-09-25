@@ -9529,6 +9529,11 @@ pub enum SemanticNodeData {
         /// predicate) or `void` (assertion) `return_type`. `None` for an
         /// ordinary signature. Participates in node interning.
         predicate: Option<SignaturePredicate>,
+        /// Whether a CONSTRUCT signature is abstract (`abstract new () =>
+        /// T`, an abstract class's construct signatures) — the checker's
+        /// `SignatureFlags.Abstract`. Always `false` for a call signature.
+        /// Participates in node interning.
+        is_abstract: bool,
     },
     /// An index-composed callable whose body-derived return is deferred to
     /// its return carrier. It has NO return-type slot, so a deferred
@@ -9920,6 +9925,7 @@ impl PartialEq for SemanticNodeData {
                     signature_span: asig,
                     return_type_span: aret,
                     predicate: apred,
+                    is_abstract: aabs,
                 },
                 Self::Signature {
                     kind: bk,
@@ -9931,6 +9937,7 @@ impl PartialEq for SemanticNodeData {
                     signature_span: bsig,
                     return_type_span: bret,
                     predicate: bpred,
+                    is_abstract: babs,
                 },
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
@@ -9948,6 +9955,7 @@ impl PartialEq for SemanticNodeData {
                     && asig == bsig
                     && aret == bret
                     && apred == bpred
+                    && aabs == babs
             }
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
@@ -10102,8 +10110,10 @@ impl std::hash::Hash for SemanticNodeData {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             } => {
                 kind.hash(state);
+                is_abstract.hash(state);
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);

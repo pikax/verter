@@ -4165,6 +4165,8 @@ mod broad_runtime_tests;
 mod cycle_gate_tests;
 
 #[cfg(test)]
+mod abstract_construct_tests;
+#[cfg(test)]
 mod base_signature_tests;
 #[cfg(test)]
 mod checker_probe_lane_tests;

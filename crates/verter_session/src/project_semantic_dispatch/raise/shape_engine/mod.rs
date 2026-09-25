@@ -292,6 +292,7 @@ struct RaisedFunction {
     signature_span: Option<Span>,
     return_type_span: Option<Span>,
     predicate: Option<RaisedPredicate>,
+    is_abstract: bool,
 }
 
 /// Type-predicate mirror of [`verter_type_expr::TypePredicate`]: the raised

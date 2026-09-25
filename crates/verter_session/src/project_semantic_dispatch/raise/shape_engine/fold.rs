@@ -40,6 +40,8 @@ pub(super) struct FoldedFunction<O> {
     /// The signature's type predicate, its subject spelled the way the
     /// raised function prints it (the named parameter, or `this`).
     pub(super) predicate: Option<FoldedPredicate<O>>,
+    /// Whether a construct signature is abstract (`abstract new () => T`).
+    pub(super) is_abstract: bool,
 }
 
 /// A folded type predicate awaiting algebra construction.
@@ -334,9 +336,10 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             signature_span,
             return_type_span,
             predicate,
+            is_abstract,
             ..
         } => {
-            let folded = fold_function(
+            let mut folded = fold_function(
                 alg,
                 dispatch,
                 params,
@@ -347,6 +350,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
                 *predicate,
                 active,
             )?;
+            folded.is_abstract = *is_abstract;
             let function = alg.build_function(folded);
             match kind {
                 crate::semantic_query::SignatureKind::Call => alg.function_to_out(function),
@@ -514,6 +518,7 @@ fn fold_function<A: RaisedShapeAlgebra>(
         signature_span,
         return_type_span,
         predicate,
+        is_abstract: false,
     })
 }
 

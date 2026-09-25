@@ -826,6 +826,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             }) => {
                 let mut rebuilt_params = params.to_vec();
                 let mut changed = false;
@@ -869,6 +870,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
                             predicate: rebuilt_predicate,
+                            is_abstract: *is_abstract,
                         },
                     )
                 } else {
@@ -16814,6 +16816,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     return_type,
                 ),
                 predicate,
+                is_abstract: false,
             });
         }
         let Some(planned) = planned else {
@@ -17275,6 +17278,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             occurrence: None,
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             predicate,
+            is_abstract: false,
         })
     }
 

@@ -325,6 +325,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 return_type_span: None,
                 // A constructor declares no type predicate.
                 predicate: None,
+                is_abstract: false,
             })
         };
         let construct_signatures: Vec<SemanticNodeId> = match (&class.constructors, &base) {

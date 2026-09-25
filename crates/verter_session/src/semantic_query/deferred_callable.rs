@@ -154,6 +154,7 @@ impl DeferredCallable {
             return_type_span: None,
             // A body-derived return carries no authored predicate.
             predicate: None,
+            is_abstract: false,
         }
     }
 }

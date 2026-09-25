@@ -151,6 +151,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
@@ -181,6 +182,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
         members: Arc::from(explosive_members.into_boxed_slice()),

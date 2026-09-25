@@ -2120,8 +2120,10 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             return_type_span: _,
             return_type: _,
             predicate,
+            is_abstract,
         } => {
             kind.hash(hasher);
+            is_abstract.hash(hasher);
             occurrence.hash(hasher);
             // The predicate target is a pushed child; its subject and
             // assertion flag are the shallow identity.
@@ -2752,6 +2754,7 @@ fn compare_shallow(
                 signature_span: _,
                 return_type_span: _,
                 predicate: da,
+                is_abstract: aa,
             },
             D::Signature {
                 kind: kb,
@@ -2763,12 +2766,13 @@ fn compare_shallow(
                 signature_span: _,
                 return_type_span: _,
                 predicate: db,
+                is_abstract: ab,
             },
         ) => {
             // Occurrence and the return-carrier discriminant participate in
             // identity (declaration/position identity, not a raw source
             // coordinate); the span payloads do not.
-            if ka != kb || oa != ob || pa.len() != pb.len() || ta.len() != tb.len() {
+            if ka != kb || aa != ab || oa != ob || pa.len() != pb.len() || ta.len() != tb.len() {
                 return false;
             }
             match (ca, cb) {

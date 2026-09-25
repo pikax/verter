@@ -161,7 +161,8 @@ pub fn lower_ts_type_with_whole_query(
                     signature: Some(ctor.span.into()),
                     return_type: Some(ctor.return_type.type_annotation.span().into()),
                 },
-            ));
+            ))
+            .with_abstract(ctor.r#abstract);
             TypeExpr::ConstructorType(Arc::new(func))
         }
 

@@ -128,6 +128,7 @@ impl RaisedShapeAlg<'_> {
                 signature_span: function.signature_span,
                 return_type_span: function.return_type_span,
                 predicate,
+                is_abstract: function.is_abstract,
             },
             materialized,
         )
@@ -1526,6 +1527,7 @@ fn function_expr_to_raised(
         signature_span: function.spans.signature,
         return_type_span: function.spans.return_type,
         predicate,
+        is_abstract: function.is_abstract,
     }
 }
 

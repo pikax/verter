@@ -312,6 +312,7 @@ fn materialize_constructor_type_preserves_ctor_ness() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     let node = graph.intern_construct_twin_for_tests(signature);
     let dispatch = ProjectSemanticDispatch::new(&host);

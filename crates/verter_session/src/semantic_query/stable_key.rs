@@ -671,10 +671,12 @@ fn encode_data(
             signature_span: _,
             return_type_span: _,
             predicate,
+            is_abstract,
         } => {
             enc.header(category::AUTHORED, subtag::SIGNATURE);
             enc.u8(match kind {
                 SignatureKind::Call => 1,
+                SignatureKind::Construct if *is_abstract => 3,
                 SignatureKind::Construct => 2,
             });
             enc.u16(params.len() as u16);

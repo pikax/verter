@@ -2727,12 +2727,16 @@ fn collect_named_class(
     // heritage composes at query time through the shared class-surface
     // reducer, never eagerly at the producer.
     let mut constructor_properties =
-        vec![ObjectMember::ConstructSignature(FunctionExpr::with_spans(
-            constructor_signature.parameters.clone(),
-            constructor_signature.return_type.clone().map(Arc::new),
-            constructor_signature.type_parameters.clone(),
-            ctor_fn_spans,
-        ))];
+        // An abstract class's construct signatures are abstract.
+        vec![ObjectMember::ConstructSignature(
+            FunctionExpr::with_spans(
+                constructor_signature.parameters.clone(),
+                constructor_signature.return_type.clone().map(Arc::new),
+                constructor_signature.type_parameters.clone(),
+                ctor_fn_spans,
+            )
+            .with_abstract(decl.r#abstract),
+        )];
     constructor_properties.extend(static_members);
     let constructor_shape = ObjectExpr {
         properties: constructor_properties,
@@ -5250,7 +5254,8 @@ fn widen_literal_type_with_budget(
                 function.type_parameters.clone(),
                 function.spans,
             )
-            .with_predicate(function.predicate.clone()),
+            .with_predicate(function.predicate.clone())
+            .with_abstract(function.is_abstract),
         ))),
         // A bare constructor type (`new (...) => R`) carries the same
         // `FunctionExpr` payload as a function type, so its literal members
@@ -5326,26 +5331,30 @@ fn widen_object_member_with_budget(
             )
             .with_predicate(function.predicate),
         )),
-        ObjectMember::ConstructSignature(function) => Ok(ObjectMember::ConstructSignature(
-            FunctionExpr::with_spans(
-                function.parameters,
-                function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        widen_literal_type_with_budget(
-                            return_type.as_ref().clone(),
-                            budget,
-                            depth + 1,
-                        )
-                        .map(Arc::new)
-                    })
-                    .transpose()?,
-                function.type_parameters,
-                function.spans,
-            )
-            .with_predicate(function.predicate),
-        )),
+        ObjectMember::ConstructSignature(function) => {
+            let is_abstract = function.is_abstract;
+            Ok(ObjectMember::ConstructSignature(
+                FunctionExpr::with_spans(
+                    function.parameters,
+                    function
+                        .return_type
+                        .as_ref()
+                        .map(|return_type| {
+                            widen_literal_type_with_budget(
+                                return_type.as_ref().clone(),
+                                budget,
+                                depth + 1,
+                            )
+                            .map(Arc::new)
+                        })
+                        .transpose()?,
+                    function.type_parameters,
+                    function.spans,
+                )
+                .with_predicate(function.predicate)
+                .with_abstract(is_abstract),
+            ))
+        }
         ObjectMember::Method(mut method) => {
             method.function = FunctionExpr::with_spans(
                 method.function.parameters,

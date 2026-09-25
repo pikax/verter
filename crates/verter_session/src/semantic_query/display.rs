@@ -804,10 +804,12 @@ fn display_resolved_type_node(
             return_type,
             type_parameters,
             predicate,
+            is_abstract,
             ..
         } => {
             let new_prefix = match kind {
                 crate::semantic_query::SignatureKind::Call => "",
+                crate::semantic_query::SignatureKind::Construct if *is_abstract => "abstract new ",
                 crate::semantic_query::SignatureKind::Construct => "new ",
             };
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);

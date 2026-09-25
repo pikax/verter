@@ -235,6 +235,7 @@ fn a_substituted_heritage_body_stays_a_declaration() {
             signature_span: None,
             return_type_span: None,
             predicate: None,
+            is_abstract: false,
         })
     };
     let callable = |signature| {

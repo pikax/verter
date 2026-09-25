@@ -1475,6 +1475,7 @@ fn parity_function_and_constructor_type() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     assert_classifier_parity(&host, func, "function-materialized");
     assert!(
@@ -1509,6 +1510,7 @@ fn parity_function_and_constructor_type() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     assert_classifier_parity(&host, func_miss_param, "function-miss-param");
     assert!(
@@ -2006,6 +2008,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
 
     // The oracle shape the node raises to (param `has_ts_annotation: false`).
@@ -2565,6 +2568,7 @@ fn publication_score_corpus(
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
 
     vec![
@@ -3130,6 +3134,7 @@ fn function_with_unraisable_return_fails_whole() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     assert!(
         !fold_raises(&host, node),
@@ -3160,6 +3165,7 @@ fn function_with_unraisable_parameter_fails_whole() {
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     });
     assert!(
         !fold_raises(&host, node),

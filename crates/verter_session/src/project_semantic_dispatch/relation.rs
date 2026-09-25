@@ -7070,17 +7070,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 kind: s_kind,
                 return_type: s_ret,
                 predicate: s_predicate,
+                is_abstract: s_abstract,
                 ..
             },
             SemanticNodeData::Signature {
                 kind: t_kind,
                 return_type: t_ret,
                 predicate: t_predicate,
+                is_abstract: t_abstract,
                 ..
             },
         ) = (&*source_data, &*target_data)
         {
             if s_kind != t_kind {
+                drop(source_data);
+                drop(target_data);
+                results.push(RelationResult::NotAssignable);
+                return;
+            }
+            // An abstract construct signature is not assignable to a
+            // non-abstract one.
+            if *s_abstract && !*t_abstract {
                 drop(source_data);
                 drop(target_data);
                 results.push(RelationResult::NotAssignable);
@@ -8502,6 +8512,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             _ => true,
         }
+    }
+
+    /// Whether `signature` is an ABSTRACT construct signature (the
+    /// checker's `SignatureFlags.Abstract`).
+    pub(super) fn signature_is_abstract(&self, signature: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(signature).as_deref(),
+            Some(SemanticNodeData::Signature {
+                is_abstract: true,
+                ..
+            })
+        )
     }
 
     /// The accessibility of a construct signature's DECLARATION, `None`

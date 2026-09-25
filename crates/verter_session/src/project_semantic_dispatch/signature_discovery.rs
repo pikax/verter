@@ -2260,6 +2260,7 @@ impl ProjectSemanticDispatch<'_> {
             // The composite's effect: the union rule over its constituents,
             // or a mixin construct's base.
             predicate,
+            is_abstract: false,
         }))
     }
 

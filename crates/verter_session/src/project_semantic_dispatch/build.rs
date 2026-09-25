@@ -2033,6 +2033,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span: None,
                 return_type_span: None,
                 predicate: None,
+                is_abstract: false,
             },
             scope.clone(),
         );
@@ -2943,6 +2944,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             }) = self.graph().node_data(rebound).as_deref().cloned()
             else {
                 return signature;
@@ -2982,6 +2984,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
             })
         };
         let entries: Vec<SurfaceEntry> = view
@@ -3456,12 +3459,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // construct signature's return IS the derived instance ref).
                 let own_instance_return = own_view.construct_signatures.first().and_then(|sig| {
                     match self.graph().node_data(*sig).as_deref() {
-                        Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                        Some(SemanticNodeData::Signature {
+                            return_type,
+                            is_abstract,
+                            ..
+                        }) => Some((*return_type, *is_abstract)),
                         _ => None,
                     }
                 });
                 match own_instance_return {
-                    Some(derived_return) => base_view
+                    // The inherited signatures are the DERIVED class's: they
+                    // are abstract exactly when it is
+                    // (`getDefaultConstructSignatures`).
+                    Some((derived_return, derived_abstract)) => base_view
                         .construct_signatures
                         .iter()
                         .map(
@@ -3491,6 +3501,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     // A construct signature carries no
                                     // predicate.
                                     predicate: None,
+                                    is_abstract: derived_abstract,
                                 }),
                                 _ => *base_sig,
                             },
@@ -7966,6 +7977,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature_span,
             return_type_span,
             predicate,
+            is_abstract,
         } = data.as_ref()
         else {
             return node;
@@ -7981,6 +7993,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature_span: *signature_span,
             return_type_span: *return_type_span,
             predicate: *predicate,
+            is_abstract: *is_abstract,
         };
         drop(data);
         graph.intern_preserving_scope(node, twin)
@@ -8516,6 +8529,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 signature_span,
                 return_type_span,
                 predicate,
+                is_abstract,
                 ..
             }) => self.graph().intern_node(SemanticNodeData::Signature {
                 kind: *kind,
@@ -8538,6 +8552,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // The substituted predicate target rides through: an
                 // instantiated `x is T` narrows to the argument.
                 predicate: *predicate,
+                is_abstract: *is_abstract,
             }),
             _ => result,
         }
@@ -8991,6 +9006,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let SemanticNodeData::Signature {
             kind,
+            is_abstract,
             return_type,
             type_parameters,
             occurrence,
@@ -9012,6 +9028,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             signature_span: *signature_span,
             return_type_span: *return_type_span,
             predicate: None,
+            is_abstract: *is_abstract,
         };
         drop(data);
         self.graph().intern_preserving_scope(function_node, rebuilt)

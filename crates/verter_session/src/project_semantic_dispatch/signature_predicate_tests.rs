@@ -303,6 +303,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
             signature_span: None,
             return_type_span: None,
             predicate: Some(predicate),
+            is_abstract: false,
         })
     };
     let store = graph.signature_store();
@@ -553,6 +554,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
             signature_span: None,
             return_type_span: None,
             predicate,
+            is_abstract: false,
         })
     };
     let predicate = |subject, asserts, ty| {

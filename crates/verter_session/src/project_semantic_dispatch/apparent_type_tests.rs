@@ -172,6 +172,7 @@ fn rootless_signature(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId 
         signature_span: None,
         return_type_span: None,
         predicate: None,
+        is_abstract: false,
     })
 }
 

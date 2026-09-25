@@ -68,6 +68,7 @@ fn function_with_return_span(
         signature_span: None,
         return_type_span,
         predicate: None,
+        is_abstract: false,
     })
 }
 
