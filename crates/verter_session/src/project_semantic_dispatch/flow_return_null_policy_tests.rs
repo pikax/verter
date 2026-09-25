@@ -6126,8 +6126,10 @@ const CALL_CONSUMER_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// carries no fact the test leaves unmentioned — and an `in` operand that
 /// is a call of a closed same-file function is no predicate position.
 /// Every row is clean; each cell matches its own project's TypeScript
-/// 7.0.2 answer (`viaFirst` without `strictNullChecks` is the structural
-/// twin of SDL-28's print, `{ a: any; } | { a: any; }` on the checker).
+/// 7.0.2 answer (`viaFirst` without `strictNullChecks` prints `{ a: any;
+/// } | { a: any; }` on the checker, the structural-twin presentation
+/// `an_object_join_of_structural_twins_differs_only_in_presentation`
+/// pins, and is the one object `{ a: any }` here).
 #[test]
 fn call_consumers_read_the_frames_values() {
     let host = four_policy_host();
