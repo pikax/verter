@@ -4225,6 +4225,8 @@ mod differential_narrowing_tests;
 #[cfg(test)]
 mod differential_relation_tests;
 #[cfg(test)]
+mod differential_type_operator_tests;
+#[cfg(test)]
 mod enum_literal_tests;
 #[cfg(test)]
 mod heritage_signature_tests;
