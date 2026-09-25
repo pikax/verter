@@ -550,6 +550,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             context,
             has_declared_return,
             gap,
+            declared_evolving_captures,
             extended_captures,
         } = function
         else {
@@ -564,6 +565,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             *has_declared_return,
             env,
             extended_captures,
+            declared_evolving_captures,
         ))
     }
 

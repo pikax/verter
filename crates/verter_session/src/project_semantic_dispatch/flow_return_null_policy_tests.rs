@@ -9906,3 +9906,2203 @@ fn open_narrowings_match_the_checker() {
         mismatches.join("\n")
     );
 }
+
+/// Operations on an evolving array: `push` / `unshift` calls and element writes under a number-like index, on `const`, `let` and `var` bindings.
+const EVOLVING_OPERATIONS_SOURCE: &str = r#"
+function makeEvolving() { const a = []; a.push(1); a.push("s"); return a; }
+export function returnedEmpty() { const a = []; return a; }
+export function pushOne() { const a = []; a.push(1); return a; }
+export function pushTwo() { const a = []; a.push(1); a.push("s"); return a; }
+export function pushMany() { const a = []; a.push(1, "s"); return a; }
+export function pushNoArgs() { const a = []; a.push(); return a; }
+export function unshiftOne() { const a = []; a.unshift(true); return a; }
+export function unshiftAndPush() { const a = []; a.unshift(1); a.push("s"); return a; }
+export function pushLiteralConst() { const a = []; a.push("lit" as const); return a; }
+export function pushParam(v: "x" | "y") { const a = []; a.push(v); return a; }
+export function pushAny(x: any) { const a = []; a.push(x); a.push(1); return a; }
+export function pushUnknown(x: unknown) { const a = []; a.push(x); a.push(1); return a; }
+export function pushNever(x: never) { const a = []; a.push(x); return a; }
+export function pushNull() { const a = []; a.push(null); return a; }
+export function pushUndefined() { const a = []; a.push(undefined); return a; }
+export function pushNullRead() { const a = []; a.push(null); const b = a; return b; }
+export function pushArray() { const a = []; a.push([1]); return a; }
+export function pushEmptyArray() { const a = []; a.push([]); return a; }
+export function pushTwoArrays() { const a = []; a.push([1]); a.push(["s"]); return a; }
+export function pushFunction() { const a = []; a.push(() => 1); return a; }
+export function pushAsConstObj() { const a = []; a.push({ k: "v" } as const); return a; }
+export function pushSubtypes(x: { a: number }, y: { a: number; b: number }) { const a = []; a.push(y); a.push(x); return a; }
+export function pushStringEnumLike(k: "a" | "b") { const a = []; a.push(k); a.push(k); return a; }
+export function pushSpread(xs: number[]) { const a = []; a.push(...xs); return a; }
+export function spreadString(s: string) { const a = []; a.push(...s); return a; }
+export function spreadTuple(t: [number, string]) { const a = []; a.push(...t); return a; }
+export function pushOptional() { const a = []; a?.push(1); return a; }
+export function parenPush() { const a = []; (a).push(1); return a; }
+export function letPush() { let a = []; a.push(1); return a; }
+export function varPush() { var a = []; a.push(1); return a; }
+export function letUnshift() { let a = []; a.unshift(1); return a; }
+export function varUnshift() { var a = []; a.unshift("s"); return a; }
+export function indexWrite() { const a = []; a[0] = "x"; return a; }
+export function letIndexWrite() { let a = []; a[0] = 1; return a; }
+export function varIndexWrite() { var a = []; a[0] = 1; return a; }
+export function parenWrite() { const a = []; (a)[0] = 1; return a; }
+export function anyIndexWrite() { const a = []; a["k" as any] = 1; return a; }
+export function stringKeyWrite() { const a = []; a["k"] = 1; return a; }
+export function stringTypedIndex(k: string) { const a = []; a[k] = 1; return a; }
+export function unionIndex(k: number | string) { const a = []; a[k] = 1; return a; }
+export function literalUnionIndex(k: 0 | 1) { const a = []; a[k] = "s"; return a; }
+export function compoundWrite() { const a = []; a[0] = 1; a[0] += 1; return a; }
+export function compoundKey() { const a = []; a[0] = 1; a[1] ??= "s"; return a; }
+export function destructureWrite() { const a = []; [a[0]] = [1]; return a; }
+export function lengthAssign() { const a = []; a.length = 0; a.push(1); return a; }
+export function returnPush() { const a = []; return a.push(1); }
+export function writeThenPushExpr() { const a = []; return a.push(1); }
+export function parenthesized() { const a = ([]); return a; }
+export function returnedFromFunction() { return makeEvolving(); }
+export function returnedFromFunctionLet() { let a = []; a[0] = 1; a.unshift(true); return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_OPERATIONS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // any[] {TS7034@41,TS7005@56} / any[] {TS7034@41,TS7005@56} / never[] / any[]
+    ("returnedEmpty", "any[]", "any[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@50} / any[]
+    ("pushOne", "number[]", "number[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@50,TS2345@61} / any[]
+    (
+        "pushTwo",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@51} / any[]
+    (
+        "pushMany",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] {TS7034@38,TS7005@63} / any[] {TS7034@38,TS7005@63} / never[] / any[]
+    ("pushNoArgs", "any[]", "any[]", "never[]", "any[]"),
+    // boolean[] / boolean[] / never[] {TS2345@56} / any[]
+    ("unshiftOne", "boolean[]", "boolean[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@60,TS2345@71} / any[]
+    (
+        "unshiftAndPush",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // string[] / string[] / never[] {TS2345@59} / any[]
+    (
+        "pushLiteralConst",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // string[] / string[] / never[] {TS2345@64} / any[]
+    ("pushParam", "string[]", "string[]", "never[]", "any[]"),
+    // any[] / any[] / never[] {TS2345@56,TS2345@67} / any[]
+    ("pushAny", "any[]", "any[]", "never[]", "any[]"),
+    // unknown[] / unknown[] / never[] {TS2345@64,TS2345@75} / any[]
+    ("pushUnknown", "unknown[]", "unknown[]", "never[]", "any[]"),
+    // any[] {TS7034@45,TS7005@71} / any[] {TS7034@45,TS7005@71} / never[] / any[]
+    ("pushNever", "any[]", "any[]", "never[]", "any[]"),
+    // null[] / any[] {TS7010@17} / never[] {TS2345@51} / any[]
+    ("pushNull", "null[]", "any[]", "never[]", "any[]"),
+    // undefined[] / any[] {TS7010@17} / never[] {TS2345@56} / any[]
+    ("pushUndefined", "undefined[]", "any[]", "never[]", "any[]"),
+    // null[] / any[] {TS7005@68} / never[] {TS2345@55} / any[]
+    ("pushNullRead", "null[]", "any[]", "never[]", "any[]"),
+    // number[][] / number[][] / never[] {TS2345@52} / any[]
+    ("pushArray", "number[][]", "number[][]", "never[]", "any[]"),
+    // never[][] / any[][] {TS7010@17} / never[] {TS2345@57} / any[]
+    ("pushEmptyArray", "never[][]", "any[][]", "never[]", "any[]"),
+    // (string[] | number[])[] / (string[] | number[])[] / never[] {TS2345@56,TS2345@69} / any[]
+    (
+        "pushTwoArrays",
+        "(number[] | string[])[]",
+        "(number[] | string[])[]",
+        "never[]",
+        "any[]",
+    ),
+    // (() => number)[] / (() => number)[] / never[] {TS2345@55} / any[]
+    (
+        "pushFunction",
+        "(() => number)[]",
+        "(() => number)[]",
+        "never[]",
+        "any[]",
+    ),
+    // { readonly k: "v"; }[] / { readonly k: "v"; }[] / never[] {TS2345@57} / any[]
+    (
+        "pushAsConstObj",
+        "{ readonly k: \"v\" }[]",
+        "{ readonly k: \"v\" }[]",
+        "never[]",
+        "any[]",
+    ),
+    // { a: number; }[] / { a: number; }[] / never[] {TS2345@100,TS2345@111} / any[]
+    (
+        "pushSubtypes",
+        "{ a: number }[]",
+        "{ a: number }[]",
+        "never[]",
+        "any[]",
+    ),
+    // string[] / string[] / never[] {TS2345@73,TS2345@84} / any[]
+    (
+        "pushStringEnumLike",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@65} / any[]
+    ("pushSpread", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@64} / any[]
+    ("spreadString", "string[]", "string[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@73} / any[]
+    (
+        "spreadTuple",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@56} / any[]
+    ("pushOptional", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@54} / any[]
+    ("parenPush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@48} / any[]
+    ("letPush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@48} / any[]
+    ("varPush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@54} / any[]
+    ("letUnshift", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@54} / any[]
+    ("varUnshift", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2322@46} / any[]
+    ("indexWrite", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@47} / any[]
+    ("letIndexWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@47} / any[]
+    ("varIndexWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@46} / any[]
+    ("parenWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@49} / any[]
+    ("anyIndexWrite", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS7034@42,TS7005@50,TS7015@52,TS7005@69} / any[] {TS7034@42,TS7005@50,TS7015@52,TS7005@69} / never[] / any[]
+    ("stringKeyWrite", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@53,TS7005@61,TS7015@63,TS7005@78} / any[] {TS7034@53,TS7005@61,TS7015@63,TS7005@78} / never[] / any[]
+    ("stringTypedIndex", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@56,TS7005@64,TS7015@66,TS7005@81} / any[] {TS7034@56,TS7005@64,TS7015@66,TS7005@81} / never[] / any[]
+    ("unionIndex", "any[]", "any[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2322@61} / any[]
+    (
+        "literalUnionIndex",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2322@49,TS2322@59} / any[]
+    ("compoundWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] {TS2322@57} / number[] {TS2322@57} / never[] {TS2322@47,TS2322@57} / any[]
+    ("compoundKey", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS7034@44,TS7005@53,TS7005@73} / any[] {TS7034@44,TS7005@53,TS7005@73} / never[] {TS2322@53} / any[]
+    ("destructureWrite", "any[]", "any[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@69} / any[]
+    ("lengthAssign", "number[]", "number[]", "never[]", "any[]"),
+    // number / number / number {TS2345@60} / number
+    ("returnPush", "number", "number", "number", "number"),
+    // number / number / number {TS2345@67} / number
+    ("writeThenPushExpr", "number", "number", "number", "number"),
+    // never[] / any[] {TS7005@41} / never[] / any[]
+    ("parenthesized", "never[]", "any[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] / any[]
+    (
+        "returnedFromFunction",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | boolean)[] / (number | boolean)[] / never[] {TS2322@57,TS2345@77} / any[]
+    (
+        "returnedFromFunctionLet",
+        "(boolean | number)[]",
+        "(boolean | number)[]",
+        "never[]",
+        "any[]",
+    ),
+];
+
+/// References to an evolving array that are not operations on it: each reads the array finalized where it stands, and the array keeps evolving after it.
+const EVOLVING_FINALIZING_SOURCE: &str = r#"
+export function readThenPush() { const a = []; const b = a; a.push(1); return b; }
+export function readInElement() { const a = []; return [a]; }
+export function evolvingInObject() { const a = []; a.push(1); return { a }; }
+export function exprPush() { const a = []; const n = a.push(1); return [n, a]; }
+export function assignExprValue() { const a = []; const v = (a[0] = "s"); return [v, a]; }
+export function selfPush() { const a = []; a.push(a); return a; }
+export function pushThenReadThenPush() { const a = []; a.push(1); const b = a; a.push("s"); return [b, a]; }
+export function readBetweenPushes() { const a = []; a.push(1); const b = a; a.push("s"); return b; }
+export function readBetweenPushesWhole() { const a = []; a.push(1); const b = a; a.push("s"); return a; }
+export function earlyReturn(c: boolean) { const a = []; if (c) return a; a.push(1); return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_FINALIZING_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // any[] {TS7034@40,TS7005@58} / any[] {TS7034@40,TS7005@58} / never[] {TS2345@68} / any[]
+    ("readThenPush", "any[]", "any[]", "never[]", "any[]"),
+    // any[][] {TS7034@41,TS7005@57} / any[][] {TS7034@41,TS7005@57} / never[][] / any[][]
+    (
+        "readInElement",
+        "any[][]",
+        "any[][]",
+        "never[][]",
+        "any[][]",
+    ),
+    // { a: number[]; } / { a: number[]; } / { a: never[]; } {TS2345@59} / { a: any[]; }
+    (
+        "evolvingInObject",
+        "{ a: number[] }",
+        "{ a: number[] }",
+        "{ a: never[] }",
+        "{ a: any[] }",
+    ),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] {TS2345@61} / (number | any[])[]
+    (
+        "exprPush",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (string | string[])[] / (string | string[])[] / (string | never[])[] {TS2322@62} / (string | any[])[]
+    (
+        "assignExprValue",
+        "(string | string[])[]",
+        "(string | string[])[]",
+        "(never[] | string)[]",
+        "(any[] | string)[]",
+    ),
+    // any[][] {TS7034@36,TS7005@51} / any[][] {TS7034@36,TS7005@51} / never[] {TS2345@51} / any[]
+    ("selfPush", "any[][]", "any[][]", "never[]", "any[]"),
+    // (string | number)[][] / (string | number)[][] / never[][] {TS2345@63,TS2345@87} / any[][]
+    (
+        "pushThenReadThenPush",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "never[][]",
+        "any[][]",
+    ),
+    // number[] / number[] / never[] {TS2345@60,TS2345@84} / any[]
+    (
+        "readBetweenPushes",
+        "number[]",
+        "number[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@65,TS2345@89} / any[]
+    (
+        "readBetweenPushesWhole",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] {TS7034@49,TS7005@71} / any[] {TS7034@49,TS7005@71} / never[] {TS2345@81} / any[]
+    ("earlyReturn", "any[]", "any[]", "never[]", "any[]"),
+];
+
+/// Assignments to an evolving array binding: an unparenthesized `[]` starts a new evolving array, any other value is held when assignable to `any[]` (else `any[]`), and paths holding an ordinary value join the evolving ones under subtype reduction.
+const EVOLVING_ASSIGNMENTS_SOURCE: &str = r#"
+export function reassignLiteral() { let a = []; a = [1]; return a; }
+export function reassignAfterRead() { let a = []; a.push(1); const b = a; a = ["s"]; return [a, b]; }
+export function letReassignAfterRead() { let a = []; a.push(1); const b = a; a = [true]; a.push("s"); return [a, b]; }
+export function varReassignAfterRead() { var a = []; a.push(1); const b = a; a = [true]; return [a, b]; }
+export function resetEmpty() { let a = []; a.push(1); a = []; a.push("s"); return a; }
+export function parenReset() { let a = []; a = ([]); a.push(1); return a; }
+export function parenAssign() { let a = []; a = ([]); a.push(1); return a; }
+export function assignThenPush() { let a = []; a = [1]; a.push("s"); return a; }
+export function assignString() { let a = []; a.push(1); a = "s" as any as string; return a; }
+export function assignTuple() { let a = []; a = [1, "s"] as [number, string]; return a; }
+export function valueReset() { let a = []; a.push(1); const b = (a = []); a.push("s"); return [a, b]; }
+export function mixedJoin(c: boolean) { let a = []; if (c) a = [1]; return a; }
+export function mixedJoin2(c: boolean) { let a = []; if (c) { a = [1]; } else { a.push("s"); } return a; }
+export function mixedJoin3(c: boolean) { let a = []; a.push(true); if (c) a = [1]; return a; }
+export function mixedJoinRead(c: boolean) { let a = []; if (c) a = [1]; const b = a; return b; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_ASSIGNMENTS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] {TS2322@54} / any[]
+    (
+        "reassignLiteral",
+        "number[]",
+        "number[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string[] | number[])[] / (string[] | number[])[] / never[][] {TS2345@58,TS2322@80} / any[][]
+    (
+        "reassignAfterRead",
+        "(number[] | string[])[]",
+        "(number[] | string[])[]",
+        "never[][]",
+        "any[][]",
+    ),
+    // (number[] | boolean[])[] {TS2345@97} / (number[] | boolean[])[] {TS2345@97} / never[][] {TS2345@61,TS2322@83,TS2345@97} / any[][]
+    (
+        "letReassignAfterRead",
+        "(boolean[] | number[])[]",
+        "(boolean[] | number[])[]",
+        "never[][]",
+        "any[][]",
+    ),
+    // (number[] | boolean[])[] / (number[] | boolean[])[] / never[][] {TS2345@61,TS2322@83} / any[][]
+    (
+        "varReassignAfterRead",
+        "(boolean[] | number[])[]",
+        "(boolean[] | number[])[]",
+        "never[][]",
+        "any[][]",
+    ),
+    // string[] / string[] / never[] {TS2345@51,TS2345@70} / any[]
+    ("resetEmpty", "string[]", "string[]", "never[]", "any[]"),
+    // never[] {TS2345@61} / any[] {TS7010@17} / never[] {TS2345@61} / any[]
+    ("parenReset", "never[]", "any[]", "never[]", "any[]"),
+    // never[] {TS2345@62} / any[] {TS7010@17} / never[] {TS2345@62} / any[]
+    ("parenAssign", "never[]", "any[]", "never[]", "any[]"),
+    // number[] {TS2345@64} / number[] {TS2345@64} / never[] {TS2322@53,TS2345@64} / any[]
+    ("assignThenPush", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS2322@57} / any[] {TS2322@57} / never[] {TS2345@53,TS2322@57} / any[] {TS2322@57}
+    ("assignString", "any[]", "any[]", "never[]", "any[]"),
+    // [number, string] / [number, string] / never[] {TS2322@45} / any[]
+    (
+        "assignTuple",
+        "[number, string]",
+        "[number, string]",
+        "never[]",
+        "any[]",
+    ),
+    // string[][] / any[][] {TS7005@61} / never[][] {TS2345@51,TS2345@82} / any[][]
+    (
+        "valueReset",
+        "string[][]",
+        "any[][]",
+        "never[][]",
+        "any[][]",
+    ),
+    // any[] {TS7034@45,TS7005@76} / any[] {TS7034@45,TS7005@76} / never[] {TS2322@65} / any[]
+    ("mixedJoin", "any[]", "any[]", "never[]", "any[]"),
+    // string[] | number[] / string[] | number[] / never[] {TS2322@68,TS2345@88} / any[]
+    (
+        "mixedJoin2",
+        "number[] | string[]",
+        "number[] | string[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] | boolean[] / number[] | boolean[] / never[] {TS2345@61,TS2322@80} / any[]
+    (
+        "mixedJoin3",
+        "boolean[] | number[]",
+        "boolean[] | number[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] {TS7034@49,TS7005@83} / any[] {TS7034@49,TS7005@83} / never[] {TS2322@69} / any[]
+    ("mixedJoinRead", "any[]", "any[]", "never[]", "any[]"),
+];
+
+/// Evolving arrays where paths meet: `if` / `switch` / `try` arms, conditional and logical expressions in statement and value position.
+const EVOLVING_BRANCHES_SOURCE: &str = r#"
+export function branchPush(c: boolean) { const a = []; if (c) { a.push(1); } else { a.push("s"); } return a; }
+export function branchOnePush(c: boolean) { const a = []; if (c) { a.push(1); } return a; }
+export function pushInIf(c: boolean) { const a = []; if (c) a.push(1); return a; }
+export function switchPush(k: number) { const a = []; switch (k) { case 1: a.push(1); break; default: a.push("s"); } return a; }
+export function pushInTry() { const a = []; try { a.push(1); } catch { a.push("s"); } return a; }
+export function pushInTernary(c: boolean) { const a = []; c ? a.push(1) : a.push("s"); return a; }
+export function pushInLogical(c: boolean) { const a = []; c && a.push(1); return a; }
+export function orPush(c: boolean) { const a = []; c || a.push(1); return a; }
+export function coalescePush(x: number | null) { const a = []; x ?? a.push("s"); return a; }
+export function narrowedAndPush(x: string | null) { const a = []; x !== null && a.push(x); return a; }
+export function ternaryWrite(c: boolean) { const a = []; c ? (a[0] = 1) : (a[0] = true); return a; }
+export function valueTernaryPush(c: boolean) { const a = []; const n = c ? a.push(1) : a.push("s"); return [n, a]; }
+export function valueTernaryRead(c: boolean) { const a = []; const r = c ? a.push(1) : a; return r; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_BRANCHES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (string | number)[] / (string | number)[] / never[] {TS2345@72,TS2345@92} / any[]
+    (
+        "branchPush",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@75} / any[]
+    ("branchOnePush", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@68} / any[]
+    ("pushInIf", "number[]", "number[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@83,TS2345@110} / any[]
+    (
+        "switchPush",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@58,TS2345@79} / any[]
+    (
+        "pushInTry",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@70,TS2345@82} / any[]
+    (
+        "pushInTernary",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2345@71} / any[]
+    ("pushInLogical", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@64} / any[]
+    ("orPush", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@76} / any[]
+    ("coalescePush", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@88} / any[]
+    (
+        "narrowedAndPush",
+        "string[]",
+        "string[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | boolean)[] / (number | boolean)[] / never[] {TS2322@63,TS2322@76} / any[]
+    (
+        "ternaryWrite",
+        "(boolean | number)[]",
+        "(boolean | number)[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | (string | number)[])[] / (number | (string | number)[])[] / (number | never[])[] {TS2345@83,TS2345@95} / (number | any[])[]
+    (
+        "valueTernaryPush",
+        "((number | string)[] | number)[]",
+        "((number | string)[] | number)[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // number | any[] {TS7034@54,TS7005@88} / number | any[] {TS7034@54,TS7005@88} / number | never[] {TS2345@83} / number | any[]
+    (
+        "valueTernaryRead",
+        "any[] | number",
+        "any[] | number",
+        "never[] | number",
+        "any[] | number",
+    ),
+];
+
+/// Evolving arrays in loops: each reference's loop-head type is its entry type joined with one pass of the iteration in which it reads its own entry type.
+const EVOLVING_LOOPS_SOURCE: &str = r#"
+export function loopWrite(n: number) { const a = []; for (let i = 0; i < n; i++) { a[i] = i; } return a; }
+export function letLoopWrite(n: number) { let a = []; for (let i = 0; i < n; i++) { a[i] = i; } return a; }
+export function varLoopWrite(n: number) { var a = []; for (let i = 0; i < n; i++) { a[i] = "s"; } return a; }
+export function loopPush(xs: string[]) { const a = []; for (const x of xs) { a.push(x); } return a; }
+export function whileLoop(n: number) { const a = []; while (n > 0) { a.push(n); n--; } return a; }
+export function doWhile(n: number) { const a = []; do { a.push(n); n--; } while (n > 0); return a; }
+export function forOfNarrow(xs: (string | null)[]) { const a = []; for (const x of xs) { if (x !== null) a.push(x); } return a; }
+export function forInLoop(o: { p: number }) { const a = []; for (const k in o) { a.push(k); } return a; }
+export function nestedLoop(xs: number[][]) { const a = []; for (const r of xs) { for (const v of r) { a.push(v); } } return a; }
+export function breakLoop(xs: number[]) { const a = []; for (const x of xs) { if (x > 1) break; a.push(x); } return a; }
+export function continueLoop(xs: number[]) { const a = []; for (const x of xs) { if (x > 1) continue; a.push("s"); } return a; }
+export function labeledBreak(xs: number[][]) { const a = []; outer: for (const r of xs) { for (const v of r) { if (v) break outer; a.push(v); } } return a; }
+export function returnInLoop(xs: number[]) { const a = []; for (const x of xs) { a.push(x); if (x) return a; } return a; }
+export function loopTwoKinds(xs: number[], ys: string[]) { const a = []; for (const x of xs) { a.push(x); } for (const y of ys) { a.push(y); } return a; }
+export function selfPushLoop(xs: number[]) { const a = []; for (const x of xs) { a.push(a); } return a; }
+export function typedSelfPushLoop(xs: number[]) { const a = []; a.push(1); for (const x of xs) { a.push(a); } return a; }
+export function wrapLoop(xs: number[]) { const a = []; a.push(1); for (const x of xs) { a.push([a]); } return a; }
+export function copyLoop(xs: number[]) { const a = []; const b = []; a.push(1); for (const x of xs) { b.push(a); a.push(b); } return a; }
+export function chainedLoop(xs: number[]) { const a = []; const b = []; for (const x of xs) { a.push(b); b.push(x); } return a; }
+export function chainedLoop3(xs: string[]) { const a = []; const b = []; const c = []; for (const x of xs) { a.push(b); b.push(c); c.push(x); } return a; }
+export function nestPushLoop(xs: number[]) { const a = []; let b: any = 1; for (const x of xs) { a.push(b); b = [b]; } return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_LOOPS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[][] / number[][] / never[] {TS2345@102,TS2345@113} / any[]
+    (
+        "chainedLoop",
+        "number[][]",
+        "number[][]",
+        "never[]",
+        "any[]",
+    ),
+    // string[][][] / string[][][] / never[] {TS2345@117,TS2345@128,TS2345@139} / any[]
+    (
+        "chainedLoop3",
+        "string[][][]",
+        "string[][][]",
+        "never[]",
+        "any[]",
+    ),
+    // number[] / number[] / never[] {TS2322@84} / any[]
+    ("loopWrite", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2322@85} / any[]
+    ("letLoopWrite", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2322@85} / any[]
+    ("varLoopWrite", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@85} / any[]
+    ("loopPush", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@77} / any[]
+    ("whileLoop", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@64} / any[]
+    ("doWhile", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@113} / any[]
+    ("forOfNarrow", "string[]", "string[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@89} / any[]
+    ("forInLoop", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@110} / any[]
+    ("nestedLoop", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@104} / any[]
+    ("breakLoop", "number[]", "number[]", "never[]", "any[]"),
+    // string[] / string[] / never[] {TS2345@110} / any[]
+    ("continueLoop", "string[]", "string[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@139} / any[]
+    ("labeledBreak", "number[]", "number[]", "never[]", "any[]"),
+    // number[] / number[] / never[] {TS2345@89} / any[]
+    ("returnInLoop", "number[]", "number[]", "never[]", "any[]"),
+    // (string | number)[] / (string | number)[] / never[] {TS2345@103,TS2345@138} / any[]
+    (
+        "loopTwoKinds",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[][] {TS7034@52,TS7005@89} / any[][] {TS7034@52,TS7005@89} / never[] {TS2345@89} / any[]
+    ("selfPushLoop", "any[][]", "any[][]", "never[]", "any[]"),
+    // (number | number[])[] / (number | number[])[] / never[] {TS2345@72,TS2345@105} / any[]
+    (
+        "typedSelfPushLoop",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | number[][])[] / (number | number[][])[] / never[] {TS2345@63,TS2345@96} / any[]
+    (
+        "wrapLoop",
+        "(number | number[][])[]",
+        "(number | number[][])[]",
+        "never[]",
+        "any[]",
+    ),
+    // (number | number[][])[] / (number | number[][])[] / never[] {TS2345@77,TS2345@110,TS2345@121} / any[]
+    (
+        "copyLoop",
+        "(number | number[][])[]",
+        "(number | number[][])[]",
+        "never[]",
+        "any[]",
+    ),
+    // any[] / any[] / never[] {TS2345@105} / any[]
+    ("nestPushLoop", "any[]", "any[]", "never[]", "any[]"),
+];
+
+/// Evolving arrays captured by a nested function: a `const` or `var` one, and a `let` one not past its last assignment, read the declared `autoArrayType`; a `let` one past its last assignment continues from the array it holds where the function is created, and operations inside the function evolve it.
+const EVOLVING_CAPTURES_SOURCE: &str = r#"
+export function captured() { const a = []; const f = () => a; a.push(1); return f(); }
+export function capturedLater() { const a = []; a.push(1); const f = () => a; return f(); }
+export function readInClosureLater() { const a = []; a.push(1); return () => a; }
+export function letCaptured() { let a = []; const f = () => a; a.push(1); return f(); }
+export function varCaptured() { var a = []; const f = () => a; a.push(1); return f(); }
+export function letCapturedLater() { let a = []; a.push(1); return () => a; }
+export function letCapturedBefore() { let a = []; const f = () => a; a.push(1); return f; }
+export function varCapturedLater() { var a = []; a.push(1); return () => a; }
+export function letCapturedAfterReassign() { let a = []; a = []; a.push(1); return () => a; }
+export function letCapturedThenReassign() { let a = []; a.push(1); const f = () => a; a = ["s"]; return f; }
+export function letCapturedLoopAssign(xs: number[]) { let a = []; for (const x of xs) { a = [x]; } a.push("s"); return () => a; }
+export function nestedEvolving() { const f = () => { const b = []; b.push(1); return b; }; return f; }
+export function closureReadsAfterPushLet() { let a = []; a.push(1); const f = () => { a.push("s"); return a; }; return f; }
+export function nestedArrowPushLet() { let a = []; a.push(1); const f = () => { a.push("s"); return a; }; return f; }
+export function nestedArrowReadLet() { let a = []; a.push(1); const f = () => { const b = a; a.push("s"); return b; }; return f; }
+export function nestedArrowPushConst() { const a = []; a.push(1); const f = () => { a.push("s"); return a; }; return f; }
+export function nestedTernaryPushLet() { let a = []; a.push(1); const f = (c: boolean) => { c ? a.push("s") : 0; return a; }; return f; }
+export function nestedLoopPushLet() { let a = []; a.push(1); const f = (xs: string[]) => { for (const x of xs) { a.push(x); } return a; }; return f; }
+export function nestedLetReset() { let a = []; a.push(1); const f = () => { a = []; return a; }; return f; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const EVOLVING_CAPTURES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (c: boolean) => (string | number)[] / (c: boolean) => (string | number)[] / (c: boolean) => never[] {TS2345@61,TS2345@104} / (c: boolean) => any[]
+    (
+        "nestedTernaryPushLet",
+        "(c: boolean) => (number | string)[]",
+        "(c: boolean) => (number | string)[]",
+        "(c: boolean) => never[]",
+        "(c: boolean) => any[]",
+    ),
+    // (xs: string[]) => (string | number)[] / (xs: string[]) => (string | number)[] / (xs: string[]) => never[] {TS2345@58,TS2345@121} / (xs: string[]) => any[]
+    (
+        "nestedLoopPushLet",
+        "(xs: string[]) => (number | string)[]",
+        "(xs: string[]) => (number | string)[]",
+        "(xs: string[]) => never[]",
+        "(xs: string[]) => any[]",
+    ),
+    // any[] {TS7034@36,TS7005@60} / any[] {TS7034@36,TS7005@60} / never[] {TS2345@70} / any[]
+    ("captured", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@41,TS7005@76} / any[] {TS7034@41,TS7005@76} / never[] {TS2345@56} / any[]
+    ("capturedLater", "any[]", "any[]", "never[]", "any[]"),
+    // () => any[] {TS7034@46,TS7005@78} / () => any[] {TS7034@46,TS7005@78} / () => never[] {TS2345@61} / () => any[]
+    (
+        "readInClosureLater",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // any[] {TS7034@37,TS7005@61} / any[] {TS7034@37,TS7005@61} / never[] {TS2345@71} / any[]
+    ("letCaptured", "any[]", "any[]", "never[]", "any[]"),
+    // any[] {TS7034@37,TS7005@61} / any[] {TS7034@37,TS7005@61} / never[] {TS2345@71} / any[]
+    ("varCaptured", "any[]", "any[]", "never[]", "any[]"),
+    // () => number[] / () => number[] / () => never[] {TS2345@57} / () => any[]
+    (
+        "letCapturedLater",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@43,TS7005@67} / () => any[] {TS7034@43,TS7005@67} / () => never[] {TS2345@77} / () => any[]
+    (
+        "letCapturedBefore",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@42,TS7005@74} / () => any[] {TS7034@42,TS7005@74} / () => never[] {TS2345@57} / () => any[]
+    (
+        "varCapturedLater",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => number[] / () => number[] / () => never[] {TS2345@73} / () => any[]
+    (
+        "letCapturedAfterReassign",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@49,TS7005@84} / () => any[] {TS7034@49,TS7005@84} / () => never[] {TS2345@64,TS2322@92} / () => any[]
+    (
+        "letCapturedThenReassign",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@59,TS7005@126} / () => any[] {TS7034@59,TS7005@126} / () => never[] {TS2322@94,TS2345@107} / () => any[]
+    (
+        "letCapturedLoopAssign",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => number[] / () => number[] / () => never[] {TS2345@75} / () => any[]
+    (
+        "nestedEvolving",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => (string | number)[] / () => (string | number)[] / () => never[] {TS2345@65,TS2345@94} / () => any[]
+    (
+        "closureReadsAfterPushLet",
+        "() => (number | string)[]",
+        "() => (number | string)[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => (string | number)[] / () => (string | number)[] / () => never[] {TS2345@59,TS2345@88} / () => any[]
+    (
+        "nestedArrowPushLet",
+        "() => (number | string)[]",
+        "() => (number | string)[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => number[] / () => number[] / () => never[] {TS2345@59,TS2345@101} / () => any[]
+    (
+        "nestedArrowReadLet",
+        "() => number[]",
+        "() => number[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@48,TS7005@105} / () => any[] {TS7034@48,TS7005@105} / () => never[] {TS2345@63,TS2345@92} / () => any[]
+    (
+        "nestedArrowPushConst",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+    // () => any[] {TS7034@40,TS7005@92} / () => any[] {TS7034@40,TS7005@92} / () => never[] {TS2345@55} / () => any[]
+    (
+        "nestedLetReset",
+        "() => any[]",
+        "() => any[]",
+        "() => never[]",
+        "() => any[]",
+    ),
+];
+
+// ──────────────────────────────────────────────────────────────────────
+// The checker's evolving array (`autoArrayType`)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Every `(symbol, strict, off, strict without noImplicitAny, off without
+/// noImplicitAny)` row of `table` answers its own project's measured
+/// TypeScript 7.0.2 print ([`matrix_mismatches`]).
+fn assert_measured_matrix(file: &str, source: &str, table: &[(&str, &str, &str, &str, &str)]) {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(&host, file, source, table);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Under `noImplicitAny` an unannotated declaration initialised to an
+/// unparenthesized `[]` is the checker's EVOLVING array. Its element type
+/// grows only at a `push` / `unshift` call on it (each argument adds the
+/// base type of its literal, a spread argument its source's element
+/// types, and `never` adds nothing) and at an element write `a[i] = v`
+/// whose index is number-like (`a["k"] = 1` and a `string` or `number |
+/// string` index add nothing); a compound write, an element inside a
+/// destructuring target and a `length` write are ordinary references. A
+/// read with nothing added is `any[]` (TS7034 at the declaration, TS7005
+/// at the read); otherwise the array of the added types' subtype-reduced
+/// union — with `strictNullChecks` off a widening `null` / `undefined`
+/// element reads `any` alone. Without `noImplicitAny` the binding is
+/// declared as the literal's widened type (`never[]`, `any[]` with
+/// `strictNullChecks` off) and no operation retypes it.
+#[test]
+fn evolving_array_operations_grow_the_element_type() {
+    assert_measured_matrix(
+        "evolving-operations.ts",
+        EVOLVING_OPERATIONS_SOURCE,
+        EVOLVING_OPERATIONS_TABLE,
+    );
+}
+
+/// Every reference to an evolving array that is not one of its operations
+/// FINALIZES it there: it reads the array of the elements added so far
+/// (`any[]` with none), and the array goes on evolving past it — `const b
+/// = a; a.push(1)` leaves `b` `any[]`, and `a.push(1); const b = a;
+/// a.push("s")` reads `number[]` in `b` and `(string | number)[]` in `a`.
+#[test]
+fn a_reference_finalizes_an_evolving_array_where_it_reads() {
+    assert_measured_matrix(
+        "evolving-finalizing.ts",
+        EVOLVING_FINALIZING_SOURCE,
+        EVOLVING_FINALIZING_TABLE,
+    );
+}
+
+/// A write to an evolving-array binding takes the checker's
+/// `autoArrayType` assignment rule: an unparenthesized `[]` starts a new
+/// evolving array (`a = ([])` assigns `never[]`), any other value is held
+/// when it is assignable to `any[]` and is `any[]` otherwise, and a join
+/// of a path holding an ordinary value with an evolving one finalizes the
+/// evolving one and reduces by subtype — `if (c) a = [1]` over an
+/// untouched `let a = []` is `any[]`.
+#[test]
+fn writes_to_an_evolving_array_follow_the_auto_array_rule() {
+    assert_measured_matrix(
+        "evolving-assignments.ts",
+        EVOLVING_ASSIGNMENTS_SOURCE,
+        EVOLVING_ASSIGNMENTS_TABLE,
+    );
+}
+
+/// Where paths meet, evolving arrays join by the union of their elements:
+/// the arms of an `if`, a `switch` or a `try`, and the operands of a
+/// conditional or logical expression, whose flow branches at the test in
+/// statement and value position alike — `c ? a.push(1) : a` reads the
+/// untouched array in its alternate.
+#[test]
+fn evolving_arrays_join_where_paths_meet() {
+    assert_measured_matrix(
+        "evolving-branches.ts",
+        EVOLVING_BRANCHES_SOURCE,
+        EVOLVING_BRANCHES_TABLE,
+    );
+}
+
+/// In a loop, each reference's loop-head type is its entry type joined
+/// with ONE pass of the iteration in which it reads its own entry type and
+/// every other reference its own loop-head type: `a.push(a)` over `const
+/// a = []; a.push(1)` is `(number | number[])[]`, never a growing nest,
+/// while `a.push(v)` over `v = w; w = "s"` reaches the `string` two
+/// iterations away. Breaks, `continue`s and returns leave from the pass
+/// where every reference reads its loop-head type.
+#[test]
+fn evolving_arrays_in_loops_take_the_checkers_loop_head() {
+    assert_measured_matrix(
+        "evolving-loops.ts",
+        EVOLVING_LOOPS_SOURCE,
+        EVOLVING_LOOPS_TABLE,
+    );
+}
+
+/// A nested function reads a captured evolving array by the checker's
+/// capture rule: a `const` or `var` one, or a `let` one assigned after
+/// the function is created or inside a nested function, reads the declared
+/// `autoArrayType` (`any[]`), and an operation inside the function starts
+/// from it; a `let` one past its last assignment continues from the array
+/// it holds where the function is created, so an operation inside the
+/// function evolves that array further.
+#[test]
+fn closures_read_a_captured_evolving_array_by_the_capture_rule() {
+    assert_measured_matrix(
+        "evolving-captures.ts",
+        EVOLVING_CAPTURES_SOURCE,
+        EVOLVING_CAPTURES_TABLE,
+    );
+}
+
+/// Array types relate covariantly in their element (the checker's
+/// `arrayVariances`), and a join reduces by the SUBTYPE relation, under
+/// which `any` is below nothing but `any` / `unknown`: a return join of
+/// `number[]` and `any[]` is `any[]`, of `string[]` and `(string |
+/// number)[]` is `(string | number)[]`, and so is an array literal's
+/// element union of the two.
+const ARRAY_JOIN_SOURCE: &str = r#"
+export function anyJoin(c: boolean, x: number[], y: any[]) { if (c) return x; return y; }
+export function subtypeJoin(c: boolean, x: string[], y: (string | number)[]) { if (c) return x; return y; }
+export function arrayOfArrays(x: number[], y: (string | number)[]) { return [x, y]; }
+export function arrayOfLocals(x: number[], y: (string | number)[]) { const b = x; return [b, y]; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`; no diagnostics); then the four answers.
+const ARRAY_JOIN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // any[] / any[] / any[] / any[]
+    ("anyJoin", "any[]", "any[]", "any[]", "any[]"),
+    // (string | number)[] / (string | number)[] / (string | number)[] / (string | number)[]
+    (
+        "subtypeJoin",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // (string | number)[][] / (string | number)[][] / (string | number)[][] / (string | number)[][]
+    (
+        "arrayOfArrays",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+    ),
+    // (string | number)[][] / (string | number)[][] / (string | number)[][] / (string | number)[][]
+    (
+        "arrayOfLocals",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+        "(number | string)[][]",
+    ),
+];
+
+#[test]
+fn array_joins_reduce_by_the_covariant_subtype_relation() {
+    assert_measured_matrix("array-joins.ts", ARRAY_JOIN_SOURCE, ARRAY_JOIN_TABLE);
+}
+
+/// Arithmetic binary expressions over parameters, literals, locals, enums and `any` / `unknown` / nullish operands.
+const ARITHMETIC_SOURCE: &str = r#"
+export function addNum(i: number) { return i + 1; }
+export function addLit() { return 1 + 2; }
+export function addStr(i: number, s: string) { return i + s; }
+export function addStrLit(i: number) { return "a" + i; }
+export function addAny(a: any, i: number) { return a + i; }
+export function addAnyStr(a: any) { return a + "s"; }
+export function addUnion(u: 1 | 2, i: number) { return u + i; }
+export function addNumUnionStr(u: number | string, i: number) { return u + i; }
+export function addBool(b: boolean, i: number) { return b + i; }
+export function addNull(i: number) { return null + i; }
+export function addUndef(u: undefined, i: number) { return u + i; }
+export function addUnknown(u: unknown, i: number) { return u + i; }
+export function addTemplate(i: number) { return `${i}` + i; }
+export function subNum(i: number) { return i - 1; }
+export function subAny(a: any) { return a - 1; }
+export function subBigNum(a: bigint, i: number) { return a - i; }
+export function subStr(s: string) { return s - 1; }
+export function mulUnknown(u: unknown) { return u * 2; }
+export function shiftNum(i: number) { return i << 2; }
+export function powNum(i: number) { return i ** 2; }
+export function bitAny(a: any, b: any) { return a | b; }
+export function modBigAny(a: bigint, b: any) { return a % b; }
+export function addEnum(e: E, i: number) { return e + i; }
+export function addStrEnum(e: S, i: number) { return e + i; }
+export function nestedArith(i: number, s: string) { return i + 1 + s; }
+export function parenArith(i: number) { return (i + 1) * 2; }
+export function localArith() { let x = 0; x = x + 1; return x; }
+export function constArith() { const x = 1 + 1; return x; }
+export function arrElem(i: number) { return [i + 1]; }
+export function addBigParams(a: bigint, b: bigint) { return a + b; }
+export function mulBigParams(a: bigint, b: bigint) { return a * b; }
+export function subBigLit(a: bigint, b: 1n | 2n) { return a - b; }
+export function parenAssignNarrow() { let x: string | number = "s"; (x) = 5; return x; }
+enum E { A, B }
+enum S { A = "a" }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const ARITHMETIC_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number / number / number / number
+    ("addNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("addLit", "number", "number", "number", "number"),
+    // string / string / string / string
+    ("addStr", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("addStrLit", "string", "string", "string", "string"),
+    // any / any / any / any
+    ("addAny", "any", "any", "any", "any"),
+    // string / string / string / string
+    ("addAnyStr", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("addUnion", "number", "number", "number", "number"),
+    // any {TS2365@72} / any {TS2365@72} / any {TS2365@72} / any {TS2365@72}
+    ("addNumUnionStr", "any", "any", "any", "any"),
+    // any {TS2365@57} / any {TS2365@57} / any {TS2365@57} / any {TS2365@57}
+    ("addBool", "any", "any", "any", "any"),
+    // any {TS18050@45} / any {TS2365@45} / any {TS18050@45} / any {TS2365@45}
+    ("addNull", "any", "any", "any", "any"),
+    // any {TS18048@60} / any {TS2365@60} / any {TS18048@60} / any {TS2365@60}
+    ("addUndef", "any", "any", "any", "any"),
+    // any {TS18046@60} / any {TS2365@60} / any {TS18046@60} / any {TS2365@60}
+    ("addUnknown", "any", "any", "any", "any"),
+    // string / string / string / string
+    ("addTemplate", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("subNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("subAny", "number", "number", "number", "number"),
+    // any {TS2365@58} / any {TS2365@58} / any {TS2365@58} / any {TS2365@58}
+    ("subBigNum", "any", "any", "any", "any"),
+    // number {TS2362@44} / number {TS2362@44} / number {TS2362@44} / number {TS2362@44}
+    ("subStr", "number", "number", "number", "number"),
+    // number {TS18046@49} / number {TS2362@49} / number {TS18046@49} / number {TS2362@49}
+    ("mulUnknown", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("shiftNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("powNum", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("bitAny", "number", "number", "number", "number"),
+    // bigint / bigint / bigint / bigint
+    ("modBigAny", "bigint", "bigint", "bigint", "bigint"),
+    // number / number / number / number
+    ("addEnum", "number", "number", "number", "number"),
+    // string / string / string / string
+    ("addStrEnum", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("nestedArith", "string", "string", "string", "string"),
+    // number / number / number / number
+    ("parenArith", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("localArith", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("constArith", "number", "number", "number", "number"),
+    // number[] / number[] / number[] / number[]
+    ("arrElem", "number[]", "number[]", "number[]", "number[]"),
+    // bigint / bigint / bigint / bigint
+    ("addBigParams", "bigint", "bigint", "bigint", "bigint"),
+    // bigint / bigint / bigint / bigint
+    ("mulBigParams", "bigint", "bigint", "bigint", "bigint"),
+    // bigint / bigint / bigint / bigint
+    ("subBigLit", "bigint", "bigint", "bigint", "bigint"),
+    // number / number / number / number
+    ("parenAssignNarrow", "number", "number", "number", "number"),
+];
+
+/// Assignments and updates through TS carriers: through non-null `!` and parentheses they assign the binding; through a type assertion (`as`, `satisfies`, `<T>`) they do not.
+const ASSERTED_TARGETS_SOURCE: &str = r#"
+export function asAssignNum() { let a = []; a.push(1); (a as any) = 5; return a; }
+export function asAssignLet() { let x: string | number = "s"; (x as any) = 5; return x; }
+export function asAssignNarrow(y: string | number) { let x = y; if (typeof x === "string") { (x as any) = 5; return x; } return 0; }
+export function asAssignLiteral() { let x = "s" as string | number; x = 1; (x as any) = "t"; return x; }
+export function parenAssignNarrow() { let x: string | number = "s"; (x) = 5; return x; }
+export function nonNullAssign() { let x: string | number = "s"; x! = 5; return x; }
+export function satisfiesAssign() { let x: string | number = "s"; (x satisfies string | number) = 5; return x; }
+export function angleAssign() { let x: string | number = "s"; (<any>x) = 5; return x; }
+export function asUpdate() { let x: string | number = "s"; (x as any)++; return x; }
+export function asCaptureAfter() { let x: string | number = "s"; (x as any) = 5; return () => x; }
+export function asArrayWrite() { let a = []; a.push(1); (a as any)[0] = "s"; return a; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const ASSERTED_TARGETS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] {TS2345@52} / any[]
+    ("asAssignNum", "number[]", "number[]", "never[]", "any[]"),
+    // string / string / string / string
+    ("asAssignLet", "string", "string", "string", "string"),
+    // string | 0 / string | 0 / string | 0 / string | 0
+    (
+        "asAssignNarrow",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+        "0 | string",
+    ),
+    // number / number / number / number
+    ("asAssignLiteral", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("parenAssignNarrow", "number", "number", "number", "number"),
+    // number / number / number / number
+    ("nonNullAssign", "number", "number", "number", "number"),
+    // string {TS2322@67} / string {TS2322@67} / string {TS2322@67} / string {TS2322@67}
+    ("satisfiesAssign", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("angleAssign", "string", "string", "string", "string"),
+    // string / string / string / string
+    ("asUpdate", "string", "string", "string", "string"),
+    // () => string / () => string / () => string / () => string
+    (
+        "asCaptureAfter",
+        "() => string",
+        "() => string",
+        "() => string",
+        "() => string",
+    ),
+    // number[] / number[] / never[] {TS2345@53} / any[]
+    ("asArrayWrite", "number[]", "number[]", "never[]", "any[]"),
+];
+
+/// Writes to ordinary variables in loops, and updates in control tests.
+const LOOP_WRITES_SOURCE: &str = r#"
+export function counterFor(n: number) { let x = 0; for (let i = 0; i < n; i++) { x = x + 1; } return x; }
+export function widenFor(n: number) { let x: string | number = 0; for (let i = 0; i < n; i++) { x = "s"; } return x; }
+export function whileWrite(n: number) { let x: string | number | boolean = 0; while (n-- > 0) { x = "s"; } return x; }
+export function doWrite(n: number) { let x: string | number | boolean = 0; do { x = true; } while (n-- > 0); return x; }
+export function breakWrite(n: number) { let x: string | number | boolean = 0; for (let i = 0; i < n; i++) { if (i > 2) break; x = "s"; } return x; }
+export function continueWrite(n: number) { let x: string | number | boolean = 0; for (let i = 0; i < n; i++) { if (i > 2) continue; x = "s"; } return x; }
+export function autoLoop(n: number) { let x; for (let i = 0; i < n; i++) { x = i; } return x; }
+export function autoNullLoop(n: number) { let x = null; for (let i = 0; i < n; i++) { x = "s"; } return x; }
+export function narrowedAfter(n: number) { let x: string | number = 0; while (n > 0) { x = "s"; n--; } return typeof x === "string" ? x : 1; }
+export function incLoop(n: number) { let x = 0; while (x < n) { x++; } return x; }
+export function varLoop(n: number) { var x: string | number = 0; for (let i = 0; i < n; i++) { x = "s"; } return x; }
+export function returnInLoopWrite(n: number) { let x: string | number = 0; for (let i = 0; i < n; i++) { x = "s"; if (i) return x; } return x; }
+export function autoReadInBody(n: number) { let x; for (let i = 0; i < n; i++) { if (i > 0) return x; x = i; } return 0; }
+export function varReadInBody(n: number) { var x: string | number = 0; for (let i = 0; i < n; i++) { if (i > 0) return x; x = "s"; } return true; }
+export function doFalseWrite() { let x: "a" | "b" | "c" = "a"; do { x = "b" } while (false); return x }
+export function doFalseTwo(f: boolean) { let x: "a" | "b" | "c" = "a"; do { if (f) { x = "b" } else { x = "c" } } while (false); return x }
+export function ifTestUpdate(n: number) { if (n-- > 0) { return n; } return 1; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const LOOP_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "b" / "b" / "b" / "b"
+    ("doFalseWrite", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // "b" | "c" / "b" | "c" / "b" | "c" / "b" | "c"
+    (
+        "doFalseTwo",
+        "\"b\" | \"c\"",
+        "\"b\" | \"c\"",
+        "\"b\" | \"c\"",
+        "\"b\" | \"c\"",
+    ),
+    // number | undefined / number / any / any
+    (
+        "autoReadInBody",
+        "number | undefined",
+        "number",
+        "any",
+        "any",
+    ),
+    // string | number | true / string | number | true / string | number | true / string | number | true
+    (
+        "varReadInBody",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    // number / number / number / number
+    ("counterFor", "number", "number", "number", "number"),
+    // string | number / string | number / string | number / string | number
+    (
+        "widenFor",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "whileWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // boolean / boolean / boolean / boolean
+    ("doWrite", "boolean", "boolean", "boolean", "boolean"),
+    // string | number / string | number / string | number / string | number
+    (
+        "breakWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "continueWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // number | undefined / number / any / any
+    ("autoLoop", "number | undefined", "number", "any", "any"),
+    // string | null / string / null {TS2322@87} / any
+    ("autoNullLoop", "null | string", "string", "null", "any"),
+    // string | 1 / string | 1 / string | 1 / string | 1
+    (
+        "narrowedAfter",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+        "1 | string",
+    ),
+    // number / number / number / number
+    ("incLoop", "number", "number", "number", "number"),
+    // string | number / string | number / string | number / string | number
+    (
+        "varLoop",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "returnInLoopWrite",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // number / number / number / number
+    ("ifTestUpdate", "number", "number", "number", "number"),
+];
+
+/// Logical expressions whose right operand writes a binding, in value and statement position.
+const VALUE_LOGICAL_SOURCE: &str = r#"
+export function valueLogicalRead(c: boolean) { const a = []; const r = c && a.push(1); return [r, a]; }
+export function valueOrRead(c: boolean) { const a = []; const r = c || a.push(1); return [r, a]; }
+export function valueCoalesceRead(x: number | null) { const a = []; const r = x ?? a.push("s"); return [r, a]; }
+export function valueLogicalOnly(c: boolean) { const a = []; return c && a.push(1); }
+export function valueStrLeft(s: string) { const a = []; const r = s && a.push(1); return [r, a]; }
+export function valueNumOr(n: number) { const a = []; const r = n || a.push(1); return [r, a]; }
+export function valueObjAnd(o: { k: 1 }) { const a = []; const r = o && a.push(1); return [r, a]; }
+export function valueNullOr(v: string | null) { const a = []; const r = v || a.push(1); return [r, a]; }
+export function valueUndefCoalesce(v?: string) { const a = []; const r = v ?? a.push(1); return [r, a]; }
+export function stmtAssignAnd(c: boolean) { let x: string | number = "s"; c && (x = 1); return x; }
+export function valueNarrowAnd(v: string | null) { const a = []; const r = v !== null && a.push(v); return [r, a]; }
+"#;
+
+/// Each row: the checker's print under strict, `strictNullChecks` off,
+/// `noImplicitAny` off, and both off (TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`), with the diagnostics each reports on the
+/// function's line (`code@column`); then the four answers.
+const VALUE_LOGICAL_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (number | false | number[])[] / (number | number[])[] / (number | false | never[])[] {TS2345@84} / (number | any[])[]
+    (
+        "valueLogicalRead",
+        "(false | number | number[])[]",
+        "(number | number[])[]",
+        "(false | never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (number | true | number[])[] / (number | true | number[])[] / (number | true | never[])[] {TS2345@79} / (number | true | any[])[]
+    (
+        "valueOrRead",
+        "(number | number[] | true)[]",
+        "(number | number[] | true)[]",
+        "(never[] | number | true)[]",
+        "(any[] | number | true)[]",
+    ),
+    // (number | string[])[] / (number | string[])[] / (number | never[])[] {TS2345@91} / (number | any[])[]
+    (
+        "valueCoalesceRead",
+        "(number | string[])[]",
+        "(number | string[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // number | false / number / number | false {TS2345@81} / number
+    (
+        "valueLogicalOnly",
+        "false | number",
+        "number",
+        "false | number",
+        "number",
+    ),
+    // (number | "" | number[])[] / (number | number[])[] / (number | "" | never[])[] {TS2345@79} / (number | any[])[]
+    (
+        "valueStrLeft",
+        "(\"\" | number | number[])[]",
+        "(number | number[])[]",
+        "(\"\" | never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] {TS2345@77} / (number | any[])[]
+    (
+        "valueNumOr",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] {TS2345@80} / (number | any[])[]
+    (
+        "valueObjAnd",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // (string | number | number[])[] / (string | number | number[])[] / (string | number | never[])[] {TS2345@85} / (string | number | any[])[]
+    (
+        "valueNullOr",
+        "(number | number[] | string)[]",
+        "(number | number[] | string)[]",
+        "(never[] | number | string)[]",
+        "(any[] | number | string)[]",
+    ),
+    // (string | number | number[])[] / (string | number | number[])[] / (string | number | never[])[] {TS2345@86} / (string | number | any[])[]
+    (
+        "valueUndefCoalesce",
+        "(number | number[] | string)[]",
+        "(number | number[] | string)[]",
+        "(never[] | number | string)[]",
+        "(any[] | number | string)[]",
+    ),
+    // string | number / string | number / string | number / string | number
+    (
+        "stmtAssignAnd",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // (number | false | string[])[] / (number | string[])[] / (number | false | never[])[] {TS2345@97} / (number | any[])[]
+    (
+        "valueNarrowAnd",
+        "(false | number | string[])[]",
+        "(number | string[])[]",
+        "(false | never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+];
+
+/// An arithmetic binary expression takes the checker's rule
+/// (`checkBinaryLikeExpression`). `+` is `number` over two number-like
+/// operands, `bigint` over two bigint-like ones, `string` when either is
+/// string-like, and `any` when either is `any`, where "like" never admits
+/// `any`, `unknown`, `void`, `null` or `undefined`. Every other combination
+/// is the checker's error, typed `any` (`b + i` over `b: boolean`, `null +
+/// i`). Every other arithmetic operator is `number` unless an operand may be
+/// a bigint, and `bigint` over two bigint-like operands (`any` admitted),
+/// else `any`.
+#[test]
+fn arithmetic_expressions_take_the_checkers_operand_rule() {
+    assert_measured_matrix("arithmetic.ts", ARITHMETIC_SOURCE, ARITHMETIC_TABLE);
+}
+
+/// The checker assigns through parentheses and non-null `!` and never
+/// through a type assertion: `(x as any) = 5`, `(<any>x) = 5` and `(x
+/// satisfies T) = 5` leave `x` as it was — it stays past its last
+/// assignment for a closure, and an evolving array keeps its elements —
+/// while `x! = 5` and `(x) = 5` retype it. An update through a type
+/// assertion (`(x as any)++`) likewise leaves the binding alone.
+#[test]
+fn assignments_through_a_type_assertion_are_not_assignments() {
+    assert_measured_matrix(
+        "asserted-targets.ts",
+        ASSERTED_TARGETS_SOURCE,
+        ASSERTED_TARGETS_TABLE,
+    );
+}
+
+/// Writes to ordinary variables in a loop take each reference's loop-head
+/// type (its entry type joined with one pass of the body) rather than the
+/// loop refusal, through `for`, `while` and `do`, `break`, `continue` and a
+/// `return` inside the body; an initializer-less `let` or a `var` written
+/// in the body joins its never-assigned entry path as an `if` does. An
+/// update a control test evaluates on every path (`while (n-- > 0)`,
+/// `if (n-- > 0)`) applies before the test branches.
+#[test]
+fn loop_writes_take_each_references_loop_head() {
+    assert_measured_matrix("loop-writes.ts", LOOP_WRITES_SOURCE, LOOP_WRITES_TABLE);
+}
+
+/// A logical expression whose right operand writes a binding branches at
+/// its left operand: the right operand runs on the edge the left one does
+/// not short-circuit, under the left operand's guard, the paths join, and
+/// the value is the checker's logical result — `&&` the left operand's
+/// definitely-falsy part with the right operand (with `strictNullChecks`
+/// off, the right operand's base type's), `||` the left operand without its
+/// falsy parts with the right operand, `??` the non-nullable left operand
+/// with the right one.
+#[test]
+fn logical_expressions_that_write_branch_at_their_left_operand() {
+    assert_measured_matrix(
+        "value-logical.ts",
+        VALUE_LOGICAL_SOURCE,
+        VALUE_LOGICAL_TABLE,
+    );
+}
+
+/// Loops whose written references are independent, or depend on each other
+/// along a chain, measured on TypeScript 7.0.2 (`--strict`, with
+/// `strictNullChecks` and `noImplicitAny` each off in turn).
+const LOOP_HEADS_SOURCE: &str = r#"
+export function independentCounters(go: boolean) { let a = 0, b = 0, d = 0, e = 0, f = 0, g = 0, h = 0, i = 0, j = 0, k = 0, l = 0, m = 0; while (go) { a++; b++; d++; e++; f++; g++; h++; i++; j++; k++; l++; m++; } return [a, b, d, e, f, g, h, i, j, k, l, m]; }
+export function independentWrites(go: boolean) { let a: number | null = null, b: number | null = null, d: number | null = null, e: number | null = null, f: number | null = null, g: number | null = null, h: number | null = null, i: number | null = null, j: number | null = null, k: number | null = null, l: number | null = null, m: number | null = null; while (go) { a = 1; b = 1; d = 1; e = 1; f = 1; g = 1; h = 1; i = 1; j = 1; k = 1; l = 1; m = 1; } return [a, b, d, e, f, g, h, i, j, k, l, m]; }
+export function chain(go: boolean) { let x: string | number | boolean | null = null; let y: string | number | boolean | null = 0; let z: string | number | boolean | null = true; while (go) { x = y; y = z; z = "s"; } return x; }
+"#;
+
+const LOOP_HEADS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / number[] / number[]
+    (
+        "independentCounters",
+        "number[]",
+        "number[]",
+        "number[]",
+        "number[]",
+    ),
+    // (number | null)[] / number[] / (number | null)[] / number[]
+    (
+        "independentWrites",
+        "(null | number)[]",
+        "number[]",
+        "(null | number)[]",
+        "number[]",
+    ),
+    // string | number | true | null / string | number | boolean /
+    // string | number | true | null / string | number | boolean
+    (
+        "chain",
+        "null | number | string | true",
+        "boolean | number | string",
+        "null | number | string | true",
+        "boolean | number | string",
+    ),
+];
+
+/// A loop types each reference it writes at its head once per set of the
+/// references under analysis its value can read: the head of a reference
+/// no other one feeds takes one pass, and a chain `x = y; y = z; z = "s"`
+/// takes one pass per link — `x` reaches `z`'s `"s"` two iterations away
+/// (`string | number | true | null`). Twelve independent counters take
+/// twelve head passes and the final pass, never a pass per subset of them.
+#[test]
+fn loop_heads_follow_each_references_dependencies() {
+    assert_measured_matrix("loop-heads.ts", LOOP_HEADS_SOURCE, LOOP_HEADS_TABLE);
+    let host = four_policy_host();
+    let path = format!("{STRICT_ROOT}/loop-heads.ts");
+    upsert(&host, &path, LOOP_HEADS_SOURCE);
+    for (symbol, passes) in [
+        ("independentCounters", 13),
+        ("independentWrites", 13),
+        ("chain", 4),
+    ] {
+        let before = super::flow_return::loop_passes_for_tests();
+        let _ = observe(&host, &path, symbol);
+        assert_eq!(
+            super::flow_return::loop_passes_for_tests() - before,
+            passes,
+            "`{symbol}` evaluates one pass per loop head and one final pass"
+        );
+    }
+}
+
+const CAPTURE_EXTENT_SOURCE: &str = r#"
+export function memberWriteAfter(p: { y: number } | null) { let o = p; if (o) { const f = () => o.y; o.y = 2; return f; } return null; }
+export function loopExtent(n: number) { let x: string | number = 1; let f = () => 0 as string | number; for (let i = 0; i < n; i++) { x = "s"; if (typeof x === "string") { f = () => x; } } return f; }
+export function loopExtentAfter(n: number) { let x: string | number = 1; for (let i = 0; i < n; i++) { x = "s"; } if (typeof x === "string") { return () => x; } return null; }
+export function straightWriteBefore() { let x: string | number = 1; x = "s"; if (typeof x === "string") { return () => x; } return null; }
+"#;
+
+const CAPTURE_EXTENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // (() => number) | null / () => number / (() => number) | null / () => number
+    (
+        "memberWriteAfter",
+        "() => number | null",
+        "() => number",
+        "() => number | null",
+        "() => number",
+    ),
+    // () => string | number under all four: the capture reads its declared
+    // type, which this lane does not supply for a `let` — the typed gap.
+    (
+        "loopExtent",
+        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
+        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
+        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
+        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
+    ),
+    // (() => string) | null / () => string / (() => string) | null / () => string
+    (
+        "loopExtentAfter",
+        "() => string | null",
+        "() => string",
+        "() => string | null",
+        "() => string",
+    ),
+    // (() => string) | null / () => string / (() => string) | null / () => string
+    (
+        "straightWriteBefore",
+        "() => string | null",
+        "() => string",
+        "() => string | null",
+        "() => string",
+    ),
+];
+
+/// A closure extends its creator's control-flow container over a `let`
+/// past its last assignment (`isPastLastAssignment`), measured on
+/// TypeScript 7.0.2: only a write to the binding itself counts — a member
+/// write `o.y = 2` after the creation leaves `o` narrowed there — and a
+/// write inside a loop counts up to the loop's end
+/// (`extendAssignmentPosition`), so a closure created after it in the same
+/// loop reads the declared `string | number`, which this lane refuses
+/// with the typed capture gap; one created after the loop reads the
+/// narrowed `string`.
+#[test]
+fn closures_extend_past_the_last_assignment_by_its_extent() {
+    assert_measured_matrix(
+        "capture-extent.ts",
+        CAPTURE_EXTENT_SOURCE,
+        CAPTURE_EXTENT_TABLE,
+    );
+}
+
+const TEST_UPDATES_SOURCE: &str = r#"
+export function whileTestUpdateExit() { let x = 1 as 1 | 2; while (x++ < 3) { break; } return x; }
+export function doTestUpdateExit() { let x = 1 as 1 | 2; do { } while (x++ < 3); return x; }
+export function ternaryTestUpdate() { let x = 1 as 1 | 2; let y = 0; (x++ > 0) ? (y = 1) : (y = 2); return x; }
+export function andTestUpdate() { let x = 1 as 1 | 2; let y = 0; (x++ > 0) && (y = 1); return x; }
+"#;
+
+const TEST_UPDATES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    (
+        "whileTestUpdateExit",
+        "number",
+        "number",
+        "number",
+        "number",
+    ),
+    // number under all four
+    ("doTestUpdateExit", "number", "number", "number", "number"),
+    // number under all four
+    ("ternaryTestUpdate", "number", "number", "number", "number"),
+    // number under all four
+    ("andTestUpdate", "number", "number", "number", "number"),
+];
+
+/// An update in a test (`while (x++ < 3)`, `do … while (x++ < 3)`, the
+/// test of a conditional or the left operand of `&&` at statement
+/// position) runs where the test evaluates, before its condition splits,
+/// so every path leaving the test holds the update's `number` — measured
+/// on TypeScript 7.0.2, `x` over `let x = 1 as 1 | 2` is `number` past
+/// each of them, even where the loop body only breaks.
+#[test]
+fn test_updates_apply_where_the_test_evaluates() {
+    assert_measured_matrix("test-updates.ts", TEST_UPDATES_SOURCE, TEST_UPDATES_TABLE);
+}
+
+/// The global declarations TypeScript 7.0.2's libraries make for the
+/// members the array tables read, verbatim (`lib.es5.d.ts`, with `find`
+/// from `lib.es2015.core.d.ts` and `includes` from
+/// `lib.es2016.array.include.d.ts`; measured with `--target es2022`).
+const ARRAY_LIB: &str = r#"
+interface ConcatArray<T> { readonly length: number; readonly [n: number]: T; join(separator?: string): string; slice(start?: number, end?: number): T[]; }
+interface Array<T> {
+    length: number;
+    pop(): T | undefined;
+    push(...items: T[]): number;
+    concat(...items: ConcatArray<T>[]): T[];
+    concat(...items: (T | ConcatArray<T>)[]): T[];
+    join(separator?: string): string;
+    slice(start?: number, end?: number): T[];
+    indexOf(searchElement: T, fromIndex?: number): number;
+    some(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): boolean;
+    map<U>(callbackfn: (value: T, index: number, array: T[]) => U, thisArg?: any): U[];
+    filter<S extends T>(predicate: (value: T, index: number, array: T[]) => value is S, thisArg?: any): S[];
+    filter(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): T[];
+    find<S extends T>(predicate: (value: T, index: number, obj: T[]) => value is S, thisArg?: any): S | undefined;
+    find(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): T | undefined;
+    includes(searchElement: T, fromIndex?: number): boolean;
+    [n: number]: T;
+}
+interface ReadonlyArray<T> { readonly length: number; readonly [n: number]: T; }
+interface String { readonly length: number; readonly [index: number]: string; }
+interface StringConstructor { new (value?: any): String; (value?: any): string; readonly prototype: String; }
+declare var String: StringConstructor;
+"#;
+
+/// [`assert_measured_matrix`] with `lib` registered as every project's
+/// ambient library.
+fn assert_measured_matrix_with_lib(
+    file: &str,
+    source: &str,
+    lib: &str,
+    table: &[(&str, &str, &str, &str, &str)],
+) {
+    let host = four_policy_host();
+    for ordinal in 0..4u32 {
+        host.workspace()
+            .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                project_id: Some(verter_workspace::workspace_snapshot::ProjectId(ordinal)),
+                canonical_id: std::sync::Arc::from(format!("lib.array{ordinal}.d.ts").as_str()),
+                source: std::sync::Arc::from(lib),
+            })
+            .expect("the library registers against its project");
+    }
+    let mismatches = matrix_mismatches(&host, file, source, table);
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+const LITERAL_UNION_SOURCE: &str = r#"
+declare const c: boolean;
+declare function num(): number;
+export function assertSingle() { let x = "a" as "a"; return x; }
+export function assertSingleAngle() { let x = <1>1; return x; }
+export function assertSingleObj() { let x = "a" as "a"; return { x }; }
+export function assignLit() { let x = 0 as 0 | 1 | 2; x = 1; return x; }
+export function assignLitNum() { let x = 0 as 0 | 1 | 2; x = num() as 0 | 1; return x; }
+export function assignLitDecl() { let x: 0 | 1 | 2 = 0; x = 1; return x; }
+export function assignLitBool() { let x = true as boolean; x = false; return x; }
+export function assignLitStrUnion() { let x = "a" as "a" | "b"; x = "b"; return x; }
+export function assignWide() { let x = 0 as number; x = 1; return x; }
+export function assignConstAssert() { let x = 0 as const; return x; }
+export function assignSat() { let x = 0 satisfies number; x = 1; return x; }
+export function assignAngle() { let x = <0 | 1 | 2>0; x = 2; return x; }
+export function assignParenAs() { let x = (0 as 0 | 1 | 2); x = 1; return x; }
+export function counterForLit() { let x = 0 as 0 | 1 | 2; for (let i = 0; i < 3; i++) { x = 1; } return x; }
+export function counterWhileLit() { let x = 0 as 0 | 1 | 2; while (c) { x = 2; } return x; }
+export function counterIfLit() { let x = 0 as 0 | 1 | 2; if (c) { x = 2; } return x; }
+export function counterLoopRead() { let x = 0 as 0 | 1 | 2; let y = x; while (c) { y = x; x = 1; } return y; }
+export function assignNonUnionFromUnion() { let x = 0 as 0 | 1 | 2; x = (c ? 1 : 2); return x; }
+export function assignMismatch() { let x = 0 as 0 | 1 | 2; x = 5 as any; return x; }
+export function incLitUnion() { let x = 0 as 0 | 1 | 2; x++; return x; }
+export function inductionLiteral(n: number) { let i = 0 as 0 | 1; while (i < n) { i++; } return i; }
+export function inductionLiteralBody(n: number) { let i = 0 as 0 | 1; while (i < n) { i++; if (c) return i; } return null; }
+export function paramLoopCompound(p: 0 | 1) { while (c) { p++; } return p; }
+export function letVarUnionInit() { var v = 0 as 0 | 1; v = 1; return v; }
+export function condInit() { let x = c ? 1 : "a"; x = 1; return x; }
+"#;
+
+const LITERAL_UNION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // "a" under all four
+    ("assertSingle", "\"a\"", "\"a\"", "\"a\"", "\"a\""),
+    // 1 under all four
+    ("assertSingleAngle", "1", "1", "1", "1"),
+    // { x: "a"; } under all four
+    (
+        "assertSingleObj",
+        "{ x: \"a\" }",
+        "{ x: \"a\" }",
+        "{ x: \"a\" }",
+        "{ x: \"a\" }",
+    ),
+    // 1 under all four
+    ("assignLit", "1", "1", "1", "1"),
+    // 0 | 1 under all four
+    ("assignLitNum", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // 1 under all four
+    ("assignLitDecl", "1", "1", "1", "1"),
+    // boolean under all four
+    ("assignLitBool", "boolean", "boolean", "boolean", "boolean"),
+    // "b" under all four
+    ("assignLitStrUnion", "\"b\"", "\"b\"", "\"b\"", "\"b\""),
+    // number under all four
+    ("assignWide", "number", "number", "number", "number"),
+    // 0 under all four
+    ("assignConstAssert", "0", "0", "0", "0"),
+    // number under all four
+    ("assignSat", "number", "number", "number", "number"),
+    // 2 under all four
+    ("assignAngle", "2", "2", "2", "2"),
+    // 1 under all four
+    ("assignParenAs", "1", "1", "1", "1"),
+    // 0 | 1 | 2 under all four
+    (
+        "counterForLit",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "counterWhileLit",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "counterIfLit",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "counterLoopRead",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // 1 | 2 under all four
+    (
+        "assignNonUnionFromUnion",
+        "1 | 2",
+        "1 | 2",
+        "1 | 2",
+        "1 | 2",
+    ),
+    // 0 | 1 | 2 under all four
+    (
+        "assignMismatch",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+        "0 | 1 | 2",
+    ),
+    // number under all four
+    ("incLitUnion", "number", "number", "number", "number"),
+    // 0 | 1 under all four
+    ("inductionLiteral", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // number | null / number / number | null / number
+    (
+        "inductionLiteralBody",
+        "null | number",
+        "number",
+        "null | number",
+        "number",
+    ),
+    // 0 | 1 under all four
+    ("paramLoopCompound", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // 1 under all four
+    ("letVarUnionInit", "1", "1", "1", "1"),
+    // number under all four
+    ("condInit", "number", "number", "number", "number"),
+];
+
+/// An unannotated `let` / `var` is declared as its initializer's widened
+/// type, and a type assertion's type is not fresh, so it does not widen:
+/// `let x = 0 as 0 | 1 | 2` declares `0 | 1 | 2`, and `let x = "a" as "a"`
+/// reads `"a"`. Each assignment reduces against a union declared type
+/// (`getAssignmentReducedType`): `x = 1` leaves `1`, and
+/// a value no constituent can hold leaves the whole union. A loop head where
+/// the reference enters at its declared type stays that type, so `i++` in
+/// `while (i < n)` over `let i = 0 as 0 | 1` leaves `0 | 1` past the loop
+/// while the body reads `number` after the update. Measured on TypeScript
+/// 7.0.2 in all four `strictNullChecks` × `noImplicitAny` settings.
+#[test]
+fn assignments_reduce_against_an_asserted_declared_type() {
+    assert_measured_matrix(
+        "literal-union.ts",
+        LITERAL_UNION_SOURCE,
+        LITERAL_UNION_TABLE,
+    );
+}
+
+const INDUCTION_LOOPS_SOURCE: &str = r#"
+export function inductionOnly(n: number) { let i = 0; for (; i < n; i++) { } return i; }
+export function inductionOnlyWhile(n: number) { let i = 0; while (i < n) { i++; } return i; }
+export function inductionLiteral(n: number) { let i = 0 as 0 | 1; while (i < n) { i++; } return i; }
+export function inductionFor(n: number) { let k = 0; for (let i = 0; i < n; i++) { k = i; } return k; }
+export function inductionReturn(n: number) { for (let i = 0; i < n; i++) { if (i > 3) return i; } return null; }
+"#;
+
+const INDUCTION_LOOPS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    ("inductionOnly", "number", "number", "number", "number"),
+    // number under all four
+    ("inductionOnlyWhile", "number", "number", "number", "number"),
+    // 0 | 1 under all four
+    ("inductionLiteral", "0 | 1", "0 | 1", "0 | 1", "0 | 1"),
+    // number under all four
+    ("inductionFor", "number", "number", "number", "number"),
+    // number | null / number / number | null / number
+    (
+        "inductionReturn",
+        "null | number",
+        "number",
+        "null | number",
+        "number",
+    ),
+];
+
+/// A loop whose only write is its induction variable (`i++` in a `for` update
+/// or a `while` body) types that variable at the head like any other written
+/// reference: `let i = 0` reads `number` past the loop and inside it, and one
+/// declared `0 | 1` stays `0 | 1`. Measured on TypeScript 7.0.2.
+#[test]
+fn loops_writing_only_their_induction_variable_take_the_loop_head() {
+    assert_measured_matrix(
+        "induction-loops.ts",
+        INDUCTION_LOOPS_SOURCE,
+        INDUCTION_LOOPS_TABLE,
+    );
+}
+
+const ARRAY_MEMBERS_SOURCE: &str = r#"
+export function evLength() { const a = []; a.push(1); return a.length; }
+export function evLengthEmpty() { const a = []; return a.length; }
+export function evLengthBetween() { const a = []; const n = a.length; a.push(1); return [n, a]; }
+export function evIndex() { const a = []; a.push(1); return a[0]; }
+export function evIndexEmpty() { const a = []; return a[0]; }
+export function evFilter() { const a = []; a.push(1); a.push("s"); return a.filter(x => x); }
+export function evJoin() { const a = []; a.push(1); return a.join(","); }
+export function evSlice() { const a = []; a.push(1); return a.slice(); }
+export function evPop() { const a = []; a.push(1); return a.pop(); }
+export function evFind() { const a = []; a.push(1); return a.find(x => x > 0); }
+export function evSome() { const a = []; a.push(1); return a.some(x => x > 0); }
+export function decLength(a: number[]) { return a.length; }
+export function decIndex(a: number[]) { return a[0]; }
+export function decFilter(a: (string | number)[]) { return a.filter(x => x); }
+export function decJoin(a: number[]) { return a.join(","); }
+export function decIndexOf(a: number[]) { return a.indexOf(1); }
+export function decSlice(a: number[]) { return a.slice(); }
+export function decPop(a: number[]) { return a.pop(); }
+export function decFind(a: number[]) { return a.find(x => x > 0); }
+export function decLocalLength() { const a: number[] = [1]; return a.length; }
+export function decReadonlyLength(a: readonly string[]) { return a.length; }
+export function decReadonlyIndex(a: readonly string[]) { return a[0]; }
+export function decTupleLength(t: [number, string]) { return t.length; }
+export function tupleIndex(t: [number, string]) { return t[1]; }
+export function localTupleIndex() { const t = [1, "a"] as const; return t[0]; }
+"#;
+
+const ARRAY_MEMBERS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    ("evLength", "number", "number", "number", "number"),
+    // number under all four
+    ("evLengthEmpty", "number", "number", "number", "number"),
+    // (number | number[])[] / (number | number[])[] / (number | never[])[] / (number | any[])[]
+    (
+        "evLengthBetween",
+        "(number | number[])[]",
+        "(number | number[])[]",
+        "(never[] | number)[]",
+        "(any[] | number)[]",
+    ),
+    // number / number / never / any
+    ("evIndex", "number", "number", "never", "any"),
+    // any / any / never / any
+    ("evIndexEmpty", "any", "any", "never", "any"),
+    // (string | number)[] / (string | number)[] / never[] / any[]
+    (
+        "evFilter",
+        "(number | string)[]",
+        "(number | string)[]",
+        "never[]",
+        "any[]",
+    ),
+    // string under all four
+    ("evJoin", "string", "string", "string", "string"),
+    // number[] / number[] / never[] / any[]
+    ("evSlice", "number[]", "number[]", "never[]", "any[]"),
+    // number | undefined / number / undefined / any
+    ("evPop", "number | undefined", "number", "undefined", "any"),
+    // number | undefined / number / undefined / any
+    ("evFind", "number | undefined", "number", "undefined", "any"),
+    // boolean under all four
+    ("evSome", "boolean", "boolean", "boolean", "boolean"),
+    // number under all four
+    ("decLength", "number", "number", "number", "number"),
+    // number under all four
+    ("decIndex", "number", "number", "number", "number"),
+    // (string | number)[] under all four
+    (
+        "decFilter",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+        "(number | string)[]",
+    ),
+    // string under all four
+    ("decJoin", "string", "string", "string", "string"),
+    // number under all four
+    ("decIndexOf", "number", "number", "number", "number"),
+    // number[] under all four
+    ("decSlice", "number[]", "number[]", "number[]", "number[]"),
+    // number | undefined / number / number | undefined / number
+    (
+        "decPop",
+        "number | undefined",
+        "number",
+        "number | undefined",
+        "number",
+    ),
+    // number | undefined / number / number | undefined / number
+    (
+        "decFind",
+        "number | undefined",
+        "number",
+        "number | undefined",
+        "number",
+    ),
+    // number under all four
+    ("decLocalLength", "number", "number", "number", "number"),
+    // number under all four
+    ("decReadonlyLength", "number", "number", "number", "number"),
+    // string under all four
+    ("decReadonlyIndex", "string", "string", "string", "string"),
+    // 2 under all four
+    ("decTupleLength", "2", "2", "2", "2"),
+    // string under all four
+    ("tupleIndex", "string", "string", "string", "string"),
+    // 1 under all four
+    ("localTupleIndex", "1", "1", "1", "1"),
+];
+
+/// A member read off an array, a readonly array or a tuple reads the global
+/// `Array` / `ReadonlyArray` wrapper's member (`getApparentType`), and an
+/// element read at an integer literal reads the element (a tuple's position):
+/// an EVOLVING array finalizes where it is read, so `a.length` and `a[0]`
+/// over `const a = []; a.push(1)` read `number`, `a.pop()` `number |
+/// undefined` (`number` with `strictNullChecks` off), and `a.filter(x => x)`
+/// over a `string | number` array `(string | number)[]`; without
+/// `noImplicitAny` the array is declared `never[]` (`any[]` with
+/// `strictNullChecks` off). Measured on TypeScript 7.0.2 (`--target es2022`),
+/// the table's comments in the checker's print order.
+#[test]
+fn array_members_read_through_the_apparent_wrapper() {
+    assert_measured_matrix_with_lib(
+        "array-members.ts",
+        ARRAY_MEMBERS_SOURCE,
+        ARRAY_LIB,
+        ARRAY_MEMBERS_TABLE,
+    );
+}
+
+const ARRAY_MAP_SOURCE: &str = r#"
+export function evMap() { const a = []; a.push(1); return a.map(x => x); }
+export function evMapString() { const a = []; a.push(1); return a.map(x => String(x)); }
+export function decMap(a: number[]) { return a.map(x => x); }
+export function decMapString(a: number[]) { return a.map(x => String(x)); }
+"#;
+
+const ARRAY_MAP_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] / any[]
+    ("evMap", "number[]", "number[]", "never[]", "any[]"),
+    // string[] under all four
+    (
+        "evMapString",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+    // number[] under all four
+    ("decMap", "number[]", "number[]", "number[]", "number[]"),
+    // string[] under all four
+    (
+        "decMapString",
+        "string[]",
+        "string[]",
+        "string[]",
+        "string[]",
+    ),
+];
+
+/// `map<U>` infers `U` from its callback's return, the callback's parameter
+/// contextually typed by the array's element: `a.map(x => x)` over
+/// `number[]` is `number[]` and `a.map(x => String(x))` `string[]`
+/// (measured on TypeScript 7.0.2). The lane answers `unknown[]`.
+#[test]
+#[ignore = "call inference from a contextually typed callback return: `a.map(x => x)` over `number[]` is `number[]`"]
+fn array_map_infers_its_callback_return() {
+    assert_measured_matrix_with_lib("array-map.ts", ARRAY_MAP_SOURCE, ARRAY_LIB, ARRAY_MAP_TABLE);
+}
+
+const ARRAY_CONCAT_SOURCE: &str = r#"
+export function evConcat() { const a = []; a.push(1); return a.concat([2]); }
+export function decConcat(a: number[]) { return a.concat([2]); }
+"#;
+
+const ARRAY_CONCAT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] / number[] / never[] / any[]
+    ("evConcat", "number[]", "number[]", "never[]", "any[]"),
+    // number[] under all four
+    ("decConcat", "number[]", "number[]", "number[]", "number[]"),
+];
+
+/// `a.concat([2])` over `number[]` resolves `concat`'s first overload and
+/// is `number[]` (measured on TypeScript 7.0.2). The lane refuses the callee.
+#[test]
+#[ignore = "overload resolution of `concat(...items: ConcatArray<T>[])` over an array literal argument"]
+fn array_concat_resolves_its_overloads() {
+    assert_measured_matrix_with_lib(
+        "array-concat.ts",
+        ARRAY_CONCAT_SOURCE,
+        ARRAY_LIB,
+        ARRAY_CONCAT_TABLE,
+    );
+}
+
+const NON_ASSIGNABLE_ARGUMENT_SOURCE: &str = r#"
+export function evIndexOf() { const a = []; a.push(1); return a.indexOf(1); }
+export function evIncludes() { const a = []; a.push(1); return a.includes(1); }
+"#;
+
+const NON_ASSIGNABLE_ARGUMENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number under all four
+    ("evIndexOf", "number", "number", "number", "number"),
+    // boolean under all four
+    ("evIncludes", "boolean", "boolean", "boolean", "boolean"),
+];
+
+/// Without `noImplicitAny` an evolving array is `never[]`, so `a.indexOf(1)`
+/// passes an argument `never` cannot hold (TS2345), and the checker still
+/// types the call by its only signature: `number`, and `boolean` for
+/// `includes` (measured on TypeScript 7.0.2). The lane refuses the callee in
+/// that setting.
+#[test]
+#[ignore = "a call whose argument is not assignable still takes the return type of its only signature"]
+fn a_call_with_a_non_assignable_argument_keeps_its_only_signature() {
+    assert_measured_matrix_with_lib(
+        "non-assignable-argument.ts",
+        NON_ASSIGNABLE_ARGUMENT_SOURCE,
+        ARRAY_LIB,
+        NON_ASSIGNABLE_ARGUMENT_TABLE,
+    );
+}
+
+const BOOLEAN_MEMBER_RETURNS_SOURCE: &str = r#"
+export function decIncludes(a: number[]) { return a.includes(1); }
+export function decSome(a: number[]) { return a.some(x => x > 0); }
+export function nestedIndex(o: { xs: boolean[] }) { return o.xs[0]; }
+"#;
+
+const BOOLEAN_MEMBER_RETURNS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // boolean under all four
+    ("decIncludes", "boolean", "boolean", "boolean", "boolean"),
+    // boolean under all four
+    ("decSome", "boolean", "boolean", "boolean", "boolean"),
+    // boolean under all four
+    ("nestedIndex", "boolean", "boolean", "boolean", "boolean"),
+];
+
+/// `return a.includes(1)`, `return a.some(x => x > 0)` and `return o.xs[0]`
+/// read a parameter's member and are `boolean`: the checker infers no type
+/// predicate from them (measured on TypeScript 7.0.2). The lane answers
+/// `boolean` degraded by the guard-narrowing gap.
+#[test]
+#[ignore = "a boolean member call or element read of a parameter infers no type predicate"]
+fn boolean_member_reads_of_a_parameter_infer_no_type_predicate() {
+    assert_measured_matrix_with_lib(
+        "boolean-member-returns.ts",
+        BOOLEAN_MEMBER_RETURNS_SOURCE,
+        ARRAY_LIB,
+        BOOLEAN_MEMBER_RETURNS_TABLE,
+    );
+}
+
+const STRING_ELEMENT_SOURCE: &str = r#"
+export function strIndex(s: string) { return s[0]; }
+"#;
+
+const STRING_ELEMENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string under all four
+    ("strIndex", "string", "string", "string", "string"),
+];
+
+/// `s[0]` over `s: string` is `string`, the `String` wrapper's
+/// `[index: number]: string` (measured on TypeScript 7.0.2). The lane misses
+/// the read.
+#[test]
+#[ignore = "an element read of a string reads the `String` wrapper's number index signature"]
+fn a_string_element_read_reads_the_string_index_signature() {
+    assert_measured_matrix_with_lib(
+        "string-element.ts",
+        STRING_ELEMENT_SOURCE,
+        ARRAY_LIB,
+        STRING_ELEMENT_TABLE,
+    );
+}
+
+const INVOKED_WRITES_SOURCE: &str = r#"
+declare const c: boolean;
+export function iifeStraight() { let x: string | number = 0; (() => { x = "s"; })(); return x; }
+export function iifeCond() { let x: string | number = 0; if (c) { (() => { x = "s"; })(); } return x; }
+export function iifeFnExpr() { let x: string | number = 0; (function () { x = "s"; })(); return x; }
+export function iifeLoop(n: number) { let x: string | number = 0; for (let i = 0; i < n; i++) { (() => { x = "s"; })(); } return x; }
+export function iifeLoopWhile() { let x: string | number = 0; while (c) { (function () { x = "s"; })(); } return x; }
+export function iifeLoopRead(n: number) { let x: string | number = 0; let r = 0 as string | number; for (let i = 0; i < n; i++) { r = x; (() => { x = "s"; })(); } return r; }
+"#;
+
+const INVOKED_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string under all four
+    ("iifeStraight", "string", "string", "string", "string"),
+    // string | number under all four
+    (
+        "iifeCond",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string under all four
+    ("iifeFnExpr", "string", "string", "string", "string"),
+    // string | number under all four
+    (
+        "iifeLoop",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number under all four
+    (
+        "iifeLoopWhile",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    // string | number under all four
+    (
+        "iifeLoopRead",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+];
+
+/// The checker's flow runs through an immediately invoked function
+/// expression's body, so its writes to a captured binding reach the reads
+/// after the call: `(() => { x = "s"; })()` over `let x: string | number =
+/// 0` leaves `string`, in a loop `string | number` (measured on TypeScript
+/// 7.0.2). The lane refuses the function.
+#[test]
+#[ignore = "an immediately invoked function expression's writes to captured bindings enter the caller's flow"]
+fn invoked_function_expressions_apply_their_writes() {
+    assert_measured_matrix(
+        "invoked-writes.ts",
+        INVOKED_WRITES_SOURCE,
+        INVOKED_WRITES_TABLE,
+    );
+}
+
+const MEMBER_WRITES_SOURCE: &str = r#"
+declare const c: boolean;
+export function memberWriteStraight() { const o: { y: string | number } = { y: 0 }; o.y = "s"; return o.y; }
+export function memberWriteLoop() { const o: { y: string | number | boolean } = { y: 0 }; o.y = 0; while (c) { o.y = "s"; } return o.y; }
+"#;
+
+const MEMBER_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // string under all four
+    (
+        "memberWriteStraight",
+        "string",
+        "string",
+        "string",
+        "string",
+    ),
+    // string | number under all four
+    (
+        "memberWriteLoop",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+];
+
+/// An assignment `o.y = "s"` narrows the reference `o.y` for the reads after
+/// it: `string` straight after it, and `string | number` past a loop that
+/// assigns it over `o.y = 0` (measured on TypeScript 7.0.2). The lane reads the
+/// member's declared type.
+#[test]
+#[ignore = "an assignment to a member path narrows later reads of that path, in and outside loops"]
+fn member_writes_narrow_their_member_path() {
+    assert_measured_matrix(
+        "member-writes.ts",
+        MEMBER_WRITES_SOURCE,
+        MEMBER_WRITES_TABLE,
+    );
+}

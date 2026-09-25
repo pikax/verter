@@ -13852,7 +13852,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         operand: SemanticNodeId,
         context: crate::semantic_query::StructuralReduceContext,
     ) -> bool {
-        let on_path = self.awaited_active.borrow().contains(&(relation, operand))
+        let on_path = self.awaited_active.borrow().contains(relation, operand)
             || self
                 .graph()
                 .is_same_path_inflight_on_current_thread(&relation.key(operand, context));
@@ -13912,7 +13912,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             active: &self.awaited_active,
             base,
         };
-        self.awaited_active.borrow_mut().push((relation, operand));
+        self.awaited_active.borrow_mut().push(relation, operand);
         // The declaration carriers expanded consecutively into `current`,
         // outermost first: when `current` is its own answer, the innermost
         // carrier is, and so on outwards while each carrier was its
@@ -13952,7 +13952,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.fold_local_partial_completeness(reasons);
                 return AwaitedOutcome::Refused;
             }
-            self.awaited_active.borrow_mut().push((relation, next));
+            self.awaited_active.borrow_mut().push(relation, next);
             current = next;
         }
     }
@@ -16248,7 +16248,7 @@ mod carrier_type_param_descent_tests {
 }
 
 /// Which awaited relation a shared structural arm re-enters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AwaitedRelation {
     /// [`SemanticQueryKey::AwaitedNormalize`].
     Normalize,
@@ -16327,13 +16327,60 @@ enum AwaitedOutcome {
 /// Pops the operands one awaited run pushed onto the dispatch's path when
 /// the run ends, however it ends.
 struct AwaitedPathGuard<'g> {
-    active: &'g std::cell::RefCell<Vec<(AwaitedRelation, SemanticNodeId)>>,
+    active: &'g std::cell::RefCell<AwaitedPath>,
     base: usize,
 }
 
 impl Drop for AwaitedPathGuard<'_> {
     fn drop(&mut self) {
         self.active.borrow_mut().truncate(self.base);
+    }
+}
+
+/// The operands the awaited relations are unwrapping on the current path
+/// ([`ProjectSemanticDispatch::awaited_active`]), in push order, with
+/// their membership counted: a run asks whether each operand it reaches is
+/// already on the path, so the check is one lookup rather than a scan of
+/// every operand the run has reached — a chain of `n` distinct thenables
+/// costs `O(n)` checks, never `O(n²)` comparisons. Owned by the dispatch
+/// with the ordered stack it indexes: an operand enters both on a push and
+/// leaves both when its run's [`AwaitedPathGuard`] truncates (an operand a
+/// nested run pushed again stays a member until its outer entry goes), so
+/// the index holds nothing once the outermost run ends.
+#[derive(Debug, Default)]
+pub(crate) struct AwaitedPath {
+    order: Vec<(AwaitedRelation, SemanticNodeId)>,
+    members: rustc_hash::FxHashMap<(AwaitedRelation, SemanticNodeId), u32>,
+}
+
+impl AwaitedPath {
+    pub(crate) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub(crate) fn contains(&self, relation: AwaitedRelation, operand: SemanticNodeId) -> bool {
+        self.members.contains_key(&(relation, operand))
+    }
+
+    pub(crate) fn push(&mut self, relation: AwaitedRelation, operand: SemanticNodeId) {
+        *self.members.entry((relation, operand)).or_insert(0) += 1;
+        self.order.push((relation, operand));
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        while self.order.len() > len {
+            let Some(entry) = self.order.pop() else {
+                break;
+            };
+            if let std::collections::hash_map::Entry::Occupied(mut count) =
+                self.members.entry(entry)
+            {
+                *count.get_mut() -= 1;
+                if *count.get() == 0 {
+                    count.remove();
+                }
+            }
+        }
     }
 }
 
@@ -16431,5 +16478,38 @@ fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMo
         crate::semantic_query::ReadonlyMod::Add => true,
         crate::semantic_query::ReadonlyMod::Remove => false,
         crate::semantic_query::ReadonlyMod::Keep => readonly,
+    }
+}
+
+#[cfg(test)]
+mod awaited_path_tests {
+    use super::{AwaitedPath, AwaitedRelation};
+    use crate::semantic_query::SemanticNodeId;
+
+    /// The awaited relations' path ([`AwaitedPath`]) answers
+    /// membership by lookup, and a truncation takes exactly the entries it
+    /// pops: an operand a nested run pushed again stays on the path until the
+    /// outer run's own entry goes, as the ordered stack alone would say.
+    #[test]
+    fn the_awaited_path_counts_each_entry_until_its_run_truncates() {
+        let operand = |index: u64| SemanticNodeId(index);
+        let mut path = AwaitedPath::default();
+        path.push(AwaitedRelation::Normalize, operand(1));
+        path.push(AwaitedRelation::Normalize, operand(2));
+        let nested = path.len();
+        path.push(AwaitedRelation::Normalize, operand(1));
+        path.push(AwaitedRelation::Payload, operand(3));
+        assert!(path.contains(AwaitedRelation::Payload, operand(3)));
+        assert!(!path.contains(AwaitedRelation::Normalize, operand(3)));
+        path.truncate(nested);
+        assert!(
+            path.contains(AwaitedRelation::Normalize, operand(1)),
+            "the outer run's entry keeps the operand on the path"
+        );
+        assert!(!path.contains(AwaitedRelation::Payload, operand(3)));
+        path.truncate(0);
+        assert!(!path.contains(AwaitedRelation::Normalize, operand(1)));
+        assert!(!path.contains(AwaitedRelation::Normalize, operand(2)));
+        assert_eq!(path.len(), 0);
     }
 }

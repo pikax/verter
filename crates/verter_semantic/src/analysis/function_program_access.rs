@@ -49,23 +49,23 @@ pub(crate) fn static_member_reference(
     }
 }
 
-/// The root a write through `expression` reaches. A type assertion between
-/// the root and the written position (`(x as T) = v`) makes a whole write
-/// [`FunctionWriteTarget::Asserted`]; parentheses and a non-null assertion
-/// (`x! = v`) keep it an assignment of the root, as the checker's
-/// `getAssignmentTargetKind` walks through exactly those two.
+/// The write an assignment names through TS carriers, or `None` when the
+/// target is a whole binding under a type assertion — a reference, not an
+/// assignment target
+/// ([`crate::analysis::flow::WrappedAssignmentTarget`]). `asserted` says a
+/// type assertion already wraps `expression`.
 fn expression_target(
     mut expression: &Expression<'_>,
     mut kind: FunctionWriteKind,
     mut asserted: bool,
-) -> FunctionWriteTarget {
+) -> Option<FunctionWriteTarget> {
     let span = expression.span().into();
     loop {
         expression = match expression {
             Expression::Identifier(_) if asserted && kind == FunctionWriteKind::Whole => {
-                return FunctionWriteTarget::Asserted { span }
+                return None
             }
-            Expression::Identifier(identifier) => return named(identifier, kind),
+            Expression::Identifier(identifier) => return Some(named(identifier, kind)),
             Expression::StaticMemberExpression(member) => {
                 kind = FunctionWriteKind::Member;
                 &member.object
@@ -79,6 +79,7 @@ fn expression_target(
                 &member.object
             }
             Expression::ParenthesizedExpression(inner) => &inner.expression,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
             Expression::TSAsExpression(inner) => {
                 asserted = true;
                 &inner.expression
@@ -91,9 +92,11 @@ fn expression_target(
                 asserted = true;
                 &inner.expression
             }
-            Expression::TSNonNullExpression(inner) => &inner.expression,
-            Expression::TSInstantiationExpression(inner) => &inner.expression,
-            _ => return FunctionWriteTarget::Unsupported { span },
+            Expression::TSInstantiationExpression(inner) => {
+                asserted = true;
+                &inner.expression
+            }
+            _ => return Some(FunctionWriteTarget::Unsupported { span }),
         };
     }
 }
@@ -118,10 +121,14 @@ pub(crate) fn expression_root<'a, 'ast>(
     }
 }
 
-pub(super) fn simple_assignment_target(target: &SimpleAssignmentTarget<'_>) -> FunctionWriteTarget {
+/// The write a simple assignment target names; `None` for a whole
+/// binding under a type assertion, which is a reference.
+pub(super) fn simple_assignment_target(
+    target: &SimpleAssignmentTarget<'_>,
+) -> Option<FunctionWriteTarget> {
     match target {
         SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-            named(identifier, FunctionWriteKind::Whole)
+            Some(named(identifier, FunctionWriteKind::Whole))
         }
         SimpleAssignmentTarget::StaticMemberExpression(member) => {
             expression_target(&member.object, FunctionWriteKind::Member, false)
@@ -190,7 +197,7 @@ fn collect_targets(target: &AssignmentTarget<'_>, out: &mut Vec<FunctionWriteTar
                 collect_targets(&rest.target, out);
             }
         }
-        _ => out.push(simple_assignment_target(
+        _ => out.extend(simple_assignment_target(
             target.to_simple_assignment_target(),
         )),
     }
@@ -385,7 +392,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for EscapingAssignments {
     }
 
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
-        self.record(vec![simple_assignment_target(&it.argument)]);
+        self.record(simple_assignment_target(&it.argument).into_iter().collect());
         oxc_ast_visit::walk::walk_update_expression(self, it);
     }
 

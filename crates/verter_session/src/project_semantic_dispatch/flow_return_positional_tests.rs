@@ -327,6 +327,20 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
             "{name} degraded success is ReturnOnly — nothing warms"
         );
     }
+    // A binary expression over a call is modelled: `fs() + "y"` is `string`
+    // by the checker's operand rule (tsc 7.0.2: `{ label: string; made:
+    // string; }` under all four strictNullChecks x noImplicitAny settings).
+    let outcome = evaluate(&host, POS_CANONICAL, "binaryOverCall")
+        .expect("binaryOverCall must produce a value");
+    with_dispatch(&host, |dispatch| {
+        let made = member(dispatch, outcome.node, "made");
+        assert_eq!(
+            dispatch.graph().node_data(made).as_deref(),
+            Some(&SemanticNodeData::Primitive(PrimitiveKind::String)),
+            "binaryOverCall: `fs() + \"y\"` is `string`"
+        );
+    });
+    assert_eq!(outcome.degradation, None, "binaryOverCall is clean");
 
     // `arrayWithUnmodeledCall` — the ARRAY survives too: its element is
     // `string | MARKER`, the modelled `"s"` element kept beside the marked

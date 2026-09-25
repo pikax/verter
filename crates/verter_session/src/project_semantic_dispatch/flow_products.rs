@@ -1061,6 +1061,15 @@ pub use super::canonical_algebra::{LiteralFreshness, LiteralProvenance, LiteralP
 pub trait FlowSemanticAlgebra {
     /// The canonical union of `members`.
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite;
+    /// The canonical union of `members` under SUBTYPE reduction — the
+    /// checker's branch join once an evolving array meets a path holding
+    /// an ordinary value.
+    fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite;
+    /// The final type of an EVOLVING array holding `elements` — `any[]`
+    /// with none, else the array of their subtype-reduced union (the
+    /// checker's `createFinalArrayType`, read as `any[]` where it is
+    /// `autoArrayType`).
+    fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite;
     /// One bounded canonical-owner inspection across both inputs and result.
     fn literal_provenance(
         &self,
@@ -1113,6 +1122,14 @@ impl FlowSemanticAlgebra for DispatchFlowAlgebra<'_, '_> {
             incomplete,
         }
     }
+    fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+        self.dispatch
+            .subtype_reduced_union(members, self.nullability)
+    }
+    fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite {
+        self.dispatch
+            .finalize_evolving_array(elements, self.nullability)
+    }
 }
 
 /// The same canonical authority over a bare graph store — the seam the
@@ -1146,6 +1163,35 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
         FlowAlgebraComposite {
             node: composite.node,
             incomplete: composite.evidence.incomplete,
+        }
+    }
+    /// A bare graph has no relation authority: the plain union.
+    fn subtype_union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+        self.union(members)
+    }
+    /// A bare graph has no relation authority: the array of the plain
+    /// union (`any[]` with no element).
+    fn evolving_array(&self, elements: &[EvolvingElement]) -> FlowAlgebraComposite {
+        let nodes: Vec<SemanticNodeId> = elements.iter().map(|element| element.node).collect();
+        let element = match nodes.as_slice() {
+            [] => FlowAlgebraComposite {
+                node: self
+                    .0
+                    .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Any,
+                    )),
+                incomplete: false,
+            },
+            _ => self.union(&nodes),
+        };
+        FlowAlgebraComposite {
+            node: self
+                .0
+                .intern_node(crate::semantic_query::SemanticNodeData::Array {
+                    element: element.node,
+                    readonly: false,
+                }),
+            incomplete: element.incomplete,
         }
     }
 }
@@ -1226,6 +1272,12 @@ pub enum WideningMembership {
 /// A path holding a declared nullable — or anything else — clears it,
 /// exactly as the checker's union of a widening and a non-widening
 /// `null` is the non-widening `null`.
+///
+/// An EVOLVING array (the checker's `autoArrayType` binding under
+/// `noImplicitAny`) additionally carries the element types its operations
+/// added along the path ([`Self::evolving_elements`]); its `united` value
+/// is the finalized array every ordinary read takes, and only an evolving
+/// operation or a join reads the elements.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReachingTypeProduct {
     contributors: Arc<[SemanticNodeId]>,
@@ -1236,6 +1288,19 @@ pub struct ReachingTypeProduct {
     /// an auto-typed declaration without an initializer, which the
     /// checker binds no assignment for.
     declaration_only: bool,
+    evolving: Option<Arc<[EvolvingElement]>>,
+}
+
+/// One element type an EVOLVING array's operation added: the base type of
+/// the added value's literal, and whether it is the checker's widening
+/// `null` / `undefined` (which vanishes beside any other element, or reads
+/// `any` alone, with `strictNullChecks` off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EvolvingElement {
+    /// The element type.
+    pub node: SemanticNodeId,
+    /// Whether the element is the widening nullable type.
+    pub widening_nullish: bool,
 }
 
 impl ReachingTypeProduct {
@@ -1249,7 +1314,25 @@ impl ReachingTypeProduct {
             widening: None,
             widening_nullish: false,
             declaration_only: false,
+            evolving: None,
         }
+    }
+
+    /// An EVOLVING array holding `elements`, whose finalized type is
+    /// `finalized` ([`FlowSemanticAlgebra::evolving_array`]).
+    #[must_use]
+    pub fn evolving(finalized: SemanticNodeId, elements: Arc<[EvolvingElement]>) -> Self {
+        Self {
+            evolving: Some(elements),
+            ..Self::of(finalized)
+        }
+    }
+
+    /// The element types of an EVOLVING array, in the order its operations
+    /// added them; `None` for every other value.
+    #[must_use]
+    pub fn evolving_elements(&self) -> Option<&[EvolvingElement]> {
+        self.evolving.as_deref()
     }
 
     /// Mark whether this reaching value is the checker's widening
@@ -1902,6 +1985,62 @@ fn join_reaching_values(
     })
 }
 
+/// The checker's join where an EVOLVING array reaches it
+/// (`getUnionOrEvolvingArrayType`): when every path holds one, the result
+/// evolves on with the union of their elements; otherwise each finalizes
+/// and the paths join under subtype reduction (an ordinary value is never
+/// a subset of the `autoArrayType` declaration, so the checker reduces:
+/// `let a = []; if (c) a = [1]; return a` is `any[]`).
+fn join_evolving_reaching_types(
+    algebra: &dyn FlowSemanticAlgebra,
+    budget: &FlowProductBudget,
+    products: &[&ReachingTypeProduct],
+) -> Result<ReachingTypeProduct, FlowProductFailure> {
+    if products.iter().all(|product| product.evolving.is_some()) {
+        let mut elements: Vec<EvolvingElement> = Vec::new();
+        for product in products {
+            for element in product.evolving.iter().flat_map(|elements| elements.iter()) {
+                match elements
+                    .iter_mut()
+                    .find(|existing| existing.node == element.node)
+                {
+                    // A widening and a non-widening `null` join as the
+                    // non-widening one.
+                    Some(existing) => existing.widening_nullish &= element.widening_nullish,
+                    None => elements.push(*element),
+                }
+                if let Some(exceeded) = width_exceeded(budget, elements.len()) {
+                    return Err(FlowProductFailure::BudgetExceeded(exceeded));
+                }
+            }
+        }
+        let finalized = algebra.evolving_array(&elements);
+        if finalized.incomplete {
+            return Err(FlowProductFailure::Gap(FlowGap::NominalRelation));
+        }
+        return Ok(ReachingTypeProduct::evolving(
+            finalized.node,
+            Arc::from(elements.into_boxed_slice()),
+        ));
+    }
+    let mut members: Vec<SemanticNodeId> = Vec::new();
+    for product in products {
+        for contributor in product.contributors.iter().copied() {
+            if !members.contains(&contributor) {
+                members.push(contributor);
+                if let Some(exceeded) = width_exceeded(budget, members.len()) {
+                    return Err(FlowProductFailure::BudgetExceeded(exceeded));
+                }
+            }
+        }
+    }
+    let united = algebra.subtype_union(&members);
+    if united.incomplete {
+        return Err(FlowProductFailure::Gap(FlowGap::NominalRelation));
+    }
+    Ok(ReachingTypeProduct::of(united.node))
+}
+
 /// One canonical reaching-type operation over the actual incoming paths.
 /// Contributors preserve source/edge order and are deduplicated before the
 /// canonical owner constructs the final type. Temporary binary prefixes never
@@ -1925,6 +2064,9 @@ fn join_reaching_types(
     };
     if products.iter().all(|product| *product == *first) {
         return Ok((*first).clone());
+    }
+    if products.iter().any(|product| product.evolving.is_some()) {
+        return join_evolving_reaching_types(algebra, budget, products);
     }
     let mut seen = rustc_hash::FxHashSet::default();
     let mut contributors = Vec::new();
@@ -1984,6 +2126,7 @@ fn join_reaching_types(
         widening,
         widening_nullish: products.iter().all(|product| product.widening_nullish),
         declaration_only: products.iter().any(|product| product.declaration_only),
+        evolving: None,
     };
     if let Some(WideningMembership::Partial(members)) = &product.widening {
         if let Some(exceeded) = width_exceeded(budget, members.len()) {

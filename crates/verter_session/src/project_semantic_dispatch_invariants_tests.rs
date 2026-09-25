@@ -4978,10 +4978,16 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
 }
 
 /// Mutable-array inference: a MUTABLE array `(infer U)[]` pattern binds —
-/// `string[] extends (infer U)[] ? U : never` → `string`. An array relates
-/// its elements covariantly, mutable arrays included (measured on
-/// TypeScript 7.0.2: `string[] extends (string | number)[]` is true, the
-/// reverse false), so the forward deposit IS the binding.
+/// `string[] extends (infer U)[] ? U : never` → `string`. Array element
+/// types relate covariantly, mutable or readonly (the checker's
+/// `arrayVariances`), so the element deposit IS the binding and no reverse
+/// arm runs against the `Infer` element.
+///
+/// tsc 7.0.2 (`--strict`): `const y: (string | number)[] = x` over
+/// `x: string[]` has no error, and `if (c) return x; return y` over
+/// `x: string[]` and `y: (string | number)[]` is `(string | number)[]` — the
+/// subtype reduction absorbs `string[]`; the reverse, `(string | number)[]`
+/// to `string[]`, is TS2322.
 #[test]
 fn mutable_array_infer_element_binds_covariantly() {
     use crate::semantic_query::{
@@ -5025,9 +5031,9 @@ fn mutable_array_infer_element_binds_covariantly() {
         graph.node_data(result)
     );
 
-    // Control: a non-`Infer` mutable array relates its element
-    // covariantly — `string[] ≤ (string | number)[]` holds and the reverse
-    // does not.
+    // Mutable arrays without an `Infer` element relate covariantly too:
+    // `string[] ≤ (string | number)[]` under assignability and the subtype
+    // relation, never the reverse.
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let union_node = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
@@ -5043,12 +5049,23 @@ fn mutable_array_infer_element_binds_covariantly() {
             dispatch.execute_relate_pair_as_result_for_tests(check, union_array),
             RelationResult::Assignable { .. }
         ),
-        "a mutable array relates its element covariantly: string[] ≤ (string | number)[]"
+        "a mutable array's element relates covariantly: string[] ≤ (string | number)[]"
+    );
+    assert!(
+        matches!(
+            dispatch.execute_relate_pair_kind(
+                check,
+                union_array,
+                crate::semantic_query::RelationKind::Subtype
+            ),
+            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
+        ),
+        "string[] is a subtype of (string | number)[]"
     );
     assert_eq!(
         dispatch.execute_relate_pair_as_result_for_tests(union_array, check),
         RelationResult::NotAssignable,
-        "(string | number)[] is not below string[]"
+        "(string | number)[] is not assignable to string[]"
     );
 }
 
