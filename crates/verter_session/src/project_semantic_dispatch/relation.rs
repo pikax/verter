@@ -6495,6 +6495,74 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //    quasi skeleton where that is provably sound, BEFORE the
         //    deferred gate silently defers the pair. An undecidable pair
         //    still falls through to Unknown. ─────────────────────────────
+        // A template literal type relates as the type the checker builds for
+        // it — its holes settled and its unions distributed — and a pattern
+        // accepts a string literal or template whose slices fit its holes.
+        let mut settled_pair = None;
+        let mut template_budget_exceeded = false;
+        for (side, data) in [(source, &source_data), (target, &target_data)] {
+            if settled_pair.is_some() || template_budget_exceeded {
+                break;
+            }
+            if let SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            } = &**data
+            {
+                let reduced = self.reduce_template_literal_nodes(
+                    quasis,
+                    expressions,
+                    ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                );
+                if reduced.keyspace_budget_exceeded {
+                    template_budget_exceeded = true;
+                    continue;
+                }
+                if reduced.node != side
+                    && !matches!(
+                        graph.node_data(reduced.node).as_deref(),
+                        Some(SemanticNodeData::TemplateLiteral { quasis: q, expressions: e })
+                            if q == quasis && e == expressions
+                    )
+                {
+                    settled_pair = Some(if side == source {
+                        (reduced.node, target)
+                    } else {
+                        (source, reduced.node)
+                    });
+                }
+            }
+        }
+        if template_budget_exceeded {
+            results.push(RelationResult::Unknown);
+            return;
+        }
+        if let Some((source, target)) = settled_pair {
+            drop(source_data);
+            drop(target_data);
+            work.push(RelateWork::Eval(source, target));
+            return;
+        }
+        if let Some(accepted) = self.string_mapping_relation(source, target) {
+            results.push(if accepted {
+                assignable(bindings)
+            } else {
+                RelationResult::NotAssignable
+            });
+            return;
+        }
+        if matches!(&*target_data, SemanticNodeData::TemplateLiteral { .. }) {
+            if let Some(accepted) = self.template_pattern_accepts(source, target) {
+                results.push(if accepted {
+                    assignable(bindings)
+                } else {
+                    RelationResult::NotAssignable
+                });
+                return;
+            }
+        }
         if let Some(result) =
             self.relate_string_literal_and_template(&source_data, &target_data, bindings)
         {
@@ -6585,7 +6653,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         // ── Deferred shells on either side → Unknown ───────────────────
-        if !nominal_defers_gate && (is_deferred(&source_data) || is_deferred(&target_data)) {
+        //    A settled template literal type (every hole a placeholder) is
+        //    a terminal string type, not a deferred shell: a union on the
+        //    other side distributes over it below.
+        let deferred = |node: SemanticNodeId, data: &SemanticNodeData| {
+            is_deferred(data)
+                && !(matches!(data, SemanticNodeData::TemplateLiteral { .. })
+                    && self.template_is_settled(node))
+        };
+        if !nominal_defers_gate
+            && (deferred(source, &source_data) || deferred(target, &target_data))
+        {
             results.push(RelationResult::Unknown);
             return;
         }

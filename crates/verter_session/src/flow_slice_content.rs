@@ -7964,9 +7964,14 @@ impl<'a> Lowerer<'a> {
                 Declaration::TSEnumDeclaration(declaration) => {
                     other |= declaration.id.name.as_str() == name;
                 }
-                Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_) => {
-                    other = true;
+                // A namespace of the name merges with a function of it; a
+                // `declare global` block declares globals this module-local
+                // binding shadows.
+                Declaration::TSModuleDeclaration(module) => {
+                    other |= matches!(&module.id,
+                        oxc_ast::ast::TSModuleDeclarationName::Identifier(id) if id.name.as_str() == name);
                 }
+                Declaration::TSGlobalDeclaration(_) => {}
                 Declaration::TSImportEqualsDeclaration(declaration) => {
                     other |= declaration.id.name.as_str() == name;
                 }
@@ -7986,6 +7991,77 @@ impl<'a> Lowerer<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Whether every signature the top-level declarations of `name` declare
+    /// returns `never` by its authored annotation: a function declaration
+    /// group (its implementation signature aside when overloads precede
+    /// it), or an annotated variable whose annotation is a function type.
+    /// Any other annotation, and a group mixing `never` with another
+    /// return, is `false` — which overload a call selects is the
+    /// evaluator's question.
+    fn closed_callee_declares_never(&self, name: &str) -> bool {
+        use oxc_ast::ast::Declaration;
+        let returns_never = |annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>| {
+            annotation.is_some_and(|annotation| {
+                matches!(annotation.type_annotation, TSType::TSNeverKeyword(_))
+            })
+        };
+        let mut signatures: Vec<bool> = Vec::new();
+        let mut overloads: Vec<bool> = Vec::new();
+        for statement in &self.program.body {
+            let declaration = match statement {
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(declaration) => declaration,
+                    None => continue,
+                },
+                statement => match statement.as_declaration() {
+                    Some(declaration) => declaration,
+                    None => continue,
+                },
+            };
+            match declaration {
+                Declaration::FunctionDeclaration(function)
+                    if function
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| id.name.as_str() == name) =>
+                {
+                    let never = returns_never(function.return_type.as_deref());
+                    if function.body.is_some() && !overloads.is_empty() {
+                        // The implementation signature is not visible
+                        // beside its overloads.
+                        signatures.append(&mut overloads);
+                    } else if function.body.is_some() {
+                        signatures.push(never);
+                    } else {
+                        overloads.push(never);
+                    }
+                }
+                Declaration::VariableDeclaration(variables) => {
+                    for declarator in variables.declarations.iter() {
+                        if !matches!(&declarator.id, BindingPattern::BindingIdentifier(id)
+                            if id.name.as_str() == name)
+                        {
+                            continue;
+                        }
+                        match declarator
+                            .type_annotation
+                            .as_deref()
+                            .map(|annotation| &annotation.type_annotation)
+                        {
+                            Some(TSType::TSFunctionType(function)) => {
+                                signatures.push(returns_never(Some(&function.return_type)));
+                            }
+                            _ => return false,
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        signatures.append(&mut overloads);
+        !signatures.is_empty() && signatures.iter().all(|never| *never)
     }
 
     /// The [`SliceStatement::CalleeEffect`] of a statement call whose bare
@@ -8014,6 +8090,14 @@ impl<'a> Lowerer<'a> {
                 .is_some_and(|kind| !kind.explicit)
         {
             return Some(SliceStatement::ThrowPoint);
+        }
+        // An explicitly typed callee every declared signature of which
+        // returns `never` ends the path, as an authored `throw` does.
+        if !self.namespace_owned
+            && self.callee_declaration_set_closed(callee.name.as_str())
+            && self.closed_callee_declares_never(callee.name.as_str())
+        {
+            return Some(SliceStatement::Throw);
         }
         match self.lower_callee_signature_guard(call, callee) {
             SliceGuard::CalleePredicate {

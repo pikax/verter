@@ -12550,7 +12550,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// The string mapping a `__builtin__` application applies, with its
     /// operand.
-    fn string_mapping_of(&self, node: SemanticNodeId) -> Option<(Arc<str>, SemanticNodeId)> {
+    pub(super) fn string_mapping_of(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(Arc<str>, SemanticNodeId)> {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args })
                 if base.canonical_id.as_ref() == "__builtin__"
@@ -12569,7 +12572,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Whether a template literal type keeps `node` as a hole: `string`,
     /// `number`, `bigint`, `any`, a template literal type made of those, or
     /// a string mapping over one of them.
-    fn is_template_hole(&self, node: SemanticNodeId) -> bool {
+    pub(super) fn is_template_hole(&self, node: SemanticNodeId) -> bool {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Primitive(
                 PrimitiveKind::String
@@ -14939,7 +14942,7 @@ fn fence_to_dep_signature(
 /// Apply a TS string-intrinsic case transform to a single string literal value.
 /// `Capitalize` / `Uncapitalize` toggle the case of the FIRST character only;
 /// `Uppercase` / `Lowercase` transform the whole string.
-fn transform_string_intrinsic(intrinsic: &str, text: &str) -> String {
+pub(super) fn transform_string_intrinsic(intrinsic: &str, text: &str) -> String {
     match intrinsic {
         "Uppercase" => text.to_uppercase(),
         "Lowercase" => text.to_lowercase(),

@@ -194,6 +194,7 @@ pub(crate) mod semantic_source_leaf_facts;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
 pub(crate) mod template_class_facts;
+mod template_relation;
 pub(crate) mod walk;
 
 /// Shared structural depth-fuse cap. The walker's per-request depth
@@ -4199,6 +4200,8 @@ mod namespace_member_value_tests;
 #[cfg(test)]
 mod namespace_value_tests;
 #[cfg(test)]
+mod never_callee_tests;
+#[cfg(test)]
 mod object_literal_accessor_tests;
 #[cfg(test)]
 mod object_literal_key_tests;
@@ -4212,6 +4215,8 @@ mod relation_operand_tests;
 mod signature_relation_tests;
 #[cfg(test)]
 mod string_mapping_template_tests;
+#[cfg(test)]
+mod template_pattern_relation_tests;
 #[cfg(test)]
 mod this_receiver_tests;
 #[cfg(test)]
