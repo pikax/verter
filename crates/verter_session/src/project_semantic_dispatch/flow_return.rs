@@ -5776,8 +5776,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// first, compare each against every peer still standing, and remove
     /// it at the first peer it is below; the survivors keep their source
     /// order. Only a structured operand is removable — a primitive or a
-    /// literal only when some operand is an empty object type (`string`
-    /// beside `{}` is absorbed). Before the relation is asked, the
+    /// literal (an enum member's literal included) only when some operand is
+    /// an empty object type (`string` beside `{}` is absorbed; `E.A` beside
+    /// `0` is not, though it relates to it). Before the relation is asked, the
     /// checker's shortcuts refuse a pair:
     ///
     /// - the discriminant shortcut: the FIRST property of the operand
@@ -5870,7 +5871,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 || (!has_empty_object
                     && matches!(
                         self.graph().node_data(resolved[index]).as_deref(),
-                        Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_))
+                        Some(
+                            SemanticNodeData::Primitive(_)
+                                | SemanticNodeData::Literal(_)
+                                | SemanticNodeData::EnumLiteral(_)
+                        )
                     ))
             {
                 continue;
