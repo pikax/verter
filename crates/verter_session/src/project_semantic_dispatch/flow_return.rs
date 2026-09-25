@@ -6355,7 +6355,7 @@ fn expression_write_tree(
             }
             SliceExpr::FrameShadowed { inner, .. } => walk(inner, out),
             SliceExpr::OptionalAnyChain { root } => walk(root, out),
-            SliceExpr::Object { entries } => {
+            SliceExpr::Object { entries, .. } => {
                 for entry in entries.iter() {
                     match entry {
                         SliceObjectEntry::Spread { source } => walk(source, out),
@@ -8099,6 +8099,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_object_literal(
         &mut self,
         entries: &[crate::flow_slice_content::SliceObjectEntry],
+        offset: u32,
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
@@ -8128,7 +8129,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     binder: self.dispatch.this_binder(
                         self.canonical,
                         self.owner,
-                        &Arc::from("(object literal)"),
+                        &Arc::from(super::substitute::object_literal_this_name(offset)),
                         None,
                     ),
                     members: std::cell::RefCell::new(Vec::new()),
@@ -8355,21 +8356,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .borrow_mut()
                     .push(surface_members[position].clone());
             }
-            // A member whose value holds the literal's own `this` (a method
-            // returning `this`) names the literal's type recursively,
-            // which this graph does not represent: that position is the
-            // typed marker.
-            for index in 0..surface_members.len() {
-                if self
-                    .dispatch
-                    .mentions_node(surface_members[index].value, receiver.binder)
-                {
-                    let marker = self.unmodeled_position();
-                    surface_members[index].value = marker;
-                    unwidened_members[index].value = marker;
-                }
-            }
         }
+        // A member whose value holds the literal's own `this` (a method
+        // returning `this`) names the literal's type recursively: the
+        // literal is then its own identity, whose reads bind that `this` to
+        // the identity itself — the checker's one anonymous type.
+        let recursive = receiver.as_ref().is_some_and(|receiver| {
+            surface_members
+                .iter()
+                .any(|member| self.dispatch.mentions_node(member.value, receiver.binder))
+        });
         self.receiver = enclosing_receiver;
         if spread_seen {
             if late_bound.any() {
@@ -8413,9 +8409,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 },
             ))
         };
-        let node = intern(surface_members);
+        let identify = |surface: SemanticNodeId| {
+            if !recursive {
+                return surface;
+            }
+            self.dispatch.graph().intern_node_with_scope(
+                SemanticNodeData::ClassExpressionInstance {
+                    identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
+                        canonical_id: Arc::from(self.canonical),
+                        owner: self.owner,
+                        offset,
+                        name: Arc::from("(object literal)"),
+                        outer_clauses: Arc::from([]),
+                        own_arity: 0,
+                        constructor_visibility: None,
+                        prototype: None,
+                        object_literal: true,
+                    }),
+                    type_arguments: Arc::from([]),
+                    surface,
+                },
+                self.binder_env.scope.clone(),
+            )
+        };
+        let node = identify(intern(surface_members));
         if unwidened_differs {
-            let unwidened = intern(unwidened_members);
+            let unwidened = identify(intern(unwidened_members));
             self.unwidened_views.insert(node, unwidened);
         }
         Positional::Value(node)
@@ -8437,8 +8456,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         contextual: SemanticNodeId,
     ) -> Positional<SemanticNodeId> {
         match expr {
-            crate::flow_slice_content::SliceExpr::Object { entries } => {
-                self.eval_object_literal(entries, false, Some(contextual))
+            crate::flow_slice_content::SliceExpr::Object { entries, offset } => {
+                self.eval_object_literal(entries, *offset, false, Some(contextual))
             }
             crate::flow_slice_content::SliceExpr::Array {
                 elements,
@@ -9037,8 +9056,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         expression: &crate::flow_slice_content::SliceExpr,
     ) -> Positional<SemanticNodeId> {
         match expression {
-            crate::flow_slice_content::SliceExpr::Object { entries } => {
-                self.eval_object_literal(entries, true, None)
+            crate::flow_slice_content::SliceExpr::Object { entries, offset } => {
+                self.eval_object_literal(entries, *offset, true, None)
             }
             other => self.eval_expr(other),
         }
@@ -11611,7 +11630,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             self.project_path_navigate(base, prefix)?
         };
-        let optional = self.member_read_optionality(parent, terminal.as_ref()) == Some(true);
+        let optional = self.member_read_optionality(
+            self.member_declaring_surface(parent, terminal),
+            terminal.as_ref(),
+        ) == Some(true);
         let value = self.project_path_navigate(parent, std::slice::from_ref(terminal))?;
         Some(if optional {
             self.fold_optional_read_undefined(value)
@@ -11624,6 +11646,51 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// member path — the projection half of
     /// [`Self::project_segments_navigate`].
     fn project_path_navigate(
+        &mut self,
+        base: SemanticNodeId,
+        segments: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
+        // A member of a class reference reads where the class declares it,
+        // binding the member's polymorphic `this` to the reference: a body
+        // reading its own class through a parameter (`h.v` over `h: H`)
+        // never lowers the class's other members, one of which is the body
+        // being evaluated. A declaration's self-reference (the class body
+        // lowering the class's own name) is the application it records.
+        if let Some((first, rest)) = segments.split_first() {
+            let base = self
+                .dispatch
+                .self_reference_declaration(base)
+                .unwrap_or(base);
+            if let Some(source) = self.class_reference_member_source(base, first) {
+                let read =
+                    self.project_path_navigate_through(source, std::slice::from_ref(first))?;
+                let read = self.dispatch.bind_this_receiver(read, base);
+                return if rest.is_empty() {
+                    Some(read)
+                } else {
+                    self.project_path_navigate(read, rest)
+                };
+            }
+        }
+        self.project_path_navigate_through(base, segments)
+    }
+
+    /// The surface that declares member `name` of `base` — the class's own
+    /// member position when `base` references a class (or is a
+    /// declaration's self-reference to one), else `base` itself — for a
+    /// read that asks how the member is declared.
+    fn member_declaring_surface(&self, base: SemanticNodeId, name: &str) -> SemanticNodeId {
+        let reference = self
+            .dispatch
+            .self_reference_declaration(base)
+            .unwrap_or(base);
+        self.class_reference_member_source(reference, name)
+            .unwrap_or(base)
+    }
+
+    /// [`Self::project_path_navigate`]'s shared `ProjectPath { mode:
+    /// Navigate }` walk.
+    fn project_path_navigate_through(
         &mut self,
         base: SemanticNodeId,
         segments: &[Arc<str>],
@@ -14293,7 +14360,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(filter) => Arc::clone(&filter.member),
             None => return Err(FlowReturnFailure::UnmodeledDemandPoint),
         };
-        let Some(crate::flow_slice_content::SliceExpr::Object { entries }) = argument else {
+        let Some(crate::flow_slice_content::SliceExpr::Object { entries, .. }) = argument else {
             return Err(FlowReturnFailure::UnmodeledDemandPoint);
         };
         // Last write wins for duplicate keys (JS object-literal
@@ -17553,8 +17620,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // same authority `project_segments_navigate` uses for
                     // a plain member path — regardless of whether the hop
                     // itself used `?.` or `.`.
-                    let declared_optional =
-                        self.member_read_optionality(read_base, name.as_ref()) == Some(true);
+                    let declared_optional = self.member_read_optionality(
+                        self.member_declaring_surface(read_base, name.as_ref()),
+                        name.as_ref(),
+                    ) == Some(true);
                     current = if declared_optional {
                         self.fold_optional_read_undefined(member)
                     } else {
@@ -17621,8 +17690,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
             }
-            crate::flow_slice_content::SliceExpr::Object { entries } => {
-                self.eval_object_literal(entries, false, None)
+            crate::flow_slice_content::SliceExpr::Object { entries, offset } => {
+                self.eval_object_literal(entries, *offset, false, None)
             }
             crate::flow_slice_content::SliceExpr::Array {
                 elements,

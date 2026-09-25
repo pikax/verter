@@ -254,9 +254,9 @@ fn served_return(
 /// A static member's `this` is its class's constructor, and a method of a
 /// variable's object literal reads the variable: both are the deferred
 /// `typeof` of the declaration, read where a consumer demands it. A
-/// literal a function returns has no name to defer to, so a method
-/// returning that literal's `this` — a recursive anonymous type — takes
-/// the typed marker, never an unbound `this`.
+/// literal a function returns has no name to defer to: a method returning
+/// that literal's `this` makes the literal its own identity, the
+/// checker's one recursive anonymous type, and the return is complete.
 ///
 /// Measured on TypeScript 7.0.2: `ReturnType<typeof SS.s>` is `typeof SS`;
 /// `ReturnType<typeof own.me>` is the literal `{ v: number; me(): ...; }`,
@@ -287,8 +287,7 @@ export function selfFn() { return { v: 1, me() { return this; } }; }
     );
     let (_, degradation) = served_return(SOURCE, "selfFn", None);
     assert_eq!(
-        degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
-        "the recursive anonymous literal takes the typed marker"
+        degradation, None,
+        "the recursive anonymous literal is its own identity"
     );
 }

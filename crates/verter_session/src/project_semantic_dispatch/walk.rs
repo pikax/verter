@@ -3138,7 +3138,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // surface, exactly as a `DeclRef` projects through the
                 // declaration body it resolves to.
                 SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                    current = *surface;
+                    let surface = *surface;
+                    drop(data);
+                    current = self
+                        .dispatch
+                        .class_expression_read_surface(current)
+                        .unwrap_or(surface);
                 }
                 SemanticNodeData::Alias(target) => {
                     // Alias unwrap — emit AliasResolve edge and
@@ -6044,6 +6049,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::ClassExpressionInstance { surface, .. } => {
                 let surface = *surface;
                 drop(data);
+                let surface = self
+                    .dispatch
+                    .class_expression_read_surface(cur)
+                    .unwrap_or(surface);
                 work.push(Frame::Visit {
                     node: surface,
                     target,

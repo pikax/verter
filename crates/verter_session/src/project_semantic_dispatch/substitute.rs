@@ -42,6 +42,12 @@
 /// authored clause has this many parameters, so it names no authored one.
 pub(crate) const THIS_BINDER_INDEX: u16 = u16::MAX;
 
+/// The declaration name of the `this` binder an object literal's methods
+/// read the literal through: the literal's start offset identifies it.
+pub(crate) fn object_literal_this_name(offset: u32) -> String {
+    format!("(object literal)@{offset}")
+}
+
 use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
@@ -182,6 +188,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// The surface a structural read of the class-expression (or object
+    /// literal) instance `instance` reads through. An object literal's
+    /// `this` is the literal itself, never the reference it is read
+    /// through, so its surface reads with that `this` bound to the
+    /// instance.
+    pub(super) fn class_expression_read_surface(
+        &self,
+        instance: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (surface, object_literal) = match self.graph().node_data(instance)?.as_ref() {
+            SemanticNodeData::ClassExpressionInstance {
+                identity, surface, ..
+            } => (*surface, identity.object_literal),
+            _ => return None,
+        };
+        Some(if object_literal {
+            self.bind_this_receiver(surface, instance)
+        } else {
+            surface
+        })
+    }
+
+    /// Whether `binder` is the `this` of the object literal `identity`
+    /// names — the binder its methods read the literal through.
+    pub(super) fn is_object_literal_this_binder(
+        &self,
+        identity: &crate::semantic_query::ClassExpressionIdentity,
+        binder: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            self.graph().node_data(binder).as_deref(),
+            Some(SemanticNodeData::TypeParam { decl, param_index: THIS_BINDER_INDEX, .. })
+                if decl.canonical_id == identity.canonical_id
+                    && decl.owner == identity.owner
+                    && decl.decl_name.as_ref() == object_literal_this_name(identity.offset)
+        )
+    }
+
     /// Bind every polymorphic `this` binder `node` mentions to
     /// `receiver`, the reference its member was read through.
     pub(super) fn bind_this_receiver(
@@ -204,6 +248,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     binders.push(current);
                 }
                 continue;
+            }
+            // An object literal's own `this` is bound by the literal's
+            // identity, never by a reference it is read through.
+            if let SemanticNodeData::ClassExpressionInstance { identity, .. } = data.as_ref() {
+                if identity.object_literal {
+                    continue;
+                }
             }
             let _ = data.for_each_child(|child| stack.push(child));
         }
@@ -451,8 +502,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     any_changed |= changed;
                     new_arguments.push(sub);
                 }
-                let (sub, changed) =
-                    self.substitute_with_change_tracking(*surface, parameter_node, arg);
+                // An object literal's surface mentions no `this` but its
+                // own, which its identity binds.
+                let (sub, changed) = if identity.object_literal
+                    && self.is_object_literal_this_binder(identity, parameter_node)
+                {
+                    (*surface, false)
+                } else {
+                    self.substitute_with_change_tracking(*surface, parameter_node, arg)
+                };
                 if !changed && !any_changed {
                     return (node, false);
                 }

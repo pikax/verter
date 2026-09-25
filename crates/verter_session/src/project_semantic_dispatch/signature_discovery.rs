@@ -303,6 +303,10 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
             SemanticNodeData::ClassExpressionInstance { surface, .. } => {
                 let surface = *surface;
                 drop(data);
+                let surface = self
+                    .dispatch()
+                    .class_expression_read_surface(node)
+                    .unwrap_or(surface);
                 self.discover(surface)
             }
             SemanticNodeData::MergedDecl { contributors } => {

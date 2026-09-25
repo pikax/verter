@@ -3146,20 +3146,19 @@ const LIFTED_ROW_OVERRIDES = new Map([
       "class_features_static_generic_method_instantiation_projects_return_with_substitution",
     ),
     {
-      mech: "ClassSurfaceProjection",
+      mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::ClassSurface)",
       semantic_queries: [
         "ResolveDecl",
         "Instantiate",
         "TypeOf",
         "ProjectPath",
-        "ResolveClassSurface",
         "LowerLocator",
         "SignaturesOfType",
       ],
-      consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
-        "lifted by U2.CLASS_SURFACES: `ReturnType<typeof GenericStatic.make<string>>` lowers the instantiation-expression args on the typeof path and instantiates the static generic method to `{ wrapped: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+        "lifted by U2.CLASS_SURFACES: `ReturnType<typeof GenericStatic.make<string>>` lowers the instantiation-expression args on the typeof path, reads the static member where the class declares it (no whole static surface), and instantiates the static generic method to `{ wrapped: string }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
     },
   ],
   [

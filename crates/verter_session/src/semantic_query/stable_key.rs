@@ -647,6 +647,7 @@ fn encode_data(
                 }
             }
             enc.u32(identity.own_arity);
+            enc.u8(u8::from(identity.object_literal));
             enc.u16(type_arguments.len() as u16);
             for argument in type_arguments.iter() {
                 encode_child(graph, *argument, seen, &mut enc, depth);

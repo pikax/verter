@@ -26301,7 +26301,8 @@ fn reexport_class_host() -> VerterHost {
         "/w/reexp_use.ts",
         "import { ReClass } from './reexp_barrel';\n\
          export type ReOwnReturn = ReturnType<typeof ReClass.own>;\n\
-         export type ReOriginReturn = ReturnType<typeof ReClass.origin>;\n",
+         export type ReOriginReturn = ReturnType<typeof ReClass.origin>;\n\
+         export type ReStatics = typeof ReClass;\n",
     );
     host
 }
@@ -26336,6 +26337,9 @@ fn reexported_class_static_surface_composes_heritage_under_origin_scope() {
         "heritage static must compose — the slot must carry the ORIGIN canonical \
          (the barrel has no type-side sibling decl to read heritage from)"
     );
+    // A member read resolves where the class declares the member; the whole
+    // constructor type is what composes the surface.
+    let _ = resolve_named_in(&host, "/w/reexp_use.ts", "ReStatics");
     // Slot attribution: the admitted `ResolveClassSurface(Static)` slot is
     // keyed by the ORIGIN canonical; NO barrel-keyed slot exists (across
     // every projection mode — the probe is mode-agnostic on purpose).

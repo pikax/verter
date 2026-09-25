@@ -832,7 +832,12 @@ fn display_resolved_type_node(
         // A class expression renders by the name the checker prints for a
         // reference to it (`Mixin.(Anonymous class)`, `(Anonymous
         // class)<string>`) — like a lazy reference, its body is never
-        // re-rendered here.
+        // re-rendered here. An object literal's recursive anonymous type has
+        // no name: it renders as its surface, whose own `this` renders as
+        // `this`.
+        SemanticNodeData::ClassExpressionInstance {
+            identity, surface, ..
+        } if identity.object_literal => display_type_node(store, *surface, needs, depth, visited).0,
         SemanticNodeData::ClassExpressionInstance {
             identity,
             type_arguments,

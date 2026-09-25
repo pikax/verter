@@ -1148,6 +1148,10 @@ pub enum SliceExpr {
         /// The entries in source order — construction order is meaning
         /// (a later entry overrides what an earlier one provisioned).
         entries: Arc<[SliceObjectEntry]>,
+        /// The literal's start offset in the defining file — what
+        /// identifies it among the file's object literals when its type is
+        /// recursive through its own `this`.
+        offset: u32,
     },
     /// An array literal evaluated STRUCTURALLY: every element is a flow
     /// expression (parameter / local references substitute). Without a
@@ -8970,6 +8974,15 @@ impl<'a> Lowerer<'a> {
                             Some(ObjectThisMember::Method(target)) => {
                                 SliceExpr::Call(SliceCall::Direct(target), call_site(call))
                             }
+                            // A static the class inherits (or declares
+                            // without a body) is called off its constructor.
+                            _ if matches!(this, SliceThis::Static { .. }) => SliceExpr::Call(
+                                SliceCall::Member {
+                                    receiver: Box::new(SliceExpr::This(this.clone())),
+                                    member: Arc::from([Arc::clone(name)]),
+                                },
+                                call_site(call),
+                            ),
                             _ => {
                                 SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
                             }
@@ -9341,6 +9354,19 @@ impl<'a> Lowerer<'a> {
                 TypeExpr::Primitive(PrimitiveName::Undefined),
                 None,
             )),
+            // A static member reading its own class, or an object literal's
+            // method reading the variable that holds the literal, reads the
+            // value its receiver is: the deferred type of the value being
+            // declared, whose surface this member is part of.
+            NameBinding::Free
+                if matches!(
+                    &self.this,
+                    Some(SliceThis::Static { class: value, .. } | SliceThis::Value { value, .. })
+                        if value.as_ref() == name
+                ) =>
+            {
+                SliceExpr::This(self.this.clone().expect("guarded"))
+            }
             NameBinding::Free => SliceExpr::Type(GatedLeaf(
                 TypeExpr::TypeOf(verter_type_expr::ValueRef {
                     path: vec![name.to_owned()],
@@ -9787,6 +9813,7 @@ impl<'a> Lowerer<'a> {
         if structural {
             SliceExpr::Object {
                 entries: Arc::from(entries.into_boxed_slice()),
+                offset: object.span.start,
             }
         } else {
             self.lower_leaf(whole, mode)
@@ -9967,6 +9994,15 @@ impl<'a> Lowerer<'a> {
                 SliceCall::Direct(target),
                 SliceCallSite::new(0, false, false, span.into()),
             ),
+            // Any other member of a static `this` — an annotated or
+            // inherited static, a method read as a value — reads off the
+            // class's constructor, where the class declares that member.
+            _ if matches!(self.this, Some(SliceThis::Static { .. })) => {
+                return SliceExpr::OptionalMember {
+                    root: Box::new(SliceExpr::This(self.this.clone().expect("guarded"))),
+                    links: path.iter().map(|name| (Arc::clone(name), false)).collect(),
+                };
+            }
             _ => return gap,
         };
         if rest.is_empty() {

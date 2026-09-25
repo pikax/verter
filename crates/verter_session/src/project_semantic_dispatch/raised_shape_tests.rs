@@ -2802,6 +2802,7 @@ fn publication_score_corpus(
                     own_arity: 0,
                     constructor_visibility: None,
                     prototype: None,
+                    object_literal: false,
                 }),
                 type_arguments: Arc::from([foo]),
                 surface: obj_a,

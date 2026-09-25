@@ -4193,7 +4193,7 @@ fn object_return_lowers_a_spread_entry_structurally() {
         "merge",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Object { entries }),
+        argument: Some(SliceExpr::Object { entries, .. }),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -4247,7 +4247,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
 
     let node = content_for_path(source, "merge", &[Arc::from("a")]);
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Object { entries }),
+        argument: Some(SliceExpr::Object { entries, .. }),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -4276,7 +4276,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
     // A WHOLE-return demand selects both.
     let node = content_for(source, "merge");
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Object { entries }),
+        argument: Some(SliceExpr::Object { entries, .. }),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -4325,7 +4325,7 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
         "merge",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Object { entries }),
+        argument: Some(SliceExpr::Object { entries, .. }),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -4428,7 +4428,7 @@ fn member_demand_elides_sibling_member_values() {
         &[Arc::from("b")],
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Object { entries }),
+        argument: Some(SliceExpr::Object { entries, .. }),
         ..
     }] = node.body.statements.as_ref()
     else {

@@ -5462,6 +5462,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
     ) -> Option<RelationResult> {
         let followed = self.follow_relation_aliases(node);
+        // A class's instance type declares its members one by one and is
+        // never a spread program: it relates to itself without building the
+        // body, which a member body relating its own class (`h.m(h)` inside
+        // the class) would re-enter.
+        if self.references_class_declaration(followed) {
+            return None;
+        }
         let normalized = match self.unwrap_identity_carrier_for_relation(followed) {
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return None,
@@ -5482,6 +5489,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
         self.try_object_spread_program_relation(normalized, normalized, bindings)
+    }
+
+    /// Whether `node` references a class declaration's instance type — a
+    /// `DeclRef`, an application of one, or the declaration's lowering-time
+    /// self-reference.
+    fn references_class_declaration(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return false;
+        };
+        let (canonical, owner, name) = match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => (
+                Arc::clone(&identity.canonical_id),
+                identity.owner,
+                Arc::clone(&identity.decl_name),
+            ),
+            SemanticNodeData::InstantiationRef { base, .. } => (
+                Arc::clone(&base.canonical_id),
+                base.owner,
+                Arc::clone(&base.decl_name),
+            ),
+            SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. }) => {
+                match graph.node_scope(node) {
+                    Some(crate::semantic_query::NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        ..
+                    }) => (canonical_id, owner, Arc::clone(name)),
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        };
+        drop(data);
+        self.ctx
+            .prepared_type_decl_return_only(canonical.as_ref(), owner, name.as_ref())
+            .is_some_and(|prepared| {
+                prepared.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+            })
     }
 
     fn projected_relation_branches(
@@ -7296,7 +7342,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 // A class expression's instance relates through its surface.
                 SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                    current = *surface;
+                    let surface = *surface;
+                    drop(data);
+                    current = self
+                        .class_expression_read_surface(current)
+                        .unwrap_or(surface);
                     continue;
                 }
                 SemanticNodeData::MergedDecl { contributors } => {

@@ -1135,6 +1135,14 @@ pub struct ClassExpressionIdentity {
     /// instance but never re-types the prototype, which has no parameter
     /// left. `None` for the prototype instance itself.
     pub prototype: Option<SemanticNodeId>,
+    /// Whether the identity is an OBJECT LITERAL's anonymous type rather
+    /// than a class's instance: a literal one of whose methods returns (or
+    /// otherwise holds) the literal's own `this`, the checker's recursive
+    /// `{ v: number; me(): ...; }`. The literal's `this` is not
+    /// polymorphic — it is always the literal itself — so a structural read
+    /// through the identity binds the surface's `this` to the identity, and
+    /// the identity prints as its surface rather than a name.
+    pub object_literal: bool,
 }
 
 /// One type-parameter clause enclosing a class expression.

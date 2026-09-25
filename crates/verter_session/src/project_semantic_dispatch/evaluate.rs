@@ -892,7 +892,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let resolved = match data.as_ref() {
                 // A class expression's instance resolves to the instance surface
                 // it carries — the body a `DeclRef` resolves to, already in hand.
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => *surface,
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    let surface = *surface;
+                    drop(data);
+                    self.class_expression_read_surface(n).unwrap_or(surface)
+                }
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the `ScopeId { canonical_id, local_scope: None }` shape the
                 // canonical resolver issues).
