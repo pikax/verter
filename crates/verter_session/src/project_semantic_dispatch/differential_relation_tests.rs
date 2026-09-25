@@ -292,13 +292,8 @@ fn wrong_clean_a_discriminated_object_source_relates_to_a_target_union() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `boolean` IS `true | false`, so each is below the other. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[boolean] extends [true | false] ? 1 : 2`: the checker answers `1`; the
-///   lane measured `2`.
+/// `boolean` IS `true | false`, so each is below the other.
 #[test]
-#[ignore = "boolean is identical to true | false"]
 fn wrong_clean_boolean_is_the_union_of_its_literals() {
     let matrix = Matrix::new(UNIONS);
     let failures = matrix.types(&[("[boolean] extends [true | false] ? 1 : 2", "1")]);

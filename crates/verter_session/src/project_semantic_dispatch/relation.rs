@@ -7031,6 +7031,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             distribute_and(work, results, &members, |m| (*m, target));
             return;
         }
+        // `boolean` IS the union `true | false` to the checker: against a
+        // union target each of its literals relates on its own
+        // (`eachTypeRelatedToSomeType`), so `boolean` fits `true | false`.
+        if matches!(
+            (&*source_data, &*target_data),
+            (
+                SemanticNodeData::Primitive(PrimitiveKind::Boolean),
+                SemanticNodeData::Union(_)
+            )
+        ) {
+            drop(source_data);
+            drop(target_data);
+            let literals = [true, false].map(|value| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+            });
+            distribute_and(work, results, &literals, |literal| (*literal, target));
+            return;
+        }
         if let SemanticNodeData::Union(members) = &*target_data {
             let members = members.members_arc();
             drop(source_data);
