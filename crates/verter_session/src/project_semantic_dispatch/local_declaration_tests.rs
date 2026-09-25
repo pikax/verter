@@ -136,10 +136,8 @@ fn a_local_function_reaching_its_own_return_follows_the_checker() {
 /// the return that is being resolved: `any`, and `any + 1` is `any`.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): `ReturnType<typeof
-/// selfInExpression>` is `any` (`0 extends 1 & T` holds). The lane reads
-/// the `+` over an `any` operand as an unmodelled position.
+/// selfInExpression>` is `any` (`0 extends 1 & T` holds).
 #[test]
-#[ignore = "the checker's `+` over an `any` operand is `any`"]
 fn a_local_function_calling_itself_inside_an_expression_returns_any() {
     let failures = mismatches(FIXTURE, &[("ReturnType<typeof selfInExpression>", "any")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
