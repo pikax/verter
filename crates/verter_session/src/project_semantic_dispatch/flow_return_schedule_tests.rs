@@ -1566,7 +1566,7 @@ fn a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack() {
 /// | `c2(v: number)` = `idc([v, "lit"])` | `readonly [number, "lit"]` |
 ///
 /// The literal is a frame value, so `o1`..`a2` answer the checker's type.
-/// A `const` type parameter's argument is the open case,
+/// A `const` type parameter's argument reads its const context,
 /// [`a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context`].
 #[test]
 fn an_object_or_array_literal_argument_evaluates_in_its_own_frame() {
@@ -1595,22 +1595,48 @@ export function o4(v: number) { return box({ a: v }); }\n\
 export function a1(v: number, o: { a: string }) { return id([v, o.a]); }\n\
 export function a2(v: number) { return first([v, 1]); }\n\
 export function c1(v: number) { return idc({ a: v, s: \"lit\" }); }\n\
-export function c2(v: number) { return idc([v, \"lit\"]); }\n";
+export function c2(v: number) { return idc([v, \"lit\"]); }\n\
+export function c3(v: number) { return idc({ a: v, n: { s: \"lit\" }, xs: [v, 1] }); }\n\
+function boxc<const T>(o: { a: T }) { return o.a; }\n\
+export function c4(v: number) { return boxc({ a: [v, \"lit\"] }); }\n";
 
 /// A literal argument of a `const` type parameter that reads the frame is
-/// read in its const context: `c1` is `{ readonly a: number; readonly s:
-/// "lit"; }` and `c2` `readonly [number, "lit"]` (TypeScript 7.0.2, all
-/// four settings). The lane types the frame literal as a mutable, widened
-/// one (`c1` answers `{ a: number, s: string }`).
+/// read in its const context (`isConstContext`): literals kept, members
+/// and nested tuples readonly.
+///
+/// Measured on TypeScript 7.0.2 (all four settings alike): `c1` is `{
+/// readonly a: number; readonly s: "lit"; }`, `c2` `readonly [number,
+/// "lit"]`, and `c3` `{ readonly a: number; readonly n: { readonly s:
+/// "lit"; }; readonly xs: readonly [number, 1]; }`.
 #[test]
-#[ignore = "a const type parameter reads a frame-evaluated literal argument in its const context"]
 fn a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context() {
     for (name, expected) in [
         ("c1", "{ readonly a: number; readonly s: \"lit\"; }"),
         ("c2", "readonly [number, \"lit\"]"),
+        (
+            "c3",
+            "{ readonly a: number; readonly n: { readonly s: \"lit\"; }; readonly xs: readonly [number, 1]; }",
+        ),
     ] {
         assert_answers_as_the_checker(&cold_read_of(LITERAL_ARGUMENT_SOURCE, name, expected));
     }
+}
+
+/// A literal member whose contextual type is a `const` type parameter
+/// nested in the parameter's type is read in its const context.
+///
+/// Measured on TypeScript 7.0.2 (all four settings alike): `c4`
+/// (`boxc<const T>(o: { a: T })` over `{ a: [v, "lit"] }`) is `readonly
+/// [number, "lit"]`. The lane reads the member widened and answers
+/// `readonly (string | number)[]`.
+#[test]
+#[ignore = "a literal member read in the const context of a const type parameter nested in its parameter's type"]
+fn a_const_type_parameter_nested_in_the_parameter_reads_its_member_in_its_const_context() {
+    assert_answers_as_the_checker(&cold_read_of(
+        LITERAL_ARGUMENT_SOURCE,
+        "c4",
+        "readonly [number, \"lit\"]",
+    ));
 }
 
 /// A 200-level chain whose every level passes the next an object literal

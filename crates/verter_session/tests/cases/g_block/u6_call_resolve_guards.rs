@@ -116,6 +116,7 @@ fn base_key() -> ResolveCallKey {
                 spread: false,
                 literal_mode: ArgumentLiteralMode::Widened,
                 context_sensitive: false,
+                const_view: None,
             }]
             .into_boxed_slice(),
         ),
@@ -254,6 +255,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Widened,
                     context_sensitive: false,
+                    const_view: None,
                 }]
                 .into_boxed_slice(),
             );
@@ -271,6 +273,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: true,
                     literal_mode: ArgumentLiteralMode::Widened,
                     context_sensitive: false,
+                    const_view: None,
                 }]
                 .into_boxed_slice(),
             );
@@ -288,6 +291,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Literal,
                     context_sensitive: false,
+                    const_view: None,
                 }]
                 .into_boxed_slice(),
             );

@@ -95,6 +95,9 @@ struct CallArgument {
     /// A function-valued argument with at least one un-annotated parameter.
     /// Its provisional type is withheld from the first inference pass.
     context_sensitive: bool,
+    /// The argument checked in its const context ([`CallArgKey::Eager`]),
+    /// the source a candidate's `const` type parameter infers from.
+    const_view: Option<SemanticNodeId>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1517,13 +1520,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode) = match argument {
+            let (node, spread, literal_mode, const_view) = match argument {
                 CallArgKey::Eager {
                     ty,
                     spread,
                     literal_mode,
+                    const_view,
                     ..
-                } => (*ty, *spread, *literal_mode),
+                } => (*ty, *spread, *literal_mode, *const_view),
                 CallArgKey::ProgramExpression {
                     point,
                     spread,
@@ -1553,7 +1557,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             expression.as_ref(),
                         )
                         .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode)
+                    (node, *spread, *literal_mode, None)
                 }
             };
             let freshness_origin = node;
@@ -1565,6 +1569,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     indefinite_spread: false,
                     context_sensitive,
+                    const_view: const_view
+                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                 });
                 continue;
             }
@@ -1595,6 +1601,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         literal_mode,
                         indefinite_spread: false,
                         context_sensitive,
+                        const_view: None,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -1603,6 +1610,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     literal_mode,
                     indefinite_spread: true,
                     context_sensitive,
+                    const_view: None,
                 }),
             }
         }
@@ -1779,6 +1787,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .expect("fresh call session")
             .checkpoint();
         let mut deferred_for_relation_scc = false;
+        // An argument whose parameter IS a `const` type parameter of this
+        // candidate is checked in its const context (`isConstContext`): a
+        // literal the calling frame computes relates, and deposits, as its
+        // const view — literals kept, members and tuples readonly.
+        let argument_source =
+            |argument: &CallArgument, target: SemanticNodeId| match argument.const_view {
+                Some(view)
+                    if visible_type_params
+                        .iter()
+                        .any(|decl| decl.is_const && decl.param == target) =>
+                {
+                    (view, view, ArgumentLiteralMode::Literal)
+                }
+                _ => (
+                    argument.node,
+                    argument.freshness_origin,
+                    argument.literal_mode,
+                ),
+            };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
             let deposits_before = self.accepted_inference_deposits();
@@ -1872,15 +1899,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // an inference-RESULT rule, applied at the deposit under the
             // inferring parameter's const policy — never to the
             // assignability source.
-            let source = argument.node;
+            let (source, freshness_origin, literal_mode) = argument_source(argument, target);
             let deposits_before = self.accepted_inference_deposits();
-            let step = self.call_argument_relation(
-                source,
-                target,
-                argument.freshness_origin,
-                budget,
-                argument.literal_mode,
-            );
+            let step =
+                self.call_argument_relation(source, target, freshness_origin, budget, literal_mode);
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -2243,17 +2265,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
+            let (source, freshness_origin, _) = argument_source(argument, target);
             let target = self.substitute_canonical(target, &substitution);
-            let source = argument.node;
             match decided_call_relation(
-                self.call_relation(
-                    source,
-                    target,
-                    argument.freshness_origin,
-                    budget,
-                    false,
-                    true,
-                ),
+                self.call_relation(source, target, freshness_origin, budget, false, true),
                 own_return_function.as_ref(),
             ) {
                 Ok(Some(true)) => {}

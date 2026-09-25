@@ -1411,6 +1411,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ty,
                         spread: argument.spread,
                         context_sensitive: argument.context_sensitive,
+                        const_view: None,
                         literal_mode: match argument.literal_mode {
                             verter_type_expr::IndexedValueLiteralMode::Widened => {
                                 crate::semantic_query::ArgumentLiteralMode::Widened
@@ -8253,8 +8254,12 @@ struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
     /// The frame-lowered argument values of each call, by the call's span
     /// ([`crate::flow_slice_content::SliceContent::call_arguments`]).
-    call_arguments:
-        Arc<rustc_hash::FxHashMap<verter_span::Span, Arc<[crate::flow_slice_content::SliceExpr]>>>,
+    call_arguments: Arc<
+        rustc_hash::FxHashMap<
+            verter_span::Span,
+            Arc<[crate::flow_slice_content::SliceCallArgument]>,
+        >,
+    >,
     /// The flow slot THIS frame evaluates — the identity a same-slot
     /// recursive call holds on.
     ///
@@ -21402,7 +21407,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         body: &crate::flow_slice_content::SliceRegion,
         call_arguments: &Arc<
-            rustc_hash::FxHashMap<verter_span::Span, Arc<[crate::flow_slice_content::SliceExpr]>>,
+            rustc_hash::FxHashMap<
+                verter_span::Span,
+                Arc<[crate::flow_slice_content::SliceCallArgument]>,
+            >,
         >,
         can_fall_through: NormalCompletion,
         empty_completion: crate::flow_slice_content::EmptyCompletion,
@@ -23215,6 +23223,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // computes (`c ? a : b`, `twin(c)`, `[twin(c)]`): its frame
             // lowering reads the frame's own bindings, which the indexed
             // program resolves in owner scope and cannot.
+            // A literal argument this frame computes is also evaluated in its
+            // const context: the value a `const` type parameter it is passed
+            // to infers from.
+            let mut const_view = None;
             let evaluated = match arguments.get(ordinal) {
                 Some(lowered) => match self.eval_expr(lowered) {
                     Positional::Value(node) => Some(node),
@@ -23226,9 +23238,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         (
                             FlowIndexedArgumentBinding::NonBindingExpression,
                             Some(frame_arguments),
-                        ) => frame_arguments
-                            .get(ordinal)
-                            .and_then(|expr| self.eval_frame_call_argument(expr)),
+                        ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
+                            let value = self.eval_frame_call_argument(&frame_argument.value)?;
+                            const_view = frame_argument
+                                .const_context
+                                .as_ref()
+                                .and_then(|expr| self.eval_frame_call_argument(expr));
+                            Some(value)
+                        }),
                         _ => None,
                     };
                     frame_value
@@ -23272,6 +23289,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ty,
                 spread: argument.spread,
                 context_sensitive: argument.context_sensitive,
+                const_view,
                 literal_mode: match argument.literal_mode {
                     verter_type_expr::IndexedValueLiteralMode::Widened => {
                         crate::semantic_query::ArgumentLiteralMode::Widened

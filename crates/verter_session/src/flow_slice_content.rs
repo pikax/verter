@@ -244,7 +244,20 @@ pub struct SliceContent {
     /// channel (a budget edge, a decided-above call, a control-test gap);
     /// the executor then reads that call's arguments from the indexed
     /// program.
-    pub call_arguments: Arc<FxHashMap<verter_span::Span, Arc<[SliceExpr]>>>,
+    pub call_arguments: Arc<FxHashMap<verter_span::Span, Arc<[SliceCallArgument]>>>,
+}
+
+/// One argument of an authored call, lowered in the frame as a whole value
+/// ([`SliceContent::call_arguments`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceCallArgument {
+    /// The argument's value.
+    pub value: SliceExpr,
+    /// An object or array literal argument lowered in a const context, as
+    /// `as const` lowers it: the value the checker checks the literal as
+    /// when its contextual type is a `const` type parameter
+    /// (`isConstContext`). `None` for any other argument.
+    pub const_context: Option<SliceExpr>,
 }
 
 /// What a function body models as when it contributes no return arm and
@@ -6619,7 +6632,7 @@ struct Lowerer<'a> {
     decided_above_call_spans: Vec<verter_span::Span>,
     /// The frame-lowered argument values of each call — see
     /// [`SliceContent::call_arguments`].
-    call_arguments: FxHashMap<verter_span::Span, Arc<[SliceExpr]>>,
+    call_arguments: FxHashMap<verter_span::Span, Arc<[SliceCallArgument]>>,
     /// Nonzero while a call argument lowers as a WHOLE value: every
     /// position inside it is a value position, whatever the demand
     /// selected.
@@ -14960,11 +14973,18 @@ impl<'a> Lowerer<'a> {
         let decided_above = self.decided_above_call_spans.len();
         let control_test_gap = self.control_test_gap;
         self.whole_value_nesting += 1;
-        let arguments: Vec<SliceExpr> = call
+        let arguments: Vec<SliceCallArgument> = call
             .arguments
             .iter()
             .filter_map(|argument| argument.as_expression())
-            .map(|argument| self.lower_expr(argument, ExprMode::Return))
+            .map(|argument| SliceCallArgument {
+                value: self.lower_expr(argument, ExprMode::Return),
+                const_context: matches!(
+                    value_descent(unwrap_parenthesized(argument)),
+                    ValueDescent::Object(_) | ValueDescent::Array(_)
+                )
+                .then(|| self.lower_in_const_context(argument, ExprMode::Return)),
+            })
             .collect();
         self.whole_value_nesting -= 1;
         let side_channel = self.budget_failure != budget_failure

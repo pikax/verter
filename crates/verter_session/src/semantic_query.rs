@@ -2130,6 +2130,11 @@ pub enum CallArgKey {
         /// Whether the argument is a function value at least one of whose
         /// parameters carries no authored type annotation.
         context_sensitive: bool,
+        /// The argument checked in its const context — an object or array
+        /// literal the calling frame computes, read as `as const` reads it —
+        /// which a `const` type parameter the argument is passed to infers
+        /// from (`isConstContext`). `None` for any other argument.
+        const_view: Option<SemanticNodeId>,
     },
     /// An argument identified by its program expression (the identity of
     /// the expression record the applicability executor evaluates).

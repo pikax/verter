@@ -312,6 +312,7 @@ pub(super) fn eager(ty: SemanticNodeId) -> CallArgKey {
         spread: false,
         literal_mode: ArgumentLiteralMode::Literal,
         context_sensitive: false,
+        const_view: None,
     }
 }
 
@@ -323,6 +324,7 @@ fn fresh_literal(ty: SemanticNodeId) -> CallArgKey {
         spread: false,
         literal_mode: ArgumentLiteralMode::Widened,
         context_sensitive: false,
+        const_view: None,
     }
 }
 
@@ -546,6 +548,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
             spread: true,
             literal_mode: ArgumentLiteralMode::Literal,
             context_sensitive: false,
+            const_view: None,
         }],
     )));
     assert!(matches!(
@@ -575,6 +578,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
                 spread: true,
                 literal_mode: ArgumentLiteralMode::Widened,
                 context_sensitive: false,
+                const_view: None,
             }],
         )),
         super::call_resolve::ResolveCallStep::Degraded(
@@ -1531,6 +1535,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         spread: false,
         literal_mode: ArgumentLiteralMode::Literal,
         context_sensitive,
+        const_view: None,
     };
 
     let withheld = selected(dispatch.execute_resolve_call(call_key(
@@ -3242,6 +3247,7 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
         spread: true,
         literal_mode: ArgumentLiteralMode::Literal,
         context_sensitive: false,
+        const_view: None,
     };
     let key = call_key(
         &dispatch,
