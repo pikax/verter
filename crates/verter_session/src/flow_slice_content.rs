@@ -433,14 +433,15 @@ pub enum SliceStatement {
     /// `asserts` signature narrows what follows while a `never` return
     /// ends the path. The evaluator reads the callee's call signatures
     /// (`SignaturesOfType`): none asserting and none returning `never`
-    /// leaves the path as it is; anything else takes the typed
-    /// guard-narrowing gap.
+    /// leaves the path as it is, and a `never` effects signature ends it;
+    /// an asserting one takes the typed guard-narrowing gap.
     CallEffect {
         /// The callee's type source.
         callee: SliceEffectCallee,
-        /// The call expression's absolute span — the call obligation a
-        /// settled callee discharges.
-        call: verter_span::Span,
+        /// The call expression — its absolute span is the call obligation
+        /// a settled callee discharges, and its arguments resolve an
+        /// overloaded or generic effects signature.
+        site: SliceCallSite,
     },
     /// A statement call whose bare callee names a value this file does not
     /// declare as ONE closed function (an import, a declared constant, an
@@ -11465,7 +11466,7 @@ impl<'a> Lowerer<'a> {
                         SliceStatement::ThrowPoint,
                         SliceStatement::CallEffect {
                             callee,
-                            call: call.span.into(),
+                            site: call_site(call),
                         },
                     ]
                     .into_boxed_slice(),

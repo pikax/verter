@@ -20979,8 +20979,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::CallEffect { callee, call } => {
-                    self.settle_call_effect(callee, *call);
+                crate::flow_slice_content::SliceStatement::CallEffect { callee, site } => {
+                    if !self.settle_call_effect(callee, *site) {
+                        path_alive = false;
+                    }
                 }
                 crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
                     // A same-file assertion call: the narrowing fact lives
