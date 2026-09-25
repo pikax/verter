@@ -1298,3 +1298,155 @@ fn a_warm_chain_passing_a_call_on_its_parameter_instantiates_stacklessly() {
         "{ v: boolean; tag: \"c\"; }",
     );
 }
+
+/// A chain whose every level passes the next an object literal holding a
+/// member read of its parameter:
+/// `bN<T>(o: { a: T }) { return b(N-1)({ a: o.a }); }`.
+fn object_literal_argument_chain(levels: usize) -> String {
+    let mut source =
+        "function b0<T>(o: { a: T }) { return { v: o.a, tag: \"c\" as const }; }\n".to_string();
+    for level in 1..levels {
+        source.push_str(&format!(
+            "function b{level}<T>(o: {{ a: T }}) {{ return b{}({{ a: o.a }}); }}\n",
+            level - 1
+        ));
+    }
+    source.push_str(&format!(
+        "export function witness(v: number | string) {{ return b{}({{ a: v }}); }}\n",
+        levels - 1
+    ));
+    source
+}
+
+/// Native recursion through callees whose evaluation is not reusable ends
+/// in the typed depth refusal on the production worker stack: each level
+/// of the object-literal chain answers a degraded value, so the schedule
+/// leaves it to its demand and it nests; the connected-query depth guard
+/// refuses the chain from 12 levels, partial and never admitted, however
+/// long it is.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings, over the 200-level chain): `witness` is
+/// `{ v: string | number; tag: "c"; }`, so the refusal is a typed gap, not
+/// an answer. The 8 MiB thread is the production worker stack the bound
+/// is sized for; an unoptimized build overflows the 2 MiB default test
+/// stack before the guard trips (see
+/// `a_chain_of_degraded_callees_answers_on_the_default_stack`).
+#[test]
+fn a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack() {
+    let read = on_stack(8 << 20, || {
+        cold_read_of(
+            &object_literal_argument_chain(200),
+            "witness",
+            "{ v: string | number; tag: \"c\"; }",
+        )
+    });
+    assert!(
+        read.partial && read.candidates == 0,
+        "refused partial and never admitted: {:?}",
+        read.reasons
+    );
+    assert!(
+        read.reasons
+            .contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
+        "the refusal is the depth rail's: {:?}",
+        read.reasons
+    );
+}
+
+/// An object or array literal written as a call argument is evaluated in
+/// the frame it is written in, so the bindings it reads are the frame's.
+///
+/// Oracle (the pinned TypeScript 7.0.2, `--declaration
+/// --emitDeclarationOnly`, identical under all four `strictNullChecks` x
+/// `noImplicitAny` settings), over `id<T>(x: T)`, `idc<const T>(x: T)`,
+/// `box<T>(o: { a: T })` returning `o.a` and `first<T>(xs: T[])` returning
+/// `xs[0]`:
+///
+/// | function | declared return |
+/// |---|---|
+/// | `o1(v: number)` = `id({ a: v })` | `{ a: number; }` |
+/// | `o2(v: number)` = `id({ a: v, s: "lit" })` | `{ a: number; s: string; }` |
+/// | `o3(o: { a: string })` = `id({ a: o.a })` | `{ a: string; }` |
+/// | `o4(v: number)` = `box({ a: v })` | `number` |
+/// | `a1(v: number, o: { a: string })` = `id([v, o.a])` | `(string \| number)[]` |
+/// | `a2(v: number)` = `first([v, 1])` | `number` |
+/// | `c1(v: number)` = `idc({ a: v, s: "lit" })` | `{ readonly a: number; readonly s: "lit"; }` |
+/// | `c2(v: number)` = `idc([v, "lit"])` | `readonly [number, "lit"]` |
+///
+/// Today the call sink types each such literal in the file's owner scope,
+/// where `v` and `o` are unbound, and every function answers the
+/// `UnresolvedValue` degradation (`a2`: `FlowGap(UnmodeledExpression)`).
+#[test]
+#[ignore = "an object or array literal argument is typed in the calling function's own scope"]
+fn an_object_or_array_literal_argument_evaluates_in_its_own_frame() {
+    const SOURCE: &str = "\
+function id<T>(x: T) { return x; }\n\
+function idc<const T>(x: T) { return x; }\n\
+function box<T>(o: { a: T }) { return o.a; }\n\
+function first<T>(xs: T[]) { return xs[0]; }\n\
+export function o1(v: number) { return id({ a: v }); }\n\
+export function o2(v: number) { return id({ a: v, s: \"lit\" }); }\n\
+export function o3(o: { a: string }) { return id({ a: o.a }); }\n\
+export function o4(v: number) { return box({ a: v }); }\n\
+export function a1(v: number, o: { a: string }) { return id([v, o.a]); }\n\
+export function a2(v: number) { return first([v, 1]); }\n\
+export function c1(v: number) { return idc({ a: v, s: \"lit\" }); }\n\
+export function c2(v: number) { return idc([v, \"lit\"]); }\n";
+    for (name, expected) in [
+        ("o1", "{ a: number; }"),
+        ("o2", "{ a: number; s: string; }"),
+        ("o3", "{ a: string; }"),
+        ("o4", "number"),
+        ("a1", "(string | number)[]"),
+        ("a2", "number"),
+        ("c1", "{ readonly a: number; readonly s: \"lit\"; }"),
+        ("c2", "readonly [number, \"lit\"]"),
+    ] {
+        assert_answers_as_the_checker(&cold_read_of(SOURCE, name, expected));
+    }
+}
+
+/// A 200-level chain whose every level passes the next an object literal
+/// answers on the default test stack.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings): `witness` is `{ v: string | number; tag:
+/// "c"; }` over the 200-level chain.
+///
+/// Today every level answers a degraded value (the literal argument is
+/// typed in the file's owner scope), so no level is reusable, each nests
+/// natively, and an unoptimized build overflows the default test stack
+/// before the depth guard refuses the chain at 12 levels.
+#[test]
+#[ignore = "an object literal argument chain answers without nesting a native evaluation per level"]
+fn a_chain_of_degraded_callees_answers_on_the_default_stack() {
+    assert_answers_as_the_checker(&cold_read_of(
+        &object_literal_argument_chain(200),
+        "witness",
+        "{ v: string | number; tag: \"c\"; }",
+    ));
+}
+
+/// The object-literal chain costs the same work per level at 16, 64 and
+/// 200 levels.
+///
+/// Oracle: as for `a_chain_of_degraded_callees_answers_on_the_default_stack`,
+/// at every length. Today the chain answers a degraded value at every
+/// length, with work that doubles per level (13,238 units at 9 levels,
+/// 26,543 at 10) until the depth guard refuses it.
+#[test]
+#[ignore = "an object literal argument chain answers at the same work per level"]
+fn an_object_literal_argument_chain_costs_the_same_work_per_level() {
+    let per_level = on_stack(8 << 20, || {
+        work_per_level(
+            object_literal_argument_chain,
+            "{ v: string | number; tag: \"c\"; }",
+            &[16, 64, 200],
+        )
+    });
+    assert!(
+        per_level.windows(2).all(|pair| pair[0] == pair[1]),
+        "work per level: {per_level:?}"
+    );
+}

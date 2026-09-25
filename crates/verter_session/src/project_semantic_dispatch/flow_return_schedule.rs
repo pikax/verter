@@ -229,6 +229,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let scope = FlowScheduleScope {
             txn: &self.dispatch_txn,
         };
+        // Every frame evaluates beneath a fact tracer: an obligation frame
+        // is pushed only inside a flow, relation or call-resolution
+        // evaluation, the root of each is a cold build through the shared
+        // dispatch choke point, and that build installs the tracer around
+        // everything it computes.
+        verter_debug_assert!(
+            crate::resolver_core::resolver_context::fact_tracer_installed(),
+            "a flow frame evaluates beneath its root's fact tracer"
+        );
         // A body that makes no call and reads no `typeof` in a type
         // position demands no callee return. A completed
         // member is reusable only when its evaluation's reads were

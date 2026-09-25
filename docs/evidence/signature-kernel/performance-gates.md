@@ -141,7 +141,15 @@ Recorded plainly so no reader mistakes absence for a pass:
   one, a 32-module chain the depth (5) of a 4-module one, the 200-level
   nested-argument, type-position, warm local-arrow and warm argument-form
   chains answer on the default test stack, and the 1,000-level
-  type-position chain answers. Two typed bounds end whatever still
+  type-position chain answers. A scheduled evaluation is reusable only
+  when its reads are recorded, which takes a live fact tracer, and every
+  flow frame has one: an obligation frame is pushed only inside a flow,
+  relation or call-resolution evaluation (`flow_frame_open`,
+  `relate` frame open, `resolve_call_frame_open`), the root of each is a
+  cold build through the dispatch choke point
+  (`execute_via_cold_build_helper_with_publication_capture`), and that
+  build installs the tracer around everything it computes. The schedule
+  asserts it in debug builds, over every lib and integration test. Two typed bounds end whatever still
   recurses, each with the depth rail's `CONNECTED_QUERY_DEPTH_LIMIT`
   incompleteness rather than a stack overflow: the connected-query depth
   guard (24 nested query boundaries —
@@ -155,16 +163,25 @@ Recorded plainly so no reader mistakes absence for a pass:
   * a callee whose evaluation is not reusable (a degraded or unproven
     return) is left to its demand; the first unreusable callee of a branch
     costs one extra evaluation before the schedule leaves that branch, and
-    a chain of them nests one native evaluation per level until the
-    nesting bound refuses it. An argument the flow lane types only as a
-    degraded value — an object or array literal holding a frame binding
-    (`b(N-1)({ a: o.a })`), which the call sink still types in the file's
-    owner scope — makes every level such a callee;
+    a chain of them nests natively, one evaluation and two nested queries
+    per level, and each level evaluates the one below twice, so its work
+    doubles per level (13,238 units at 9 levels, 26,543 at 10). An
+    argument the flow lane types only as a degraded value — an object or
+    array literal holding a frame binding (`b(N-1)({ a: o.a })`), which
+    the call sink still types in the file's owner scope — makes every
+    level such a callee. The two typed bounds end that chain from 12
+    levels, partial and never admitted, on the 8 MiB production worker
+    stack (`schedule::a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack`;
+    with both bounds disabled the 200-level chain overflows that stack).
+    An unoptimized build overflows the 2 MiB default test stack before
+    they trip: the bounds are sized for the worker stack, not for a test
+    thread. Skipped until the literal argument is typed in its frame:
+    `schedule::an_object_or_array_literal_argument_evaluates_in_its_own_frame`,
+    `schedule::a_chain_of_degraded_callees_answers_on_the_default_stack`
+    and `schedule::an_object_literal_argument_chain_costs_the_same_work_per_level`;
   * a cycle among callee returns is evaluated from its first-discovered
     member through the ordinary path, where the re-entry intercept holds
     each back-edge; its members nest natively beneath that root;
-  * every demand when no fact tracer is installed: a scheduled evaluation
-    is reusable only when its reads were recorded, so no schedule runs;
   * a `this.m()` method chain nests nothing, because the flow lane answers
     its first hop with the typed `UnresolvedValue` degradation (tsc:
     `{ v: string | number; tag: "c"; }`) — a separate gap.
