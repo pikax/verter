@@ -6,9 +6,11 @@
 //! typed callee, and any other signature narrows nothing and does not end
 //! the path. A callee whose declaration set this file closes — a variable,
 //! a module's unexported function or overload group — is read through
-//! `SignaturesOfType`; an imported, exported or script-global function,
-//! whose set a module augmentation or another script can extend, keeps the
-//! typed guard-narrowing gap.
+//! `SignaturesOfType`; at statement position an imported, exported or
+//! script-global function, whose set a module augmentation or another
+//! script can extend, keeps the typed guard-narrowing gap. A control test
+//! the call executor resolves (an imported predicate included) narrows by
+//! the signature the call selects.
 //!
 //! Every expected answer is TypeScript 7.0.2's, read off
 //! `tsc --declaration --emitDeclarationOnly --ignoreConfig --moduleResolution
@@ -105,22 +107,35 @@ fn a_closed_callee_narrows_through_its_declared_signatures() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An imported function's declared signatures can be extended by any
-/// `declare module` augmentation, which the owner-scope `typeof` read does
-/// not stitch, so its call keeps the typed guard-narrowing gap.
+/// A control call through an imported function is resolved by the call
+/// executor over the module binding's checker-visible signature set: a
+/// call handing no reference narrows nothing (`i3`), and a predicate
+/// narrows its argument (`i4`). A statement call's assertion through an
+/// imported function, whose declared signatures a `declare module`
+/// augmentation can extend, keeps the typed guard-narrowing gap (`i5`).
 ///
 /// Measured on TypeScript 7.0.2: `ReturnType<typeof i3>` is `string |
 /// number`, `ReturnType<typeof i4>` is `string | 0` and `ReturnType<typeof
 /// i5>` is `string`.
 #[test]
 fn an_imported_function_callee_keeps_the_typed_gap() {
-    for name in ["i3", "i4", "i5"] {
-        assert_eq!(
-            degradation_in(project(), FIXTURE, name),
-            Ok(Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                crate::semantic_query::FlowGap::GuardNarrowing
-            ))),
-            "{name}"
-        );
+    let failures = mismatches_in(
+        project(),
+        FIXTURE,
+        &[
+            ("ReturnType<typeof i3>", "string | number"),
+            ("ReturnType<typeof i4>", "string | 0"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for name in ["i3", "i4"] {
+        assert_eq!(degradation_in(project(), FIXTURE, name), Ok(None), "{name}");
     }
+    assert_eq!(
+        degradation_in(project(), FIXTURE, "i5"),
+        Ok(Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        ))),
+        "i5"
+    );
 }
