@@ -2656,7 +2656,7 @@ fn collect_named_class(
                                 )
                             })
                         })
-                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown))
+                        .unwrap_or_else(|| implicit_property_type(decl, prop, source))
                 });
                 let spans = MemberSpans {
                     declaration: Some(prop.span.into()),
@@ -4251,6 +4251,89 @@ fn lower_identifier_variable_parts(
 /// keep freshness (parentheses, `satisfies`, a non-null assertion); a
 /// conditional is fresh when both of its branches are; a read of another
 /// value follows that value; an assertion and every other form are regular.
+/// The declared type of a class property written with neither a type nor
+/// an initializer (the checker's `getWidenedTypeForVariableLikeDeclaration`).
+/// The implicit `any`, except where the checker reads the property's type
+/// off control flow under `noImplicitAny`: an instance property the
+/// constructor assigns (`getFlowTypeInConstructor`) and a static property
+/// of a class with a static block (`getFlowTypeInStaticBlocks`). That flow
+/// type is not modelled here, so the property is the unrepresented
+/// authored type there, never a guessed one. An ambient (`declare`)
+/// property is the implicit `any`.
+fn implicit_property_type(
+    class: &Class<'_>,
+    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    source: &str,
+) -> TypeExpr {
+    let flow_typed = !prop.declare
+        && if prop.r#static {
+            class
+                .body
+                .body
+                .iter()
+                .any(|element| matches!(element, ClassElement::StaticBlock(_)))
+        } else {
+            static_property_key_name(&prop.key).is_some_and(|name| {
+                class.body.body.iter().any(|element| match element {
+                    ClassElement::MethodDefinition(method)
+                        if method.kind == MethodDefinitionKind::Constructor =>
+                    {
+                        method
+                            .value
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| constructor_assigns_this_member(body, &name))
+                    }
+                    _ => false,
+                })
+            })
+        };
+    if flow_typed {
+        TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
+            &source[prop.span.start as usize..prop.span.end as usize],
+        ))
+    } else {
+        TypeExpr::Primitive(PrimitiveName::Any)
+    }
+}
+
+/// Whether a constructor body assigns `this.<name>` in its own control
+/// flow: an assignment inside a nested function, arrow or class is not on
+/// the constructor's flow.
+fn constructor_assigns_this_member(body: &oxc_ast::ast::FunctionBody<'_>, name: &str) -> bool {
+    struct Assigns<'n> {
+        name: &'n str,
+        found: bool,
+    }
+    impl<'a> Visit<'a> for Assigns<'_> {
+        fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
+            if let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = &it.left {
+                if matches!(member.object, Expression::ThisExpression(_))
+                    && member.property.name.as_str() == self.name
+                {
+                    self.found = true;
+                }
+            }
+            oxc_ast_visit::walk::walk_assignment_expression(self, it);
+        }
+        fn visit_function(
+            &mut self,
+            _: &oxc_ast::ast::Function<'a>,
+            _: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+        fn visit_arrow_function_expression(
+            &mut self,
+            _: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+        ) {
+        }
+        fn visit_class(&mut self, _: &Class<'a>) {}
+    }
+    let mut assigns = Assigns { name, found: false };
+    assigns.visit_function_body(body);
+    assigns.found
+}
+
 fn initializer_literal_freshness(init: &Expression<'_>) -> DeclaredLiteralFreshness {
     match init {
         Expression::ParenthesizedExpression(paren) => {
