@@ -1021,6 +1021,7 @@ impl FlowEvaluator<'_, '_> {
             _ => {}
         }
         let SliceExpr::Logical {
+            operator,
             left,
             right,
             fresh_operands,
@@ -1029,11 +1030,26 @@ impl FlowEvaluator<'_, '_> {
         else {
             return;
         };
-        for (operand, fresh) in [(left, fresh_operands.0), (right, fresh_operands.1)] {
+        for (is_right, operand, fresh) in [
+            (false, left, fresh_operands.0),
+            (true, right, fresh_operands.1),
+        ] {
             match operand.as_ref() {
                 SliceExpr::Type(leaf) if fresh => {
                     if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {
-                        out.push(self.lower_body_type(leaf.ty()));
+                        let literal = self.lower_body_type(leaf.ty());
+                        // With `strictNullChecks` off `a && b` holds the definitely
+                        // falsy part of `b`'s base type beside `b`: a falsy literal
+                        // `b` meets its own regular twin there, and the union keeps
+                        // the regular one (`removeRedundantLiteralTypes`), so
+                        // `v && 0` is a `0` that does not widen.
+                        let redundant = is_right
+                            && *operator == SliceLogical::And
+                            && !self.nullability.is_strict()
+                            && self.arm_facts(literal).is_some_and(|facts| !facts.truthy);
+                        if !redundant {
+                            out.push(literal);
+                        }
                     }
                 }
                 nested @ (SliceExpr::Logical { .. } | SliceExpr::Assignment { .. }) => {

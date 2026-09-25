@@ -259,6 +259,10 @@ export function lgOrAssign(v: string | undefined) { let x = v; x ||= "d"; return
 export function lgNullishAssign(v: string | null) { let x = v; x ??= "d"; return x; }
 export function lgOrValue(v: string | undefined) { return v || 0; }
 export function lgAndValue(v: string | undefined) { return v && 0; }
+export function lgAndEmpty(v: string | undefined) { return v && ""; }
+export function lgAndOne(v: string | undefined) { return v && 1; }
+export function lgAndFalse(v: string | undefined) { return v && false; }
+export function lgAndLet(v: string | undefined) { let r = v && 0; return r; }
 export function lgNullishValue(v: string | null | undefined) { return v ?? 0; }
 export function lgChain(a: string | undefined, b: number | undefined) { return a ?? b ?? true; }
 export function lgNotValue(v: string) { return !v; }
@@ -301,19 +305,24 @@ fn logical_operators_type_as_the_checker_types_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Without `strictNullChecks` `v && 0` over `v: string | undefined` is `0`: the
-/// left operand contributes no falsy part. Wrong-but-clean: the lane answers
-/// `number`.
-///
-/// What the lane gives:
-/// - `lgAndValue`: the checker answers `"" | 0 | undefined` (strict), `0`
-///   (strictNullChecks off), `"" | 0 | undefined` (noImplicitAny off), `0`
-///   (both off); the lane measured `number` (strictNullChecks off, both off).
+/// Without `strictNullChecks` `a && b` holds the definitely falsy part of `b`'s
+/// base type beside `b`, so a falsy literal `b` meets its regular twin and the
+/// union keeps that one (`removeRedundantLiteralTypes`): `v && 0` is a `0` that
+/// does not widen, even in a mutable binding, while `v && 1` is `0 | 1`.
 #[test]
-#[ignore = "without strictNullChecks a && b over a string left operand is the right operand's type"]
-fn wrong_clean_an_and_expression_types_as_its_right_operand_without_strict_null_checks() {
+fn an_and_expression_keeps_a_redundant_literal_as_the_checker_reduces_it() {
     let matrix = Matrix::new(LOGICAL);
-    let failures = matrix.nullness(&[(Read::Return("lgAndValue"), "\"\" | 0 | undefined", "0")]);
+    let failures = matrix.nullness(&[
+        (Read::Return("lgAndValue"), "\"\" | 0 | undefined", "0"),
+        (Read::Return("lgAndEmpty"), "\"\" | undefined", "\"\""),
+        (Read::Return("lgAndOne"), "\"\" | 1 | undefined", "0 | 1"),
+        (
+            Read::Return("lgAndFalse"),
+            "\"\" | false | undefined",
+            "false",
+        ),
+        (Read::Return("lgAndLet"), "number | \"\" | undefined", "0"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
