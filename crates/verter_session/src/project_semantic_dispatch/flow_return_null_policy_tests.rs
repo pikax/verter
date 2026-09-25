@@ -10114,10 +10114,6 @@ const EVOLVING_OPERATIONS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
     ),
     // number[] / number[] / never[] {TS2322@49,TS2322@59} / any[]
     ("compoundWrite", "number[]", "number[]", "never[]", "any[]"),
-    // number[] {TS2322@57} / number[] {TS2322@57} / never[] {TS2322@47,TS2322@57} / any[]
-    ("compoundKey", "number[]", "number[]", "never[]", "any[]"),
-    // any[] {TS7034@44,TS7005@53,TS7005@73} / any[] {TS7034@44,TS7005@53,TS7005@73} / never[] {TS2322@53} / any[]
-    ("destructureWrite", "any[]", "any[]", "never[]", "any[]"),
     // number[] / number[] / never[] {TS2345@69} / any[]
     ("lengthAssign", "number[]", "number[]", "never[]", "any[]"),
     // number / number / number {TS2345@60} / number
@@ -10734,6 +10730,28 @@ fn evolving_array_operations_grow_the_element_type() {
         "evolving-operations.ts",
         EVOLVING_OPERATIONS_SOURCE,
         EVOLVING_OPERATIONS_TABLE,
+    );
+}
+
+/// The element writes of [`EVOLVING_OPERATIONS_SOURCE`] that are not
+/// evolving operations — a logical assignment (`a[1] ??= "s"`) and a
+/// destructuring target (`[a[0]] = [1]`) — leave the array's read clean on
+/// the checker; the lane does not apply either member write and degrades
+/// the read.
+const EVOLVING_ORDINARY_ELEMENT_WRITES_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    // number[] {TS2322@57} / number[] {TS2322@57} / never[] {TS2322@47,TS2322@57} / any[]
+    ("compoundKey", "number[]", "number[]", "never[]", "any[]"),
+    // any[] {TS7034@44,TS7005@53,TS7005@73} / any[] {TS7034@44,TS7005@53,TS7005@73} / never[] {TS2322@53} / any[]
+    ("destructureWrite", "any[]", "any[]", "never[]", "any[]"),
+];
+
+#[test]
+#[ignore = "an element write that does not evolve the array (`??=`, a destructuring target) leaves its later read clean"]
+fn ordinary_element_writes_to_an_evolving_array_leave_its_read_clean() {
+    assert_measured_matrix(
+        "evolving-operations.ts",
+        EVOLVING_OPERATIONS_SOURCE,
+        EVOLVING_ORDINARY_ELEMENT_WRITES_TABLE,
     );
 }
 
@@ -11401,14 +11419,14 @@ const CAPTURE_EXTENT_TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "() => number | null",
         "() => number",
     ),
-    // () => string | number under all four: the capture reads its declared
-    // type, which this lane does not supply for a `let` — the typed gap.
+    // () => string | number under all four: the capture is created before
+    // the loop's end, so it reads its declared type.
     (
         "loopExtent",
-        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
-        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
-        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
-        "() => number | string | () => string [degraded Some(FlowGap(ClosureCapture))]",
+        "() => number | string",
+        "() => number | string",
+        "() => number | string",
+        "() => number | string",
     ),
     // (() => string) | null / () => string / (() => string) | null / () => string
     (
