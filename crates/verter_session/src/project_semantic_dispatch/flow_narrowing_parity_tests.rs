@@ -1932,3 +1932,95 @@ fn a_member_equality_never_narrows_a_non_union_parent() {
         ],
     );
 }
+
+/// The lib environment the `length` rows register: the pinned lib's own
+/// declarations of the members they read, narrowed to those members.
+const LENGTH_LIB: &str = r#"
+interface Array<T> { length: number; }
+interface String { length: number; }
+interface ArrayConstructor { isArray(arg: any): arg is any[]; }
+declare var Array: ArrayConstructor;
+"#;
+
+const LENGTH_OVER_A_UNION: &str = r#"
+export function orLen(x: string | number[]) { return !Array.isArray(x) || x.length === 0; }
+export function eqLen(x: string | number[]) { return x.length === 0; }
+export function retLen(x: string | number[]) { if (x.length === 0) return x; return x; }
+export function retLenOnly(x: string | number[]) { if (x.length === 0) return x; throw 0; }
+"#;
+
+/// `x.length` over `string | number[]` reads each arm's `length` — the
+/// string arm through its wrapper — and every arm projects `number`, so
+/// `x.length === 0` discriminates no arm: the parent keeps both. Measured
+/// on 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting:
+/// `orLen` and `eqLen` return `boolean` with no predicate, `retLen` and
+/// `retLenOnly` return `string | number[]`.
+#[test]
+fn a_length_test_over_a_string_or_array_union_narrows_no_arm() {
+    let rows = [
+        ("orLen", "(x: string | number[]) => boolean"),
+        ("eqLen", "(x: string | number[]) => boolean"),
+        ("retLen", "(x: string | number[]) => string | number[]"),
+        ("retLenOnly", "(x: string | number[]) => string | number[]"),
+    ];
+    let mut source = String::from(LENGTH_OVER_A_UNION);
+    for (name, _) in &rows {
+        source.push_str(&format!(
+            "export function sig_{name}() {{ return {name}; }}\n"
+        ));
+    }
+    let host =
+        super::signature_predicate_inference_tests::host_with_lib_source(&source, LENGTH_LIB);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (name, printed) in rows {
+            super::signature_predicate_inference_tests::assert_complete(&host, root, name);
+            assert_prints(&host, root, &format!("sig_{name}"), printed);
+            if printed.ends_with("=> boolean") {
+                assert_predicate(&host, root, &format!("sig_{name}"), printed);
+            }
+        }
+    }
+}
+
+const CONDITIONAL_ASSERTIONS: &str = r#"
+function a(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function n(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+function touch() {}
+export function c1(x: string | number, c: boolean) { c ? (0, a(x)) : (0, a(x)); return x; }
+export function c2(x: string | number, c: boolean, d: boolean) { c ? (d ? (0, a(x)) : (0, a(x))) : (0, a(x)); return x; }
+export function c3(x: string | number, c: boolean) { (c ? (0, a(x)) : (0, a(x)), 0); return x; }
+export function c4(x: string | number, c: boolean) { const u = c ? (0, a(x)) : (0, a(x)); return x; }
+export function c5(x: string | number, c: boolean) { c ? ((0, a(x))) : (0, a(x)); return x; }
+export function c6(x: string | number, c: boolean) { c ? (touch(), a(x)) : (0, a(x)); return x; }
+export function c7(x: string | number) { typeof x === "string" ? (0, a(x)) : (0, a(x)); return x; }
+export function o1(x: string | number, c: boolean) { c ? a(x) : a(x); return x; }
+export function o2(x: string | number, c: boolean) { c ? (0, a(x)) : 0; return x; }
+export function o3(x: string | number, c: boolean, d: boolean) { c ? (d ? (0, a(x)) : 0) : (0, a(x)); return x; }
+export function o4(x: string | number, c: boolean) { c && (0, a(x)); return x; }
+export function g1(x: string | number | boolean, c: boolean) { c ? (0, a(x)) : (0, n(x)); return x; }
+"#;
+
+/// The flow after a conditional joins its arms' ends, so an entered
+/// `asserts` call narrows past it only when every arm applies it — nested
+/// conditionals included, the other operands of an arm aside. Measured on
+/// 7.0.2 under every `strictNullChecks` × `noImplicitAny` setting: `c1` to
+/// `c7` return `string`; a call that is an arm itself is not entered
+/// (`o1`), and an arm that asserts nothing joins the unnarrowed path
+/// (`o2`, `o3`, `o4`), each `string | number`. Arms that assert different
+/// targets join to their union (`g1` is `string | number`), which this
+/// lane leaves behind the typed guard gap.
+#[test]
+fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
+    let mut rows = Vec::new();
+    for name in ["c1", "c2", "c3", "c4", "c5", "c6", "c7"] {
+        rows.push((name, "string", "string"));
+    }
+    for name in ["o1", "o2", "o3", "o4"] {
+        rows.push((name, "string | number", "string | number"));
+    }
+    check_rows(CONDITIONAL_ASSERTIONS, &rows);
+    let host = host_with(CONDITIONAL_ASSERTIONS);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        super::signature_predicate_inference_tests::assert_degrades(&host, root, "g1");
+    }
+}

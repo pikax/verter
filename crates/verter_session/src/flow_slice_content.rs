@@ -11329,6 +11329,41 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// The `asserts` narrowings one entered item applies once it has run,
+    /// with the spans of the calls that apply them: a call's own, and for
+    /// a conditional whose every arm entered calls, the narrowings every
+    /// arm applies alike (`c ? (0, a(x)) : (0, a(x))` narrows `x` as
+    /// `a(x)` does). `None` when the arms narrow differently: the join is
+    /// neither arm's narrowing, and the calls keep their certification.
+    fn entered_item_assertions(
+        &mut self,
+        item: &ArmEntered<'_>,
+        spans: &mut Vec<verter_span::Span>,
+    ) -> Option<Vec<SliceAssertion>> {
+        match item {
+            ArmEntered::Call(call) => {
+                let assertion = self.entered_assertion(call);
+                if assertion.is_some() {
+                    spans.push(call.span.into());
+                }
+                Some(assertion.into_iter().collect())
+            }
+            ArmEntered::Join {
+                consequent,
+                alternate,
+            } => {
+                let mut arms = [Vec::new(), Vec::new()];
+                for (arm, items) in arms.iter_mut().zip([consequent, alternate]) {
+                    for item in items {
+                        arm.extend(self.entered_item_assertions(item, spans)?);
+                    }
+                }
+                let [consequent, alternate] = arms;
+                (consequent == alternate).then_some(consequent)
+            }
+        }
+    }
+
     /// Discharge the same-frame channels of one walked
     /// [`LeafCallScanner`]: the `control` / `discarded` channels certify
     /// per-callee under `mode`, and a collected same-frame WRITE admitted
@@ -11352,11 +11387,12 @@ impl<'a> Lowerer<'a> {
         self.decided_above_call_spans.extend(scanner.unentered);
         let mut applied: Vec<verter_span::Span> = Vec::new();
         if self.entered_assertion_sink.is_some() {
-            for call in &scanner.entered {
-                if let Some(assertion) = self.entered_assertion(call) {
-                    applied.push(call.span.into());
+            for item in &scanner.entered {
+                let mut spans = Vec::new();
+                if let Some(assertions) = self.entered_item_assertions(item, &mut spans) {
+                    applied.extend(spans);
                     if let Some(sink) = self.entered_assertion_sink.as_mut() {
-                        sink.push(assertion);
+                        sink.extend(assertions);
                     }
                 }
             }
@@ -12116,6 +12152,35 @@ impl ControlCall {
 /// `const y = (0, assertString(x))` narrow it). A skeleton-visible write inside a `void` operand is not collected
 /// either: the operand's value cannot depend on it, and a read after it
 /// rides the slice's unapplied-write ledger like any statement write's.
+/// A call the checker enters into control flow, or the join of a
+/// conditional whose every arm entered one: the flow after the conditional
+/// is the union of the arms' ends, so an `asserts` narrowing persists past
+/// it only when every arm applies it.
+enum ArmEntered<'a> {
+    Call(&'a oxc_ast::ast::CallExpression<'a>),
+    Join {
+        consequent: Vec<ArmEntered<'a>>,
+        alternate: Vec<ArmEntered<'a>>,
+    },
+}
+
+impl<'a> ArmEntered<'a> {
+    /// Every call this item holds, in source order.
+    fn flatten_into(self, out: &mut Vec<&'a oxc_ast::ast::CallExpression<'a>>) {
+        match self {
+            Self::Call(call) => out.push(call),
+            Self::Join {
+                consequent,
+                alternate,
+            } => {
+                for item in consequent.into_iter().chain(alternate) {
+                    item.flatten_into(out);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct LeafCallScanner<'a> {
     decided: Vec<verter_span::Span>,
@@ -12133,13 +12198,14 @@ struct LeafCallScanner<'a> {
     /// The same-frame calls the checker enters into control flow (an
     /// expression statement's own call, a comma operand) outside any
     /// conditional arm, whose `asserts` predicate persists past the
-    /// scanned position.
-    entered: Vec<&'a oxc_ast::ast::CallExpression<'a>>,
+    /// scanned position, in source order — with the joins of the
+    /// conditionals whose every arm entered calls.
+    entered: Vec<ArmEntered<'a>>,
     /// Conditional-arm nesting: a ternary arm or a `&&` / `||` / `??`
     /// right operand, whose effects join the other path's.
     conditional_nesting: usize,
-    /// Entered calls inside a conditional arm, not yet joined.
-    conditional_entered: Vec<&'a oxc_ast::ast::CallExpression<'a>>,
+    /// Entered calls (and joins) inside a conditional arm, not yet joined.
+    conditional_entered: Vec<ArmEntered<'a>>,
     /// Entered calls of a conditional arm whose path joins one with no
     /// entered call under a non-literal test: an `asserts` narrowing they
     /// make does not persist past the conditional (the join is the
@@ -12190,8 +12256,16 @@ impl<'a> LeafCallScanner<'a> {
         self.conditional_nesting += 1;
         self.visit_expression(expr);
         self.conditional_nesting -= 1;
+        self.join_away_from(start);
+    }
+
+    /// The arm items from `start` join a path that entered none: their
+    /// narrowing does not persist past the conditional.
+    fn join_away_from(&mut self, start: usize) {
         let joined: Vec<_> = self.conditional_entered.drain(start..).collect();
-        self.joined_away.extend(joined);
+        for item in joined {
+            item.flatten_into(&mut self.joined_away);
+        }
     }
 
     /// Visit a class member's key. A computed key evaluates at class
@@ -12403,10 +12477,24 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         self.visit_expression(&it.alternate);
         self.conditional_nesting -= 1;
         let end = self.conditional_entered.len();
-        // Only one arm enters calls, so the other path joins unnarrowed.
-        if (middle == start) != (end == middle) {
-            let joined: Vec<_> = self.conditional_entered.drain(start..).collect();
-            self.joined_away.extend(joined);
+        if middle == start || end == middle {
+            // At most one arm enters calls, so the other path joins
+            // unnarrowed.
+            self.join_away_from(start);
+        } else {
+            // Every arm entered calls: the join narrows by what the arms
+            // apply alike.
+            let alternate: Vec<_> = self.conditional_entered.drain(middle..).collect();
+            let consequent: Vec<_> = self.conditional_entered.drain(start..).collect();
+            let join = ArmEntered::Join {
+                consequent,
+                alternate,
+            };
+            if self.conditional_nesting == 0 {
+                self.entered.push(join);
+            } else {
+                self.conditional_entered.push(join);
+            }
         }
     }
     fn visit_logical_expression(&mut self, it: &oxc_ast::ast::LogicalExpression<'a>) {
@@ -12439,8 +12527,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         self.visit_expression(&it.right);
         self.conditional_nesting -= 1;
         // The path that skips the right operand joins unnarrowed.
-        let joined: Vec<_> = self.conditional_entered.drain(start..).collect();
-        self.joined_away.extend(joined);
+        self.join_away_from(start);
     }
     // Statement TESTS are control positions. Statements are reachable
     // inside a leaf-lowered expression only through an immediately
@@ -12530,7 +12617,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
             && (self.comma_operand_calls.contains(&call.span)
                 || self.statement_calls.contains(&call.span))
         {
-            let call = self.alloc(call);
+            let call = ArmEntered::Call(self.alloc(call));
             if self.conditional_nesting == 0 {
                 self.entered.push(call);
             } else {

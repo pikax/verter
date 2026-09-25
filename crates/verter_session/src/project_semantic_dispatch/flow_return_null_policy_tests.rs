@@ -5092,3 +5092,145 @@ fn index_signatures_and_any_relate_by_the_checkers_rules() {
         mismatches.join("\n")
     );
 }
+
+/// Returns no path reaches: after a never-returning call (a statement or a
+/// comma operand, the return's own included), a `throw`, a loop that never
+/// exits, or another `return`.
+const UNREACHABLE_RETURN_SOURCE: &str = r#"
+function fail(): never { throw 0; }
+export function callStmt(x: string | number) { fail(); return x; }
+export function callComma(x: string | number) { return (fail(), x); }
+export function commaStmt(x: string | number) { (0, fail()); return x; }
+export function throwStmt(x: string | number) { throw 0; return x; }
+export function whileTrue(x: string | number) { while (true) {} return x; }
+export function forEver(x: string | number) { for (;;) {} return x; }
+export function afterReturn(x: string | number) { return 1; return x; }
+export function afterFailMixed(x: string | number, c: boolean) { if (c) return true; fail(); return x; }
+export function narrowedBefore(x: string | number) { if (typeof x === "string") { fail(); return x; } return 0; }
+export function literalUnreach() { fail(); return "lit"; }
+export function nullUnreach() { fail(); return null; }
+export function letInit() { let y: string | undefined = "s"; fail(); return y; }
+export function emptyReturn(x: string | number, c: boolean) { if (c) return x; fail(); return; }
+export function emptyReturnOnly() { fail(); return; }
+export function letEvolving() { let y; y = 1; fail(); return y; }
+export function letEvolvingNull() { let y = null; y = 1; fail(); return y; }
+export function varEvolving() { var y; y = "s"; throw 0; return y; }
+export function letNumber() { let y = 1; y = 2; fail(); return y; }
+"#;
+
+/// `(symbol, strict, strictNullChecks off, noImplicitAny off, both off)`
+/// for [`UNREACHABLE_RETURN_SOURCE`], each the lane's spelling of that
+/// project's TypeScript 7.0.2 `.d.ts` answer.
+const UNREACHABLE_RETURN_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "callStmt",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "callComma",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "commaStmt",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "throwStmt",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "whileTrue",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "forEver",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "afterReturn",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    (
+        "afterFailMixed",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+        "number | string | true",
+    ),
+    (
+        "narrowedBefore",
+        "number | string",
+        "number | string",
+        "number | string",
+        "number | string",
+    ),
+    ("literalUnreach", "string", "string", "string", "string"),
+    ("nullUnreach", "null", "any", "null", "any"),
+    (
+        "letInit",
+        "string | undefined",
+        "string",
+        "string | undefined",
+        "string",
+    ),
+    (
+        "emptyReturn",
+        "number | string | undefined",
+        "number | string",
+        "number | string | undefined",
+        "number | string",
+    ),
+    ("emptyReturnOnly", "void", "void", "void", "void"),
+    ("letEvolving", "any", "any", "any", "any"),
+    ("letEvolvingNull", "any", "any", "null", "any"),
+    ("varEvolving", "any", "any", "any", "any"),
+    ("letNumber", "number", "number", "number", "number"),
+];
+
+/// The checker infers a return type from EVERY `return` of the body,
+/// reachable or not (`checkAndAggregateReturnExpressionTypes` walks them
+/// all), and a reference no path reaches reads its declared type: a
+/// parameter its annotation, never a narrow (`narrowedBefore`); an
+/// annotated local its annotation (`letInit`); an auto-typed local — an
+/// unannotated `let` / `var` with no initializer or a `null` / `undefined`
+/// one under `noImplicitAny` — `any` (`letEvolving`, `varEvolving`,
+/// `letEvolvingNull`, which without `noImplicitAny` is declared `null`).
+/// An unreachable bare `return;` adds `undefined` beside other returns under
+/// `strictNullChecks` and is `void` alone. Each cell matches its own
+/// project's TypeScript 7.0.2 answer.
+#[test]
+fn unreachable_returns_contribute_their_declared_reads() {
+    let host = four_policy_host();
+    let mismatches = matrix_mismatches(
+        &host,
+        "unreachable.ts",
+        UNREACHABLE_RETURN_SOURCE,
+        UNREACHABLE_RETURN_TABLE,
+    );
+    assert!(
+        mismatches.is_empty(),
+        "flow-return answers differ from the measured TypeScript 7.0.2 matrix:\n{}",
+        mismatches.join("\n")
+    );
+}
