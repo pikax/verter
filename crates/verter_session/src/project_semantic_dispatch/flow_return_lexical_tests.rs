@@ -5996,38 +5996,13 @@ fn visible_overload_ordinals_covers_every_group_shape() {
 // would silently retire the framework ledger's own emptiness assertions.
 // ──────────────────────────────────────────────────────────────────────
 
-/// A heritage-REDECLARED method degrades where the checker answers the
-/// declared literal.
-///
-/// A derived `class` / `interface` that re-declares a base method leaves
-/// the composed surface carrying BOTH contributors under one key, so the
-/// shared PathWalker's Object hop sees a two-member same-name method
-/// collision and hands the call rail an overload GROUP of arity 2 — which
-/// the rail refuses (`UnrepresentableCallee`). It is not an overload
-/// group: TypeScript's derived declaration OVERRIDES the base one.
-///
-/// OWNER: the shared PathWalker / type-resolution heritage member
-/// projection — the composed surface must not retain a base contributor
-/// a derived declaration overrides. Not the flow rail: the rail's refusal
-/// is correct for a genuine arity-2 group, and the defect is that this is
-/// not one. Pre-existing (the reviewer proved it by mutation control
-/// against the pre-carrier tree).
+/// A derived `class` / `interface` that re-declares a base method
+/// overrides it: the call reads the derived declaration alone, never an
+/// overload group of both.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `hbClassCall()` is `"BASE"`, `ebIfaceCall()` is
 /// `"EB"`.
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: hbClassCall must evaluate clean
-///   left: Some(UnrepresentableCallee)
-///  right: None
-/// ```
-#[ignore = "owned by the shared PathWalker / type-resolution heritage member projection: a \
-            derived re-declaration must OVERRIDE the base contributor on the composed surface \
-            rather than leave both under one key, which the method-overload-group carrier then \
-            reads as an arity-2 group"]
 #[test]
 fn heritage_redeclared_method_answers_the_derived_declaration() {
     let host = make_r5_host();
@@ -6035,35 +6010,12 @@ fn heritage_redeclared_method_answers_the_derived_declaration() {
     assert_clean_warm(&host, "ebIfaceCall", string_lit("EB"));
 }
 
-/// Reading an accessor pair publishes the GETTER's `Signature` node
-/// instead of the getter's RETURN.
-///
-/// `class C { get a(): "GA"; set a(v: "GA") }` — reading `.a` publishes
-/// the getter's callable signature, cleanly and warm, where the property
-/// read's value is the getter's return type.
-///
-/// OWNER: the shared PathWalker / type-resolution accessor member
-/// projection. Structurally untouched by the flow-return substrate — the
-/// flow rail only reads whatever the member hop published.
+/// Reading an accessor pair publishes the getter's RETURN: `class C {
+/// get a(): "GA"; set a(v: "GA") }` read as `.a` is `"GA"`, never the
+/// getter's callable signature.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `gaRead()` is `"GA"`.
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: gaRead's read of an accessor pair must publish the getter's RETURN, not its signature
-///   left: Other("Signature { kind: Call, params: [], return_type: SemanticNodeId(3), type_parameters: [], signature_span: Some(Span { start: 41651, end: 41660 }), return_type_span: Some(Span { start: 41655, end: 41659 }) }")
-///  right: Other("Literal(String(\"GA\"))")
-/// ```
-///
-/// (The `SemanticNodeId` and the two spans are fixture-POSITION
-/// dependent — an edit anywhere above `GaClass` in the shared R5 fixture
-/// moves them. The load-bearing part is the node KIND: a `Signature`
-/// where the read's value must be that signature's return.)
-#[ignore = "owned by the shared PathWalker / type-resolution accessor member projection: a \
-            property read of a get/set pair must project the GETTER's return type, not the \
-            getter's Signature node"]
 #[test]
 fn accessor_pair_read_publishes_the_getters_return() {
     let host = make_r5_host();
@@ -6082,46 +6034,11 @@ fn accessor_pair_read_publishes_the_getters_return() {
     );
 }
 
-/// The `undefined` IDENTIFIER publishes a semantic-miss carrier instead
-/// of the `undefined` primitive.
-///
-/// `k ? undefined : 1` publishes
-/// `Union([1, Unknown { raw: "semanticMiss" }])`: the `undefined`
-/// identifier resolves to nothing the value pass models, so the leaf
-/// lowering answers a miss carrier rather than
-/// `PrimitiveKind::Undefined`. The result is a DEGRADED success — the
-/// value reaches an unresolved carrier, so nothing warms — which is why
-/// the row now fails at the "must evaluate clean" gate before it can
-/// reach the arm comparison it was written to make.
-///
-/// OWNER: `U6.VALUE_INFERENCE` — the `undefined`-identifier gap in the
-/// shared shallow value pass. Pre-existing; it is newly REACHABLE through
-/// the conditional's structural arm (before it, the whole ternary folded
-/// through one leaf answer), not newly wrong.
+/// The `undefined` IDENTIFIER publishes the `undefined` primitive:
+/// `k ? undefined : 1` is `1 | undefined`, clean.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict
 /// --ignoreConfig`): `undefTernary(k)` is `1 | undefined`.
-///
-/// Verbatim failure, un-ignored on this tree:
-///
-/// ```text
-/// assertion `left == right` failed: undefTernary must evaluate clean
-///   left: Some(UnresolvedValue)
-///  right: None
-/// ```
-///
-/// (The row dies at `r5_node`'s clean-and-warm gate, BEFORE the arm
-/// comparison: a value that reaches a miss carrier is a degraded success.
-/// The arm comparison it would then make is
-/// `["Opaque", "Other(\"Literal(Number(1.0))\")"]` against
-/// `["Other(\"Literal(Number(1.0))\")", "Primitive(Undefined)"]`, sorted,
-/// because the union interner orders by node id. `Opaque` is
-/// `node_shape`'s spelling of `SemanticNodeData::Opaque(QueryError::Miss)`
-/// — the same node the PROJECTED surface renders as
-/// `Unknown { raw: "semanticMiss" }`.)
-#[ignore = "owned by U6.VALUE_INFERENCE: the `undefined` identifier must lower to \
-            PrimitiveKind::Undefined in the shared shallow value pass instead of a \
-            semantic-miss carrier"]
 #[test]
 fn undefined_identifier_publishes_the_undefined_primitive() {
     let host = make_r5_host();

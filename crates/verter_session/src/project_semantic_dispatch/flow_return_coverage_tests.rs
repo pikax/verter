@@ -1342,27 +1342,13 @@ fn vue_define_props_member_read_resolves_to_the_payload_member_type() {
     );
 }
 
-/// CANARY — a `$props()`-destructured binding read from a `.svelte`
-/// instance script must resolve to its destructuring annotation.
+/// A `$props()`-destructured binding read from a `.svelte` instance
+/// script resolves to its destructuring annotation.
 ///
 /// Oracle: the projected TS analogue is
 /// `function f(p: { msg: string; count: number }) { const { msg } = p; return msg; }`
 /// — tsgo `string`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
-///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: the same evaluator arm as the Vue twin. The `$props()`
-/// destructuring binds `msg` as a carrier-scope destructured `let`, which
-/// the evaluator answers with an opaque miss rather than the
-/// annotation's member.
 #[test]
-#[ignore = "a `$props()`-destructured binding read evaluates to Opaque(Miss) (ReturnOnly): the flow evaluator has no destructuring-element arm for a carrier-scope binding"]
 fn svelte_runes_props_binding_read_resolves_to_its_annotation() {
     let host = carrier_host();
     assert_eq!(
@@ -1603,30 +1589,12 @@ fn cross_file_mutual_recursion_fails_closed_like_tsc_declines_to_infer() {
     assert_fails_closed(&host, XF_SCC_B, "sccB");
 }
 
-/// CANARY — an imported GENERIC callee must infer its type argument from
-/// the call site.
+/// An imported GENERIC callee infers its type argument from the call
+/// site.
 ///
 /// Oracle: `ReturnType<typeof xfCallGenericValueRoute>` is
 /// `{ g: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: the callee's `T` must be inferred as `string` from the call argument
-///   left: Primitive(Unknown)
-///  right: Primitive(String)
-/// ```
-///
-/// Owning layer: the call carrier's argument-driven type inference.
-/// Adjacent to — but distinct from — the recorded "explicit type
-/// arguments collapse to `unknown`" debt: here the type argument is
-/// IMPLICIT and inferable from the sole call argument, and it still lands
-/// as `unknown`, warm. NOT a cross-file defect: the same-file twin
-/// (`same_file_generic_callee_infers_its_type_argument_from_the_call_site`)
-/// fails identically, which isolates the missing capability to the shared
-/// carrier rather than to the barrel / import hop.
 #[test]
-#[ignore = "an imported generic callee's IMPLICIT type argument is not inferred from the call argument: the instantiation collapses to `unknown` and is admitted warm"]
 fn imported_generic_callee_infers_its_type_argument_from_the_call_site() {
     let host = ts_host();
     let ty = value_of(&host, XF_MAIN, "xfCallGenericValueRoute");
@@ -1752,24 +1720,11 @@ fn regexp_literal_return_is_the_regexp_lib_type() {
     assert_clean_warm(&host, LEAF, "leafRegExp", type_ref("RegExp"));
 }
 
-/// CANARY — an `AssignmentExpression` (`(a = 2)`) in return position is
-/// the assigned value's type.
+/// An `AssignmentExpression` (`(a = 2)`) in return position is the
+/// assigned value's type.
 ///
 /// Oracle: `ReturnType<typeof leafAssign>` is `number`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: leafAssign
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
-///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
-///
-/// Owning layer: `flow_slice_content::lower_leaf`. Note the contrast with
-/// `leafUpdate`: the assignment form produces the SAME `any` but is
-/// admitted WARM with no degradation, while the update form degrades.
 #[test]
-#[ignore = "AssignmentExpression has no leaf rule: it evaluates to `any` and — unlike UpdateExpression — is admitted warm with no degradation"]
 fn assignment_expression_return_is_the_assigned_type() {
     let host = ts_host();
     assert_clean_warm(&host, LEAF, "leafAssign", number());
@@ -4054,28 +4009,13 @@ fn this_field_read_inside_an_instance_method_resolves_to_the_field_type() {
     );
 }
 
-/// CANARY — a SAME-FILE generic callee infers its type argument from the
-/// call site. This is the isolating twin of
-/// `imported_generic_callee_infers_its_type_argument_from_the_call_site`:
-/// both fail identically, which proves the collapse is NOT a cross-file
-/// hop defect but the shared call carrier's missing argument-driven
-/// inference.
+/// A SAME-FILE generic callee infers its type argument from the call
+/// site, as its imported twin
+/// (`imported_generic_callee_infers_its_type_argument_from_the_call_site`)
+/// does.
 ///
 /// Oracle: `ReturnType<typeof localGenericInfer>` is `{ g: string; }`.
-///
-/// Verbatim failure (un-ignored):
-///
-/// ```text
-/// assertion `left == right` failed: the same-file callee's `T` must be inferred as `string`
-///   left: Primitive(Unknown)
-///  right: Primitive(String)
-/// ```
-///
-/// Owning layer: the direct-call carrier's instantiation — every free
-/// clause parameter instantiates at `unknown`, warm, with no argument
-/// inference step.
 #[test]
-#[ignore = "a same-file generic callee's IMPLICIT type argument is not inferred from the call argument: the instantiation collapses to `unknown` and is admitted warm"]
 fn same_file_generic_callee_infers_its_type_argument_from_the_call_site() {
     let host = host_with(&[(EXTRA, EXTRA_SRC)]);
     let ty = value_of(&host, EXTRA, "localGenericInfer");

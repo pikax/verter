@@ -294,7 +294,7 @@ fn wrong_clean_a_discriminated_object_source_relates_to_a_target_union() {
 
 /// `boolean` IS `true | false`, so each is below the other.
 #[test]
-fn wrong_clean_boolean_is_the_union_of_its_literals() {
+fn boolean_relates_as_the_checker_relates_true_or_false() {
     let matrix = Matrix::new(UNIONS);
     let failures = matrix.types(&[("[boolean] extends [true | false] ? 1 : 2", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));

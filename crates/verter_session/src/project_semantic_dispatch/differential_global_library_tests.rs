@@ -456,15 +456,9 @@ fn a_method_call_on_a_library_generic_instance_resolves() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `ReturnType<Map<string, 1>['get']>` is `1 | undefined` and
-/// `Parameters<Set<number>['add']>` is `[value: number]`.
-///
-/// What the lane gives:
-/// - `ReturnType<Map<string, 1>['get']>`: the checker answers `1 | undefined`
-///   (strict), `1` (strictNullChecks off), `1 | undefined` (noImplicitAny off),
-///   `1` (both off); the lane measured `<opaque Miss>`.
-/// - `Parameters<Set<number>['add']>`: the checker answers `[value: number]`;
-///   the lane measured `<opaque Miss>`.
+/// `ReturnType<Map<string, 1>['get']>` is `1 | undefined` (`1` without
+/// `strictNullChecks`) and `Parameters<Set<number>['add']>` is `[value:
+/// number]`, each read off the global interface.
 #[test]
 fn a_member_of_a_library_generic_instance_reads_in_type_position() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
@@ -511,14 +505,10 @@ fn promise_all_and_race_map_their_tuple_argument() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `m.size` over `m: Map<string, number>` is `number`. Wrong-but-clean: the
-/// lane answers `Map<string, number>`, the receiver itself.
-///
-/// What the lane gives:
-/// - `mSize`: the checker answers `number`; the lane measured `Map<string,
-///   number>`.
+/// `m.size` over `m: Map<string, number>` is `number`: the member of the
+/// global `Map` interface, never the receiver.
 #[test]
-fn wrong_clean_a_map_size_read_is_its_declared_type() {
+fn a_map_size_read_reads_as_the_checker_reads_it() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[("mSize", "number")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
