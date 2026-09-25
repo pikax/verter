@@ -7639,6 +7639,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // ── A primitive, a literal, an array or a tuple against an object
+        //    type relates through its apparent type
+        //    (`structuredTypeRelatedTo` over `getApparentType`): the
+        //    library's wrapper interface (`String`, `Number`, `Boolean`,
+        //    `Array<T>`, …), read through the one global lookup. ─────────
+        if matches!(&*target_data, SemanticNodeData::Object(_)) {
+            if let Some((name, args)) = self.apparent_wrapper_of(source) {
+                drop(source_data);
+                drop(target_data);
+                // The library of the project the relation is asked in: the
+                // demand's, else the one the target was declared in.
+                let Some(canonical) = self.wrapper_demand_canonical().or_else(|| {
+                    self.graph()
+                        .node_scope(target)
+                        .and_then(|scope| scope.canonical_file())
+                }) else {
+                    results.push(RelationResult::Unknown);
+                    return;
+                };
+                match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+                    super::apparent_type::GlobalWrapper::Surface(surface) if surface != source => {
+                        work.push(RelateWork::Eval(surface, target));
+                    }
+                    super::apparent_type::GlobalWrapper::Absent => {
+                        results.push(RelationResult::NotAssignable);
+                    }
+                    super::apparent_type::GlobalWrapper::Surface(_)
+                    | super::apparent_type::GlobalWrapper::Unsettled => {
+                        results.push(RelationResult::Unknown);
+                    }
+                }
+                return;
+            }
+        }
+
         // Different concrete kinds → NotAssignable.
         results.push(RelationResult::NotAssignable);
     }
@@ -8667,6 +8702,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.relate_apparent_function_member(source, &target_key, t_prop, bindings)
                     {
                         apparent
+                    } else if let Some(apparent) =
+                        self.relate_apparent_object_member(&target_key, t_prop, bindings)
+                    {
+                        apparent
                     } else if t_prop.optional {
                         assignable(bindings)
                     } else {
@@ -9062,6 +9101,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .graph()
             .intern_node(SemanticNodeData::Object(source.clone()));
         let value = self.apparent_function_member_value(node, key)?;
+        Some(self.relate_member(value, target.value, bindings, InferPosition::Covariant))
+    }
+
+    /// A property an object type does not declare, read off the global
+    /// `Object` interface its apparent type carries — the members the
+    /// checker's `getPropertyOfType` adds after an object type's own
+    /// (`{}` is below `Object`: `toString`, `valueOf`, …). `None` when the
+    /// project's `Object` does not declare the key or does not settle.
+    fn relate_apparent_object_member(
+        &self,
+        key: &crate::semantic_query::PropertyKey,
+        target: &crate::semantic_query::SurfaceMember,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        let canonical = self
+            .wrapper_demand_canonical()
+            .or_else(|| target.declaration_origin.clone())?;
+        let super::apparent_type::GlobalWrapper::Surface(surface) =
+            self.global_wrapper_surface("Object", &[], canonical.as_ref())
+        else {
+            return None;
+        };
+        let value = match &*self.graph().node_data(surface)? {
+            SemanticNodeData::Object(view) => match view.project_known_key(key) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => member.value,
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => return None,
+            },
+            _ => return None,
+        };
         Some(self.relate_member(value, target.value, bindings, InferPosition::Covariant))
     }
 

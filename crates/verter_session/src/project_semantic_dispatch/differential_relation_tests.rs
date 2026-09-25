@@ -688,26 +688,9 @@ fn library_wrapper_types_relate_as_the_checker_relates_them() {
 /// A primitive source relates to an object target through its apparent type,
 /// the library's wrapper interface (`String`, `Number`, `Boolean`): `string`
 /// has `length`, `charAt` and a number index, `number` has `toFixed`, `true` is
-/// below `Boolean`. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[string] extends [HasLen] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
-/// - `[string] extends [{ charAt(p: number): string }] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
-/// - `[string] extends [{ [n: number]: string }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[number] extends [{ toFixed(): string }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[boolean] extends [{ valueOf(): boolean }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[true] extends [Boolean] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
-/// - `["s"] extends [String] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
+/// below `Boolean`.
 #[test]
-#[ignore = "a primitive source relates to an object target through its apparent wrapper type"]
-fn wrong_clean_a_primitive_relates_through_its_global_wrapper_interface() {
+fn a_primitive_relates_as_the_checker_relates_its_wrapper_interface() {
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
     let failures = matrix.types(&[
         ("[string] extends [HasLen] ? 1 : 2", "1"),
@@ -726,20 +709,8 @@ fn wrong_clean_a_primitive_relates_through_its_global_wrapper_interface() {
 
 /// An array or tuple source relates to an object target through the library's
 /// `Array<T>` interface: its number index, `length` and `push`.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[string[]] extends [{ [n: number]: string }] ? 1 : 2`: the checker
-///   answers `1`; the lane measured `2`.
-/// - `[string[]] extends [{ length: number }] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `2`.
-/// - `[string[]] extends [{ push(...items: string[]): number }] ? 1 : 2`: the
-///   checker answers `1`; the lane measured `2`.
-/// - `[[1, 2]] extends [HasLen] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
 #[test]
-#[ignore = "an array or tuple source relates to an object target through the Array interface"]
-fn wrong_clean_an_array_relates_through_the_array_interface() {
+fn an_array_relates_as_the_checker_relates_the_array_interface() {
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
     let failures = matrix.types(&[
         ("[string[]] extends [{ [n: number]: string }] ? 1 : 2", "1"),
@@ -754,14 +725,9 @@ fn wrong_clean_an_array_relates_through_the_array_interface() {
 }
 
 /// `{}` is below the global `Object` interface: every object type's apparent
-/// type carries `Object`'s members. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[{}] extends [Object] ? 1 : 2`: the checker answers `1`; the lane
-///   measured `2`.
+/// type carries `Object`'s members.
 #[test]
-#[ignore = "{} relates to the Object interface through its apparent members"]
-fn wrong_clean_the_empty_object_type_is_below_object() {
+fn the_empty_object_type_relates_to_object_as_the_checker_relates_it() {
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
     let failures = matrix.types(&[("[{}] extends [Object] ? 1 : 2", "1")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
