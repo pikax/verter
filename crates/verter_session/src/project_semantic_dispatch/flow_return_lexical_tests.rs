@@ -5401,9 +5401,9 @@ fn flow_return_method_position_overload_groups_resolve_by_arguments() {
 /// ctArrow:         () => number
 /// ```
 ///
-/// One row carries a recorded, shape-level divergence from that oracle,
-/// and it is not a leak: `ctObjDisjoint` publishes no `?: undefined`
-/// normalization. Every other row matches, `ctObjBoth` as one arm,
+/// Every row matches: `ctObjDisjoint` with each literal arm taking the
+/// other's property as `?: undefined` (the same answer in all four
+/// `strictNullChecks` × `noImplicitAny` projects), `ctObjBoth` as one arm,
 /// `ctNestedTernary` flattened, `ctObjEmpty` subtype-reduced to `{}` and
 /// `ctIdent` narrowed to `true` by the truthiness test.
 ///
@@ -5426,10 +5426,10 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         // were written, and source coordinates are not constituent identity.
         ("ctObjBoth", "{a:number}"),
         // The checker widens the join: each literal arm takes the other's
-        // property as `?: undefined` (this shape prints no optionality).
+        // property as `?: undefined`.
         (
             "ctObjDisjoint",
-            "{b:number,a:undefined}|{a:number,b:undefined}",
+            "{b:number,a?:undefined}|{a:number,b?:undefined}",
         ),
         ("ctObjLocalRead", "{a:number}|2"),
         ("ctObjMethod", "{m():number}|2"),
@@ -5464,7 +5464,8 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
 }
 
 /// A compact, span-free spelling of one published `TypeExpr`, so a
-/// branch-join assertion compares MEANING and not member spans.
+/// branch-join assertion compares MEANING and not member spans. An
+/// optional property spells its key `key?`.
 fn shape_of(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
@@ -5503,8 +5504,9 @@ fn shape_of(ty: &TypeExpr) -> String {
                 .iter()
                 .map(|member| match member {
                     verter_type_expr::ObjectMember::Property(property) => format!(
-                        "{}:{}",
+                        "{}{}:{}",
                         property.key.as_string().unwrap_or_default(),
+                        if property.optional { "?" } else { "" },
                         shape_of(&property.ty)
                     ),
                     verter_type_expr::ObjectMember::Method(method) => format!(
