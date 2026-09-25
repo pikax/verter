@@ -752,19 +752,27 @@ fn the_empty_object_type_relates_to_object_as_the_checker_relates_it() {
 
 /// Under `strictBindCallApply` (part of `strict`) a function type's apparent
 /// type is `CallableFunction`, not `Function`; with a library whose
-/// `CallableFunction` declares no `apply`, a function type does not have one.
-/// Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[() => void] extends [{ apply(this: Function, thisArg: any, argArray?:
-///   any): any }] ? 1 : 2`: the checker answers `2`; the lane measured `1`.
+/// `CallableFunction` declares no `apply`, a function type does not have one,
+/// nor a constructor type through `NewableFunction`; without
+/// `strictBindCallApply` both read `Function`'s `apply` (TypeScript 7.0.2,
+/// over this library: `2` and `2` under `strict`, `1` and `1` with the option
+/// off).
 #[test]
-#[ignore = "a function type's apparent type is CallableFunction under strictBindCallApply"]
-fn wrong_clean_a_function_type_relates_through_callable_function() {
+fn a_function_type_relates_as_the_checker_reads_its_apparent_function() {
+    const APPLY: &str = "{ apply(this: Function, thisArg: any, argArray?: any): any }";
+    let call = format!("[() => void] extends [{APPLY}] ? 1 : 2");
+    let construct = format!("[new () => {{}}] extends [{APPLY}] ? 1 : 2");
     let matrix = Matrix::new(LIB_RELATIONS).lib(RELATION_LIB);
-    let failures = matrix.types(&[
-        ("[() => void] extends [{ apply(this: Function, thisArg: any, argArray?: any): any }] ? 1 : 2", "2"),
-    ]);
+    let mut failures = matrix.types(&[(call.as_str(), "2"), (construct.as_str(), "2")]);
+    failures.extend(super::checker_probe_lane_tests::mismatches_in(
+        super::checker_probe_lane_tests::ProbeProject {
+            files: &[],
+            compiler_options: Some(r#"{ "strict": true, "strictBindCallApply": false }"#),
+            ambient_lib: Some(RELATION_LIB),
+        },
+        LIB_RELATIONS,
+        &[(call.as_str(), "1"), (construct.as_str(), "1")],
+    ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
