@@ -165,20 +165,22 @@ Recorded plainly so no reader mistakes absence for a pass:
     costs one extra evaluation before the schedule leaves that branch, and
     a chain of them nests natively, one evaluation and two nested queries
     per level, and each level evaluates the one below twice, so its work
-    doubles per level (13,238 units at 9 levels, 26,543 at 10). An
-    argument the flow lane types only as a degraded value — an object or
-    array literal holding a frame binding (`b(N-1)({ a: o.a })`), which
-    the call sink still types in the file's owner scope — makes every
-    level such a callee. The two typed bounds end that chain from 12
-    levels, partial and never admitted, on the 8 MiB production worker
-    stack (`schedule::a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack`;
-    with both bounds disabled the 200-level chain overflows that stack).
-    An unoptimized build overflows the 2 MiB default test stack before
-    they trip: the bounds are sized for the worker stack, not for a test
-    thread. Skipped until the literal argument is typed in its frame:
-    `schedule::an_object_or_array_literal_argument_evaluates_in_its_own_frame`,
-    `schedule::a_chain_of_degraded_callees_answers_on_the_default_stack`
-    and `schedule::an_object_literal_argument_chain_costs_the_same_work_per_level`;
+    doubles per level. An object or array literal argument holding a
+    frame binding (`b(N-1)({ a: o.a })`) is a frame value evaluated where
+    it is written, so that chain answers, bottom-up, at the same work per
+    level on the default test stack
+    (`schedule::a_chain_of_degraded_callees_answers_on_the_default_stack`,
+    `schedule::an_object_literal_argument_chain_costs_the_same_work_per_level`).
+    The two typed bounds end a chain the schedule leaves to its demand
+    from 12 levels, partial and never admitted, on the 8 MiB production
+    worker stack
+    (`schedule::a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack`,
+    which drives the object-literal chain with the schedule off). An
+    unoptimized build overflows the 2 MiB default test stack before they
+    trip: the bounds are sized for the worker stack, not for a test
+    thread. Skipped: a `const` type parameter's frame literal argument,
+    read in its const context
+    (`schedule::a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context`);
   * a cycle among callee returns is evaluated from its first-discovered
     member through the ordinary path, where the re-entry intercept holds
     each back-edge; its members nest natively beneath that root;

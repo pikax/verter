@@ -1318,23 +1318,22 @@ fn object_literal_argument_chain(levels: usize) -> String {
     source
 }
 
-/// Native recursion through callees whose evaluation is not reusable ends
-/// in the typed depth refusal on the production worker stack: each level
-/// of the object-literal chain answers a degraded value, so the schedule
-/// leaves it to its demand and it nests; the connected-query depth guard
-/// refuses the chain from 12 levels, partial and never admitted, however
-/// long it is.
+/// Native recursion through callees the schedule does not evaluate ends in
+/// the typed depth refusal on the production worker stack: with the
+/// schedule off every level of the object-literal chain nests, and the
+/// connected-query depth guard refuses the chain from 12 levels, partial
+/// and never admitted, however long it is.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings, over the 200-level chain): `witness` is
 /// `{ v: string | number; tag: "c"; }`, so the refusal is a typed gap, not
-/// an answer. The 8 MiB thread is the production worker stack the bound
-/// is sized for; an unoptimized build overflows the 2 MiB default test
-/// stack before the guard trips (see
-/// `a_chain_of_degraded_callees_answers_on_the_default_stack`).
+/// an answer; with the schedule on the chain answers it
+/// (`a_chain_of_degraded_callees_answers_on_the_default_stack`). The 8 MiB
+/// thread is the production worker stack the bound is sized for.
 #[test]
 fn a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack() {
     let read = on_stack(8 << 20, || {
+        let _recursive = disable_flow_return_schedule_for_tests();
         cold_read_of(
             &object_literal_argument_chain(200),
             "witness",
@@ -1374,13 +1373,25 @@ fn a_chain_of_degraded_callees_ends_in_the_typed_refusal_on_the_worker_stack() {
 /// | `c1(v: number)` = `idc({ a: v, s: "lit" })` | `{ readonly a: number; readonly s: "lit"; }` |
 /// | `c2(v: number)` = `idc([v, "lit"])` | `readonly [number, "lit"]` |
 ///
-/// Today the call sink types each such literal in the file's owner scope,
-/// where `v` and `o` are unbound, and every function answers the
-/// `UnresolvedValue` degradation (`a2`: `FlowGap(UnmodeledExpression)`).
+/// The literal is a frame value, so `o1`..`a2` answer the checker's type.
+/// A `const` type parameter's argument is the open case,
+/// [`a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context`].
 #[test]
-#[ignore = "an object or array literal argument is typed in the calling function's own scope"]
 fn an_object_or_array_literal_argument_evaluates_in_its_own_frame() {
-    const SOURCE: &str = "\
+    for (name, expected) in [
+        ("o1", "{ a: number; }"),
+        ("o2", "{ a: number; s: string; }"),
+        ("o3", "{ a: string; }"),
+        ("o4", "number"),
+        ("a1", "(string | number)[]"),
+        ("a2", "number"),
+    ] {
+        assert_answers_as_the_checker(&cold_read_of(LITERAL_ARGUMENT_SOURCE, name, expected));
+    }
+}
+
+/// The functions of [`an_object_or_array_literal_argument_evaluates_in_its_own_frame`].
+const LITERAL_ARGUMENT_SOURCE: &str = "\
 function id<T>(x: T) { return x; }\n\
 function idc<const T>(x: T) { return x; }\n\
 function box<T>(o: { a: T }) { return o.a; }\n\
@@ -1393,17 +1404,20 @@ export function a1(v: number, o: { a: string }) { return id([v, o.a]); }\n\
 export function a2(v: number) { return first([v, 1]); }\n\
 export function c1(v: number) { return idc({ a: v, s: \"lit\" }); }\n\
 export function c2(v: number) { return idc([v, \"lit\"]); }\n";
+
+/// A literal argument of a `const` type parameter that reads the frame is
+/// read in its const context: `c1` is `{ readonly a: number; readonly s:
+/// "lit"; }` and `c2` `readonly [number, "lit"]` (TypeScript 7.0.2, all
+/// four settings). The lane types the frame literal as a mutable, widened
+/// one (`c1` answers `{ a: number, s: string }`).
+#[test]
+#[ignore = "a const type parameter reads a frame-evaluated literal argument in its const context"]
+fn a_const_type_parameter_reads_a_frame_literal_argument_in_its_const_context() {
     for (name, expected) in [
-        ("o1", "{ a: number; }"),
-        ("o2", "{ a: number; s: string; }"),
-        ("o3", "{ a: string; }"),
-        ("o4", "number"),
-        ("a1", "(string | number)[]"),
-        ("a2", "number"),
         ("c1", "{ readonly a: number; readonly s: \"lit\"; }"),
         ("c2", "readonly [number, \"lit\"]"),
     ] {
-        assert_answers_as_the_checker(&cold_read_of(SOURCE, name, expected));
+        assert_answers_as_the_checker(&cold_read_of(LITERAL_ARGUMENT_SOURCE, name, expected));
     }
 }
 
@@ -1414,12 +1428,11 @@ export function c2(v: number) { return idc([v, \"lit\"]); }\n";
 /// `noImplicitAny` settings): `witness` is `{ v: string | number; tag:
 /// "c"; }` over the 200-level chain.
 ///
-/// Today every level answers a degraded value (the literal argument is
-/// typed in the file's owner scope), so no level is reusable, each nests
-/// natively, and an unoptimized build overflows the default test stack
-/// before the depth guard refuses the chain at 12 levels.
+/// The literal argument is a frame value evaluated in the frame it is
+/// written in, so every level answers and is reusable, and the schedule
+/// evaluates the chain bottom-up without nesting a native evaluation per
+/// level.
 #[test]
-#[ignore = "an object literal argument chain answers without nesting a native evaluation per level"]
 fn a_chain_of_degraded_callees_answers_on_the_default_stack() {
     assert_answers_as_the_checker(&cold_read_of(
         &object_literal_argument_chain(200),
@@ -1432,11 +1445,8 @@ fn a_chain_of_degraded_callees_answers_on_the_default_stack() {
 /// 200 levels.
 ///
 /// Oracle: as for `a_chain_of_degraded_callees_answers_on_the_default_stack`,
-/// at every length. Today the chain answers a degraded value at every
-/// length, with work that doubles per level (13,238 units at 9 levels,
-/// 26,543 at 10) until the depth guard refuses it.
+/// at every length.
 #[test]
-#[ignore = "an object literal argument chain answers at the same work per level"]
 fn an_object_literal_argument_chain_costs_the_same_work_per_level() {
     let per_level = on_stack(8 << 20, || {
         work_per_level(
