@@ -420,6 +420,17 @@ type MixedDischargeResult = Result<
     crate::semantic_query::ResolveCallFailure,
 >;
 
+/// The checker's relation recursion limit: `recursiveTypeRelatedTo` sets
+/// `overflow` and answers false when `sourceDepth === 100 || targetDepth
+/// === 100` — the 101st nested structured relation of one
+/// `checkTypeRelatedTo` call — and `checkTypeRelatedTo` then reports
+/// TS2321 ("Excessive stack depth comparing types"). Measured on
+/// TypeScript 7.0.2: `[D] extends [Box<…<number>>]` answers `1` over 99
+/// nested `Box` applications or `{ v: … }` literals and `2` with TS2321
+/// over 100 (the tuple wrapper is one more level). It also bounds this
+/// engine's native recursion: a chain never opens more relation frames.
+pub(super) const CHECKER_RELATION_DEPTH_LIMIT: u16 = 100;
+
 #[cfg(test)]
 thread_local! {
     /// How many relations this thread reduced structurally; test-only.
@@ -1148,6 +1159,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(step) = self.literal_pair_relation(&key) {
             return step;
         }
+        // (0a) A structured relation of a chain that overflowed answers
+        // false before anything else, as the checker's
+        // `recursiveTypeRelatedTo` does once `overflow` is set.
+        let structured = self.relation_pair_is_structured(key.source, key.target);
+        let chain = self.current_relation_chain();
+        if let Some(chain) = chain.filter(|chain| structured && chain.overflowed) {
+            return self.overflow_relation_chain(&chain);
+        }
         // (1) Reentry intercept.
         {
             let identity = ObligationIdentity::Relate {
@@ -1185,6 +1204,211 @@ impl<'a> ProjectSemanticDispatch<'a> {
     #[cfg(test)]
     pub(crate) fn relation_reductions_for_tests() -> usize {
         RELATION_REDUCTIONS.with(std::cell::Cell::get)
+    }
+
+    /// Whether relating `key` enters the checker's `recursiveTypeRelatedTo`
+    /// and so counts toward its recursion depth: a pair of simple types
+    /// (primitives, literals, enum literals) is decided by
+    /// `isSimpleTypeRelatedTo` without it.
+    fn relation_pair_is_structured(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let simple = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(
+                    SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Literal(_)
+                        | SemanticNodeData::EnumLiteral(_)
+                )
+            )
+        };
+        !(simple(source) && simple(target))
+    }
+
+    /// The relation chain a relation opened now joins — the chain of the
+    /// relation frame on top of the stack — or `None` when it starts one.
+    fn current_relation_chain(&self) -> Option<super::dispatch_txn::RelationChainPosition> {
+        let txn = self.dispatch_txn.borrow();
+        let reentry = txn.reentry();
+        let top = reentry.depth().checked_sub(1)?;
+        let mut chain = reentry.frame(top)?.relation()?.chain.clone();
+        chain.overflowed = reentry
+            .frame(chain.base)
+            .and_then(|frame| frame.relation())
+            .is_some_and(|state| state.chain.overflowed);
+        Some(chain)
+    }
+
+    /// A structured relation of an overflowed chain, or one that would
+    /// open past [`CHECKER_RELATION_DEPTH_LIMIT`]: the checker answers
+    /// false and flags the whole relation. The flag is set on the chain's
+    /// first frame, and the answer is never admitted — it depends on where
+    /// the chain began — so the enclosing build is marked non-cacheable.
+    fn overflow_relation_chain(
+        &self,
+        chain: &super::dispatch_txn::RelationChainPosition,
+    ) -> RelationStep {
+        if let Some(state) = self
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .frame_mut_for_update(chain.base)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            state.chain.overflowed = true;
+        }
+        self.fold_into_top_build_local_taint_with(
+            false,
+            true,
+            crate::semantic_query::PartialReasonSet::empty(),
+        );
+        RelationStep::NotAssignable
+    }
+
+    /// The checker's `recursiveTypeRelatedTo` entry for the frame on top of
+    /// the stack, once its operands are unwrapped to `concrete`: a pair of
+    /// simple types is not an entry. A structured pair counts toward the
+    /// chain's depth: with [`CHECKER_RELATION_DEPTH_LIMIT`] entries already
+    /// open (or the chain already overflowed) it overflows, false. It is
+    /// then pushed on the recursion stacks under the recursion identities of
+    /// its `carriers`; once both sides are deeply nested (the checker's
+    /// `isDeeplyNestedType`, sticky down the chain as `expandingFlags`
+    /// is) the checker answers `Maybe` without relating the pair
+    /// structurally, which holds. Both answers depend on where the chain
+    /// began, so neither is admitted: the enclosing build is marked
+    /// non-cacheable. `None` to relate the pair.
+    fn enter_checker_recursion(
+        &self,
+        carriers: [SemanticNodeId; 2],
+        concrete: [SemanticNodeId; 2],
+    ) -> Option<RelationResult> {
+        if !self.relation_pair_is_structured(concrete[0], concrete[1]) {
+            return None;
+        }
+        let identities = carriers.map(|carrier| {
+            self.relation_recursion_identity(carrier)
+                .map(|identity| (identity, carrier))
+        });
+        let (top, chain, stacks) = {
+            let txn = self.dispatch_txn.borrow();
+            let reentry = txn.reentry();
+            let top = reentry.depth().checked_sub(1)?;
+            let chain = reentry.frame(top)?.relation()?.chain.clone();
+            let overflowed = reentry
+                .frame(chain.base)
+                .and_then(|frame| frame.relation())
+                .is_some_and(|state| state.chain.overflowed);
+            if overflowed || chain.depth >= CHECKER_RELATION_DEPTH_LIMIT {
+                drop(txn);
+                self.overflow_relation_chain(&chain);
+                return Some(RelationResult::NotAssignable);
+            }
+            // The chain's counted frames below this one, in push order.
+            let stacks: Vec<[Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2]> =
+                (chain.base..top)
+                    .filter_map(|index| reentry.frame(index).and_then(|frame| frame.relation()))
+                    .filter(|state| state.chain.counted)
+                    .map(|state| state.chain.identities.clone())
+                    .collect();
+            (top, chain, stacks)
+        };
+        let depth = chain.depth + 1;
+        let mut expanding = chain.expanding;
+        for (side, flag) in [(0, 1u8), (1, 2u8)] {
+            if expanding & flag == 0
+                && Self::deeply_nested(
+                    identities[side].as_ref(),
+                    stacks.iter().map(|entry| entry[side].as_ref()),
+                    usize::from(depth),
+                )
+            {
+                expanding |= flag;
+            }
+        }
+        if let Some(state) = self
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .frame_mut_for_update(top)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            state.chain.depth = depth;
+            state.chain.counted = true;
+            state.chain.expanding = expanding;
+            state.chain.identities = identities;
+        }
+        if expanding == 3 {
+            self.fold_into_top_build_local_taint_with(
+                false,
+                true,
+                crate::semantic_query::PartialReasonSet::empty(),
+            );
+            return Some(assignable(&[]));
+        }
+        None
+    }
+
+    /// The checker's `isDeeplyNestedType(type, stack, depth, 3)`: with at
+    /// least three entries on the stack, the type is deeply nested when three
+    /// entries of its recursion identity appear, each read from a node no
+    /// older than the one before (a newer node is a newer instantiation, the
+    /// checker's increasing type id); `pushed` is the entry just pushed,
+    /// `below` the entries under it.
+    fn deeply_nested<'i>(
+        pushed: Option<&'i (crate::semantic_query::DeclIdentity, SemanticNodeId)>,
+        below: impl Iterator<Item = Option<&'i (crate::semantic_query::DeclIdentity, SemanticNodeId)>>,
+        depth: usize,
+    ) -> bool {
+        const CHECKER_DEEPLY_NESTED_DEPTH: usize = 3;
+        let Some((identity, _)) = pushed else {
+            return false;
+        };
+        if depth < CHECKER_DEEPLY_NESTED_DEPTH {
+            return false;
+        }
+        let mut count = 0;
+        let mut last = 0u64;
+        for (entry_identity, node) in below.chain(std::iter::once(pushed)).flatten() {
+            if entry_identity == identity {
+                if node.0 >= last {
+                    count += 1;
+                    if count >= CHECKER_DEEPLY_NESTED_DEPTH {
+                        return true;
+                    }
+                }
+                last = node.0;
+            }
+        }
+        false
+    }
+
+    /// The checker's recursion identity of a relation operand read through
+    /// a type alias — the alias applied (`InstantiationRef`) or named
+    /// (`DeclRef`): the checker's identity of the type an alias names is
+    /// its declaration's symbol, shared by every instantiation. An interface
+    /// or class reference has none here: the checker relates two
+    /// references to one generic interface or class by its type
+    /// arguments' variance before it relates them structurally, and this
+    /// engine relates them structurally, so identifying them would stop a
+    /// finite recursion the checker never enters.
+    fn relation_recursion_identity(
+        &self,
+        carrier: SemanticNodeId,
+    ) -> Option<crate::semantic_query::DeclIdentity> {
+        let identity = match self.graph().node_data(carrier).as_deref() {
+            Some(
+                SemanticNodeData::InstantiationRef { base: identity, .. }
+                | SemanticNodeData::DeclRef { identity },
+            ) => identity.clone(),
+            _ => return None,
+        };
+        let prepared = self.ctx.prepared_type_decl_return_only(
+            identity.canonical_id.as_ref(),
+            identity.owner,
+            identity.decl_name.as_ref(),
+        )?;
+        (prepared.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+            .then_some(identity)
     }
 
     /// A pair of literal types relates, under every relation kind and
@@ -1466,6 +1690,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else {
             None
         };
+        let parent_chain = self.current_relation_chain();
         let mut txn = self.dispatch_txn.borrow_mut();
         if txn.reentry().nearest_relate().is_none() {
             // Re-snapshot at every relation ROOT so the behavioral branch
@@ -1478,6 +1703,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .reentry_mut()
             .push_relate(key.clone(), occurrence, watermark);
         txn.note_inline_flight(idx, inline_flight);
+        if let Some(state) = txn
+            .reentry_mut()
+            .frame_mut_for_update(idx)
+            .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+        {
+            state.chain = super::dispatch_txn::RelationChainPosition {
+                base: parent_chain.as_ref().map_or(idx, |chain| chain.base),
+                depth: parent_chain.as_ref().map_or(0, |chain| chain.depth),
+                counted: false,
+                overflowed: false,
+                expanding: parent_chain.as_ref().map_or(0, |chain| chain.expanding),
+                identities: [None, None],
+            };
+        }
         if redischarge {
             txn.note_session_delta_range(idx, idx + 1);
         }
@@ -1586,6 +1825,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             session_delta,
             opened_session,
             inline_flight,
+            chain: _,
         } = match popped.domain {
             ObligationFrameDomain::Relate(state) => state,
             ObligationFrameDomain::FlowReturn(_) | ObligationFrameDomain::ResolveCall(_) => {
@@ -6293,6 +6533,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        // The checker's `recursiveTypeRelatedTo` entry, judged on the
+        // operands the carriers stand for.
+        let concrete = [source, target].map(|operand| {
+            match self.unwrap_identity_carrier_for_relation(operand) {
+                IdentityCarrierUnwrap::Concrete(id) => id,
+                IdentityCarrierUnwrap::Unresolvable => operand,
+            }
+        });
+        if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
+            return result;
+        }
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
             return r;
         }

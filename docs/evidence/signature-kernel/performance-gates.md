@@ -272,17 +272,49 @@ Recorded plainly so no reader mistakes absence for a pass:
   checker's `"c319"`, `"none"` and, over 160 links, `"c159"`); the
   deepest remaining recursion over such a chain is the oxc-AST-to-`TypeExpr`
   conversion (`verter_type_expr_oxc::lower_ts_type`, on the declaration
-  lowering workers), about 4.6 KiB per link. What still recurses per
-  structural level is the relation engine: relating two nested
-  applications (`[D] extends [Box<…<number>>]`) opens one inline relation
-  frame per level (`execute_relate_inline` → `reduce_relation` → …
-  `relate_property_pair` → `relate_member`, about 16 KiB per level
-  unoptimized). It answers 85 levels on the 2 MiB default test stack and
-  overflows it from 90; on an 8 MiB thread it answers 400 levels and
-  overflows at 500, where at 600 the oxc parser's own recursion over the
-  source's type arguments overflows the IO thread first. The checker
-  bounds the same recursion: from 100 nested levels it reports TS2321
-  (excessive stack depth comparing types) and the relation is false.
+  lowering workers), about 4.6 KiB per link. The relation engine
+  recurses once per structural level, and is bounded as the checker bounds
+  it (`CHECKER_RELATION_DEPTH_LIMIT`, `project_semantic_dispatch/relation.rs`).
+  The relation frames stacked directly on one another are one checker
+  `checkTypeRelatedTo` call; a frame whose operands, unwrapped, are a
+  structured pair is one `recursiveTypeRelatedTo` entry. The 101st entry
+  overflows: the relation is false, every structured relation after it in
+  the chain is false (the checker's `overflow` flag), and nothing computed
+  under it is admitted. Measured on TypeScript 7.0.2 with each probe in its
+  own file: `[B] extends [<B around number>] ? 1 : 2` is `1` over 97–99
+  nested `Box` applications or `{ v: … }` literals and `2` with TS2321
+  over 100, 101, 102 and 500 (the tuple wrapper is the first entry); the
+  lane answers the same (`relation_depth_tests.rs` →
+  `nested_object_types_overflow_at_the_checkers_depth`,
+  `nested_generic_applications_overflow_at_the_checkers_depth`). The
+  checker's `isDeeplyNestedType` stops a recursion earlier: three entries
+  of one recursion identity on both stacks, each read from a newer
+  instantiation, answer `Maybe`, which holds. The lane gives a type
+  alias's applications that identity, so a finite recursive alias over a
+  type literal relates `1` to `string` from its third level, and an
+  infinitely recursive one stops there
+  (`a_recursive_alias_is_deeply_nested_from_its_third_instantiation`,
+  `an_infinitely_recursive_alias_stops_as_deeply_nested`). Two known
+  differences stay open, each a skipped test asserting the checker's
+  answer: an interface or class reference has no recursion identity,
+  because the checker relates two references to one generic interface by
+  its type arguments' variance and this engine does not
+  (`an_infinitely_recursive_interface_relates_by_its_variance`: the lane
+  overflows to `2` where the checker's variance measurement answers
+  `1`); and the checker's cache keeps the failures its overflow produced,
+  so in one file a 99-deep relation after a 100-deep one is `2`, where the
+  lane answers `1`, as the relation does alone — an answer computed under
+  an overflow depends on where its relation began, and the relation memo is
+  shared across requests
+  (`a_relation_after_an_overflowed_one_reads_its_failures`). The native
+  stack one relation uses, measured from the relating thread's start: 1.9
+  MiB for 100 `Box` levels and 1.1 MiB for 100 object levels unoptimized
+  (under the 2 MiB default test stack), 709 KiB and 586 KiB optimized
+  (`opt-level = 3`), flat from 100 to 400 levels — under the 1 MiB stack
+  of `verter_wasm` (wasm32's linker default; no override is configured),
+  the 2 MiB default of the tokio blocking and rayon CPU pools, and the 8 MiB
+  of the LSP serve thread, the host CPU pool and the declaration-lowering
+  workers.
 
 * **A long logical chain applies a quadratic count of guards and
   evaluates without a native level per operand.** Each operand of `a && b

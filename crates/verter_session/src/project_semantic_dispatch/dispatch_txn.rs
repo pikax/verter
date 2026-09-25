@@ -296,6 +296,10 @@ pub(crate) struct RelationFrameState {
     /// relation. It follows the member through SCC deferral and is either
     /// completed by the root's batched publish or explicitly aborted.
     pub(crate) inline_flight: Option<InlineMemberFlight>,
+    /// Where this frame sits in its relation chain — the relation frames
+    /// directly above one another, the checker's one `checkTypeRelatedTo`
+    /// call (see [`RelationChainPosition`]).
+    pub(crate) chain: RelationChainPosition,
 }
 
 impl RelationFrameState {
@@ -304,8 +308,42 @@ impl RelationFrameState {
             session_delta: false,
             opened_session: None,
             inline_flight: None,
+            chain: RelationChainPosition::default(),
         }
     }
+}
+
+/// One relation frame's place in its relation chain: the relation frames
+/// stacked directly on one another, which the checker relates in one
+/// `checkTypeRelatedTo` call with one recursion depth, one overflow flag
+/// and one pair of recursion stacks. A frame of another domain between two
+/// relation frames starts a new chain. Transient: it lives on the frame and
+/// is released at pop.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RelationChainPosition {
+    /// Stack index of the chain's first frame.
+    pub(crate) base: usize,
+    /// The chain's structured frames up to and including this one — the
+    /// checker's `sourceDepth` / `targetDepth` after this frame's push.
+    /// A frame counts once its operands, unwrapped, are known to be a
+    /// structured pair (a pair of simple types never reaches
+    /// `recursiveTypeRelatedTo`).
+    pub(crate) depth: u16,
+    /// This frame counted in `depth` — it is an entry of the checker's
+    /// recursion stacks.
+    pub(crate) counted: bool,
+    /// Set on the chain's first frame once a relation in the chain
+    /// overflowed the checker's depth: every structured relation after it
+    /// answers false, as the checker's `overflow` flag makes it.
+    pub(crate) overflowed: bool,
+    /// The checker's `expandingFlags` in force at this frame: bit 1 the
+    /// source side, bit 2 the target side was found deeply nested at this
+    /// frame or one below it in the chain.
+    pub(crate) expanding: u8,
+    /// The recursion identities of this counted frame's source and target
+    /// with the node each was read from (see
+    /// `ProjectSemanticDispatch::relation_recursion_identity`).
+    pub(crate) identities: [Option<(crate::semantic_query::DeclIdentity, SemanticNodeId)>; 2],
 }
 
 /// The flow-return-domain payload of one in-flight frame. The ordered
@@ -393,7 +431,6 @@ pub(crate) struct ObligationFrame {
 
 impl ObligationFrame {
     /// The relation frame state, when this is a relation frame.
-    #[cfg(test)]
     pub(crate) fn relation(&self) -> Option<&RelationFrameState> {
         match &self.domain {
             ObligationFrameDomain::Relate(state) => Some(state),

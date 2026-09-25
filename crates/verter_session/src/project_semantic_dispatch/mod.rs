@@ -4273,6 +4273,8 @@ mod projected_terminal_surface_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;
 #[cfg(test)]
+mod relation_depth_tests;
+#[cfg(test)]
 mod relation_operand_tests;
 #[cfg(test)]
 mod signature_relation_tests;
