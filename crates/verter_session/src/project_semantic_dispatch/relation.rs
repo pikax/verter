@@ -3653,7 +3653,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         bindings: &mut Vec<InferBinding>,
         position: InferPosition,
     ) -> RelationResult {
+        if let Some(result) = self.union_target_contains_literal_source(alternatives) {
+            return result;
+        }
         self.relate_pair_alternatives_with_freshness(alternatives, bindings, position, true)
+    }
+
+    /// A literal source that IS one of a union target's arms relates to the
+    /// union through that arm, as the checker's `containsType` test answers
+    /// before it relates any arm (`unionOrIntersectionRelatedTo`), so
+    /// excluding one member of an `N`-member literal union and relating the
+    /// rest back costs one pass over the arms per member instead of one
+    /// relation per preceding arm. `None` — the arms are related in order —
+    /// while an inference session collects, or when an arm before the
+    /// identical one is anything but a literal or a primitive: only then is
+    /// the ordered loop's answer certainly this one, `Assignable` with no
+    /// binding (a literal or primitive arm binds nothing, and the identical
+    /// arm is assignable on identity).
+    fn union_target_contains_literal_source(
+        &self,
+        alternatives: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<RelationResult> {
+        let (source, _) = alternatives.first()?;
+        if self.dispatch_txn.borrow().active_session().is_some() {
+            return None;
+        }
+        let graph = self.graph();
+        if !matches!(
+            graph.node_data(*source).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        ) {
+            return None;
+        }
+        for (_, arm) in alternatives {
+            if arm == source {
+                return Some(assignable(&[]));
+            }
+            if !matches!(
+                graph.node_data(*arm).as_deref(),
+                Some(SemanticNodeData::Literal(_) | SemanticNodeData::Primitive(_))
+            ) {
+                return None;
+            }
+        }
+        None
     }
 
     fn relate_pair_alternatives_with_freshness(

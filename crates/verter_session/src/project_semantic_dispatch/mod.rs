@@ -4270,3 +4270,5 @@ mod type_syntax_depth_tests;
 mod unique_symbol_widening_tests;
 #[cfg(test)]
 mod unread_marker_relation_tests;
+#[cfg(test)]
+mod wide_union_relation_tests;
