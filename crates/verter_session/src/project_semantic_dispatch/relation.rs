@@ -4714,8 +4714,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// where a COMPOSED root (an intersection body, an object-spread
     /// program) is composed into its one-level surface first, so an
     /// `A & { kind: "a" }` versus `A & { kind: "b" }` conflict is still
-    /// proved. Different object key sets can overlap and are never declared
-    /// disjoint.
+    /// proved. Two surfaces are also disjoint when each requires a property
+    /// the other proves absent — the checker's comparable relation refuses
+    /// an unmatched required property in either direction — once their
+    /// shared members are read; any other difference in key sets overlaps.
+    /// Two arrays relate by their elements.
     fn reduce_comparable(&self, key: &RelateMemoKey) -> RelationResult {
         if !self.relation_reads_node_pair_only(key) {
             return RelationResult::Unknown;
@@ -4809,6 +4812,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             CombineAnyFrom(usize),
             /// Conjoin the results above `base` (shared required members).
             CombineAllFrom(usize),
+            /// Conjoin the results above `base` (the shared members of a
+            /// pair its property sets prove disjoint) and publish the
+            /// disjointness proof unless one is undecided: the proof's
+            /// collapse class reads those members.
+            DisjointUnlessUndecidedFrom(usize),
             Finish((SemanticNodeId, SemanticNodeId)),
         }
 
@@ -4926,6 +4934,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Work::CombineAllFrom(base) => {
                     let combined = results.drain(base..).fold(assignable(&[]), result_and);
                     results.push(combined);
+                }
+                Work::DisjointUnlessUndecidedFrom(base) => {
+                    let combined = results.drain(base..).fold(assignable(&[]), result_and);
+                    results.push(match combined {
+                        RelationResult::Unknown => RelationResult::Unknown,
+                        _ => RelationResult::NotAssignable,
+                    });
                 }
                 Work::Finish(pair) => {
                     let result = results
@@ -5096,6 +5111,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         results.push(RelationResult::Unknown);
                         continue;
                     }
+                    // Two arrays are comparable exactly when their elements
+                    // are, in either direction and whichever is readonly
+                    // (the mutable one relates to the readonly one): the
+                    // checker relates `Array<T>` by its element's variance
+                    // (measured: `x: string[] | number[]` reads `number[]`
+                    // inside `if (x === arr)` over `arr: number[]`).
+                    if let (
+                        SemanticNodeData::Array {
+                            element: source_element,
+                            ..
+                        },
+                        SemanticNodeData::Array {
+                            element: target_element,
+                            ..
+                        },
+                    ) = (&*source_data, &*target_data)
+                    {
+                        work.push(Work::Eval(*source_element, *target_element));
+                        continue;
+                    }
 
                     let (source_view, target_view) = match (
                         self.comparable_surface(source),
@@ -5146,7 +5181,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                         self.intern_normalized_union_or_intersection(&[value, undefined], true)
                     };
-                    work.push(Work::CombineAllFrom(results.len()));
+                    budget_used = budget_used.saturating_add(
+                        (source_view.positive_members().len() as u64)
+                            .saturating_mul(target_width)
+                            .saturating_mul(2),
+                    );
+                    if budget_used > budget_limit {
+                        self.note_relation_budget_exceeded(budget_limit);
+                        return RelationResult::Unknown;
+                    }
+                    work.push(
+                        if surfaces_require_members_the_other_lacks(&source_view, &target_view) {
+                            Work::DisjointUnlessUndecidedFrom(results.len())
+                        } else {
+                            Work::CombineAllFrom(results.len())
+                        },
+                    );
                     for source_member in source_view.positive_members() {
                         budget_used = budget_used.saturating_add(1);
                         if budget_used > budget_limit {
@@ -9176,6 +9226,40 @@ fn tuple_position_pairs(
 /// pair: `true` for a template below `string`, `false` for a template
 /// against a primitive or literal of another kind (either direction),
 /// `None` for every other pair.
+/// Whether each of two object surfaces requires a property the other
+/// proves absent. The checker's comparable relation, like assignability,
+/// refuses a source that lacks a required target property
+/// (`propertiesRelatedTo` reports it unmatched), and two types are
+/// comparable when either direction relates: a pair missing a required
+/// property both ways is comparable in neither (measured: `x: A | C`
+/// over `interface A { kind: 'a'; a: 1 }` and `interface C { c: 3 }`
+/// reads `C` inside `if (x === c)`). A surface with an index signature,
+/// a call or construct signature (its apparent type declares more), or a
+/// key that is not known keeps the pair to the member descent.
+fn surfaces_require_members_the_other_lacks(a: &SurfaceView, b: &SurfaceView) -> bool {
+    let closed = |view: &SurfaceView| {
+        view.index_signatures.is_empty()
+            && view.call_signatures.is_empty()
+            && view.construct_signatures.is_empty()
+            && view
+                .positive_members()
+                .iter()
+                .all(|member| member.key.as_known().is_some())
+    };
+    let lacks_a_required_member = |source: &SurfaceView, target: &SurfaceView| {
+        target.positive_members().iter().any(|member| {
+            !member.optional
+                && member.key.cloned_known().is_some_and(|key| {
+                    matches!(
+                        source.project_known_key(&key),
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                    )
+                })
+        })
+    };
+    closed(a) && closed(b) && lacks_a_required_member(a, b) && lacks_a_required_member(b, a)
+}
+
 /// What declares a property, for the checker's protected-member rule
 /// ([`ProjectSemanticDispatch::property_accessibility_relation`]).
 enum MemberOwner {

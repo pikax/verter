@@ -916,6 +916,22 @@ pub enum SliceGuard {
         /// double-equals rule (a literal operand is never coerced).
         loose: bool,
     },
+    /// `subject === value` (`!==` negates) against a VALUE that is not a
+    /// literal — a name the frame leaves free, or a static member path
+    /// rooted at one. The evaluator reads the value's type and narrows the
+    /// subject, a whole binding, by comparability with it (the checker's
+    /// `narrowTypeByEquality`).
+    EqValue {
+        /// The compared binding.
+        subject: SliceNarrowSubject,
+        /// The value compared against, lowered as the flow expression it
+        /// is.
+        value: Box<SliceExpr>,
+        /// Whether the comparison is negated.
+        negated: bool,
+        /// The loose spelling (`==` / `!=`).
+        loose: bool,
+    },
     /// `subject instanceof Ctor`, the constructor named by a bare
     /// identifier the frame leaves FREE that provably denotes the module's
     /// single same-file `class` declaration (resolved evaluator-side as
@@ -1006,6 +1022,7 @@ fn collect_guard_subjects(guard: &SliceGuard, visitor: &mut impl FnMut(&SliceNar
         SliceGuard::Typeof { subject, .. }
         | SliceGuard::Truthy { subject, .. }
         | SliceGuard::EqLiteral { subject, .. }
+        | SliceGuard::EqValue { subject, .. }
         | SliceGuard::Instanceof { subject, .. }
         | SliceGuard::TypePredicate { subject, .. }
         | SliceGuard::In { subject, .. } => visitor(subject),
@@ -7321,6 +7338,9 @@ impl<'a> Lowerer<'a> {
                         loose: false,
                     });
                 }
+                if let Some(guard) = self.eq_value_guard(binary, negated, false) {
+                    return GuardDisposition::modeled(guard);
+                }
                 self.classify_unexpressible_comparison(binary)
             }
             // Loose (in)equality. A `typeof` comparison narrows as the
@@ -7377,6 +7397,9 @@ impl<'a> Lowerer<'a> {
                     } else {
                         SliceGuard::Or(arms)
                     });
+                }
+                if let Some(guard) = self.eq_value_guard(binary, negated, true) {
+                    return GuardDisposition::modeled(guard);
                 }
                 self.classify_unexpressible_comparison(binary)
             }
@@ -7442,6 +7465,66 @@ impl<'a> Lowerer<'a> {
                 }
             }
             _ => GuardDisposition::NoNarrowing,
+        }
+    }
+
+    /// `subject === value` against a VALUE that is not a literal: a name
+    /// the frame leaves free, or a static member path rooted at one, with
+    /// no call. The checker narrows the subject by the value's type
+    /// through the comparable relation (`narrowTypeByEquality`), so the
+    /// value lowers as the flow expression it is and the evaluator reads
+    /// its type ([`SliceGuard::EqValue`]).
+    ///
+    /// The subject is a whole binding. A member subject also narrows its
+    /// parent as a discriminant, and a value rooted at a narrowing
+    /// destination is narrowed in turn by the subject — facts this
+    /// carrier does not spell, so both stay unexpressible (`None`).
+    fn eq_value_guard(
+        &mut self,
+        binary: &oxc_ast::ast::BinaryExpression<'_>,
+        negated: bool,
+        loose: bool,
+    ) -> Option<SliceGuard> {
+        for (subject_side, value_side) in
+            [(&binary.left, &binary.right), (&binary.right, &binary.left)]
+        {
+            let Some(subject) = self.narrow_subject_of(subject_side) else {
+                continue;
+            };
+            if !subject.path.is_empty()
+                || self.subject_root_carries_an_unmentioned_narrowing(&subject)
+                || self.operand_reaches_narrow_subject(value_side)
+            {
+                return None;
+            }
+            let value = unwrap_parenthesized(value_side);
+            if !self.free_rooted_static_reference(value) {
+                return None;
+            }
+            let value = self.lower_expr(value, ExprMode::Return);
+            return Some(SliceGuard::EqValue {
+                subject,
+                value: Box::new(value),
+                negated,
+                loose,
+            });
+        }
+        None
+    }
+
+    /// Whether `expression` is a name the frame leaves free (never
+    /// `undefined`, which is a literal operand), or a static member path
+    /// rooted at one — a value reference whose read has no effect.
+    fn free_rooted_static_reference(&self, expression: &Expression<'_>) -> bool {
+        match unwrap_parenthesized(expression) {
+            Expression::Identifier(identifier) => {
+                identifier.name.as_str() != "undefined"
+                    && matches!(self.classify_occurrence(identifier.span), NameBinding::Free)
+            }
+            Expression::StaticMemberExpression(member) => {
+                self.free_rooted_static_reference(&member.object)
+            }
+            _ => false,
         }
     }
 
@@ -11598,6 +11681,17 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
         } => SliceGuard::EqLiteral {
             subject,
             literal,
+            negated: !negated,
+            loose,
+        },
+        SliceGuard::EqValue {
+            subject,
+            value,
+            negated,
+            loose,
+        } => SliceGuard::EqValue {
+            subject,
+            value,
             negated: !negated,
             loose,
         },

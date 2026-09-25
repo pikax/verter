@@ -6786,6 +6786,39 @@ enum ArmFilter {
     NoSurvivor,
 }
 
+/// One arm of an equality's value type, as
+/// [`FlowEvaluator::equality_value_shape`] classifies it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValueArm {
+    /// `any` or `unknown`.
+    Top,
+    /// A non-literal primitive: `string`, `number`, `bigint`, `boolean`,
+    /// `symbol`.
+    Primitive,
+    /// The non-primitive `object`, or the empty object type `{}`.
+    Itself,
+    /// `null` or `undefined`.
+    Nullish,
+    /// Any other object type: an object surface, an array, a tuple, a
+    /// function, a class instance.
+    Object,
+}
+
+/// How an equality's value type narrows the compared binding
+/// ([`FlowEvaluator::narrow_eq_value`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EqualityValueShape {
+    /// The value is `any` or `unknown`: every arm is comparable to it.
+    Top,
+    /// One type an `unknown` or `{}`-carrying binding reads as itself on
+    /// the strict positive edge: a primitive, `object`, `{}`.
+    Itself,
+    /// One object type, which such a binding reads as `object`.
+    NonPrimitive,
+    /// A union: every binding filters its arms by comparability.
+    Union,
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// COLD heritage-authority reads made by the `instanceof` guard
@@ -11816,6 +11849,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     LiteralComparison::Strict
                 },
             ),
+            SliceGuard::EqValue {
+                subject,
+                value,
+                negated,
+                loose,
+            } => self.narrow_eq_value(subject, value, *negated == positive, *loose),
             SliceGuard::Instanceof {
                 subject,
                 ctor,
@@ -12597,6 +12636,184 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 leaf
             }
             (_, leaf) => leaf,
+        }
+    }
+
+    /// `subject === value` against a VALUE the lowering could not read as
+    /// a literal — the checker's `narrowTypeByEquality` over the value's
+    /// type. The positive edge keeps the subject's arms COMPARABLE to the
+    /// value's type, in either direction, through the sole relation
+    /// authority (`filterType(type, t => areTypesComparable(t,
+    /// valueType))`); a subject that is `unknown` or carries an empty
+    /// object arm reads, on the strict positive edge, the value's own
+    /// type when that is a primitive, `object` or `{}`, and `object` when
+    /// it is any other object type. The negated edge narrows only against
+    /// a unit type, which no value this carrier admits is, so it keeps
+    /// the subject as declared. A value whose type is a literal, a unit,
+    /// or a form this rule does not classify leaves the typed guard gap:
+    /// the checker substitutes literals and filters unit arms there.
+    fn narrow_eq_value(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        value: &crate::flow_slice_content::SliceExpr,
+        negated: bool,
+        loose: bool,
+    ) -> GuardNarrowing {
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        if matches!(
+            self.dispatch.graph().node_data(current).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+        ) {
+            return GuardNarrowing::Unchanged;
+        }
+        let value_node = match self.eval_expr(value) {
+            Positional::Value(node) => node,
+            Positional::Hold | Positional::Unmodeled => {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+                return GuardNarrowing::Unchanged;
+            }
+        };
+        let Some(shape) = self.equality_value_shape(value_node, loose) else {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+            return GuardNarrowing::Unchanged;
+        };
+        if negated || shape == EqualityValueShape::Top {
+            return GuardNarrowing::Unchanged;
+        }
+        if !loose {
+            let unknown = matches!(
+                self.dispatch.graph().node_data(current).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+            );
+            let empty_arm = self
+                .enumerated_union_arms_or_self(current)
+                .iter()
+                .any(|arm| self.is_empty_object_arm(*arm));
+            if unknown || empty_arm {
+                match shape {
+                    EqualityValueShape::Itself => {
+                        return GuardNarrowing::Narrowed(subject.clone(), value_node);
+                    }
+                    EqualityValueShape::NonPrimitive => {
+                        let object = self
+                            .dispatch
+                            .graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Object));
+                        return GuardNarrowing::Narrowed(subject.clone(), object);
+                    }
+                    EqualityValueShape::Union | EqualityValueShape::Top => {}
+                }
+            }
+        }
+        let mut undecided = false;
+        let fact = self.narrow_arms_by(subject, |this, arm| {
+            match this.comparable_either_way(arm, value_node) {
+                Some(comparable) => Some(comparable),
+                None => {
+                    undecided = true;
+                    Some(true)
+                }
+            }
+        });
+        if undecided {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        match fact {
+            ArmFilter::NoSurvivor => GuardNarrowing::Narrowed(subject.clone(), self.never_node()),
+            ArmFilter::Narrowed(node) => GuardNarrowing::Narrowed(subject.clone(), node),
+            ArmFilter::Unchanged => GuardNarrowing::Unchanged,
+        }
+    }
+
+    /// The checker's `areTypesComparable`, through the sole relation
+    /// authority: `false` on its disjointness proof, `true` when either
+    /// type is assignable to the other (assignability implies
+    /// comparability), `None` otherwise. The authority's permissive
+    /// verdict alone is no proof: it answers "no proof of empty overlap",
+    /// which is weaker than the checker's comparable relation, so an arm it
+    /// only fails to separate from the value keeps the typed gap.
+    fn comparable_either_way(&self, a: SemanticNodeId, b: SemanticNodeId) -> Option<bool> {
+        use super::relation::ComparabilityVerdict;
+        match self.dispatch.nodes_comparable(a, b) {
+            ComparabilityVerdict::Disjoint(_) => Some(false),
+            ComparabilityVerdict::Undecided => None,
+            ComparabilityVerdict::Overlaps => (self.assignable(a, b) == Some(true)
+                || self.assignable(b, a) == Some(true))
+            .then_some(true),
+        }
+    }
+
+    /// Whether `arm` is the empty object type `{}`.
+    fn is_empty_object_arm(&self, arm: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.graph().node_data(arm).as_deref(),
+            Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty()
+        )
+    }
+
+    /// How an equality's VALUE type takes part in
+    /// [`Self::narrow_eq_value`], `None` for a value this rule does not
+    /// read: a literal or unit type, alone or in a union (the checker
+    /// substitutes a literal for a primitive arm and filters unit arms), a
+    /// primitive under the loose operator (coercion), or any form the
+    /// classification cannot settle.
+    fn equality_value_shape(
+        &mut self,
+        value: SemanticNodeId,
+        loose: bool,
+    ) -> Option<EqualityValueShape> {
+        let arms = self.enumerated_union_arms_or_self(value);
+        let mut shapes = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            let settled = match self.dispatch.unwrap_identity_carrier_for_relation(*arm) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return None,
+            };
+            let shape = match self.dispatch.graph().node_data(settled).as_deref()? {
+                SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown) => {
+                    ValueArm::Top
+                }
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::Symbol,
+                ) => ValueArm::Primitive,
+                SemanticNodeData::Primitive(PrimitiveKind::Object) => ValueArm::Itself,
+                SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
+                    ValueArm::Nullish
+                }
+                SemanticNodeData::Object(surface) if surface.closed().is_empty() => {
+                    ValueArm::Itself
+                }
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::ObjectSpreadProgram(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::ClassExpressionInstance { .. } => ValueArm::Object,
+                _ => return None,
+            };
+            shapes.push(shape);
+        }
+        if shapes.contains(&ValueArm::Top) {
+            return Some(EqualityValueShape::Top);
+        }
+        match shapes.as_slice() {
+            [ValueArm::Nullish] => None,
+            [ValueArm::Primitive] if loose => None,
+            [ValueArm::Primitive | ValueArm::Itself] => Some(EqualityValueShape::Itself),
+            [ValueArm::Object] => Some(EqualityValueShape::NonPrimitive),
+            _ => Some(EqualityValueShape::Union),
         }
     }
 

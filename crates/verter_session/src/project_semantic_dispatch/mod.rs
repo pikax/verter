@@ -119,6 +119,8 @@ mod call_resolve;
 #[cfg(test)]
 mod call_resolve_tests;
 pub(crate) mod dispatch_txn;
+#[cfg(test)]
+mod equality_value_narrowing_tests;
 pub(crate) mod flow_return;
 #[cfg(test)]
 mod flow_return_accessor_tests;
