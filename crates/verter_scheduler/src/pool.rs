@@ -171,6 +171,7 @@ impl SchedulerCpuPool {
         let pool_id = NEXT_POOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
+            .stack_size(WORKER_STACK_BYTES)
             .thread_name(|i| format!("verter-cpu-{i}"))
             .start_handler(move |_| {
                 // Mark every rayon worker as a scheduler CPU worker so
@@ -270,6 +271,16 @@ impl SchedulerCpuPool {
     }
 }
 
+/// The native stack of every scheduler worker, CPU and I/O alike: 8 MiB,
+/// the stack the host CPU pool and the declaration-lowering workers run
+/// on. A source job parses and analyzes the file it loads (an I/O worker
+/// runs it inline), and the parser and the syntax-tree clone recurse once
+/// per level of nesting: on the platform default (2 MiB on Windows and
+/// Linux) a file holding 700 nested type arguments or a 2,000-operand
+/// `&&` chain overflowed a worker and aborted the process. Stacks are
+/// reserved, not committed, so the reservation costs address space only.
+const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// Scheduler-owned I/O pool for source/load work.
 ///
 /// Fixed-size pool with a bounded crossbeam channel. Separate from the
@@ -336,6 +347,7 @@ impl SchedulerIoPool {
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("verter-io-{i}"))
+                    .stack_size(WORKER_STACK_BYTES)
                     .spawn(move || {
                         // Mark this thread as an I/O worker so
                         // cooperative-pump callers reached via the

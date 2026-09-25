@@ -50,6 +50,25 @@ fn an_80_deep_nested_generic_application_reads_on_the_default_stack() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A 700-deep nested generic application parses and lowers on the
+/// scheduler's workers: the parser and the syntax-tree clone recurse once
+/// per argument level on the worker that loads the file.
+///
+/// Measured on TypeScript 7.0.2 (all four settings): over `D` with `Box`
+/// applied 700 times, `keyof D` is `"v"` and `D extends Box<unknown> ? 1 :
+/// 2` is `1` (the same at 1,500 and 2,100 levels).
+#[test]
+fn a_700_deep_nested_generic_application_parses_on_a_scheduler_worker() {
+    let failures = mismatches(
+        &nested_box(700),
+        &[
+            ("keyof D", "\"v\""),
+            ("D extends Box<unknown> ? 1 : 2", "1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A chain of 1,000 indexed accesses lowers on the default test stack.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): over `interface R {
