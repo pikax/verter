@@ -333,9 +333,33 @@ Recorded plainly so no reader mistakes absence for a pass:
   `an_and_chain_applies_a_quadratic_count_of_guards` and
   `a_300_operand_and_chain_evaluates_on_a_small_stack`, the checker's
   `"" | 0 | 1 | false | null | undefined`). The slice lowering of the chain
-  (`Lowerer::lower_logical_value`, on the 8 MiB declaration-lowering
-  workers) still recurses once per operand, about 21 KiB per operand
-  unoptimized: 320 operands use 6.9 MB of it.
+  (`Lowerer::lower_logical_value`, on the declaration-lowering workers)
+  recursed once per operand, about 21 KiB per operand unoptimized (320
+  operands used 6.9 MB of the 8 MiB worker stack), and each node
+  reclassified its whole left operand as a guard, a count that grows with
+  the square of the chain and a composition with its cube: 2,000 operands
+  took 70 s of lowering. It now walks the chain's left spine from an
+  explicit stack, and each node hands its guard disposition to the node
+  enclosing it, so each operand is classified a bounded number of times
+  (`flow_slice_content_tests.rs` →
+  `an_and_chain_classifies_each_operand_a_bounded_number_of_times`: 200,
+  400 and 600 classifications at 100, 200 and 300 operands; 5,247,
+  20,497 and 45,747 when every node reclassifies). The evaluator's
+  fresh-literal collection and effect walk over a chain walk its spine too,
+  and the evaluation stops at the first operand after the connected
+  demand's work budget trips, instead of evaluating the rest of the chain
+  under a result already refused. A 2,000-operand chain lowers and
+  evaluates on a 1 MiB thread in 8 s unoptimized
+  (`flow_return_null_policy_tests.rs` →
+  `a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack`: the
+  typed `Budget(WorkBudgetExceeded)` refusal, with the guard applications of
+  a 1,000-operand chain; without the early stop, 6.0 million against 1.5
+  million and 90 s). Recursive slice lowering overflows the worker, and a
+  recursive fresh-literal collection or effect walk the 1 MiB thread. The
+  checker answers the chain in about a second
+  (`"" | 0 | 1 | false | null | undefined`); the lane's connected work
+  outgrows the budget from about 420 operands
+  (`a_2000_operand_and_chain_answers_the_checkers_type`, skipped).
 
 * **The scheduler's workers parse on 8 MiB stacks.** The oxc parser, the
   syntax-tree clone the semantic builder reads (`clone_in`) and the

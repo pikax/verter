@@ -346,6 +346,10 @@ struct LoweredStatementBatch {
 pub struct DeclBodyMemo {
     #[cfg(test)]
     pub(crate) capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many tests this memo's slice lowerings classified as guards
+    /// ([`crate::flow_slice_content::guard_classification_probe`]).
+    #[cfg(test)]
+    pub(crate) guard_classification_work: Arc<std::sync::atomic::AtomicUsize>,
     key: SnapshotKey,
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
@@ -434,6 +438,8 @@ impl DeclBodyMemo {
         Self {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
+            #[cfg(test)]
+            guard_classification_work: Arc::default(),
             key,
             eval_source,
             framework_parse,
@@ -470,6 +476,8 @@ impl DeclBodyMemo {
         let memo = Self {
             #[cfg(test)]
             capture_lookup_work: Arc::default(),
+            #[cfg(test)]
+            guard_classification_work: Arc::default(),
             key,
             eval_source: Arc::from(""),
             framework_parse: None,
@@ -1265,9 +1273,14 @@ impl DeclBodyMemo {
         let snapshot = self.key.clone();
         #[cfg(test)]
         let work = Arc::clone(&self.capture_lookup_work);
+        #[cfg(test)]
+        let classifications = Arc::clone(&self.guard_classification_work);
         let Some(node) = service.run_leased(&self.key, move |program| {
             #[cfg(test)]
             let _probe = crate::flow_slice_content::capture_lookup_probe::enter(work);
+            #[cfg(test)]
+            let _classifications =
+                crate::flow_slice_content::guard_classification_probe::enter(classifications);
             program.and_then(|p| {
                 p.with_indexed_function(&entry, |resolved, entry| {
                     crate::flow_slice_content::build_flow_slice_content(

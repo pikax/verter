@@ -671,6 +671,12 @@ impl FlowEvaluator<'_, '_> {
             other => return other,
         };
         for (node, operator, right, guard, right_reachable, widen) in spine.into_iter().rev() {
+            // Once the connected demand has tripped, the frame closes with
+            // the budget failure whatever the rest of the chain evaluates
+            // to; the operands left are not evaluated.
+            if self.dispatch.connected_demand_tripped() {
+                return Positional::Unmodeled;
+            }
             let value =
                 match self.eval_logical_step(operator, left_type, right, guard, right_reachable) {
                     Positional::Value(value) => value,
@@ -1078,17 +1084,28 @@ impl FlowEvaluator<'_, '_> {
             }
             _ => {}
         }
-        let SliceExpr::Logical {
+        // A chain nests its left operands: its left spine is walked, and the
+        // operands are visited in the recursion's order — the innermost left
+        // operand, then each right operand from the innermost node out.
+        let mut operands: Vec<(&SliceExpr, bool)> = Vec::new();
+        let mut node = expr;
+        while let SliceExpr::Logical {
             left,
             right,
             fresh_operands,
             ..
-        } = expr
-        else {
-            return;
-        };
-        for (operand, fresh) in [(left, fresh_operands.0), (right, fresh_operands.1)] {
-            match operand.as_ref() {
+        } = node
+        {
+            operands.push((right, fresh_operands.1));
+            if matches!(left.as_ref(), SliceExpr::Logical { .. }) {
+                node = left;
+            } else {
+                operands.push((left, fresh_operands.0));
+                break;
+            }
+        }
+        for (operand, fresh) in operands.into_iter().rev() {
+            match operand {
                 SliceExpr::Type(leaf) if fresh => {
                     if let verter_type_expr::TypeExpr::Literal(_) = leaf.ty() {
                         out.push(self.lower_body_type(leaf.ty()));

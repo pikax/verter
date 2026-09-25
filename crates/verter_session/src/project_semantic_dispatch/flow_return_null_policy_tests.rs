@@ -11576,6 +11576,60 @@ fn a_300_operand_and_chain_evaluates_on_a_small_stack() {
     assert_eq!(answer, "\"\" | 0 | 1 | false | null | undefined");
 }
 
+/// `and_chain(operands)` observed on a thread with a 1 MiB stack, with the
+/// guards its evaluation applied.
+fn and_chain_on_a_small_stack(operands: usize) -> (String, usize) {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let host = four_policy_host();
+            let path = format!("{STRICT_ROOT}/and-chain-{operands}.ts");
+            upsert(&host, &path, &and_chain(operands));
+            let before = super::flow_return::guard_applications_for_tests();
+            let answer = observe(&host, &path, "lc");
+            (
+                answer,
+                super::flow_return::guard_applications_for_tests() - before,
+            )
+        })
+        .expect("spawn the evaluating thread")
+        .join()
+        .expect("the chain evaluates")
+}
+
+/// A 2,000-operand `&&` chain lowers and evaluates on a 1 MiB thread: the
+/// slice lowering walks its nested left operands from an explicit spine
+/// and classifies each operand's guard once, so neither its stack nor its
+/// work grows with a native level or a re-classification per operand. The
+/// evaluation's connected work outgrows the demand's budget on this
+/// chain, and the lane answers with that typed refusal; the operands past
+/// that point are not evaluated, so the guards it applies are those of a
+/// 1,000-operand chain.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
+/// about one second): `"" | 0 | 1 | false | null | undefined` with
+/// `strictNullChecks`, `0 | 1` without it.
+#[test]
+fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
+    let (answer, guards) = and_chain_on_a_small_stack(2000);
+    assert_eq!(answer, "<no value: Failure(Budget(WorkBudgetExceeded))>");
+    let (_, shorter_guards) = and_chain_on_a_small_stack(1000);
+    assert_eq!(
+        guards, shorter_guards,
+        "the evaluation stops where the budget trips"
+    );
+}
+
+/// The checker's answer for the 2,000-operand chain above.
+#[test]
+#[ignore = "the evaluation's connected work outgrows the demand's work budget past about 420 operands"]
+fn a_2000_operand_and_chain_answers_the_checkers_type() {
+    assert_eq!(
+        and_chain_on_a_small_stack(2000).0,
+        "\"\" | 0 | 1 | false | null | undefined"
+    );
+}
+
 const CAPTURE_EXTENT_SOURCE: &str = r#"
 export function memberWriteAfter(p: { y: number } | null) { let o = p; if (o) { const f = () => o.y; o.y = 2; return f; } return null; }
 export function loopExtent(n: number) { let x: string | number = 1; let f = () => 0 as string | number; for (let i = 0; i < n; i++) { x = "s"; if (typeof x === "string") { f = () => x; } } return f; }

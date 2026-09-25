@@ -7082,9 +7082,20 @@ fn expression_effect_tree(
                     walk(arm, out);
                 }
             }
+            // A chain nests its left operands: its left spine is walked, in
+            // tree order — the innermost left operand, then each right
+            // operand from the innermost node out.
             SliceExpr::Logical { left, right, .. } => {
-                walk(left, out);
-                walk(right, out);
+                let mut rights = vec![&**right];
+                let mut innermost = &**left;
+                while let SliceExpr::Logical { left, right, .. } = innermost {
+                    rights.push(right);
+                    innermost = left;
+                }
+                walk(innermost, out);
+                for right in rights.into_iter().rev() {
+                    walk(right, out);
+                }
             }
             SliceExpr::Sequence { value, .. } => walk(value, out),
             SliceExpr::Satisfies { operand, .. } | SliceExpr::Void { operand, .. } => {
