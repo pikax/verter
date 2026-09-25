@@ -356,8 +356,20 @@ impl FlowEvaluator<'_, '_> {
             .map_or_else(|| vec![node], |arms| arms.to_vec())
     }
 
-    /// `checkNonNullType`'s result: the operand without its `null`,
-    /// `undefined` and `void` members.
+    /// The operand of an arithmetic operator after `checkNonNullType`: its
+    /// non-nullable part, or the checker's error type (`any`) when
+    /// nothing else is left (tsc 7.0.2: `null + i` over `i: number` is
+    /// `any` with and without `strictNullChecks`).
+    fn checked_arithmetic_operand(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let checked = self.non_nullable_operand(node);
+        if checked != node && self.is_primitive(checked, &[PrimitiveKind::Never]) {
+            return self.primitive(PrimitiveKind::Any);
+        }
+        checked
+    }
+
+    /// `getNonNullableType`: the operand without its `null`, `undefined`
+    /// and `void` members.
     fn non_nullable_operand(&self, node: SemanticNodeId) -> SemanticNodeId {
         let arms = self.operand_arms(node);
         let kept: Vec<SemanticNodeId> = arms
@@ -471,7 +483,7 @@ impl FlowEvaluator<'_, '_> {
     /// `++` / `--`): `bigint` for a `bigint` operand, `number | bigint`
     /// when it may also be a number or is `any` / `unknown`, else `number`.
     fn unary_numeric_result(&mut self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
-        let operand = self.non_nullable_operand(operand);
+        let operand = self.checked_arithmetic_operand(operand);
         if !self.maybe_of_kind(operand, OperandKind::BigInt) {
             return Some(self.primitive(PrimitiveKind::Number));
         }
@@ -494,8 +506,8 @@ impl FlowEvaluator<'_, '_> {
         left: SemanticNodeId,
         right: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let left = self.non_nullable_operand(left);
-        let right = self.non_nullable_operand(right);
+        let left = self.checked_arithmetic_operand(left);
+        let right = self.checked_arithmetic_operand(right);
         let any_or_unknown = [PrimitiveKind::Any, PrimitiveKind::Unknown];
         if (self.is_primitive(left, &any_or_unknown) && self.is_primitive(right, &any_or_unknown))
             || !(self.maybe_of_kind(left, OperandKind::BigInt)
@@ -525,8 +537,8 @@ impl FlowEvaluator<'_, '_> {
             && !self.assignable_to_kind(right, OperandKind::String, true)?
         {
             (
-                self.non_nullable_operand(left),
-                self.non_nullable_operand(right),
+                self.checked_arithmetic_operand(left),
+                self.checked_arithmetic_operand(right),
             )
         } else {
             (left, right)
