@@ -2180,9 +2180,14 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     }
 
     // A class expression is itself a callable (its constructor) and
-    // creates more; no index record serves its constructor or its field
-    // initializers. A class DECLARATION binds a name instead and is never
-    // walked here.
+    // creates more. Its constructor body and methods are nested callables
+    // recorded on their own below, and its field initializers are this
+    // frame's footprint — except their WRITES, which run at construction
+    // and are not this frame's (see `Self::class_values`), and a STATIC
+    // BLOCK, which no index record serves. A class holding either records
+    // itself as an unserved callable; any other adds no callable of its
+    // own. A class DECLARATION binds a name instead and is never walked
+    // here.
     //
     // The class's VALUE positions read this frame: its decorators, its
     // `extends` value, its computed keys and its static initializers run
@@ -2193,7 +2198,9 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     // and accessors are nested callables the function index serves. A
     // static block keeps its own lexical scope and stays unwalked.
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
-        self.push_unserved_callable(it.span.into());
+        if class_runs_unserved_code(it) {
+            self.push_unserved_callable(it.span.into());
+        }
         self.class_values += 1;
         self.visit_decorators(&it.decorators);
         if let Some(super_class) = &it.super_class {
@@ -2868,4 +2875,56 @@ fn collect_binding_pattern<'a, 'ast>(
             collect_binding_pattern(&assignment.left, destructured, identifiers, defaults);
         }
     }
+}
+
+/// Whether a class expression runs code no index record serves: a static
+/// block, or a write in a field initializer, computed key or heritage (a
+/// write the frame does not record — see the skeleton's `class_values`).
+/// Nested callables and nested classes answer for their own bodies.
+fn class_runs_unserved_code(class: &oxc_ast::ast::Class<'_>) -> bool {
+    #[derive(Default)]
+    struct Writes(bool);
+    impl<'a> Visit<'a> for Writes {
+        fn visit_assignment_expression(&mut self, _it: &oxc_ast::ast::AssignmentExpression<'a>) {
+            self.0 = true;
+        }
+        fn visit_update_expression(&mut self, _it: &oxc_ast::ast::UpdateExpression<'a>) {
+            self.0 = true;
+        }
+        fn visit_function(&mut self, _it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {}
+        fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'a>) {}
+    }
+    let mut writes = Writes::default();
+    if let Some(heritage) = &class.super_class {
+        writes.visit_expression(heritage);
+    }
+    for element in &class.body.body {
+        match element {
+            oxc_ast::ast::ClassElement::StaticBlock(_) => return true,
+            oxc_ast::ast::ClassElement::MethodDefinition(method) => {
+                if method.computed {
+                    writes.visit_property_key(&method.key);
+                }
+            }
+            oxc_ast::ast::ClassElement::PropertyDefinition(property) => {
+                if property.computed {
+                    writes.visit_property_key(&property.key);
+                }
+                if let Some(value) = &property.value {
+                    writes.visit_expression(value);
+                }
+            }
+            oxc_ast::ast::ClassElement::AccessorProperty(property) => {
+                if property.computed {
+                    writes.visit_property_key(&property.key);
+                }
+                if let Some(value) = &property.value {
+                    writes.visit_expression(value);
+                }
+            }
+            oxc_ast::ast::ClassElement::TSIndexSignature(_) => {}
+        }
+    }
+    writes.0
 }

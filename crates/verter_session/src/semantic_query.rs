@@ -1123,6 +1123,18 @@ pub struct ClassExpressionIdentity {
     /// How many type parameters the class declares itself; a reference
     /// prints their arguments after the name (`(Anonymous class)<string>`).
     pub own_arity: u32,
+    /// The accessibility of the declaration behind the class's construct
+    /// signatures — its first constructor's, else its base's — that the
+    /// checker's `constructorVisibilitiesAreCompatible` reads; `None` for
+    /// a declaration-less default constructor.
+    pub constructor_visibility: Option<verter_type_expr::MemberVisibility>,
+    /// The class's `prototype`: the class instance with `any` for every
+    /// type parameter it has, outer and own (the checker's
+    /// `getTypeOfPrototypeProperty`), recorded where the class is authored
+    /// — an instantiation of the enclosing clauses substitutes into the
+    /// instance but never re-types the prototype, which has no parameter
+    /// left. `None` for the prototype instance itself.
+    pub prototype: Option<SemanticNodeId>,
 }
 
 /// One type-parameter clause enclosing a class expression.

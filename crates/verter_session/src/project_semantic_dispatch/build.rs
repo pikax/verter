@@ -720,6 +720,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
 
+        // A namespace member path: a namespace block has no value surface
+        // the path could walk, and its members register under their
+        // QUALIFIED names, so `typeof N.M.f` reads the value `N.M.f` names.
+        // A function-local root is never a namespace (a namespace declares
+        // only at file or namespace scope).
+        if value_root.scope.local_scope.is_none() {
+            let mut joined = value_root.name.to_string();
+            for (split, segment) in path.iter().enumerate() {
+                joined.push('.');
+                joined.push_str(segment);
+                if matches!(
+                    shallow.visible_value_binding(value_root.scope.owner, &joined),
+                    Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
+                ) {
+                    let member_root = ValueRootKey {
+                        scope: value_root.scope.clone(),
+                        name: Arc::from(joined),
+                    };
+                    return self.build_typeof(&member_root, &path[split + 1..], context);
+                }
+            }
+        }
+
         // Local PRESENCE through the CENTRALIZED effective header lookup so a
         // rune module's ambient `$state`/`$derived`/… value (and the rune
         // namespace types) is seen as locally declared at the `typeof`-rooted
@@ -6197,6 +6220,169 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Where member `name` of the class declaration `class` (applied to
+    /// `args`) reads from, found without lowering the class's other
+    /// members: an object of the class's OWN members of that name, each
+    /// lowered from its own member position, else the `extends` arm that
+    /// supplies it. A member body reading its own class (`this.v`) reads a
+    /// sibling this way; lowering the whole class body would lower the
+    /// reading member's own body-derived return and re-enter it.
+    pub(super) fn class_member_source(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let prepared = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, class)?;
+        if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
+            return None;
+        }
+        let body_slot = prepared.body_facts.body_slot.clone();
+        let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
+        let body = super::raise::deref_slot_body(self.ctx, &body_slot)?;
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash: serve.indexed.whole_hash,
+            local_scope: None,
+        };
+        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
+            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                &bundle, owner,
+            )
+        });
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        let env: FxHashMap<String, SemanticNodeId> = prepared
+            .type_parameters
+            .iter()
+            .zip(args.iter())
+            .map(|(param, arg)| (param.name.to_string(), *arg))
+            .collect();
+        let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
+        let context = crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Navigate,
+        )
+        .into_structural_provenance();
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let lower_at =
+            |path: Vec<verter_type_expr::locators::TypeBodyPathStep>,
+             substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+             context: crate::semantic_query::ProjectionReductionContext| {
+                self.lower_located_body_with_resolution_debt(
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                        verter_type_expr::locators::TypeBodySlot {
+                            anchor: body_slot.anchor.clone(),
+                            path: Arc::from(path.into_boxed_slice()),
+                        },
+                    ),
+                    prepared.kind,
+                    &prepared.type_parameters,
+                    &prepared.name_resolution,
+                    &env,
+                    &scope,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    substitutions,
+                    context,
+                    None,
+                )
+            };
+        // The class body is its own members, over its `extends` arm when it
+        // has one.
+        let arms: Vec<(Vec<verter_type_expr::locators::TypeBodyPathStep>, &TypeExpr)> = match &body
+        {
+            TypeExpr::Intersection(arms) => arms
+                .iter()
+                .enumerate()
+                .map(|(ordinal, arm)| {
+                    (
+                        vec![
+                            verter_type_expr::locators::TypeBodyPathStep::IntersectionArm {
+                                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                            },
+                        ],
+                        arm,
+                    )
+                })
+                .collect(),
+            other => vec![(Vec::new(), other)],
+        };
+        let mut own: Vec<SurfaceEntry> = Vec::new();
+        let mut heritage: Vec<Vec<verter_type_expr::locators::TypeBodyPathStep>> = Vec::new();
+        for (prefix, arm) in &arms {
+            let TypeExpr::Object(object) = arm else {
+                heritage.push(prefix.clone());
+                continue;
+            };
+            for (raw_index, member) in object.properties.iter().enumerate() {
+                let (member_key, optional, readonly, method_kind, has_body, visibility) =
+                    match member {
+                        ObjectMember::Property(property) => (
+                            property.key.cloned_known(),
+                            property.optional,
+                            property.readonly,
+                            None,
+                            false,
+                            property.visibility,
+                        ),
+                        ObjectMember::Method(method) => (
+                            method.key.cloned_known(),
+                            method.optional,
+                            false,
+                            Some(method.method_kind),
+                            method.has_implementation_body,
+                            method.visibility,
+                        ),
+                        _ => continue,
+                    };
+                if member_key.as_ref() != Some(&key) {
+                    continue;
+                }
+                let mut path = prefix.clone();
+                path.push(verter_type_expr::locators::TypeBodyPathStep::Member {
+                    ordinal: u32::try_from(raw_index).unwrap_or(u32::MAX),
+                });
+                path.push(verter_type_expr::locators::TypeBodyPathStep::MemberValue);
+                let value = lower_at(
+                    path,
+                    &mut substitutions,
+                    context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                );
+                own.push(SurfaceEntry::Member(SurfaceMember {
+                    key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
+                    value,
+                    optional,
+                    readonly,
+                    method_kind,
+                    has_implementation_body: has_body,
+                    visibility,
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    spans: verter_type_expr::MemberSpans::default(),
+                    declaration_origin: Some(Arc::from(canonical)),
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                    merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                }));
+            }
+        }
+        if !own.is_empty() {
+            return Some(self.graph().intern_node_with_scope(
+                SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
+                scope,
+            ));
+        }
+        // An inherited member reads off the base the class extends: its
+        // `extends` arm lowers to a lazy reference, which binds no `this`, so
+        // the member keeps the polymorphic `this` the reading receiver binds.
+        let prefix = heritage.into_iter().next()?;
+        Some(lower_at(prefix, &mut substitutions, context))
+    }
+
     pub(super) fn backfill_member_index_surface(
         &self,
         result: SemanticNodeId,
@@ -8948,6 +9134,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute_n!(MacroMemberWalk, path.len());
+        // A member read off a class's polymorphic `this` reads the class
+        // instance, and binds `this` in the member to the binder itself.
+        if let Some(instance) = self.this_binder_instance(base) {
+            let mut output = self.build_project_path(instance, path, context);
+            if let QueryResult::Value(node) = output.result {
+                output.result = QueryResult::Value(self.bind_this_receiver(node, base));
+            }
+            return output;
+        }
         // §22 fast-reject for the `?[K]` indexed-access shape: `any[K]=any`,
         // `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `error[K]=error`.
         // Member projection (`.foo`) is a distinct surface left to the walker.
@@ -8992,6 +9187,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // non-publication rail).
         let mut walker = PathWalker::new(self, context, &fence);
         let result = walker.walk(start_base, walker_path.as_ref());
+        // A member read through a class reference binds the member's
+        // polymorphic `this` to that reference.
+        let result = if path.len() == 1 && self.is_this_receiver(base) {
+            self.bind_this_receiver(result, base)
+        } else {
+            result
+        };
         // Drain the walker's diagnostics + cache_suppress flag so the
         // memo no-poison contract sees them at admission time.
         let walker_diagnostics: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic> =

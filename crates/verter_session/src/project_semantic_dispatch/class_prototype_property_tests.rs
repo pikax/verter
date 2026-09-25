@@ -59,8 +59,9 @@ fn keyof_a_class_constructor_type_holds_prototype() {
 /// `prototype` (TS2699 in a class, accepted in an ambient one) does not
 /// change it.
 ///
-/// Measured on TypeScript 7.0.2: `typeof D0.prototype` is `D0`, `typeof
-/// G.prototype` `G<any>`, `(typeof D0)['prototype']['p']` and `typeof
+/// Measured on TypeScript 7.0.2: `typeof D0.prototype` and `(typeof
+/// D0)['prototype']` are `D0`, `typeof G.prototype` and `(typeof
+/// G)['prototype']` `G<any>`, `(typeof SP3)['prototype']` `SP3`, `(typeof D0)['prototype']['p']` and `typeof
 /// D0.prototype.p` `1`, `ReturnType<typeof mk>['prototype']['ce']` `1` and
 /// `ReturnType<typeof mkg>['prototype']['v']` `any`.
 #[test]
@@ -69,6 +70,9 @@ fn prototype_reads_the_instance_with_any_type_arguments() {
         FIXTURE,
         &[
             ("typeof D0.prototype", "D0"),
+            ("(typeof D0)['prototype']", "D0"),
+            ("(typeof G)['prototype']", "G<any>"),
+            ("(typeof SP3)['prototype']", "SP3"),
             ("typeof G.prototype", "G<any>"),
             ("(typeof D0)['prototype']['p']", "1"),
             ("typeof D0.prototype.p", "1"),
@@ -81,9 +85,7 @@ fn prototype_reads_the_instance_with_any_type_arguments() {
 
 /// An indexed access of `prototype` is the instance type: it relates both
 /// ways with the class it reads, and not with its base or a structural
-/// twin. The lane prints the class body a declared class's read evaluates
-/// to, one level expanded, as it does for any indexed access that reads a
-/// declared type; the checker prints the class name.
+/// twin.
 ///
 /// Measured on TypeScript 7.0.2, as `Same<A, B>` (`[A] extends [B]` and
 /// `[B] extends [A]`): `(typeof D0)['prototype']` and `D0`, `(typeof

@@ -3812,6 +3812,7 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// gcFlowExplicit(): string     gcFlowInferred(): string
 /// gcBareExplicit(): string     gcBareInferred(): unknown   ← exact
 /// gcViaAnnotated(): string     gcNonGeneric():   string
+/// GcNs.nsCall():    string
 /// new GcHolder<number>().viaCall(): string
 /// new GcHolder<number>().ownT():   number
 /// GcNs.nsCall(): string            GcNs.nsPlainCall(): string
