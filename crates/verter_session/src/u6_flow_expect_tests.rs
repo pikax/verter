@@ -2134,6 +2134,17 @@ pub(crate) mod checker_syntax {
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
             }
+            // A declaration body's reference to the declaration itself
+            // lowers to the self-reference sentinel, which stands for that
+            // declaration (`R[]` inside `type R = R[] | 1`): it matches the
+            // declaration's name, a zero-argument reference only.
+            (
+                CheckerType::Ref(name),
+                SemanticNodeData::Opaque(crate::semantic_query::QueryError::RecursiveRef {
+                    name: sentinel,
+                    args,
+                }),
+            ) => args.is_empty() && &**sentinel == name.as_str(),
             // A class-expression instance matches the name the checker
             // prints for a reference to it (`Mixin.(Anonymous class)`,
             // `(Anonymous class)`, the variable a class expression

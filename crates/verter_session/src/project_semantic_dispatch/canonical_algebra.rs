@@ -1092,14 +1092,24 @@ fn canonicalize_with(
 
     // 3b. Intersection literal absorption, mirroring the checker's
     //     `removeRedundantSupertypes`: a base primitive beside a literal of
-    //     that base adds no constraint (`"a" & string` is `"a"`).
+    //     that base adds no constraint (`"a" & string` is `"a"`). An enum
+    //     member is a literal of its value's kind (`E.A & number` is `E.A`).
     if !is_union {
+        fn literal_base(literal: &LiteralValue) -> PrimitiveKind {
+            match literal {
+                LiteralValue::String(_) => PrimitiveKind::String,
+                LiteralValue::Number(_) => PrimitiveKind::Number,
+                LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+                LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+            }
+        }
         let base_of = |member: SemanticNodeId| match graph.node_data(member).as_deref() {
-            Some(SemanticNodeData::Literal(LiteralValue::String(_))) => Some(PrimitiveKind::String),
-            Some(SemanticNodeData::Literal(LiteralValue::Number(_))) => Some(PrimitiveKind::Number),
-            Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => Some(PrimitiveKind::BigInt),
-            Some(SemanticNodeData::Literal(LiteralValue::Boolean(_))) => {
-                Some(PrimitiveKind::Boolean)
+            Some(SemanticNodeData::Literal(literal)) => Some(literal_base(literal)),
+            Some(SemanticNodeData::EnumLiteral(enum_literal)) => {
+                match graph.node_data(enum_literal.base).as_deref() {
+                    Some(SemanticNodeData::Literal(literal)) => Some(literal_base(literal)),
+                    _ => None,
+                }
             }
             _ => None,
         };

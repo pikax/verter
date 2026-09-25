@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    CacheRead, IndexKey, LiteralValue, PartialReasonSet, ProjectionMode,
+    CacheRead, IndexKey, LiteralValue, PartialReasonSet, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ResultCompleteness,
     ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
@@ -1023,6 +1023,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         if let Some(reasons) = exit_reasons {
             completeness = completeness.merge(ResultCompleteness::partial(reasons));
+        } else if let Some(reduced) = self.composite_over_resolved_arms(n) {
+            n = reduced;
         }
         // The alias names the type its application settled on only while
         // that type is one the alias itself constructs; a union that
@@ -1771,6 +1773,265 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
+    }
+
+    /// The union or intersection `node` reduced over its arms' RESOLVED
+    /// types, as the checker's `getUnionType` / `getIntersectionType`
+    /// construct it: an arm written as a name (an alias, an enum, an
+    /// application, a `typeof`) takes part in literal subsumption, the
+    /// `any` / `unknown` / `never` lattice, disjoint-literal collapse and
+    /// intersection distribution as the type it names. `None` when the
+    /// reduction changes nothing, or no arm is such a name.
+    ///
+    /// A union reads a named arm that resolves to a union as that union's
+    /// members; any other arm is read as its resolved type only where that
+    /// type is made of literals, primitives and enum members (an
+    /// intersection distributes over a named union of them only): an object
+    /// type takes part in no reduction here, so its arm keeps its name. A union keeps its written names as the checker keeps its
+    /// origin (`getUnionType`): one named union holding every other
+    /// member is that name (`A | 1` is `A`), and named unions that do not
+    /// overlap stay beside the remaining members (`A | 3 | S` is `A | S`);
+    /// a reduction that removed a member of a named union answers the
+    /// reduced set (`A | number` is `number`). An intersection arm that
+    /// resolves to the missing-member marker makes the intersection that
+    /// marker: its value is unknown.
+    ///
+    /// A composite whose reduction re-enters itself (an alias union naming
+    /// itself through its arms) stays as written: the re-entry reads
+    /// through the same `carrier_normalizing` in-progress record the
+    /// carrier normalizer keeps, never a depth limit.
+    pub(super) fn composite_over_resolved_arms(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        use crate::semantic_query::composite::CompositeOriginCategory as Category;
+        let graph = self.graph();
+        let (arms, is_union) = match graph.node_data(node)?.as_ref() {
+            SemanticNodeData::Union(members) => (members.members_arc(), true),
+            SemanticNodeData::Intersection(members)
+                if matches!(
+                    members.origin_category(),
+                    Category::Canonical(_) | Category::CanonicalUnproven | Category::AuthoredShell
+                ) =>
+            {
+                (members.members_arc(), false)
+            }
+            _ => return None,
+        };
+        let is_name = |arm: SemanticNodeId| {
+            matches!(
+                graph.node_data(arm).as_deref(),
+                Some(
+                    SemanticNodeData::Alias(_)
+                        | SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::InstantiationRef { .. }
+                        | SemanticNodeData::TypeOf(_)
+                        | SemanticNodeData::Conditional { .. }
+                        | SemanticNodeData::IndexedAccess { .. }
+                        | SemanticNodeData::BareRef(_)
+                        | SemanticNodeData::ImportType(_)
+                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+                )
+            )
+        };
+        if !arms.iter().any(|arm| is_name(*arm)) {
+            return None;
+        }
+        if self.carrier_normalizing.borrow().contains(&node) {
+            return None;
+        }
+        self.carrier_normalizing.borrow_mut().push(node);
+        let reduced = self.reduce_over_resolved_arms(node, &arms, is_union, &is_name);
+        self.carrier_normalizing.borrow_mut().pop();
+        reduced
+    }
+
+    fn reduce_over_resolved_arms(
+        &self,
+        node: SemanticNodeId,
+        arms: &[SemanticNodeId],
+        is_union: bool,
+        is_name: &dyn Fn(SemanticNodeId) -> bool,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let transit =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        // Whether a resolved type is a literal, a primitive or an enum member
+        // — the types these reductions act on.
+        let is_scalar = |view: SemanticNodeId| {
+            matches!(
+                graph.node_data(view).as_deref(),
+                Some(
+                    SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Literal(_)
+                        | SemanticNodeData::EnumLiteral(_)
+                        | SemanticNodeData::Opaque(_)
+                )
+            )
+        };
+        // Each arm as the reduction reads it, and the resolved union a named
+        // arm stands for.
+        let mut views: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut named_unions: Vec<(SemanticNodeId, Vec<SemanticNodeId>)> = Vec::new();
+        for &arm in arms {
+            if !is_name(arm) {
+                views.push(arm);
+                continue;
+            }
+            let StructuralFactDemandOutcome::Complete(resolved) =
+                self.normalize_node_for_structural_fact_demand(arm, transit)
+            else {
+                return None;
+            };
+            // A union joins a named union's members, whatever they are; an
+            // intersection distributes over one made of scalars only.
+            let is_named_union = matches!(
+                graph.node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Union(_))
+            );
+            if !is_named_union {
+                views.push(if is_scalar(resolved) { resolved } else { arm });
+                continue;
+            }
+            let members = self.resolved_union_members(arm, resolved, is_name, transit)?;
+            if !is_union && !members.iter().all(|member| is_scalar(*member)) {
+                views.push(arm);
+                continue;
+            }
+            views.push(self.intern_normalized_union_or_intersection(&members, true));
+            named_unions.push((arm, members));
+        }
+        if views.as_slice() == arms {
+            return None;
+        }
+        let is_opaque = |view: SemanticNodeId| {
+            matches!(
+                graph.node_data(view).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        };
+        if !is_union {
+            if let Some(marker) = views.iter().copied().find(|view| is_opaque(*view)) {
+                return Some(marker);
+            }
+            let reduced = self
+                .distributed_intersection(&views)
+                .unwrap_or_else(|| self.intern_normalized_union_or_intersection(&views, false));
+            return (reduced != node).then_some(reduced);
+        }
+        // An arm this demand could not type leaves the union's member set
+        // unknown: it stays as written.
+        if views.iter().any(|view| is_opaque(*view)) {
+            return None;
+        }
+        let reduced = self.intern_normalized_union_or_intersection(&views, true);
+        let type_set: Vec<SemanticNodeId> = match graph.node_data(reduced).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown)) => {
+                return Some(reduced)
+            }
+            _ => vec![reduced],
+        };
+        // The checker's union origin: the named unions, when they do not
+        // overlap and the reduction kept every member they name.
+        let in_named = |member: &SemanticNodeId| {
+            named_unions
+                .iter()
+                .any(|(_, members)| members.contains(member))
+        };
+        let remaining: Vec<SemanticNodeId> = type_set
+            .iter()
+            .copied()
+            .filter(|member| !in_named(member))
+            .collect();
+        let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
+        let result = match named_unions.as_slice() {
+            [(named, _)] if remaining.is_empty() => *named,
+            [] => reduced,
+            _ if named_count + remaining.len() == type_set.len() => {
+                let origin: Vec<SemanticNodeId> = remaining
+                    .into_iter()
+                    .chain(named_unions.iter().map(|(named, _)| *named))
+                    .collect();
+                // The written arms ARE the origin: the union stays as written.
+                if origin.len() == arms.len() && origin.iter().all(|arm| arms.contains(arm)) {
+                    return None;
+                }
+                self.intern_normalized_union_or_intersection(&origin, true)
+            }
+            _ => reduced,
+        };
+        (result != node).then_some(result)
+    }
+
+    /// The members of the resolved union `union` — what the named arm
+    /// `name` stands for — with every member that is itself a named union
+    /// read as that union's members, flattened as the checker's union holds
+    /// them. `None` when a name's resolution did not complete, or when the
+    /// walk reaches a name on its own active path: a union that contains
+    /// itself is the checker's circularity, and it stays deferred.
+    fn resolved_union_members(
+        &self,
+        name: SemanticNodeId,
+        union: SemanticNodeId,
+        is_name: &dyn Fn(SemanticNodeId) -> bool,
+        transit: ProjectionReductionContext,
+    ) -> Option<Vec<SemanticNodeId>> {
+        enum Step {
+            Read(SemanticNodeId),
+            Leave(SemanticNodeId),
+        }
+        let graph = self.graph();
+        let mut members: Vec<SemanticNodeId> = Vec::new();
+        // The names on the walk's active path, and those fully read.
+        let mut active: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut read: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        active.insert(name);
+        let mut pending: Vec<Step> = vec![Step::Leave(name), Step::Read(union)];
+        while let Some(step) = pending.pop() {
+            let node = match step {
+                Step::Read(node) => node,
+                Step::Leave(node) => {
+                    active.remove(&node);
+                    read.insert(node);
+                    continue;
+                }
+            };
+            if let Some(SemanticNodeData::Union(arms)) = graph.node_data(node).as_deref() {
+                pending.extend(arms.iter().rev().map(|arm| Step::Read(*arm)));
+                continue;
+            }
+            if !is_name(node) {
+                members.push(node);
+                continue;
+            }
+            if active.contains(&node) {
+                return None;
+            }
+            if read.contains(&node) {
+                continue;
+            }
+            let StructuralFactDemandOutcome::Complete(resolved) =
+                self.normalize_node_for_structural_fact_demand(node, transit)
+            else {
+                return None;
+            };
+            match graph.node_data(resolved).as_deref() {
+                Some(SemanticNodeData::Union(_)) => {
+                    active.insert(node);
+                    pending.push(Step::Leave(node));
+                    pending.push(Step::Read(resolved));
+                }
+                // A name for a primitive or a literal is that type.
+                Some(
+                    SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_),
+                ) => members.push(resolved),
+                _ => members.push(node),
+            }
+        }
+        Some(members)
     }
 
     /// Fold a LOCALLY-PRODUCED partial — one no `CacheRead` carried (a step

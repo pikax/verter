@@ -4237,6 +4237,8 @@ mod module_object_tests;
 #[cfg(test)]
 mod module_value_surface_tests;
 #[cfg(test)]
+mod named_arm_reduction_tests;
+#[cfg(test)]
 mod namespace_member_value_tests;
 #[cfg(test)]
 mod namespace_value_tests;

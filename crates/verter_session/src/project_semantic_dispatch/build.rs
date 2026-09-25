@@ -12909,6 +12909,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
+        // The checker constructs a conditional's operands before it relates
+        // them: a union or intersection operand is the type its written
+        // names reduce to (`1 & ReturnType<typeof anyf>` is `any`).
+        let check = self.composite_over_resolved_arms(check).unwrap_or(check);
+        let extends = self
+            .composite_over_resolved_arms(extends)
+            .unwrap_or(extends);
         let absorbed_check = self.indexed_access_where_written(check);
         if let Some(absorbed) =
             self.absorb_conditional(absorbed_check, extends, distributive, |take_true| {
@@ -13001,6 +13008,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if self.ctx.is_cancelled() {
             return self.cancelled_build_output();
         }
+        let check = self.composite_over_resolved_arms(check).unwrap_or(check);
+        let extends = self
+            .composite_over_resolved_arms(extends)
+            .unwrap_or(extends);
         let absorbed_check = self.indexed_access_where_written(check);
         if let Some(output) =
             self.absorb_conditional(absorbed_check, extends, distributive, &mut *lower_branch)
