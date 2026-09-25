@@ -9460,6 +9460,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             target_property = property;
                             &target_property
                         }
+                        // A private accessor is found only on a type that
+                        // declares it, and relates only to that declaration.
+                        None if t_prop.visibility
+                            == verter_type_expr::MemberVisibility::Private =>
+                        {
+                            return match source.project_known_key(&target_key) {
+                                crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
+                                    RelationResult::NotAssignable
+                                }
+                                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                                    match self.property_accessibility_relation(member, t_prop) {
+                                        Some(RelationResult::NotAssignable) => {
+                                            RelationResult::NotAssignable
+                                        }
+                                        _ => RelationResult::Unknown,
+                                    }
+                                }
+                            };
+                        }
                         None => return RelationResult::Unknown,
                     }
                 }

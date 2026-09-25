@@ -2442,6 +2442,31 @@ fn alias_default_export_type_symbol(
 /// `Some(Protected)` / `Some(Private)` carry the declared accessibility. This
 /// lowers the OXC token directly — it does NOT text-scan the source
 /// (Typed-IR-Only).
+/// A class member's key. An ECMAScript private name `#name` keeps its `#`
+/// and is recorded as a private member ([`class_member_visibility`]), so it
+/// relates only to its own declaration, as the checker relates it.
+fn class_member_key(key: &PropertyKey<'_>, source: &str) -> TypeAuthoredPropertyKey {
+    match key {
+        PropertyKey::PrivateIdentifier(name) => {
+            AuthoredPropertyKey::string(format!("#{}", name.name).as_str())
+        }
+        _ => lower_property_key(key, source),
+    }
+}
+
+/// A class member's accessibility: an ECMAScript private name is private
+/// whatever modifier it carries.
+fn class_member_visibility(
+    key: &PropertyKey<'_>,
+    acc: Option<TSAccessibility>,
+) -> MemberVisibility {
+    if matches!(key, PropertyKey::PrivateIdentifier(_)) {
+        MemberVisibility::Private
+    } else {
+        visibility_from_ts_accessibility(acc)
+    }
+}
+
 fn visibility_from_ts_accessibility(acc: Option<TSAccessibility>) -> MemberVisibility {
     match acc {
         None | Some(TSAccessibility::Public) => MemberVisibility::Public,
@@ -2579,9 +2604,9 @@ fn collect_named_class(
     let mut ctor_fn_spans = FunctionSpans::default();
     let mut inference_unavailable = None;
     // The served function position of a body-derived member return is keyed
-    // by the RAW `ClassBody.body` index (the produced-shape ordinal skips
-    // `#private` members and interleaves fields) and the per-(name, static)
-    // overload ordinal.
+    // by the RAW `ClassBody.body` index (the produced shape interleaves
+    // fields and static members) and the per-(name, static) overload
+    // ordinal; a `#private` method serves none.
     let mut member_overload_ordinals: rustc_hash::FxHashMap<(String, bool), u32> =
         rustc_hash::FxHashMap::default();
 
@@ -2593,12 +2618,13 @@ fn collect_named_class(
                 // (a `private` / `protected` member is RECORDED; the
                 // published-prop projection re-applies a Public-only filter
                 // at the publication boundary). `static` selects the surface:
-                // instance body vs constructor shape. A `#private` brand is
-                // not a type-level member and never lands on either surface.
-                if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+                // instance body vs constructor shape. A `#private` instance
+                // field is a private member ([`class_member_key`]); a static
+                // one never lands on the constructor shape.
+                if prop.r#static && matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
-                let prop_key = lower_property_key(&prop.key, source);
+                let prop_key = class_member_key(&prop.key, source);
                 // A function-valued field initializer with NO authored
                 // annotation is a served class-member position (the index
                 // discovers it as `Member{[raw ordinal]}`): its body-derived
@@ -2705,7 +2731,7 @@ fn collect_named_class(
                         ty,
                         prop.optional,
                         prop.readonly,
-                        visibility_from_ts_accessibility(prop.accessibility),
+                        class_member_visibility(&prop.key, prop.accessibility),
                         spans,
                     ));
                 if prop.r#static {
@@ -2742,15 +2768,16 @@ fn collect_named_class(
                 }
             }
             ClassElement::MethodDefinition(method) => {
-                if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
-                    // A `#private` method/accessor is not a type-level member.
+                if method.r#static && matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    // A static `#private` method or accessor never lands on
+                    // the constructor shape.
                     continue;
                 }
                 if method.r#static {
                     // Static method → constructor-shape member with its
                     // declared accessibility (a static can never be the
                     // constructor — `static constructor` is invalid TS).
-                    let method_key = lower_property_key(&method.key, source);
+                    let method_key = class_member_key(&method.key, source);
                     let func = extract_function_signature(&method.value, source);
                     let flow_identity = class_method_flow_identity(
                         method,
@@ -2783,7 +2810,7 @@ fn collect_named_class(
                         method_key,
                         function_expr,
                         method.optional,
-                        visibility_from_ts_accessibility(method.accessibility),
+                        class_member_visibility(&method.key, method.accessibility),
                         member_spans,
                     );
                     signature.method_kind = object_method_kind(method.kind);
@@ -2883,10 +2910,10 @@ fn collect_named_class(
                     .with_predicate(func.predicate);
                     function_expr.flow_return = flow_identity.map(Box::new);
                     let mut signature = MethodSignature::with_key_visibility(
-                        lower_property_key(&method.key, source),
+                        class_member_key(&method.key, source),
                         function_expr,
                         method.optional,
-                        visibility_from_ts_accessibility(method.accessibility),
+                        class_member_visibility(&method.key, method.accessibility),
                         member_spans,
                     );
                     signature.method_kind = object_method_kind(method.kind);

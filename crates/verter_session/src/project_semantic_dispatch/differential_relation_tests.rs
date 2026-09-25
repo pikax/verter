@@ -526,20 +526,44 @@ fn private_and_protected_members_relate_nominally() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An ECMAScript private name `#h` is unique to its class, so two classes that
-/// each declare one are unrelated. Wrong-but-clean.
-///
-/// What the lane gives:
-/// - `[E1] extends [E2] ? 1 : 2`: the checker answers `2`; the lane measured
-///   `1`.
+/// Classes with ECMAScript private names.
+const PRIVATE_NAMES: &str = r##"
+class E1 { #h = 1; q = 2 }
+class E2 { #h = 1; q = 2 }
+class E3 extends E1 { r = 3 }
+class F1 { #m() {} q = 2 }
+class F2 { #m() {} q = 2 }
+class G1 { get #g() { return 1 } q = 2 }
+class Pub { q = 2 }
+"##;
+
+/// An ECMAScript private name — a field, a method or an accessor — is a
+/// member of its class that relates only to its own declaration: two classes
+/// that each declare `#h` are unrelated, a subclass fits its base, a type
+/// without the member fits no class that has one, and `keyof` leaves it out.
+/// TypeScript 7.0.2 answers each row alike under all four settings.
 #[test]
-#[ignore = "a #private member relates only to its own declaration"]
-fn wrong_clean_an_ecmascript_private_name_relates_nominally() {
-    let matrix = Matrix::new(PRIVATE_MEMBERS);
-    let failures = matrix.types(&[("[E1] extends [E2] ? 1 : 2", "2")]);
+fn an_ecmascript_private_name_relates_as_the_checker_relates_it() {
+    let matrix = Matrix::new(PRIVATE_NAMES);
+    let failures = matrix.types(&[
+        ("[E1] extends [E2] ? 1 : 2", "2"),
+        ("[E1] extends [E1] ? 1 : 2", "1"),
+        ("[E3] extends [E1] ? 1 : 2", "1"),
+        ("[E1] extends [E3] ? 1 : 2", "2"),
+        ("[E1] extends [{ q: number }] ? 1 : 2", "1"),
+        ("[{ q: number }] extends [E1] ? 1 : 2", "2"),
+        ("[Pub] extends [E1] ? 1 : 2", "2"),
+        ("[E1] extends [Pub] ? 1 : 2", "1"),
+        ("[F1] extends [F2] ? 1 : 2", "2"),
+        ("[G1] extends [Pub] ? 1 : 2", "1"),
+        ("[Pub] extends [G1] ? 1 : 2", "2"),
+        ("[{ \"#h\": number; q: number }] extends [E1] ? 1 : 2", "2"),
+        ("[keyof E1] extends [\"q\"] ? 1 : 2", "1"),
+        ("[\"q\"] extends [keyof E1] ? 1 : 2", "1"),
+        ("[E1 | E2] extends [E1] ? 1 : 2", "2"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
-
 /// Generic interfaces with and without variance annotations, and a generic
 /// function.
 const GENERICS: &str = r##"
