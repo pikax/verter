@@ -901,10 +901,22 @@ impl FlowEvaluator<'_, '_> {
         })
     }
 
-    /// `removeDefinitelyFalsyTypes`: the members that may be truthy.
+    /// `removeDefinitelyFalsyTypes`: the members that may be truthy. Under
+    /// `strictNullChecks` `unknown` is `{} | null | undefined` to the
+    /// checker, whose possibly-truthy part is `{}` (`x || 1` over `x:
+    /// unknown` is `{}`).
     fn remove_definitely_falsy(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         let mut kept = Vec::new();
         for arm in self.logical_arms(node) {
+            if self.nullability.is_strict()
+                && matches!(
+                    self.dispatch.graph().node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                )
+            {
+                kept.push(self.unknown_without(&[PrimitiveKind::Null, PrimitiveKind::Undefined]));
+                continue;
+            }
             if self.arm_facts(arm)?.truthy {
                 kept.push(arm);
             }

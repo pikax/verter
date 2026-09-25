@@ -14752,7 +14752,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// `strictNullChecks`: `{} | null | undefined` with `removed`'s arm
     /// dropped (`{} | undefined` past `!== null`, `{} | null` past
     /// `!== undefined`, `{}` past both).
-    fn unknown_without(&self, removed: &[PrimitiveKind]) -> SemanticNodeId {
+    pub(super) fn unknown_without(&self, removed: &[PrimitiveKind]) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         let mut members =
             vec![graph.intern_node(SemanticNodeData::Object(super::walk::empty_surface_view()))];
